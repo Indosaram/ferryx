@@ -1,12 +1,10 @@
-import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
-import { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
-
-import "@xterm/xterm/css/xterm.css";
 
 import { isTauriRuntime, resizeTerminal, writeTerminal } from "../lib/tauri";
 import { terminalEventBus } from "../lib/terminalEvents";
+import { attachWebglRenderer, loadTerminalAssets } from "../lib/terminalRenderer";
 import type { TerminalSession } from "../lib/types";
 
 type TerminalPaneProps = {
@@ -60,89 +58,104 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
     const host = hostRef.current;
     if (!host) return;
 
-    const terminal = new Terminal({
-      allowProposedApi: false,
-      convertEol: true,
-      cursorBlink: true,
-      cursorStyle: "bar",
-      fontFamily: '"SF Mono", SFMono-Regular, ui-monospace, Menlo, monospace',
-      fontSize: 13,
-      lineHeight: 1.2,
-      letterSpacing: 0,
-      scrollback: 10_000,
-      theme: TERMINAL_THEME,
-    });
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(host);
-    terminalRef.current = terminal;
-    fitRef.current = fitAddon;
-
-    let webglAddon: WebglAddon | null = null;
-    try {
-      webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => {
-        webglAddon?.dispose();
-        webglAddon = null;
-      });
-      terminal.loadAddon(webglAddon);
-    } catch {
-      webglAddon = null;
-    }
-
+    const abortController = new AbortController();
     let disposed = false;
-    let resizeFrame = 0;
+    let cleanupTerminal: (() => void) | null = null;
+    setConnectionError(null);
 
-    const resize = () => {
-      cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => {
-        if (disposed || host.clientWidth === 0 || host.clientHeight === 0) return;
-        fitAddon.fit();
+    void initialize(host).catch((error: unknown) => {
+      if (disposed) return;
+      setConnectionError(error instanceof Error ? error.message : "Terminal renderer failed");
+    });
+
+    async function initialize(hostElement: HTMLDivElement) {
+      const { Terminal: TerminalConstructor, FitAddon: FitAddonConstructor } = await loadTerminalAssets();
+      if (disposed) return;
+
+      const terminal = new TerminalConstructor({
+        allowProposedApi: false,
+        convertEol: true,
+        cursorBlink: true,
+        cursorStyle: "bar",
+        fontFamily: '"SF Mono", SFMono-Regular, ui-monospace, Menlo, monospace',
+        fontSize: 13,
+        lineHeight: 1.2,
+        letterSpacing: 0,
+        scrollback: 10_000,
+        theme: TERMINAL_THEME,
+      });
+      const fitAddon = new FitAddonConstructor();
+      terminal.loadAddon(fitAddon);
+      terminal.open(hostElement);
+      terminalRef.current = terminal;
+      fitRef.current = fitAddon;
+
+      let disposeWebgl: () => void = () => undefined;
+      void attachWebglRenderer(terminal, abortController.signal).then((dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+        disposeWebgl = dispose;
+      });
+
+      let resizeFrame = 0;
+      const resize = () => {
+        cancelAnimationFrame(resizeFrame);
+        resizeFrame = requestAnimationFrame(() => {
+          if (disposed || hostElement.clientWidth === 0 || hostElement.clientHeight === 0) return;
+          fitAddon.fit();
+          const backendSessionId = sessionRef.current.backendSessionId;
+          if (!backendSessionId) return;
+          void resizeTerminal({ sessionId: backendSessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+        });
+      };
+
+      const resizeObserver = new ResizeObserver(resize);
+      resizeObserver.observe(hostElement);
+
+      const dataDisposable = terminal.onData((data) => {
         const backendSessionId = sessionRef.current.backendSessionId;
         if (!backendSessionId) return;
-        void resizeTerminal({ sessionId: backendSessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+        void writeTerminal({ sessionId: backendSessionId, data }).catch((error: unknown) => {
+          setConnectionError(error instanceof Error ? error.message : "Terminal write failed");
+        });
       });
-    };
 
-    const resizeObserver = new ResizeObserver(resize);
-    resizeObserver.observe(host);
+      const focusTerminal = () => terminal.focus();
+      hostElement.addEventListener("pointerdown", focusTerminal);
 
-    const dataDisposable = terminal.onData((data) => {
       const backendSessionId = sessionRef.current.backendSessionId;
-      if (!backendSessionId) return;
-      void writeTerminal({ sessionId: backendSessionId, data }).catch((error: unknown) => {
-        setConnectionError(error instanceof Error ? error.message : "Terminal write failed");
-      });
-    });
+      const unsubscribeOutput = backendSessionId
+        ? terminalEventBus.subscribeOutput(backendSessionId, (text) => terminal.write(text))
+        : () => undefined;
 
-    const focusTerminal = () => terminal.focus();
-    host.addEventListener("pointerdown", focusTerminal);
+      if (!isTauriRuntime()) {
+        terminal.writeln("\x1b[1;32mORCA Lite\x1b[0m  UI preview");
+        terminal.writeln("\x1b[90mLaunch through Tauri to attach the PTY session.\x1b[0m");
+        terminal.write("\r\n\x1b[34m~\x1b[0m \x1b[32m❯\x1b[0m ");
+      }
 
-    const backendSessionId = sessionRef.current.backendSessionId;
-    const unsubscribeOutput = backendSessionId
-      ? terminalEventBus.subscribeOutput(backendSessionId, (text) => terminal.write(text))
-      : () => undefined;
+      resize();
+      if (active) terminal.focus();
 
-    if (!isTauriRuntime()) {
-      terminal.writeln("\x1b[1;32mORCA Lite\x1b[0m  UI preview");
-      terminal.writeln("\x1b[90mLaunch through Tauri to attach the PTY session.\x1b[0m");
-      terminal.write("\r\n\x1b[34m~\x1b[0m \x1b[32m❯\x1b[0m ");
+      cleanupTerminal = () => {
+        cancelAnimationFrame(resizeFrame);
+        resizeObserver.disconnect();
+        hostElement.removeEventListener("pointerdown", focusTerminal);
+        dataDisposable.dispose();
+        unsubscribeOutput();
+        disposeWebgl();
+        terminal.dispose();
+        terminalRef.current = null;
+        fitRef.current = null;
+      };
     }
-
-    resize();
-    if (active) terminal.focus();
 
     return () => {
       disposed = true;
-      cancelAnimationFrame(resizeFrame);
-      resizeObserver.disconnect();
-      host.removeEventListener("pointerdown", focusTerminal);
-      dataDisposable.dispose();
-      unsubscribeOutput();
-      webglAddon?.dispose();
-      terminal.dispose();
-      terminalRef.current = null;
-      fitRef.current = null;
+      abortController.abort();
+      cleanupTerminal?.();
     };
   }, [session.id]);
 
