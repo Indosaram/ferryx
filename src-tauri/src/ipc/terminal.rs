@@ -1,4 +1,5 @@
-use crate::terminal::{PtyManager, TerminalSignal};
+use crate::terminal::{PtyManager, PtySessionState, TerminalSignal};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -14,9 +15,27 @@ pub struct SpawnTerminalRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalOutputPayload {
     pub session_id: String,
     pub data: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalLifecycleState {
+    Started,
+    Exited,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalLifecyclePayload {
+    pub session_id: String,
+    pub state: TerminalLifecycleState,
+    pub exit_code: Option<i32>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -69,22 +88,62 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let (session_id, mut rx) = pty_manager
         .spawn(cmd, cols, rows)
         .map_err(|e| e.to_string())?;
+    let session = pty_manager
+        .get_session(&session_id)
+        .ok_or_else(|| format!("PTY session '{session_id}' disappeared during spawn"))?;
+
+    let started = TerminalLifecyclePayload {
+        session_id: session_id.clone(),
+        state: TerminalLifecycleState::Started,
+        exit_code: None,
+        reason: None,
+    };
+    app.emit("terminal_lifecycle", started)
+        .map_err(|e| format!("Failed to emit terminal lifecycle event: {e}"))?;
 
     let session_id_clone = session_id.clone();
     let app_handle = app.clone();
 
     tokio::spawn(async move {
-        let event_name = format!("terminal_output:{}", session_id_clone);
         while let Some(chunk) = rx.recv().await {
-            let encoded = String::from_utf8_lossy(&chunk).to_string();
             let payload = TerminalOutputPayload {
                 session_id: session_id_clone.clone(),
-                data: encoded,
+                data: STANDARD.encode(chunk),
             };
-            if let Err(e) = app_handle.emit(&event_name, payload) {
-                tracing::debug!("Failed to emit terminal output event: {}", e);
+            if let Err(error) = app_handle.emit("terminal_output", payload) {
+                tracing::debug!("Failed to emit terminal output event: {error}");
                 break;
             }
+        }
+        drop(rx);
+
+        for _ in 0..100 {
+            let lifecycle = match session.state() {
+                PtySessionState::Exited { code } => Some(TerminalLifecyclePayload {
+                    session_id: session_id_clone.clone(),
+                    state: TerminalLifecycleState::Exited,
+                    exit_code: code,
+                    reason: None,
+                }),
+                PtySessionState::Failed { reason } => Some(TerminalLifecyclePayload {
+                    session_id: session_id_clone.clone(),
+                    state: TerminalLifecycleState::Failed,
+                    exit_code: None,
+                    reason: Some(reason),
+                }),
+                PtySessionState::Starting | PtySessionState::Running | PtySessionState::Closing => {
+                    None
+                }
+            };
+
+            if let Some(payload) = lifecycle {
+                if let Err(error) = app_handle.emit("terminal_lifecycle", payload) {
+                    tracing::debug!("Failed to emit terminal lifecycle event: {error}");
+                }
+                break;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     });
 

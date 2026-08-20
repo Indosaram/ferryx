@@ -125,6 +125,7 @@ impl PtyManager {
 
                 match session.state() {
                     PtySessionState::Exited { .. } | PtySessionState::Failed { .. } => {
+                        session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
                     }
@@ -156,6 +157,7 @@ impl PtyManager {
                     Err(error) => {
                         session.mark_failed(error.to_string());
                         session.close_io();
+                        session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
                     }
@@ -177,6 +179,7 @@ impl PtyManager {
         session.close_io();
         let _ = Self::join_reader_bounded(&session).await;
         session.mark_exited(Some(code));
+        session.close_output();
         self.remove_from_registry(session_id);
     }
 
@@ -209,6 +212,7 @@ impl PtyManager {
                 session.state(),
                 PtySessionState::Exited { .. } | PtySessionState::Failed { .. }
             ) {
+                session.close_output();
                 self.remove_from_registry(session_id);
                 return Ok(());
             }
@@ -244,12 +248,9 @@ impl PtyManager {
             }
         }
 
-        // Drop the writable/master handles before waiting so a blocking master reader
-        // observes EOF/EIO as soon as the slave side disappears.
         session.close_io();
 
         if let Err(reader_error) = Self::join_reader_bounded(&session).await {
-            // A TERM-resistant foreground job should not leave the blocking reader alive.
             let _ = session.signal(TerminalSignal::Kill).or_else(|_| session.kill());
             if first_error.is_none() {
                 first_error = Some(reader_error);
@@ -277,11 +278,13 @@ impl PtyManager {
 
         if let Some(error) = first_error {
             session.mark_failed(error.to_string());
+            session.close_output();
             self.remove_from_registry(session_id);
             return Err(error);
         }
 
         session.mark_exited(exit_code);
+        session.close_output();
         self.remove_from_registry(session_id);
         Ok(())
     }

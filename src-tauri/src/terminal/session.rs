@@ -40,7 +40,7 @@ pub struct PtySession {
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
-    output_tx: mpsc::Sender<Vec<u8>>,
+    output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     reader_finished: Arc<AtomicBool>,
     reaped: Arc<AtomicBool>,
     state: Arc<Mutex<PtySessionState>>,
@@ -50,8 +50,12 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn new(config: PtySessionConfig) -> Self {
-        let output_tx = config.tx;
-        let reader_tx = output_tx.clone();
+        let output_tx = Arc::new(Mutex::new(Some(config.tx)));
+        let reader_tx = output_tx
+            .lock()
+            .as_ref()
+            .expect("output sender must exist while starting reader")
+            .clone();
         let reader = config.reader;
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
@@ -272,7 +276,15 @@ impl PtySession {
     }
 
     pub(crate) fn output_receiver_closed(&self) -> bool {
-        self.output_tx.is_closed()
+        self.output_tx
+            .lock()
+            .as_ref()
+            .map(mpsc::Sender::is_closed)
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn close_output(&self) {
+        self.output_tx.lock().take();
     }
 
     pub(crate) fn close_io(&self) {
@@ -289,6 +301,7 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         self.writer.lock().take();
         self.master.lock().take();
+        self.output_tx.lock().take();
         if let Some(handle) = self.reader_task.lock().take() {
             handle.abort();
         }

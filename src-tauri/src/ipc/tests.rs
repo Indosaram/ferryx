@@ -1,6 +1,7 @@
 use crate::ipc::*;
 use crate::terminal::PtyManager;
 use crate::worktree::WorktreeManager;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::sync::Arc;
 use tauri::{Listener, Manager};
 use tempfile::tempdir;
@@ -15,6 +16,12 @@ async fn test_tauri_mock_app_terminal_events() {
 
     let pty_manager = app.state::<Arc<PtyManager>>();
     let (tx, mut rx_event) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(10);
+    let tx_clone = tx.clone();
+    app.listen("terminal_output", move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<TerminalOutputPayload>(event.payload()) {
+            let _ = tx_clone.try_send(payload);
+        }
+    });
 
     let session_id = cmd_terminal_spawn(
         app.handle().clone(),
@@ -29,14 +36,6 @@ async fn test_tauri_mock_app_terminal_events() {
     .await
     .expect("cmd_terminal_spawn failed");
 
-    let event_name = format!("terminal_output:{}", session_id);
-    let tx_clone = tx.clone();
-    app.listen(&event_name, move |event: tauri::Event| {
-        if let Ok(payload) = serde_json::from_str::<TerminalOutputPayload>(event.payload()) {
-            let _ = tx_clone.try_send(payload);
-        }
-    });
-
     cmd_terminal_write(
         pty_manager.clone(),
         session_id.clone(),
@@ -45,7 +44,7 @@ async fn test_tauri_mock_app_terminal_events() {
     .await
     .expect("write failed");
 
-    let mut collected = String::new();
+    let mut collected = Vec::new();
     let timeout = tokio::time::Duration::from_secs(5);
     let start = tokio::time::Instant::now();
     while start.elapsed() < timeout {
@@ -55,17 +54,18 @@ async fn test_tauri_mock_app_terminal_events() {
         )
         .await
         {
-            collected.push_str(&payload.data);
-            if collected.contains("hello_orca_terminal") {
+            assert_eq!(payload.session_id, session_id);
+            collected.extend_from_slice(&STANDARD.decode(payload.data).expect("base64 output"));
+            if String::from_utf8_lossy(&collected).contains("hello_orca_terminal") {
                 break;
             }
         }
     }
 
     assert!(
-        collected.contains("hello_orca_terminal"),
+        String::from_utf8_lossy(&collected).contains("hello_orca_terminal"),
         "Expected output to contain 'hello_orca_terminal', got: {}",
-        collected
+        String::from_utf8_lossy(&collected)
     );
 
     cmd_terminal_resize(pty_manager.clone(), session_id.clone(), 120, 40)
@@ -246,4 +246,82 @@ async fn test_ipc_worktree_lifecycle() {
     manager.delete_worktree_and_branch(&wt_path, true).unwrap();
     let list_final = manager.list_worktrees().unwrap();
     assert_eq!(list_final.len(), 1);
+}
+
+#[tokio::test]
+async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
+    let app = tauri::test::mock_builder()
+        .manage(Arc::new(PtyManager::new()))
+        .manage(WorktreeManager::new("."))
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("failed to build mock app");
+
+    let pty_manager = app.state::<Arc<PtyManager>>();
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(32);
+    let (lifecycle_tx, mut lifecycle_rx) =
+        tokio::sync::mpsc::channel::<TerminalLifecyclePayload>(8);
+
+    app.listen("terminal_output", move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<TerminalOutputPayload>(event.payload()) {
+            let _ = output_tx.try_send(payload);
+        }
+    });
+    app.listen("terminal_lifecycle", move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<TerminalLifecyclePayload>(event.payload()) {
+            let _ = lifecycle_tx.try_send(payload);
+        }
+    });
+
+    let session_id = cmd_terminal_spawn(
+        app.handle().clone(),
+        pty_manager.clone(),
+        Some(SpawnTerminalRequest {
+            cwd: None,
+            cols: Some(80),
+            rows: Some(24),
+            command: None,
+        }),
+    )
+    .await
+    .expect("spawn");
+
+    let started = tokio::time::timeout(tokio::time::Duration::from_secs(2), lifecycle_rx.recv())
+        .await
+        .expect("started lifecycle timeout")
+        .expect("started lifecycle channel");
+    assert_eq!(started.session_id, session_id);
+    assert_eq!(started.state, TerminalLifecycleState::Started);
+    assert_eq!(started.exit_code, None);
+    assert_eq!(started.reason, None);
+
+    cmd_terminal_write(
+        pty_manager.clone(),
+        session_id.clone(),
+        "printf '\\377\\376\\n'\n".into(),
+    )
+    .await
+    .expect("write raw-byte command");
+
+    let mut raw = Vec::new();
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        while !raw.windows(2).any(|window| window == [0xff, 0xfe]) {
+            let payload = output_rx.recv().await.expect("terminal_output channel");
+            assert_eq!(payload.session_id, session_id);
+            raw.extend_from_slice(&STANDARD.decode(payload.data).expect("base64 payload"));
+        }
+    })
+    .await
+    .expect("raw terminal output timeout");
+
+    cmd_terminal_close(pty_manager.clone(), session_id.clone())
+        .await
+        .expect("close");
+
+    let exited = tokio::time::timeout(tokio::time::Duration::from_secs(2), lifecycle_rx.recv())
+        .await
+        .expect("exited lifecycle timeout")
+        .expect("exited lifecycle channel");
+    assert_eq!(exited.session_id, session_id);
+    assert_eq!(exited.state, TerminalLifecycleState::Exited);
+    assert!(exited.reason.is_none());
 }
