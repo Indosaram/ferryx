@@ -50,7 +50,9 @@ async fn test_e2e_agent_worktree_and_terminal_lifecycle() {
     let mut cmd = portable_pty::CommandBuilder::new("/bin/sh");
     cmd.cwd(&agent_wt_path);
 
-    let (session_id, mut rx) = pty_mgr.spawn(cmd, 80, 24).unwrap();
+    let (session_id, mut rx) = pty_mgr
+        .spawn_in_worktree(cmd, 80, 24, &worktree_mgr, &agent_wt_path)
+        .unwrap();
     assert!(pty_mgr.has_session(&session_id));
 
     pty_mgr
@@ -98,7 +100,7 @@ async fn test_e2e_agent_worktree_and_terminal_lifecycle() {
     assert!(!pty_mgr.has_session(&session_id));
 
     worktree_mgr
-        .delete_worktree_and_branch(&agent_wt_path, true)
+        .delete_worktree_and_branch_destructive(&agent_wt_path, true)
         .unwrap();
 
     let remaining_wts = worktree_mgr.list_worktrees().unwrap();

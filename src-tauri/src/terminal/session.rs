@@ -1,7 +1,9 @@
 use crate::terminal::PtyError;
+use crate::worktree::manager::WriterLeaseGuard;
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -23,7 +25,7 @@ pub enum TerminalSignal {
     Kill,
 }
 
-pub struct PtySessionConfig {
+pub(crate) struct PtySessionConfig {
     pub id: String,
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn Child + Send + Sync>,
@@ -32,6 +34,7 @@ pub struct PtySessionConfig {
     pub cols: u16,
     pub rows: u16,
     pub tx: mpsc::Sender<Vec<u8>>,
+    pub writer_lease: Option<WriterLeaseGuard>,
 }
 
 pub struct PtySession {
@@ -41,6 +44,7 @@ pub struct PtySession {
     child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
+    writer_lease: Arc<Mutex<Option<WriterLeaseGuard>>>,
     reader_finished: Arc<AtomicBool>,
     reaped: Arc<AtomicBool>,
     state: Arc<Mutex<PtySessionState>>,
@@ -49,7 +53,7 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    pub fn new(config: PtySessionConfig) -> Self {
+    pub(crate) fn new(config: PtySessionConfig) -> Self {
         let output_tx = Arc::new(Mutex::new(Some(config.tx)));
         let reader_tx = output_tx
             .lock()
@@ -84,6 +88,7 @@ impl PtySession {
             child: Arc::new(Mutex::new(Some(config.child))),
             reader_task: Arc::new(Mutex::new(Some(reader_task))),
             output_tx,
+            writer_lease: Arc::new(Mutex::new(config.writer_lease)),
             reader_finished,
             reaped: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(PtySessionState::Starting)),
@@ -135,6 +140,20 @@ impl PtySession {
             .lock()
             .as_ref()
             .and_then(|child| child.process_id())
+    }
+
+    pub fn writer_worktree(&self) -> Option<PathBuf> {
+        self.writer_lease
+            .lock()
+            .as_ref()
+            .map(|lease| lease.canonical_path().to_path_buf())
+    }
+
+    pub fn writer_owner_id(&self) -> Option<String> {
+        self.writer_lease
+            .lock()
+            .as_ref()
+            .map(|lease| lease.owner_id().to_string())
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<(), PtyError> {
@@ -292,6 +311,10 @@ impl PtySession {
         self.master.lock().take();
     }
 
+    pub(crate) fn release_writer_lease(&self) {
+        self.writer_lease.lock().take();
+    }
+
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
         self.reader_task.lock().take()
     }
@@ -302,6 +325,7 @@ impl Drop for PtySession {
         self.writer.lock().take();
         self.master.lock().take();
         self.output_tx.lock().take();
+        self.writer_lease.lock().take();
         if let Some(handle) = self.reader_task.lock().take() {
             handle.abort();
         }

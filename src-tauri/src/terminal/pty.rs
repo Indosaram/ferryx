@@ -1,7 +1,10 @@
 use crate::terminal::{session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal};
+use crate::worktree::manager::WriterLeaseGuard;
+use crate::worktree::WorktreeManager;
 use parking_lot::{Mutex, RwLock};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -50,6 +53,28 @@ impl PtyManager {
         self.spawn(cmd, cols, rows)
     }
 
+    pub fn spawn_in_worktree(
+        &self,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        worktree_manager: &WorktreeManager,
+        worktree_path: &Path,
+    ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
+        let session_id = Uuid::new_v4().to_string();
+        let lease = worktree_manager
+            .acquire_writer_lease(worktree_path, &session_id)
+            .map_err(|error| PtyError::Other(error.to_string()))?;
+        let rx = self.spawn_with_id_and_lease(
+            session_id.clone(),
+            cmd,
+            cols,
+            rows,
+            Some(lease),
+        )?;
+        Ok((session_id, rx))
+    }
+
     pub fn spawn_with_id(
         &self,
         session_id: impl Into<String>,
@@ -57,7 +82,17 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
-        let session_id = session_id.into();
+        self.spawn_with_id_and_lease(session_id.into(), cmd, cols, rows, None)
+    }
+
+    fn spawn_with_id_and_lease(
+        &self,
+        session_id: String,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        writer_lease: Option<WriterLeaseGuard>,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
         if self.has_session(&session_id) {
             return Err(PtyError::Other(format!(
                 "PTY session '{session_id}' already exists"
@@ -105,6 +140,7 @@ impl PtyManager {
             cols,
             rows,
             tx,
+            writer_lease,
         }));
 
         self.sessions
@@ -125,6 +161,7 @@ impl PtyManager {
 
                 match session.state() {
                     PtySessionState::Exited { .. } | PtySessionState::Failed { .. } => {
+                        session.release_writer_lease();
                         session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
@@ -157,6 +194,7 @@ impl PtyManager {
                     Err(error) => {
                         session.mark_failed(error.to_string());
                         session.close_io();
+                        session.release_writer_lease();
                         session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
@@ -178,6 +216,7 @@ impl PtyManager {
 
         session.close_io();
         let _ = Self::join_reader_bounded(&session).await;
+        session.release_writer_lease();
         session.mark_exited(Some(code));
         session.close_output();
         self.remove_from_registry(session_id);
@@ -212,6 +251,7 @@ impl PtyManager {
                 session.state(),
                 PtySessionState::Exited { .. } | PtySessionState::Failed { .. }
             ) {
+                session.release_writer_lease();
                 session.close_output();
                 self.remove_from_registry(session_id);
                 return Ok(());
@@ -275,6 +315,8 @@ impl PtyManager {
                 }
             }
         }
+
+        session.release_writer_lease();
 
         if let Some(error) = first_error {
             session.mark_failed(error.to_string());

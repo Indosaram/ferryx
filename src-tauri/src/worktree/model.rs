@@ -17,9 +17,9 @@ impl Worktree {
     /// Returns the short branch name if this worktree is checked out on a branch.
     /// For example, `refs/heads/orca/ws1/feat` -> `orca/ws1/feat`.
     pub fn branch_short_name(&self) -> Option<&str> {
-        self.branch.as_deref().map(|b| {
-            b.strip_prefix("refs/heads/").unwrap_or(b)
-        })
+        self.branch
+            .as_deref()
+            .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b))
     }
 
     /// Extracts Orca workspace ID and slug if the worktree branch follows `orca/<ws-id>/<slug>`.
@@ -95,6 +95,16 @@ impl CreateWorktreeOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchDeletionPreview {
+    pub branch: String,
+    pub head: String,
+    pub upstream: Option<String>,
+    pub merged: bool,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
     #[error("Git command failed ({command}): {stderr} (exit code: {code:?})")]
@@ -111,6 +121,19 @@ pub enum WorktreeError {
         count: usize,
         files: Vec<String>,
     },
+
+    #[error("Worktree '{path}' already has active writer '{owner_id}'")]
+    WriterAlreadyActive { path: PathBuf, owner_id: String },
+
+    #[error("Writer lease for '{path}' is owned by '{owner_id}', not '{requested_owner_id}'")]
+    WriterLeaseOwnerMismatch {
+        path: PathBuf,
+        owner_id: String,
+        requested_owner_id: String,
+    },
+
+    #[error("Branch '{branch}' at {head} is not merged; use the explicit destructive deletion API")]
+    UnmergedBranch { branch: String, head: String },
 
     #[error("Worktree not found at '{path}'")]
     WorktreeNotFound { path: PathBuf },

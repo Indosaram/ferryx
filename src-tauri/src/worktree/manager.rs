@@ -1,16 +1,94 @@
 use crate::worktree::git::{
     git_branch_delete, git_status_porcelain, git_worktree_add, git_worktree_list,
-    git_worktree_prune, git_worktree_remove,
+    git_worktree_prune, git_worktree_remove, run_git,
 };
 use crate::worktree::model::{
-    CreateWorktreeOptions, DirtyState, OrcaWorktreeInfo, Worktree, WorktreeError,
+    BranchDeletionPreview, CreateWorktreeOptions, DirtyState, OrcaWorktreeInfo, Worktree,
+    WorktreeError,
 };
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Default)]
+pub struct WriterLeaseRegistry {
+    writers: Arc<Mutex<HashMap<PathBuf, String>>>,
+}
+
+impl WriterLeaseRegistry {
+    fn acquire_canonical(&self, path: PathBuf, owner_id: &str) -> Result<(), WorktreeError> {
+        let mut writers = self.writers.lock();
+        if let Some(existing_owner) = writers.get(&path) {
+            return Err(WorktreeError::WriterAlreadyActive {
+                path,
+                owner_id: existing_owner.clone(),
+            });
+        }
+        writers.insert(path, owner_id.to_string());
+        Ok(())
+    }
+
+    fn release_canonical(&self, path: &Path, owner_id: &str) -> Result<(), WorktreeError> {
+        let mut writers = self.writers.lock();
+        let Some(existing_owner) = writers.get(path) else {
+            return Ok(());
+        };
+        if existing_owner != owner_id {
+            return Err(WorktreeError::WriterLeaseOwnerMismatch {
+                path: path.to_path_buf(),
+                owner_id: existing_owner.clone(),
+                requested_owner_id: owner_id.to_string(),
+            });
+        }
+        writers.remove(path);
+        Ok(())
+    }
+
+    fn owner_canonical(&self, path: &Path) -> Option<String> {
+        self.writers.lock().get(path).cloned()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct WriterLeaseGuard {
+    registry: WriterLeaseRegistry,
+    canonical_path: PathBuf,
+    owner_id: String,
+}
+
+impl WriterLeaseGuard {
+    fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+        Self {
+            registry,
+            canonical_path,
+            owner_id,
+        }
+    }
+
+    pub(crate) fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    pub(crate) fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+}
+
+impl Drop for WriterLeaseGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .registry
+            .release_canonical(&self.canonical_path, &self.owner_id);
+    }
+}
 
 /// Manages the atomic lifecycle of Git worktrees under the Orca workspace namespace (`orca/<ws-id>/<slug>`).
 #[derive(Debug, Clone)]
 pub struct WorktreeManager {
     repo_root: PathBuf,
+    writer_leases: WriterLeaseRegistry,
+    delete_lock: Arc<Mutex<()>>,
 }
 
 impl WorktreeManager {
@@ -18,12 +96,53 @@ impl WorktreeManager {
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         Self {
             repo_root: repo_root.into(),
+            writer_leases: WriterLeaseRegistry::default(),
+            delete_lock: Arc::new(Mutex::new(())),
         }
     }
 
     /// Returns the repository root path.
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    fn canonical_worktree_path(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
+        path.canonicalize()
+            .map_err(|_| WorktreeError::WorktreeNotFound {
+                path: path.to_path_buf(),
+            })
+    }
+
+    pub fn acquire_writer(&self, worktree_path: &Path, owner_id: &str) -> Result<(), WorktreeError> {
+        let _delete_guard = self.delete_lock.lock();
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        self.writer_leases.acquire_canonical(canonical, owner_id)
+    }
+
+    pub fn release_writer(&self, worktree_path: &Path, owner_id: &str) -> Result<(), WorktreeError> {
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        self.writer_leases.release_canonical(&canonical, owner_id)
+    }
+
+    pub fn writer_owner(&self, worktree_path: &Path) -> Result<Option<String>, WorktreeError> {
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        Ok(self.writer_leases.owner_canonical(&canonical))
+    }
+
+    pub(crate) fn acquire_writer_lease(
+        &self,
+        worktree_path: &Path,
+        owner_id: &str,
+    ) -> Result<WriterLeaseGuard, WorktreeError> {
+        let _delete_guard = self.delete_lock.lock();
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        self.writer_leases
+            .acquire_canonical(canonical.clone(), owner_id)?;
+        Ok(WriterLeaseGuard::new(
+            self.writer_leases.clone(),
+            canonical,
+            owner_id.to_string(),
+        ))
     }
 
     /// Validates workspace ID and slug, returning the formatted branch name (`orca/<ws-id>/<slug>`).
@@ -107,12 +226,10 @@ impl WorktreeManager {
     ) -> Result<Worktree, WorktreeError> {
         let branch_name = Self::format_branch_name(&options.ws_id, &options.slug)?;
 
-        // Ensure target directory doesn't already exist or conflict
         if options.path.exists() {
             return Err(WorktreeError::WorktreeAlreadyExists { path: options.path });
         }
 
-        // Add the git worktree
         git_worktree_add(
             &self.repo_root,
             &options.path,
@@ -120,9 +237,11 @@ impl WorktreeManager {
             options.base_ref.as_deref(),
         )?;
 
-        // Retrieve created worktree info from list
         let worktrees = self.list_worktrees()?;
-        let target_canonical = options.path.canonicalize().unwrap_or_else(|_| options.path.clone());
+        let target_canonical = options
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| options.path.clone());
 
         for wt in worktrees {
             let wt_canonical = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
@@ -131,7 +250,6 @@ impl WorktreeManager {
             }
         }
 
-        // Fallback if not found in list for some reason
         Ok(Worktree {
             path: options.path,
             head: String::new(),
@@ -202,12 +320,23 @@ impl WorktreeManager {
         self.check_dirty(worktree_path).map(|state| state.is_dirty)
     }
 
-    /// Safely removes a worktree.
-    ///
-    /// IMPORTANT: Deletion is strictly forbidden on dirty worktrees to guarantee
-    /// 1-writer-1-worktree isolation. Even if `force: true` is passed, a dirty worktree
-    /// will return `WorktreeError::DirtyWorktree` and NOT be removed.
-    pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
+    fn ensure_no_writer(&self, worktree_path: &Path) -> Result<(), WorktreeError> {
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        if let Some(owner_id) = self.writer_leases.owner_canonical(&canonical) {
+            return Err(WorktreeError::WriterAlreadyActive {
+                path: canonical,
+                owner_id,
+            });
+        }
+        Ok(())
+    }
+
+    fn remove_worktree_locked(
+        &self,
+        worktree_path: &Path,
+        force: bool,
+    ) -> Result<(), WorktreeError> {
+        self.ensure_no_writer(worktree_path)?;
         let dirty_state = self.check_dirty(worktree_path)?;
         if dirty_state.is_dirty {
             let count = dirty_state.files.len();
@@ -224,30 +353,129 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Safely removes a worktree while serializing active-writer and dirty checks with removal.
+    pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
+        let _delete_guard = self.delete_lock.lock();
+        self.remove_worktree_locked(worktree_path, force)
+    }
+
     /// Deletes a clean worktree safely (alias for `remove_worktree(path, false)`).
     pub fn safe_delete(&self, worktree_path: &Path) -> Result<(), WorktreeError> {
         self.remove_worktree(worktree_path, false)
     }
 
-    /// Safely removes a worktree and optionally deletes its underlying branch.
+    fn branch_is_merged(&self, branch: &str) -> Result<bool, WorktreeError> {
+        let merged = run_git(
+            &self.repo_root,
+            &["branch", "--merged", "HEAD", "--format=%(refname:short)"],
+        )?;
+        Ok(merged.lines().any(|line| line.trim() == branch))
+    }
+
+    pub fn branch_deletion_preview(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<BranchDeletionPreview, WorktreeError> {
+        let existing = self
+            .find_worktree(worktree_path)?
+            .ok_or_else(|| WorktreeError::WorktreeNotFound {
+                path: worktree_path.to_path_buf(),
+            })?;
+        let branch = existing
+            .branch_short_name()
+            .ok_or_else(|| WorktreeError::ParseError("Detached worktree has no branch".into()))?
+            .to_string();
+        let head = if existing.head.is_empty() {
+            run_git(&self.repo_root, &["rev-parse", "--verify", &branch])?
+                .trim()
+                .to_string()
+        } else {
+            existing.head
+        };
+        let merged = self.branch_is_merged(&branch)?;
+        let upstream = run_git(
+            &self.repo_root,
+            &["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")],
+        )
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+        let (ahead, behind) = if let Some(upstream_ref) = upstream.as_deref() {
+            let counts = run_git(
+                &self.repo_root,
+                &[
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    &format!("{upstream_ref}...{branch}"),
+                ],
+            )?;
+            let mut values = counts.split_whitespace();
+            let behind = values.next().and_then(|value| value.parse::<u64>().ok());
+            let ahead = values.next().and_then(|value| value.parse::<u64>().ok());
+            (ahead, behind)
+        } else {
+            (None, None)
+        };
+
+        Ok(BranchDeletionPreview {
+            branch,
+            head,
+            upstream,
+            merged,
+            ahead,
+            behind,
+        })
+    }
+
+    /// Safely removes a worktree and optionally deletes its branch using `git branch -d`.
     pub fn delete_worktree_and_branch(
         &self,
         worktree_path: &Path,
         delete_branch: bool,
     ) -> Result<(), WorktreeError> {
-        // Find existing worktree to extract branch name before removal
-        let existing = self.find_worktree(worktree_path)?;
-        let branch_name = existing.and_then(|wt| wt.branch_short_name().map(|s| s.to_string()));
+        let _delete_guard = self.delete_lock.lock();
+        self.ensure_no_writer(worktree_path)?;
 
-        // Perform safe removal (will fail if dirty)
-        self.remove_worktree(worktree_path, false)?;
-
-        if delete_branch {
-            if let Some(branch) = branch_name {
-                git_branch_delete(&self.repo_root, &branch, true)?;
+        let branch_preview = if delete_branch {
+            let preview = self.branch_deletion_preview(worktree_path)?;
+            if !preview.merged {
+                return Err(WorktreeError::UnmergedBranch {
+                    branch: preview.branch,
+                    head: preview.head,
+                });
             }
-        }
+            Some(preview)
+        } else {
+            None
+        };
 
+        self.remove_worktree_locked(worktree_path, false)?;
+        if let Some(preview) = branch_preview {
+            git_branch_delete(&self.repo_root, &preview.branch, false)?;
+        }
+        Ok(())
+    }
+
+    /// Explicit destructive branch deletion. Dirty worktrees and active writers remain protected.
+    pub fn delete_worktree_and_branch_destructive(
+        &self,
+        worktree_path: &Path,
+        delete_branch: bool,
+    ) -> Result<(), WorktreeError> {
+        let _delete_guard = self.delete_lock.lock();
+        self.ensure_no_writer(worktree_path)?;
+        let branch = if delete_branch {
+            Some(self.branch_deletion_preview(worktree_path)?.branch)
+        } else {
+            None
+        };
+
+        self.remove_worktree_locked(worktree_path, false)?;
+        if let Some(branch) = branch {
+            git_branch_delete(&self.repo_root, &branch, true)?;
+        }
         Ok(())
     }
 }
