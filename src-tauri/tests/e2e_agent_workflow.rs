@@ -56,21 +56,21 @@ async fn test_e2e_agent_worktree_and_terminal_lifecycle() {
     assert!(pty_mgr.has_session(&session_id));
 
     pty_mgr
-        .write_input(&session_id, b"echo 'agent work done' > task.out\n")
+        .write_input(
+            &session_id,
+            b"echo 'agent work done' > task.out; printf '__ORCA_AGENT_%s__\\n' DONE\n",
+        )
         .unwrap();
 
     let mut captured_output = Vec::new();
-    let timeout = Duration::from_secs(3);
-    let start = std::time::Instant::now();
-
-    while start.elapsed() < timeout {
-        if let Ok(Some(chunk)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !String::from_utf8_lossy(&captured_output).contains("__ORCA_AGENT_DONE__") {
+            let chunk = rx.recv().await.expect("terminal output before completion marker");
             captured_output.extend_from_slice(&chunk);
-            if agent_wt_path.join("task.out").exists() {
-                break;
-            }
         }
-    }
+    })
+    .await
+    .expect("agent completion marker timeout");
 
     assert!(agent_wt_path.join("task.out").exists(), "Agent task file must exist");
     let content = std::fs::read_to_string(agent_wt_path.join("task.out")).unwrap();

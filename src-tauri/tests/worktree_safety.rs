@@ -124,7 +124,7 @@ async fn pty_writer_lease_releases_on_close_and_natural_exit() {
     one_shot.arg("-c");
     one_shot.arg("exit 0");
     one_shot.cwd(&wt);
-    let (natural_id, _rx) = pty
+    let (natural_id, mut output) = pty
         .spawn_in_worktree(one_shot, 80, 24, &manager, &wt)
         .expect("spawn one-shot terminal");
     assert_eq!(
@@ -133,12 +133,11 @@ async fn pty_writer_lease_releases_on_close_and_natural_exit() {
     );
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        while pty.has_session(&natural_id) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        while output.recv().await.is_some() {}
     })
     .await
-    .expect("natural session removal");
+    .expect("natural session output closure");
+    assert!(!pty.has_session(&natural_id));
     assert_eq!(manager.writer_owner(&wt).expect("writer owner"), None);
 }
 
@@ -155,4 +154,46 @@ fn pty_spawn_failure_rolls_back_writer_lease() {
         .expect_err("missing program must fail to spawn");
     assert!(error.to_string().contains("spawn"));
     assert_eq!(manager.writer_owner(&wt).expect("writer owner"), None);
+}
+
+#[tokio::test]
+async fn five_concurrent_worktree_terminal_lifecycles_release_all_leases() {
+    let (_repo, manager) = setup_test_repo();
+    let pty = PtyManager::new();
+    let worktrees = (0..5)
+        .map(|index| create_worktree(&manager, &format!("concurrent-{index}")))
+        .collect::<Vec<_>>();
+    let mut session_ids = Vec::with_capacity(worktrees.len());
+    let mut receivers = Vec::with_capacity(worktrees.len());
+
+    for worktree in &worktrees {
+        let mut shell = CommandBuilder::new("/bin/sh");
+        shell.cwd(worktree);
+        let (session_id, receiver) = pty
+            .spawn_in_worktree(shell, 80, 24, &manager, worktree)
+            .expect("spawn writer terminal");
+        assert_eq!(
+            manager.writer_owner(worktree).expect("writer owner"),
+            Some(session_id.clone())
+        );
+        session_ids.push(session_id);
+        receivers.push(receiver);
+    }
+
+    assert_eq!(pty.session_count(), worktrees.len());
+
+    for session_id in &session_ids {
+        pty.close_session(session_id).await.expect("close terminal");
+    }
+
+    assert_eq!(pty.session_count(), 0);
+    for worktree in &worktrees {
+        assert_eq!(manager.writer_owner(worktree).expect("writer owner"), None);
+        manager
+            .delete_worktree_and_branch(worktree, true)
+            .expect("delete clean worktree and merged branch");
+    }
+
+    assert_eq!(manager.list_worktrees().expect("remaining worktrees").len(), 1);
+    drop(receivers);
 }
