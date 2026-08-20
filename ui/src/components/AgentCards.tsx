@@ -11,10 +11,11 @@ type AgentCardsProps = {
 };
 
 const stateLabel: Record<ActiveAgent["state"], string> = {
+  starting: "Starting",
   working: "Working",
   waiting: "Needs input",
-  done: "Done",
-  idle: "Idle",
+  exited: "Exited",
+  failed: "Failed",
 };
 
 export function AgentCards({ agents, activeWorktreePath, onSelect }: AgentCardsProps) {

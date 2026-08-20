@@ -1,5 +1,3 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke, isTauri } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
@@ -7,13 +5,12 @@ import { useEffect, useRef, useState } from "react";
 
 import "@xterm/xterm/css/xterm.css";
 
-type TerminalOutputPayload = {
-  session_id: string;
-  data: string;
-};
+import { isTauriRuntime, resizeTerminal, writeTerminal } from "../lib/tauri";
+import { terminalEventBus } from "../lib/terminalEvents";
+import type { TerminalSession } from "../lib/types";
 
 type TerminalPaneProps = {
-  cwd: string;
+  session: TerminalSession;
   active: boolean;
 };
 
@@ -41,16 +38,16 @@ const TERMINAL_THEME = {
   brightWhite: "#fafafa",
 } as const;
 
-export function TerminalPane({ cwd, active }: TerminalPaneProps) {
+export function TerminalPane({ session, active }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
-  const activeRef = useRef(active);
+  const sessionRef = useRef(session);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
+  sessionRef.current = session;
+
   useEffect(() => {
-    activeRef.current = active;
     if (active) {
       requestAnimationFrame(() => {
         fitRef.current?.fit();
@@ -81,85 +78,59 @@ export function TerminalPane({ cwd, active }: TerminalPaneProps) {
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
 
+    let webglAddon: WebglAddon | null = null;
     try {
-      const webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => webglAddon.dispose());
+      webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => {
+        webglAddon?.dispose();
+        webglAddon = null;
+      });
       terminal.loadAddon(webglAddon);
     } catch {
-      // Canvas rendering remains available when WebGL is unavailable.
+      webglAddon = null;
     }
 
     let disposed = false;
-    let unlisten: UnlistenFn | undefined;
     let resizeFrame = 0;
 
-    const resizeTerminal = () => {
+    const resize = () => {
       cancelAnimationFrame(resizeFrame);
       resizeFrame = requestAnimationFrame(() => {
         if (disposed || host.clientWidth === 0 || host.clientHeight === 0) return;
         fitAddon.fit();
-        const sessionId = sessionIdRef.current;
-        if (sessionId && isTauri()) {
-          void invoke("cmd_terminal_resize", {
-            sessionId,
-            cols: terminal.cols,
-            rows: terminal.rows,
-          }).catch(() => undefined);
-        }
+        const backendSessionId = sessionRef.current.backendSessionId;
+        if (!backendSessionId) return;
+        void resizeTerminal({ sessionId: backendSessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
       });
     };
 
-    const resizeObserver = new ResizeObserver(resizeTerminal);
+    const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(host);
 
     const dataDisposable = terminal.onData((data) => {
-      const sessionId = sessionIdRef.current;
-      if (!sessionId || !isTauri()) return;
-      void invoke("cmd_terminal_write", { sessionId, data }).catch((error: unknown) => {
-        setConnectionError(String(error));
+      const backendSessionId = sessionRef.current.backendSessionId;
+      if (!backendSessionId) return;
+      void writeTerminal({ sessionId: backendSessionId, data }).catch((error: unknown) => {
+        setConnectionError(error instanceof Error ? error.message : "Terminal write failed");
       });
     });
 
     const focusTerminal = () => terminal.focus();
     host.addEventListener("pointerdown", focusTerminal);
 
-    async function connect() {
-      resizeTerminal();
-      if (!isTauri()) {
-        terminal.writeln("\x1b[1;32momo bridge\x1b[0m  UI preview");
-        terminal.writeln("\x1b[90mLaunch through Tauri to attach the portable-pty session.\x1b[0m");
-        terminal.write("\r\n\x1b[34m~\x1b[0m \x1b[32m❯\x1b[0m ");
-        return;
-      }
+    const backendSessionId = sessionRef.current.backendSessionId;
+    const unsubscribeOutput = backendSessionId
+      ? terminalEventBus.subscribeOutput(backendSessionId, (text) => terminal.write(text))
+      : () => undefined;
 
-      try {
-        const sessionId = await invoke<string>("cmd_terminal_spawn", {
-          request: {
-            cwd,
-            cols: terminal.cols,
-            rows: terminal.rows,
-            command: null,
-          },
-        });
-        if (disposed) {
-          await invoke("cmd_terminal_close", { sessionId }).catch(() => undefined);
-          return;
-        }
-
-        sessionIdRef.current = sessionId;
-        unlisten = await listen<TerminalOutputPayload>(`terminal_output:${sessionId}`, (event) => {
-          terminal.write(event.payload.data);
-        });
-        resizeTerminal();
-        if (activeRef.current) terminal.focus();
-      } catch (error) {
-        const message = String(error);
-        setConnectionError(message);
-        terminal.writeln(`\x1b[31mFailed to start terminal: ${message}\x1b[0m`);
-      }
+    if (!isTauriRuntime()) {
+      terminal.writeln("\x1b[1;32mORCA Lite\x1b[0m  UI preview");
+      terminal.writeln("\x1b[90mLaunch through Tauri to attach the PTY session.\x1b[0m");
+      terminal.write("\r\n\x1b[34m~\x1b[0m \x1b[32m❯\x1b[0m ");
     }
 
-    void connect();
+    resize();
+    if (active) terminal.focus();
 
     return () => {
       disposed = true;
@@ -167,21 +138,17 @@ export function TerminalPane({ cwd, active }: TerminalPaneProps) {
       resizeObserver.disconnect();
       host.removeEventListener("pointerdown", focusTerminal);
       dataDisposable.dispose();
-      unlisten?.();
-      const sessionId = sessionIdRef.current;
-      sessionIdRef.current = null;
-      if (sessionId && isTauri()) {
-        void invoke("cmd_terminal_close", { sessionId }).catch(() => undefined);
-      }
+      unsubscribeOutput();
+      webglAddon?.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [cwd]);
+  }, [session.id]);
 
   return (
     <div className="relative h-full w-full bg-terminal">
-      <div ref={hostRef} className="terminal-host h-full w-full" aria-label={`Terminal in ${cwd}`} />
+      <div ref={hostRef} className="terminal-host h-full w-full" aria-label={`Terminal in ${session.cwd}`} />
       {connectionError ? (
         <div className="pointer-events-none absolute bottom-3 right-3 max-w-error rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
           PTY disconnected
