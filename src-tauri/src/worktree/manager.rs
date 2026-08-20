@@ -8,8 +8,11 @@ use crate::worktree::model::{
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+
+const ORCA_WORKTREE_DIR: &str = ".orca-worktrees";
 
 #[derive(Debug, Clone, Default)]
 pub struct WriterLeaseRegistry {
@@ -83,7 +86,11 @@ impl Drop for WriterLeaseGuard {
     }
 }
 
-/// Manages the atomic lifecycle of Git worktrees under the Orca workspace namespace (`orca/<ws-id>/<slug>`).
+/// Manages Git worktrees under a canonical repository root.
+///
+/// Every filesystem path accepted by this manager must stay inside `repo_root` after
+/// canonicalization. IPC callers should prefer identity-based resolution through
+/// `WorkspaceRegistry` instead of passing paths directly.
 #[derive(Debug, Clone)]
 pub struct WorktreeManager {
     repo_root: PathBuf,
@@ -92,25 +99,137 @@ pub struct WorktreeManager {
 }
 
 impl WorktreeManager {
-    /// Creates a new `WorktreeManager` rooted at the given repository path.
+    /// Creates a manager and immediately validates/canonicalizes the Git repository root.
+    /// Invalid roots are programmer configuration errors; fallible callers should use `try_new`.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
-        Self {
-            repo_root: repo_root.into(),
-            writer_leases: WriterLeaseRegistry::default(),
-            delete_lock: Arc::new(Mutex::new(())),
-        }
+        let requested = repo_root.into();
+        Self::try_new(&requested)
+            .unwrap_or_else(|error| panic!("invalid worktree manager root '{}': {error}", requested.display()))
     }
 
-    /// Returns the repository root path.
+    pub fn try_new(repo_root: impl Into<PathBuf>) -> Result<Self, WorktreeError> {
+        let requested = repo_root.into();
+        let canonical = fs::canonicalize(&requested)
+            .map_err(|_| WorktreeError::InvalidRepoRoot {
+                path: requested.clone(),
+            })?;
+        if !canonical.is_dir() {
+            return Err(WorktreeError::InvalidRepoRoot { path: canonical });
+        }
+
+        let top_level = run_git(&canonical, &["rev-parse", "--show-toplevel"])
+            .map_err(|_| WorktreeError::InvalidRepoRoot {
+                path: canonical.clone(),
+            })?;
+        let git_root = fs::canonicalize(PathBuf::from(top_level.trim())).map_err(|_| {
+            WorktreeError::InvalidRepoRoot {
+                path: canonical.clone(),
+            }
+        })?;
+        if git_root != canonical {
+            return Err(WorktreeError::InvalidRepoRoot { path: canonical });
+        }
+
+        Ok(Self {
+            repo_root: git_root,
+            writer_leases: WriterLeaseRegistry::default(),
+            delete_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
     }
 
-    fn canonical_worktree_path(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
-        path.canonicalize()
-            .map_err(|_| WorktreeError::WorktreeNotFound {
+    fn validate_path_components(&self, path: &Path) -> Result<(), WorktreeError> {
+        if !path.is_absolute() {
+            return Err(WorktreeError::InvalidPath {
                 path: path.to_path_buf(),
+                reason: "path must be absolute".into(),
+            });
+        }
+        if path.components().any(|component| matches!(component, Component::ParentDir)) {
+            return Err(WorktreeError::InvalidPath {
+                path: path.to_path_buf(),
+                reason: "parent traversal ('..') is forbidden".into(),
+            });
+        }
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            if name.starts_with('-') {
+                return Err(WorktreeError::InvalidPath {
+                    path: path.to_path_buf(),
+                    reason: "path component cannot start with a dash".into(),
+                });
+            }
+            if name.chars().any(char::is_control) {
+                return Err(WorktreeError::InvalidPath {
+                    path: path.to_path_buf(),
+                    reason: "path component cannot contain control characters".into(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_canonical_inside_root(
+        &self,
+        original: &Path,
+        canonical: PathBuf,
+    ) -> Result<PathBuf, WorktreeError> {
+        if canonical == self.repo_root || canonical.starts_with(&self.repo_root) {
+            Ok(canonical)
+        } else {
+            Err(WorktreeError::PathOutsideWorkspace {
+                path: original.to_path_buf(),
+                root: self.repo_root.clone(),
             })
+        }
+    }
+
+    pub fn canonical_allowed_path(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
+        self.validate_path_components(path)?;
+        let canonical = fs::canonicalize(path).map_err(|_| WorktreeError::WorktreeNotFound {
+            path: path.to_path_buf(),
+        })?;
+        self.ensure_canonical_inside_root(path, canonical)
+    }
+
+    fn validate_new_worktree_path(&self, path: &Path) -> Result<(), WorktreeError> {
+        self.validate_path_components(path)?;
+        if !path.starts_with(&self.repo_root) {
+            return Err(WorktreeError::PathOutsideWorkspace {
+                path: path.to_path_buf(),
+                root: self.repo_root.clone(),
+            });
+        }
+
+        let mut ancestor = path.parent().ok_or_else(|| WorktreeError::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "worktree target has no parent".into(),
+        })?;
+        while !ancestor.exists() {
+            ancestor = ancestor.parent().ok_or_else(|| WorktreeError::InvalidPath {
+                path: path.to_path_buf(),
+                reason: "worktree target has no existing ancestor".into(),
+            })?;
+        }
+        let canonical_ancestor = fs::canonicalize(ancestor)?;
+        self.ensure_canonical_inside_root(path, canonical_ancestor)?;
+        Ok(())
+    }
+
+    fn canonical_worktree_path(&self, path: &Path) -> Result<PathBuf, WorktreeError> {
+        self.canonical_allowed_path(path)
+    }
+
+    pub fn worktree_path_for(&self, ws_id: &str, slug: &str) -> Result<PathBuf, WorktreeError> {
+        Self::format_branch_name(ws_id, slug)?;
+        let mut target = self.repo_root.join(ORCA_WORKTREE_DIR).join(ws_id);
+        for segment in slug.split('/') {
+            target.push(segment);
+        }
+        self.validate_new_worktree_path(&target)?;
+        Ok(target)
     }
 
     pub fn acquire_writer(&self, worktree_path: &Path, owner_id: &str) -> Result<(), WorktreeError> {
@@ -145,11 +264,9 @@ impl WorktreeManager {
         ))
     }
 
-    /// Validates workspace ID and slug, returning the formatted branch name (`orca/<ws-id>/<slug>`).
     pub fn format_branch_name(ws_id: &str, slug: &str) -> Result<String, WorktreeError> {
         let ws_id = ws_id.trim();
         let slug = slug.trim();
-
         if ws_id.is_empty() {
             return Err(WorktreeError::InvalidNamespace {
                 reason: "Workspace ID cannot be empty".into(),
@@ -160,14 +277,16 @@ impl WorktreeManager {
                 reason: "Slug cannot be empty".into(),
             });
         }
-
+        if ws_id.contains('/') {
+            return Err(WorktreeError::InvalidNamespace {
+                reason: "Workspace ID cannot contain '/'".into(),
+            });
+        }
         Self::validate_ref_component(ws_id, "workspace ID")?;
         Self::validate_ref_component(slug, "slug")?;
-
         Ok(format!("orca/{ws_id}/{slug}"))
     }
 
-    /// Parses an Orca branch name (`orca/<ws-id>/<slug>` or `refs/heads/orca/<ws-id>/<slug>`) into its components.
     pub fn parse_branch_name(branch: &str) -> Option<OrcaWorktreeInfo> {
         let short = branch.strip_prefix("refs/heads/").unwrap_or(branch);
         let parts: Vec<&str> = short.split('/').collect();
@@ -181,54 +300,65 @@ impl WorktreeManager {
         }
     }
 
-    /// Helper to validate git ref component characters.
     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
-        if component.starts_with('/')
-            || component.ends_with('/')
-            || component.starts_with('.')
-            || component.ends_with('.')
-        {
-            return Err(WorktreeError::InvalidNamespace {
-                reason: format!("{label} cannot start or end with '/' or '.'"),
-            });
-        }
-
         if component.contains("..") || component.contains("//") || component.contains("@{") {
             return Err(WorktreeError::InvalidNamespace {
                 reason: format!("{label} cannot contain '..', '//', or '@{{'"),
             });
         }
 
-        for c in component.chars() {
-            if c.is_ascii_control()
-                || c.is_whitespace()
-                || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        for segment in component.split('/') {
+            if segment.is_empty()
+                || segment.starts_with('.')
+                || segment.ends_with('.')
+                || segment.starts_with('-')
             {
                 return Err(WorktreeError::InvalidNamespace {
-                    reason: format!("{label} contains invalid character '{c}'"),
+                    reason: format!(
+                        "{label} path segments cannot be empty or start/end with '.', or start with '-'"
+                    ),
                 });
             }
+            if segment.ends_with(".lock") {
+                return Err(WorktreeError::InvalidNamespace {
+                    reason: format!("{label} cannot end with '.lock'"),
+                });
+            }
+            for ch in segment.chars() {
+                if ch.is_ascii_control()
+                    || ch.is_whitespace()
+                    || matches!(ch, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+                {
+                    return Err(WorktreeError::InvalidNamespace {
+                        reason: format!("{label} contains invalid character '{ch}'"),
+                    });
+                }
+            }
         }
-
-        if component.ends_with(".lock") {
-            return Err(WorktreeError::InvalidNamespace {
-                reason: format!("{label} cannot end with '.lock'"),
-            });
-        }
-
         Ok(())
     }
 
-    /// Creates a new worktree with isolated branch `orca/<ws-id>/<slug>`.
     pub fn create_worktree(
         &self,
         options: CreateWorktreeOptions,
     ) -> Result<Worktree, WorktreeError> {
         let branch_name = Self::format_branch_name(&options.ws_id, &options.slug)?;
-
+        self.validate_new_worktree_path(&options.path)?;
         if options.path.exists() {
+            self.canonical_allowed_path(&options.path)?;
             return Err(WorktreeError::WorktreeAlreadyExists { path: options.path });
         }
+
+        let parent = options
+            .path
+            .parent()
+            .ok_or_else(|| WorktreeError::InvalidPath {
+                path: options.path.clone(),
+                reason: "worktree target has no parent".into(),
+            })?;
+        fs::create_dir_all(parent)?;
+        let canonical_parent = fs::canonicalize(parent)?;
+        self.ensure_canonical_inside_root(&options.path, canonical_parent)?;
 
         git_worktree_add(
             &self.repo_root,
@@ -237,21 +367,17 @@ impl WorktreeManager {
             options.base_ref.as_deref(),
         )?;
 
-        let worktrees = self.list_worktrees()?;
-        let target_canonical = options
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| options.path.clone());
-
-        for wt in worktrees {
-            let wt_canonical = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
-            if wt_canonical == target_canonical || wt.path == options.path {
-                return Ok(wt);
+        let target_canonical = self.canonical_allowed_path(&options.path)?;
+        for wt in self.list_worktrees()? {
+            if let Ok(wt_canonical) = self.canonical_allowed_path(&wt.path) {
+                if wt_canonical == target_canonical {
+                    return Ok(wt);
+                }
             }
         }
 
         Ok(Worktree {
-            path: options.path,
+            path: target_canonical,
             head: String::new(),
             branch: Some(format!("refs/heads/{branch_name}")),
             bare: false,
@@ -261,61 +387,47 @@ impl WorktreeManager {
         })
     }
 
-    /// Lists all worktrees in the repository.
     pub fn list_worktrees(&self) -> Result<Vec<Worktree>, WorktreeError> {
-        git_worktree_list(&self.repo_root)
+        let worktrees = git_worktree_list(&self.repo_root)?;
+        Ok(worktrees
+            .into_iter()
+            .filter_map(|mut wt| {
+                let canonical = self.canonical_allowed_path(&wt.path).ok()?;
+                wt.path = canonical;
+                Some(wt)
+            })
+            .collect())
     }
 
-    /// Finds a worktree matching the specified path.
     pub fn find_worktree(&self, path: &Path) -> Result<Option<Worktree>, WorktreeError> {
-        let target_canonical = path.canonicalize().ok();
-        let worktrees = self.list_worktrees()?;
-
-        for wt in worktrees {
-            if wt.path == path {
+        let target_canonical = self.canonical_allowed_path(path)?;
+        for wt in self.list_worktrees()? {
+            if wt.path == target_canonical {
                 return Ok(Some(wt));
             }
-            if let (Some(tc), Ok(wt_c)) = (&target_canonical, wt.path.canonicalize()) {
-                if tc == &wt_c {
-                    return Ok(Some(wt));
-                }
-            }
         }
-
         Ok(None)
     }
 
-    /// Finds a worktree by workspace ID and slug.
     pub fn find_worktree_by_slug(
         &self,
         ws_id: &str,
         slug: &str,
     ) -> Result<Option<Worktree>, WorktreeError> {
         let target_branch = Self::format_branch_name(ws_id, slug)?;
-        let worktrees = self.list_worktrees()?;
-
-        for wt in worktrees {
-            if let Some(branch) = wt.branch_short_name() {
-                if branch == target_branch {
-                    return Ok(Some(wt));
-                }
+        for wt in self.list_worktrees()? {
+            if wt.branch_short_name() == Some(target_branch.as_str()) {
+                return Ok(Some(wt));
             }
         }
-
         Ok(None)
     }
 
-    /// Checks the dirty status of a worktree using `git status --porcelain`.
     pub fn check_dirty(&self, worktree_path: &Path) -> Result<DirtyState, WorktreeError> {
-        if !worktree_path.exists() {
-            return Err(WorktreeError::WorktreeNotFound {
-                path: worktree_path.to_path_buf(),
-            });
-        }
-        git_status_porcelain(worktree_path)
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        git_status_porcelain(&canonical)
     }
 
-    /// Returns `true` if the worktree has any untracked, modified, or uncommitted files.
     pub fn is_dirty(&self, worktree_path: &Path) -> Result<bool, WorktreeError> {
         self.check_dirty(worktree_path).map(|state| state.is_dirty)
     }
@@ -336,30 +448,29 @@ impl WorktreeManager {
         worktree_path: &Path,
         force: bool,
     ) -> Result<(), WorktreeError> {
-        self.ensure_no_writer(worktree_path)?;
-        let dirty_state = self.check_dirty(worktree_path)?;
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        self.ensure_no_writer(&canonical)?;
+        let dirty_state = self.check_dirty(&canonical)?;
         if dirty_state.is_dirty {
             let count = dirty_state.files.len();
-            let files = dirty_state.files.into_iter().map(|f| f.path).collect();
+            let files = dirty_state.files.into_iter().map(|file| file.path).collect();
             return Err(WorktreeError::DirtyWorktree {
-                path: worktree_path.to_path_buf(),
+                path: canonical,
                 count,
                 files,
             });
         }
 
-        git_worktree_remove(&self.repo_root, worktree_path, force)?;
+        git_worktree_remove(&self.repo_root, &canonical, force)?;
         let _ = git_worktree_prune(&self.repo_root);
         Ok(())
     }
 
-    /// Safely removes a worktree while serializing active-writer and dirty checks with removal.
     pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
         self.remove_worktree_locked(worktree_path, force)
     }
 
-    /// Deletes a clean worktree safely (alias for `remove_worktree(path, false)`).
     pub fn safe_delete(&self, worktree_path: &Path) -> Result<(), WorktreeError> {
         self.remove_worktree(worktree_path, false)
     }
@@ -376,10 +487,11 @@ impl WorktreeManager {
         &self,
         worktree_path: &Path,
     ) -> Result<BranchDeletionPreview, WorktreeError> {
+        let canonical = self.canonical_worktree_path(worktree_path)?;
         let existing = self
-            .find_worktree(worktree_path)?
+            .find_worktree(&canonical)?
             .ok_or_else(|| WorktreeError::WorktreeNotFound {
-                path: worktree_path.to_path_buf(),
+                path: canonical.clone(),
             })?;
         let branch = existing
             .branch_short_name()
@@ -429,7 +541,6 @@ impl WorktreeManager {
         })
     }
 
-    /// Safely removes a worktree and optionally deletes its branch using `git branch -d`.
     pub fn delete_worktree_and_branch(
         &self,
         worktree_path: &Path,
@@ -458,7 +569,6 @@ impl WorktreeManager {
         Ok(())
     }
 
-    /// Explicit destructive branch deletion. Dirty worktrees and active writers remain protected.
     pub fn delete_worktree_and_branch_destructive(
         &self,
         worktree_path: &Path,

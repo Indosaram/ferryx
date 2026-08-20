@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Worktree {
     pub path: PathBuf,
     pub head: String,
@@ -38,18 +39,28 @@ impl Worktree {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OrcaWorktreeInfo {
     pub ws_id: String,
     pub slug: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeIdentity {
+    pub ws_id: String,
+    pub slug: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DirtyFile {
     pub status_code: String,
     pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DirtyState {
     pub is_dirty: bool,
     pub files: Vec<DirtyFile>,
@@ -72,6 +83,7 @@ impl DirtyState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateWorktreeOptions {
     pub ws_id: String,
     pub slug: String,
@@ -96,6 +108,7 @@ impl CreateWorktreeOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BranchDeletionPreview {
     pub branch: String,
     pub head: String,
@@ -134,6 +147,25 @@ pub enum WorktreeError {
 
     #[error("Branch '{branch}' at {head} is not merged; use the explicit destructive deletion API")]
     UnmergedBranch { branch: String, head: String },
+
+    #[error("Workspace '{workspace_id}' is not registered")]
+    WorkspaceNotFound { workspace_id: String },
+
+    #[error("Workspace '{workspace_id}' is already registered")]
+    WorkspaceAlreadyRegistered { workspace_id: String },
+
+    #[error("Worktree identity '{ws_id}/{slug}' was not found in workspace '{workspace_id}'")]
+    WorktreeIdentityNotFound {
+        workspace_id: String,
+        ws_id: String,
+        slug: String,
+    },
+
+    #[error("Path '{path}' escapes registered workspace root '{root}'")]
+    PathOutsideWorkspace { path: PathBuf, root: PathBuf },
+
+    #[error("Invalid path '{path}': {reason}")]
+    InvalidPath { path: PathBuf, reason: String },
 
     #[error("Worktree not found at '{path}'")]
     WorktreeNotFound { path: PathBuf },

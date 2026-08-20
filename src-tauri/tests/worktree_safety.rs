@@ -2,7 +2,6 @@ use orca_lite_lib::terminal::PtyManager;
 use orca_lite_lib::worktree::{CreateWorktreeOptions, WorktreeError, WorktreeManager};
 use portable_pty::CommandBuilder;
 use std::fs;
-use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -21,8 +20,8 @@ fn setup_test_repo() -> (TempDir, WorktreeManager) {
     (temp_dir, manager)
 }
 
-fn create_worktree(manager: &WorktreeManager, parent: &Path, slug: &str) -> std::path::PathBuf {
-    let path = parent.join(format!("wt-{slug}"));
+fn create_worktree(manager: &WorktreeManager, slug: &str) -> std::path::PathBuf {
+    let path = manager.repo_root().join(format!("wt-{slug}"));
     manager
         .create_worktree(CreateWorktreeOptions::new("ws-safety", slug, &path))
         .expect("create worktree");
@@ -32,8 +31,7 @@ fn create_worktree(manager: &WorktreeManager, parent: &Path, slug: &str) -> std:
 #[test]
 fn second_writer_is_rejected_and_release_allows_reacquire() {
     let (_repo, manager) = setup_test_repo();
-    let wt_parent = TempDir::new().expect("wt parent");
-    let wt = create_worktree(&manager, wt_parent.path(), "lease");
+    let wt = create_worktree(&manager, "lease");
 
     manager.acquire_writer(&wt, "owner-a").expect("first writer");
     assert_eq!(manager.writer_owner(&wt).expect("writer owner"), Some("owner-a".into()));
@@ -50,8 +48,7 @@ fn second_writer_is_rejected_and_release_allows_reacquire() {
 #[test]
 fn active_writer_blocks_delete() {
     let (_repo, manager) = setup_test_repo();
-    let wt_parent = TempDir::new().expect("wt parent");
-    let wt = create_worktree(&manager, wt_parent.path(), "active-writer");
+    let wt = create_worktree(&manager, "active-writer");
 
     manager.acquire_writer(&wt, "agent-1").expect("writer acquire");
     let err = manager.safe_delete(&wt).unwrap_err();
@@ -63,8 +60,7 @@ fn active_writer_blocks_delete() {
 #[test]
 fn default_delete_rejects_clean_unmerged_branch() {
     let (_repo, manager) = setup_test_repo();
-    let wt_parent = TempDir::new().expect("wt parent");
-    let wt = create_worktree(&manager, wt_parent.path(), "unmerged-default");
+    let wt = create_worktree(&manager, "unmerged-default");
 
     fs::write(wt.join("feature.txt"), "unmerged work\n").expect("write feature");
     orca_lite_lib::worktree::run_git(&wt, &["add", "feature.txt"]).expect("git add");
@@ -83,8 +79,7 @@ fn default_delete_rejects_clean_unmerged_branch() {
 #[test]
 fn explicit_destructive_delete_removes_clean_unmerged_branch() {
     let (_repo, manager) = setup_test_repo();
-    let wt_parent = TempDir::new().expect("wt parent");
-    let wt = create_worktree(&manager, wt_parent.path(), "unmerged-force");
+    let wt = create_worktree(&manager, "unmerged-force");
 
     fs::write(wt.join("feature.txt"), "unmerged work\n").expect("write feature");
     orca_lite_lib::worktree::run_git(&wt, &["add", "feature.txt"]).expect("git add");
@@ -110,8 +105,7 @@ fn explicit_destructive_delete_removes_clean_unmerged_branch() {
 #[tokio::test]
 async fn pty_writer_lease_releases_on_close_and_natural_exit() {
     let (_repo, manager) = setup_test_repo();
-    let wt_parent = TempDir::new().expect("wt parent");
-    let wt = create_worktree(&manager, wt_parent.path(), "pty-lease");
+    let wt = create_worktree(&manager, "pty-lease");
     let pty = PtyManager::new();
 
     let mut shell = CommandBuilder::new("/bin/sh");
@@ -151,8 +145,7 @@ async fn pty_writer_lease_releases_on_close_and_natural_exit() {
 #[test]
 fn pty_spawn_failure_rolls_back_writer_lease() {
     let (_repo, manager) = setup_test_repo();
-    let wt_parent = TempDir::new().expect("wt parent");
-    let wt = create_worktree(&manager, wt_parent.path(), "pty-spawn-failure");
+    let wt = create_worktree(&manager, "pty-spawn-failure");
     let pty = PtyManager::new();
 
     let mut missing = CommandBuilder::new("/definitely/missing/orca-command");

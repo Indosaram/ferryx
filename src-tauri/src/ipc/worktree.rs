@@ -1,79 +1,204 @@
-use crate::worktree::model::{CreateWorktreeOptions, DirtyState, Worktree};
-use crate::worktree::WorktreeManager;
+use crate::ipc::{run_blocking, IpcError};
+use crate::worktree::{
+    BranchDeletionPreview, CreateWorktreeOptions, DirtyState, Worktree, WorktreeIdentity,
+    WorkspaceRegistry,
+};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use tauri::State;
+use tauri::{AppHandle, Emitter, Runtime, State};
 
-#[derive(Debug, Serialize, Deserialize)]
+pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateWorktreeRequest {
-    pub repo_root: Option<PathBuf>,
-    pub ws_id: String,
-    pub slug: String,
-    pub path: PathBuf,
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
     pub base_ref: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteWorktreeRequest {
-    pub repo_root: Option<PathBuf>,
-    pub path: PathBuf,
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
     pub delete_branch: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeStatusRequest {
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorktreeChangeKind {
+    Created,
+    Deleted,
+    DestructivelyDeleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeChangedPayload {
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
+    pub kind: WorktreeChangeKind,
+}
+
+fn emit_worktree_changed<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: String,
+    worktree: WorktreeIdentity,
+    kind: WorktreeChangeKind,
+) -> Result<(), IpcError> {
+    app.emit(
+        WORKTREE_CHANGED_EVENT,
+        WorktreeChangedPayload {
+            workspace_id,
+            worktree,
+            kind,
+        },
+    )
+    .map_err(|error| IpcError::internal(format!("failed to emit worktree_changed: {error}")))
 }
 
 #[tauri::command]
 pub async fn cmd_worktree_list(
-    default_manager: State<'_, WorktreeManager>,
-    repo_root: Option<PathBuf>,
-) -> Result<Vec<Worktree>, String> {
-    let manager = if let Some(root) = repo_root {
-        WorktreeManager::new(root)
-    } else {
-        (*default_manager).clone()
-    };
-
-    manager.list_worktrees().map_err(|e| e.to_string())
+    registry: State<'_, WorkspaceRegistry>,
+    workspace_id: String,
+) -> Result<Vec<Worktree>, IpcError> {
+    let registry = (*registry).clone();
+    run_blocking(move || {
+        let manager = registry.manager(&workspace_id).map_err(IpcError::from)?;
+        manager.list_worktrees().map_err(IpcError::from)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn cmd_worktree_create(
-    default_manager: State<'_, WorktreeManager>,
+pub async fn cmd_worktree_create<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
     request: CreateWorktreeRequest,
-) -> Result<Worktree, String> {
-    let manager = if let Some(root) = request.repo_root {
-        WorktreeManager::new(root)
-    } else {
-        (*default_manager).clone()
-    };
+) -> Result<Worktree, IpcError> {
+    let registry = (*registry).clone();
+    let workspace_id = request.workspace_id.clone();
+    let identity = request.worktree.clone();
+    let event_workspace_id = workspace_id.clone();
+    let event_identity = identity.clone();
 
-    let mut opts = CreateWorktreeOptions::new(request.ws_id, request.slug, request.path);
-    if let Some(base) = request.base_ref {
-        opts = opts.with_base_ref(base);
-    }
+    let created = run_blocking(move || {
+        let manager = registry.manager(&workspace_id).map_err(IpcError::from)?;
+        let target = manager
+            .worktree_path_for(&identity.ws_id, &identity.slug)
+            .map_err(IpcError::from)?;
+        let mut options =
+            CreateWorktreeOptions::new(identity.ws_id.clone(), identity.slug.clone(), target);
+        if let Some(base_ref) = request.base_ref {
+            options = options.with_base_ref(base_ref);
+        }
+        manager.create_worktree(options).map_err(IpcError::from)
+    })
+    .await?;
 
-    manager.create_worktree(opts).map_err(|e| e.to_string())
+    emit_worktree_changed(
+        &app,
+        event_workspace_id,
+        event_identity,
+        WorktreeChangeKind::Created,
+    )?;
+    Ok(created)
+}
+
+async fn delete_worktree<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: DeleteWorktreeRequest,
+    destructive: bool,
+) -> Result<(), IpcError> {
+    let registry = (*registry).clone();
+    let workspace_id = request.workspace_id.clone();
+    let identity = request.worktree.clone();
+    let delete_branch = request.delete_branch.unwrap_or(false);
+    let event_workspace_id = workspace_id.clone();
+    let event_identity = identity.clone();
+
+    run_blocking(move || {
+        let (manager, worktree) = registry
+            .resolve_worktree(&workspace_id, &identity)
+            .map_err(IpcError::from)?;
+        if destructive {
+            manager
+                .delete_worktree_and_branch_destructive(&worktree.path, delete_branch)
+                .map_err(IpcError::from)
+        } else {
+            manager
+                .delete_worktree_and_branch(&worktree.path, delete_branch)
+                .map_err(IpcError::from)
+        }
+    })
+    .await?;
+
+    emit_worktree_changed(
+        &app,
+        event_workspace_id,
+        event_identity,
+        if destructive {
+            WorktreeChangeKind::DestructivelyDeleted
+        } else {
+            WorktreeChangeKind::Deleted
+        },
+    )
 }
 
 #[tauri::command]
-pub async fn cmd_worktree_delete(
-    default_manager: State<'_, WorktreeManager>,
+pub async fn cmd_worktree_delete<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
     request: DeleteWorktreeRequest,
-) -> Result<(), String> {
-    let manager = if let Some(root) = request.repo_root {
-        WorktreeManager::new(root)
-    } else {
-        (*default_manager).clone()
-    };
+) -> Result<(), IpcError> {
+    delete_worktree(app, registry, request, false).await
+}
 
-    let delete_branch = request.delete_branch.unwrap_or(false);
-    manager
-        .delete_worktree_and_branch(&request.path, delete_branch)
-        .map_err(|e| e.to_string())
+#[tauri::command]
+pub async fn cmd_worktree_delete_destructive<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: DeleteWorktreeRequest,
+) -> Result<(), IpcError> {
+    delete_worktree(app, registry, request, true).await
+}
+
+#[tauri::command]
+pub async fn cmd_worktree_delete_preview(
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeStatusRequest,
+) -> Result<BranchDeletionPreview, IpcError> {
+    let registry = (*registry).clone();
+    run_blocking(move || {
+        let (manager, worktree) = registry
+            .resolve_worktree(&request.workspace_id, &request.worktree)
+            .map_err(IpcError::from)?;
+        manager
+            .branch_deletion_preview(&worktree.path)
+            .map_err(IpcError::from)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn cmd_worktree_status(
-    default_manager: State<'_, WorktreeManager>,
-    path: PathBuf,
-) -> Result<DirtyState, String> {
-    default_manager.check_dirty(&path).map_err(|e| e.to_string())
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeStatusRequest,
+) -> Result<DirtyState, IpcError> {
+    let registry = (*registry).clone();
+    run_blocking(move || {
+        let (manager, worktree) = registry
+            .resolve_worktree(&request.workspace_id, &request.worktree)
+            .map_err(IpcError::from)?;
+        manager.check_dirty(&worktree.path).map_err(IpcError::from)
+    })
+    .await
 }

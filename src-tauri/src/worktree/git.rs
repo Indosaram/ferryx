@@ -2,6 +2,71 @@ use crate::worktree::model::{DirtyFile, DirtyState, Worktree, WorktreeError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+fn escape_git_arg_for_log(arg: &str) -> String {
+    let mut escaped = String::with_capacity(arg.len());
+    for ch in arg.chars() {
+        match ch {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(&mut escaped, "\\u{{{:x}}}", ch as u32);
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn validate_git_value(value: &str, label: &str) -> Result<(), WorktreeError> {
+    if value.is_empty() {
+        return Err(WorktreeError::InvalidNamespace {
+            reason: format!("{label} cannot be empty"),
+        });
+    }
+    if value.starts_with('-') {
+        return Err(WorktreeError::InvalidNamespace {
+            reason: format!("{label} cannot start with a dash"),
+        });
+    }
+    if value.chars().any(char::is_control) {
+        return Err(WorktreeError::InvalidNamespace {
+            reason: format!("{label} cannot contain control characters"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_git_path_argument(path: &Path) -> Result<&str, WorktreeError> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| WorktreeError::ParseError("Invalid UTF-8 in worktree path".into()))?;
+    if path_str.starts_with('-') {
+        return Err(WorktreeError::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "Git path argument cannot start with a dash".into(),
+        });
+    }
+    if path_str.chars().any(char::is_control) {
+        return Err(WorktreeError::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "Git path argument cannot contain control characters".into(),
+        });
+    }
+    Ok(path_str)
+}
+
+fn validate_base_ref(repo_root: &Path, base_ref: &str) -> Result<(), WorktreeError> {
+    validate_git_value(base_ref, "Base ref")?;
+    let commit_ref = format!("{base_ref}^{{commit}}");
+    run_git(
+        repo_root,
+        &["rev-parse", "--verify", "--quiet", commit_ref.as_str()],
+    )?;
+    Ok(())
+}
+
 /// Executes a git command in the specified directory.
 pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(
     cwd: P,
@@ -9,7 +74,14 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(
 ) -> Result<String, WorktreeError> {
     let cwd_path = cwd.as_ref();
     let arg_strs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
-    let command_str = format!("git {}", arg_strs.join(" "));
+    let command_str = format!(
+        "git {}",
+        arg_strs
+            .iter()
+            .map(|arg| escape_git_arg_for_log(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
 
     let output = Command::new("git")
         .args(&arg_strs)
@@ -142,44 +214,42 @@ pub fn parse_status_porcelain(output: &str) -> DirtyState {
     for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
-            // Ignore blank lines and branch header comments in porcelain format
             continue;
         }
 
-        // Porcelain v2 ordinary changed entry: 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
         if let Some(rest) = trimmed.strip_prefix("1 ") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 8 {
-                let status_code = parts[0].to_string();
-                let path = parts[7..].join(" ");
-                files.push(DirtyFile { status_code, path });
+                files.push(DirtyFile {
+                    status_code: parts[0].to_string(),
+                    path: parts[7..].join(" "),
+                });
                 continue;
             }
         }
 
-        // Porcelain v2 renamed/copied entry: 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path><sep><origPath>
         if let Some(rest) = trimmed.strip_prefix("2 ") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 9 {
-                let status_code = parts[0].to_string();
-                let path = parts[8..].join(" ");
-                files.push(DirtyFile { status_code, path });
+                files.push(DirtyFile {
+                    status_code: parts[0].to_string(),
+                    path: parts[8..].join(" "),
+                });
                 continue;
             }
         }
 
-        // Porcelain v2 unmerged entry: u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
         if let Some(rest) = trimmed.strip_prefix("u ") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 10 {
-                let status_code = parts[0].to_string();
-                let path = parts[9..].join(" ");
-                files.push(DirtyFile { status_code, path });
+                files.push(DirtyFile {
+                    status_code: parts[0].to_string(),
+                    path: parts[9..].join(" "),
+                });
                 continue;
             }
         }
 
-        // Porcelain v2 untracked entry: ? <path>
         if let Some(rest) = trimmed.strip_prefix("? ") {
             files.push(DirtyFile {
                 status_code: "?".to_string(),
@@ -188,12 +258,10 @@ pub fn parse_status_porcelain(output: &str) -> DirtyState {
             continue;
         }
 
-        // Porcelain v2 ignored entry: ! <path> (ignored files don't make it dirty by themselves, but let's check prefix)
         if trimmed.starts_with("! ") {
             continue;
         }
 
-        // Porcelain v1 format: XY PATH (where XY is 2 characters)
         if line.len() >= 3 {
             let status_code = line[..2].to_string();
             let path = line[3..].trim().to_string();
@@ -210,71 +278,63 @@ pub fn parse_status_porcelain(output: &str) -> DirtyState {
     }
 }
 
-/// Creates a worktree with the specified branch name and optional base commit/ref.
 pub fn git_worktree_add(
     repo_root: &Path,
     worktree_path: &Path,
     branch_name: &str,
     base_ref: Option<&str>,
 ) -> Result<(), WorktreeError> {
-    let path_str = worktree_path
-        .to_str()
-        .ok_or_else(|| WorktreeError::ParseError("Invalid UTF-8 in worktree path".into()))?;
+    validate_git_value(branch_name, "Branch name")?;
+    let path_str = validate_git_path_argument(worktree_path)?;
+    if let Some(base) = base_ref {
+        validate_base_ref(repo_root, base)?;
+    }
 
-    let mut args = vec!["worktree", "add", "-b", branch_name, path_str];
+    let mut args = vec!["worktree", "add", "-b", branch_name, "--", path_str];
     if let Some(base) = base_ref {
         args.push(base);
     }
-
     run_git(repo_root, &args)?;
     Ok(())
 }
 
-/// Lists all worktrees from repository using porcelain format.
 pub fn git_worktree_list(repo_root: &Path) -> Result<Vec<Worktree>, WorktreeError> {
     let output = run_git(repo_root, &["worktree", "list", "--porcelain"])?;
     parse_worktree_list_porcelain(&output)
 }
 
-/// Removes a worktree path.
 pub fn git_worktree_remove(
     repo_root: &Path,
     worktree_path: &Path,
     force: bool,
 ) -> Result<(), WorktreeError> {
-    let path_str = worktree_path
-        .to_str()
-        .ok_or_else(|| WorktreeError::ParseError("Invalid UTF-8 in worktree path".into()))?;
-
+    let path_str = validate_git_path_argument(worktree_path)?;
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
     }
-    args.push(path_str);
-
+    args.extend(["--", path_str]);
     run_git(repo_root, &args)?;
     Ok(())
 }
 
-/// Prunes stale worktree references.
 pub fn git_worktree_prune(repo_root: &Path) -> Result<(), WorktreeError> {
     run_git(repo_root, &["worktree", "prune"])?;
     Ok(())
 }
 
-/// Checks dirty status inside a worktree directory using `git status --porcelain`.
 pub fn git_status_porcelain(worktree_path: &Path) -> Result<DirtyState, WorktreeError> {
     let output = run_git(worktree_path, &["status", "--porcelain"])?;
     Ok(parse_status_porcelain(&output))
 }
 
-/// Deletes a git branch.
 pub fn git_branch_delete(
     repo_root: &Path,
     branch_name: &str,
     force: bool,
 ) -> Result<(), WorktreeError> {
+    validate_git_value(branch_name, "Branch name")?;
     let flag = if force { "-D" } else { "-d" };
-    run_git(repo_root, &["branch", flag, branch_name])?;
+    run_git(repo_root, &["branch", flag, "--", branch_name])?;
     Ok(())
 }

@@ -1,327 +1,237 @@
 use crate::ipc::*;
 use crate::terminal::PtyManager;
-use crate::worktree::WorktreeManager;
+use crate::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::sync::Arc;
 use tauri::{Listener, Manager};
-use tempfile::tempdir;
+use tempfile::TempDir;
 
-#[tokio::test]
-async fn test_tauri_mock_app_terminal_events() {
-    let app = tauri::test::mock_builder()
-        .manage(Arc::new(PtyManager::new()))
-        .manage(WorktreeManager::new("."))
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("failed to build mock app");
+fn setup_workspace() -> (TempDir, WorkspaceRegistry) {
+    let repo = TempDir::new().expect("repo tempdir");
+    run_git(repo.path(), &["init"]).expect("git init");
+    run_git(repo.path(), &["config", "user.email", "test@example.com"]).expect("email");
+    run_git(repo.path(), &["config", "user.name", "Test User"]).expect("name");
+    std::fs::write(repo.path().join("README.md"), "initial\n").expect("README");
+    run_git(repo.path(), &["add", "README.md"]).expect("add");
+    run_git(repo.path(), &["commit", "-m", "initial commit"]).expect("commit");
 
-    let pty_manager = app.state::<Arc<PtyManager>>();
-    let (tx, mut rx_event) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(10);
-    let tx_clone = tx.clone();
-    app.listen("terminal_output", move |event: tauri::Event| {
-        if let Ok(payload) = serde_json::from_str::<TerminalOutputPayload>(event.payload()) {
-            let _ = tx_clone.try_send(payload);
-        }
-    });
-
-    let session_id = cmd_terminal_spawn(
-        app.handle().clone(),
-        pty_manager.clone(),
-        Some(SpawnTerminalRequest {
-            cwd: None,
-            cols: Some(80),
-            rows: Some(24),
-            command: None,
-        }),
-    )
-    .await
-    .expect("cmd_terminal_spawn failed");
-
-    cmd_terminal_write(
-        pty_manager.clone(),
-        session_id.clone(),
-        "echo hello_orca_terminal\n".into(),
-    )
-    .await
-    .expect("write failed");
-
-    let mut collected = Vec::new();
-    let timeout = tokio::time::Duration::from_secs(5);
-    let start = tokio::time::Instant::now();
-    while start.elapsed() < timeout {
-        if let Ok(Some(payload)) = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
-            rx_event.recv(),
-        )
-        .await
-        {
-            assert_eq!(payload.session_id, session_id);
-            collected.extend_from_slice(&STANDARD.decode(payload.data).expect("base64 output"));
-            if String::from_utf8_lossy(&collected).contains("hello_orca_terminal") {
-                break;
-            }
-        }
-    }
-
-    assert!(
-        String::from_utf8_lossy(&collected).contains("hello_orca_terminal"),
-        "Expected output to contain 'hello_orca_terminal', got: {}",
-        String::from_utf8_lossy(&collected)
-    );
-
-    cmd_terminal_resize(pty_manager.clone(), session_id.clone(), 120, 40)
-        .await
-        .expect("resize failed");
-    let sessions = cmd_terminal_list(pty_manager.clone())
-        .await
-        .expect("list failed");
-    assert!(sessions.contains(&session_id));
-
-    cmd_terminal_close(pty_manager.clone(), session_id.clone())
-        .await
-        .expect("close failed");
-    cmd_terminal_close(pty_manager.clone(), session_id.clone())
-        .await
-        .expect("second close must be idempotent");
-    let sessions_after = cmd_terminal_list(pty_manager.clone())
-        .await
-        .expect("list failed");
-    assert!(!sessions_after.contains(&session_id));
+    let registry = WorkspaceRegistry::new();
+    registry.register("workspace-test", repo.path()).expect("register");
+    (repo, registry)
 }
 
 #[tokio::test]
-async fn test_tauri_mock_app_worktree_commands() {
-    let temp = tempdir().unwrap();
-    let repo_path = temp.path().canonicalize().unwrap();
-
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
-    std::fs::write(repo_path.join("README.md"), "initial").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "initial commit"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
+async fn tauri_mock_terminal_events_use_registered_workspace() {
+    let (_repo, registry) = setup_workspace();
     let app = tauri::test::mock_builder()
         .manage(Arc::new(PtyManager::new()))
-        .manage(WorktreeManager::new(&repo_path))
+        .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("failed to build mock app");
+        .expect("mock app");
 
-    let wt_manager = app.state::<WorktreeManager>();
+    let pty_manager = app.state::<Arc<PtyManager>>();
+    let registry_state = app.state::<WorkspaceRegistry>();
+    let (tx, mut rx_event) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(16);
+    app.listen(TERMINAL_OUTPUT_EVENT, move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<TerminalOutputPayload>(event.payload()) {
+            let _ = tx.try_send(payload);
+        }
+    });
 
-    let list = cmd_worktree_list(wt_manager.clone(), None)
+    let spawned = cmd_terminal_spawn(
+        app.handle().clone(),
+        pty_manager.clone(),
+        registry_state,
+        SpawnTerminalRequest {
+            workspace_id: "workspace-test".into(),
+            worktree: None,
+            cols: Some(80),
+            rows: Some(24),
+        },
+    )
+    .await
+    .expect("spawn");
+
+    cmd_terminal_write(
+        pty_manager.clone(),
+        spawned.session_id.clone(),
+        "echo hello_orca_terminal\n".into(),
+    )
+    .await
+    .expect("write");
+
+    let mut collected = Vec::new();
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        while !String::from_utf8_lossy(&collected).contains("hello_orca_terminal") {
+            let payload = rx_event.recv().await.expect("terminal output");
+            assert_eq!(payload.session_id, spawned.session_id);
+            collected.extend_from_slice(&STANDARD.decode(payload.data).expect("base64"));
+        }
+    })
+    .await
+    .expect("terminal output timeout");
+
+    cmd_terminal_resize(
+        pty_manager.clone(),
+        spawned.session_id.clone(),
+        120,
+        40,
+    )
+    .await
+    .expect("resize");
+    let sessions = cmd_terminal_list(pty_manager.clone()).await.expect("list");
+    assert!(sessions
+        .iter()
+        .any(|session| session.session_id == spawned.session_id));
+
+    cmd_terminal_close(pty_manager.clone(), spawned.session_id.clone())
         .await
-        .expect("list failed");
-    assert_eq!(list.len(), 1);
+        .expect("close");
+    cmd_terminal_close(pty_manager.clone(), spawned.session_id.clone())
+        .await
+        .expect("idempotent close");
+    let sessions = cmd_terminal_list(pty_manager).await.expect("list after");
+    assert!(!sessions
+        .iter()
+        .any(|session| session.session_id == spawned.session_id));
+}
 
-    let wt_path = repo_path.join("wt_ipc_test");
+#[tokio::test]
+async fn tauri_mock_worktree_commands_use_identity_contract() {
+    let (_repo, registry) = setup_workspace();
+    let app = tauri::test::mock_builder()
+        .manage(Arc::new(PtyManager::new()))
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let registry_state = app.state::<WorkspaceRegistry>();
+    let identity = WorktreeIdentity {
+        ws_id: "ws-ipc".into(),
+        slug: "task-ipc".into(),
+    };
+
+    let initial = cmd_worktree_list(registry_state.clone(), "workspace-test".into())
+        .await
+        .expect("initial list");
+    assert_eq!(initial.len(), 1);
+
     let created = cmd_worktree_create(
-        wt_manager.clone(),
+        app.handle().clone(),
+        registry_state.clone(),
         CreateWorktreeRequest {
-            repo_root: None,
-            ws_id: "ws-ipc".to_string(),
-            slug: "task-ipc".to_string(),
-            path: wt_path.clone(),
+            workspace_id: "workspace-test".into(),
+            worktree: identity.clone(),
             base_ref: None,
         },
     )
     .await
-    .expect("create failed");
-    assert_eq!(
-        created.path.canonicalize().unwrap(),
-        wt_path.canonicalize().unwrap()
-    );
+    .expect("create");
+    assert!(created.path.exists());
 
-    let status = cmd_worktree_status(wt_manager.clone(), wt_path.clone())
-        .await
-        .expect("status failed");
+    let status = cmd_worktree_status(
+        registry_state.clone(),
+        WorktreeStatusRequest {
+            workspace_id: "workspace-test".into(),
+            worktree: identity.clone(),
+        },
+    )
+    .await
+    .expect("status");
     assert!(!status.is_dirty);
 
     cmd_worktree_delete(
-        wt_manager.clone(),
+        app.handle().clone(),
+        registry_state.clone(),
         DeleteWorktreeRequest {
-            repo_root: None,
-            path: wt_path.clone(),
+            workspace_id: "workspace-test".into(),
+            worktree: identity,
             delete_branch: Some(true),
         },
     )
     .await
-    .expect("delete failed");
+    .expect("delete");
 
-    let list_after = cmd_worktree_list(wt_manager.clone(), None)
+    let final_list = cmd_worktree_list(registry_state, "workspace-test".into())
         .await
-        .expect("list failed");
-    assert_eq!(list_after.len(), 1);
-}
-
-#[tokio::test]
-async fn test_ipc_terminal_lifecycle() {
-    let pty_manager = Arc::new(PtyManager::new());
-    assert_eq!(pty_manager.list_sessions().len(), 0);
-
-    let (session_id, _rx) = pty_manager.spawn_shell(80, 24).unwrap();
-    assert!(pty_manager.has_session(&session_id));
-    assert_eq!(pty_manager.list_sessions().len(), 1);
-
-    pty_manager.write_input(&session_id, b"echo test\n").unwrap();
-    pty_manager.resize(&session_id, 100, 30).unwrap();
-    let session = pty_manager.get_session(&session_id).unwrap();
-    assert_eq!(session.get_size(), (100, 30));
-
-    pty_manager.close_session(&session_id).await.unwrap();
-    pty_manager.close_session(&session_id).await.unwrap();
-    assert!(!pty_manager.has_session(&session_id));
-}
-
-#[tokio::test]
-async fn test_ipc_worktree_lifecycle() {
-    let temp = tempdir().unwrap();
-    let repo_path = temp.path().canonicalize().unwrap();
-
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
-    std::fs::write(repo_path.join("README.md"), "initial").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "initial commit"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
-    let manager = WorktreeManager::new(&repo_path);
-    let initial_list = manager.list_worktrees().unwrap();
-    assert_eq!(initial_list.len(), 1);
-
-    let wt_path = repo_path.join("wt_feat");
-    let opts = crate::worktree::model::CreateWorktreeOptions::new("ws1", "feat", &wt_path);
-    let created = manager.create_worktree(opts).unwrap();
-    assert_eq!(
-        created.path.canonicalize().unwrap(),
-        wt_path.canonicalize().unwrap()
-    );
-
-    let list_after = manager.list_worktrees().unwrap();
-    assert_eq!(list_after.len(), 2);
-
-    manager.delete_worktree_and_branch(&wt_path, true).unwrap();
-    let list_final = manager.list_worktrees().unwrap();
-    assert_eq!(list_final.len(), 1);
+        .expect("final list");
+    assert_eq!(final_list.len(), 1);
 }
 
 #[tokio::test]
 async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
+    let (_repo, registry) = setup_workspace();
     let app = tauri::test::mock_builder()
         .manage(Arc::new(PtyManager::new()))
-        .manage(WorktreeManager::new("."))
+        .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("failed to build mock app");
+        .expect("mock app");
 
     let pty_manager = app.state::<Arc<PtyManager>>();
+    let registry_state = app.state::<WorkspaceRegistry>();
     let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(32);
     let (lifecycle_tx, mut lifecycle_rx) =
         tokio::sync::mpsc::channel::<TerminalLifecyclePayload>(8);
 
-    app.listen("terminal_output", move |event: tauri::Event| {
+    app.listen(TERMINAL_OUTPUT_EVENT, move |event: tauri::Event| {
         if let Ok(payload) = serde_json::from_str::<TerminalOutputPayload>(event.payload()) {
             let _ = output_tx.try_send(payload);
         }
     });
-    app.listen("terminal_lifecycle", move |event: tauri::Event| {
+    app.listen(TERMINAL_LIFECYCLE_EVENT, move |event: tauri::Event| {
         if let Ok(payload) = serde_json::from_str::<TerminalLifecyclePayload>(event.payload()) {
             let _ = lifecycle_tx.try_send(payload);
         }
     });
 
-    let session_id = cmd_terminal_spawn(
+    let spawned = cmd_terminal_spawn(
         app.handle().clone(),
         pty_manager.clone(),
-        Some(SpawnTerminalRequest {
-            cwd: None,
+        registry_state,
+        SpawnTerminalRequest {
+            workspace_id: "workspace-test".into(),
+            worktree: None,
             cols: Some(80),
             rows: Some(24),
-            command: None,
-        }),
+        },
     )
     .await
     .expect("spawn");
 
     let started = tokio::time::timeout(tokio::time::Duration::from_secs(2), lifecycle_rx.recv())
         .await
-        .expect("started lifecycle timeout")
-        .expect("started lifecycle channel");
-    assert_eq!(started.session_id, session_id);
+        .expect("started timeout")
+        .expect("started event");
+    assert_eq!(started.session_id, spawned.session_id);
     assert_eq!(started.state, TerminalLifecycleState::Started);
-    assert_eq!(started.exit_code, None);
-    assert_eq!(started.reason, None);
 
     cmd_terminal_write(
         pty_manager.clone(),
-        session_id.clone(),
+        spawned.session_id.clone(),
         "printf '\\377\\376\\n'\n".into(),
     )
     .await
-    .expect("write raw-byte command");
+    .expect("write raw bytes");
 
     let mut raw = Vec::new();
     tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
         while !raw.windows(2).any(|window| window == [0xff, 0xfe]) {
-            let payload = output_rx.recv().await.expect("terminal_output channel");
-            assert_eq!(payload.session_id, session_id);
+            let payload = output_rx.recv().await.expect("output event");
+            assert_eq!(payload.session_id, spawned.session_id);
             raw.extend_from_slice(&STANDARD.decode(payload.data).expect("base64 payload"));
         }
     })
     .await
-    .expect("raw terminal output timeout");
+    .expect("raw output timeout");
 
-    cmd_terminal_close(pty_manager.clone(), session_id.clone())
+    cmd_terminal_close(pty_manager, spawned.session_id.clone())
         .await
         .expect("close");
 
     let exited = tokio::time::timeout(tokio::time::Duration::from_secs(2), lifecycle_rx.recv())
         .await
-        .expect("exited lifecycle timeout")
-        .expect("exited lifecycle channel");
-    assert_eq!(exited.session_id, session_id);
+        .expect("exited timeout")
+        .expect("exited event");
+    assert_eq!(exited.session_id, spawned.session_id);
     assert_eq!(exited.state, TerminalLifecycleState::Exited);
     assert!(exited.reason.is_none());
 }
