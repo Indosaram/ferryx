@@ -1,168 +1,198 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { FolderPlus, GitBranch, Plus, X } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+
 import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
+import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
-import { TerminalPane } from "./components/TerminalPane";
-import type { ActiveAgent, TerminalTab, Worktree } from "./lib/types";
-import { Terminal as TerminalIcon } from "lucide-react";
+import { worktreeErrorMessage } from "./lib/ipcErrors";
+import { createWorktree, toIpcError } from "./lib/tauri";
+import type { Worktree } from "./lib/types";
+import { useWorkspaceRuntime } from "./state/workspaceRuntime";
+import { useWorkspaceStore } from "./state/workspaceStore";
 
 export function App() {
-  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
-  const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
-  const [agents, setAgents] = useState<ActiveAgent[]>([]);
-  const [tabs, setTabs] = useState<TerminalTab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string>("");
+  const {
+    state,
+    agents,
+    openTab,
+    ensureTabForWorktree,
+    closeTab,
+    enableSplit,
+    rotateSplit,
+    disableSplit,
+    activatePrimary,
+    syncWorktrees,
+  } = useWorkspaceStore();
+  const { runtimeError, refreshWorktrees, reportRuntimeError } = useWorkspaceRuntime({
+    activeWorktreeId: state.activeWorktreeId,
+    syncWorktrees,
+    ensureTabForWorktree,
+  });
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [newSlug, setNewSlug] = useState("");
+  const [newBaseRef, setNewBaseRef] = useState("HEAD");
+  const [createError, setCreateError] = useState<string | null>(null);
 
-  const fetchWorktrees = async () => {
-    try {
-      const list = await invoke<Worktree[]>("cmd_worktree_list", {});
-      setWorktrees(list);
+  const activeWorktree = useMemo(
+    () => state.worktrees.find((worktree) => worktree.worktreeId === state.activeWorktreeId) ?? null,
+    [state.activeWorktreeId, state.worktrees],
+  );
+  const activeAgent = agents.find((agent) => agent.worktreeId === activeWorktree?.worktreeId);
 
-      if (list.length > 0) {
-        if (!activeWorktree || !list.some((w) => w.path === activeWorktree.path)) {
-          const first = list[0];
-          setActiveWorktree(first);
-          ensureTabForWorktree(first);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to list worktrees:", err);
-    }
-  };
+  const handleSelectWorktree = useCallback(
+    (worktree: Worktree) => {
+      void ensureTabForWorktree(worktree).catch(reportRuntimeError);
+    },
+    [ensureTabForWorktree, reportRuntimeError],
+  );
 
-  useEffect(() => {
-    fetchWorktrees();
-    setAgents([
-      {
-        id: "agent_claude_1",
-        name: "Claude Code",
-        task: "Implementing Rust Tauri migration",
-        state: "working",
-        worktreePath: worktrees[0]?.path || ".",
-      },
-      {
-        id: "agent_codex_1",
-        name: "Codex",
-        task: "Reviewing PTY session synchronization",
-        state: "waiting",
-        worktreePath: worktrees[0]?.path || ".",
-      },
-    ]);
-  }, []);
-
-  const ensureTabForWorktree = (wt: Worktree) => {
-    const existing = tabs.find((t) => t.cwd === wt.path);
-    if (existing) {
-      setActiveTabId(existing.id);
-      return;
-    }
-
-    const dirName = wt.path.split("/").pop() || wt.path;
-    const newTab: TerminalTab = {
-      id: `tab_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      label: dirName,
-      cwd: wt.path,
-    };
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
-  };
-
-  const handleSelectWorktree = (wt: Worktree) => {
-    setActiveWorktree(wt);
-    ensureTabForWorktree(wt);
-  };
-
-  const handleCreateWorktree = async () => {
-    const slug = prompt("Enter new worktree slug (e.g. feature-auth):");
-    if (!slug || !slug.trim()) return;
+  const handleCreateWorktreeSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const slug = newSlug.trim();
+    if (!slug || !activeWorktree) return;
 
     try {
-      const wsId = `ws_${Date.now().toString(36)}`;
-      const basePath = worktrees[0]?.path || ".";
-      const targetPath = `${basePath}/../wt_${slug.trim()}`;
-      await invoke("cmd_worktree_create", {
-        request: {
-          wsId,
-          slug: slug.trim(),
-          path: targetPath,
-        },
-      });
-      await fetchWorktrees();
-    } catch (err: any) {
-      alert(`Failed to create worktree: ${err}`);
+      setCreateError(null);
+      await createWorktree({ wsId: activeWorktree.wsId, slug, baseRef: newBaseRef || null });
+      setIsCreateOpen(false);
+      setNewSlug("");
+      await refreshWorktrees();
+    } catch (error) {
+      setCreateError(worktreeErrorMessage(toIpcError(error)));
     }
   };
 
   const handleAddTerminalTab = () => {
     if (!activeWorktree) return;
-    const dirName = activeWorktree.path.split("/").pop() || activeWorktree.path;
-    const count = tabs.filter((t) => t.cwd === activeWorktree.path).length + 1;
-    const newTab: TerminalTab = {
-      id: `tab_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      label: `${dirName} (${count})`,
-      cwd: activeWorktree.path,
-    };
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    void openTab(activeWorktree).catch(reportRuntimeError);
   };
 
   const handleCloseTab = (tabId: string) => {
-    const nextTabs = tabs.filter((t) => t.id !== tabId);
-    setTabs(nextTabs);
-    if (activeTabId === tabId && nextTabs.length > 0) {
-      const lastTab = nextTabs[nextTabs.length - 1];
-      setActiveTabId(lastTab.id);
-      const matchingWt = worktrees.find((w) => w.path === lastTab.cwd);
-      if (matchingWt) setActiveWorktree(matchingWt);
-    } else if (nextTabs.length === 0) {
-      setActiveTabId("");
+    void closeTab(tabId).catch(reportRuntimeError);
+  };
+
+  const handleSplit = () => {
+    if (state.layout.split === "none") {
+      void enableSplit("horizontal").catch(reportRuntimeError);
+    } else if (state.layout.split === "horizontal") {
+      rotateSplit();
+    } else {
+      disableSplit();
     }
   };
 
-  const activeAgent = agents.find((a) => a.worktreePath === activeWorktree?.path);
-
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background font-sans text-foreground">
+    <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Sidebar
-        worktrees={worktrees}
+        worktrees={state.worktrees}
         agents={agents}
         activePath={activeWorktree?.path || ""}
         onSelectWorktree={handleSelectWorktree}
-        onCreateWorktree={handleCreateWorktree}
+        onCreateWorktree={() => {
+          setCreateError(null);
+          setIsCreateOpen(true);
+        }}
       />
 
       <main className="flex h-full flex-1 flex-col overflow-hidden bg-card">
         {activeWorktree ? (
           <>
-            <WorkspaceHeader worktree={activeWorktree} agent={activeAgent} />
+            <WorkspaceHeader
+              worktree={activeWorktree}
+              agent={activeAgent}
+              onSplit={handleSplit}
+              splitState={state.layout.split}
+            />
             <TabBar
-              tabs={tabs}
-              activeTabId={activeTabId}
-              onActivate={setActiveTabId}
+              tabs={state.layout.tabs}
+              activeTabId={state.layout.primaryTabId ?? ""}
+              onActivate={activatePrimary}
               onClose={handleCloseTab}
               onAdd={handleAddTerminalTab}
             />
-            <div className="relative flex-1 overflow-hidden">
-              {tabs.map((tab) => (
-                <div
-                  key={tab.id}
-                  className={`absolute inset-0 h-full w-full ${
-                    tab.id === activeTabId ? "block" : "hidden"
-                  }`}
-                >
-                  <TerminalPane cwd={tab.cwd} active={tab.id === activeTabId} />
-                </div>
-              ))}
-            </div>
+            <TerminalSplitView layout={state.layout} sessions={state.sessions} />
           </>
         ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-muted-foreground">
-            <TerminalIcon className="size-8 text-muted-foreground/50" />
-            <p className="text-sm">Select or create a worktree from the sidebar to start.</p>
+          <div className="flex h-full flex-1 items-center justify-center text-xs text-muted-foreground">
+            {runtimeError ? `Workspace unavailable (${runtimeError.code})` : "No workspace available"}
           </div>
         )}
       </main>
+
+      {runtimeError && activeWorktree ? (
+        <div className="pointer-events-none fixed bottom-3 right-3 z-40 max-w-error rounded-md border border-destructive/30 bg-card/95 px-3 py-2 text-[11px] text-destructive shadow-lg">
+          {runtimeError.code}: {runtimeError.message}
+        </div>
+      ) : null}
+
+      {isCreateOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <form
+            onSubmit={handleCreateWorktreeSubmit}
+            className="w-96 animate-enter space-y-4 rounded-xl border border-border bg-card p-5 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <FolderPlus className="size-4 text-primary" />
+                <span>Create New Worktree</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCreateOpen(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="mb-1 block text-muted-foreground">Branch / Worktree Slug</label>
+                <input
+                  type="text"
+                  autoFocus
+                  placeholder="e.g. feature-auth"
+                  value={newSlug}
+                  onChange={(event) => setNewSlug(event.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-muted-foreground">Base Ref / Branch</label>
+                <div className="flex items-center gap-2 rounded-md border border-input bg-background px-3 py-1.5 text-xs text-foreground">
+                  <GitBranch className="size-3.5 text-muted-foreground" />
+                  <input
+                    type="text"
+                    value={newBaseRef}
+                    onChange={(event) => setNewBaseRef(event.target.value)}
+                    className="flex-1 bg-transparent focus:outline-none"
+                  />
+                </div>
+              </div>
+              {createError ? <p className="rounded-md bg-destructive/10 px-2 py-1.5 text-destructive">{createError}</p> : null}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsCreateOpen(false)}
+                className="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                <Plus className="size-3.5" />
+                <span>Create Worktree</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 }

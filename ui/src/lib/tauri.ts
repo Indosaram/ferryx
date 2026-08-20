@@ -15,11 +15,11 @@ export function isTauriRuntime() {
 
 export async function listWorktrees() {
   if (!isTauri()) return [] as Worktree[];
-  return invoke<Worktree[]>("cmd_worktree_list");
+  return invokeCommand<Worktree[]>("cmd_worktree_list");
 }
 
 export async function createWorktree(request: { wsId: string; slug: string; baseRef?: string | null }) {
-  return invoke<Worktree>("cmd_worktree_create", {
+  return invokeCommand<Worktree>("cmd_worktree_create", {
     request: {
       wsId: request.wsId,
       slug: request.slug,
@@ -30,22 +30,22 @@ export async function createWorktree(request: { wsId: string; slug: string; base
 
 export async function spawnTerminal(request: { workspaceId: string; worktreeId: string }) {
   if (!isTauri()) return `preview:${request.workspaceId}:${request.worktreeId}:${crypto.randomUUID()}`;
-  return invoke<string>("cmd_terminal_spawn", { request });
+  return invokeCommand<string>("cmd_terminal_spawn", { request });
 }
 
 export async function writeTerminal(request: { sessionId: string; data: string }) {
   if (!isTauri()) return;
-  await invoke("cmd_terminal_write", request);
+  await invokeCommand<void>("cmd_terminal_write", request);
 }
 
 export async function resizeTerminal(request: { sessionId: string; cols: number; rows: number }) {
   if (!isTauri()) return;
-  await invoke("cmd_terminal_resize", request);
+  await invokeCommand<void>("cmd_terminal_resize", request);
 }
 
 export async function closeTerminal(sessionId: string) {
   if (!isTauri()) return;
-  await invoke("cmd_terminal_close", { sessionId });
+  await invokeCommand<void>("cmd_terminal_close", { sessionId });
 }
 
 export async function onTerminalOutput(handler: (payload: TerminalOutputPayload) => void): Promise<UnlistenFn> {
@@ -82,4 +82,12 @@ export function isStructuredIpcError(error: unknown): error is StructuredIpcErro
     typeof candidate.details === "object" &&
     !Array.isArray(candidate.details)
   );
+}
+
+async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw toIpcError(error);
+  }
 }

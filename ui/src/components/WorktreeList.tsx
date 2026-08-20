@@ -14,6 +14,7 @@ type WorktreeListProps = {
 };
 
 function basename(path: string) {
+  if (path === ".") return "main";
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
@@ -27,13 +28,17 @@ function workspaceName(worktree: Worktree) {
 }
 
 export function WorktreeList({ worktrees, activePath, agents, onSelect, onCreate }: WorktreeListProps) {
+  const rootName = worktrees[0]?.path && worktrees[0].path !== "."
+    ? (worktrees[0].path.split("/").pop() || "Workspace")
+    : "Workspace";
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pb-3 scrollbar-sleek">
       <div className="sticky top-0 z-10 flex h-7 items-center gap-1.5 bg-worktree-sidebar pr-2 text-left">
         <span className="flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground">
           <ChevronDown className="size-3.5" />
         </span>
-        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">omo-bridge</span>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">{rootName}</span>
         <IconButton label="New worktree" size="sm" onClick={onCreate}>
           <Plus className="size-3.5" />
         </IconButton>

@@ -1,4 +1,4 @@
-import { Bot, GitBranch, PanelRight, Radio, SplitSquareHorizontal } from "lucide-react";
+import { Bot, GitBranch, PanelRight, Radio, SplitSquareHorizontal, SplitSquareVertical } from "lucide-react";
 
 import type { ActiveAgent, Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
@@ -7,6 +7,8 @@ import { StatusDot } from "./ui/StatusDot";
 type WorkspaceHeaderProps = {
   worktree: Worktree;
   agent?: ActiveAgent;
+  onSplit?: () => void;
+  splitState?: "none" | "horizontal" | "vertical";
 };
 
 function branchName(worktree: Worktree) {
@@ -14,10 +16,11 @@ function branchName(worktree: Worktree) {
 }
 
 function basename(path: string) {
+  if (path === ".") return "main";
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-export function WorkspaceHeader({ worktree, agent }: WorkspaceHeaderProps) {
+export function WorkspaceHeader({ worktree, agent, onSplit, splitState = "none" }: WorkspaceHeaderProps) {
   return (
     <header className="drag-region flex h-titlebar shrink-0 items-center border-b border-border bg-sidebar pl-3 pr-2">
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -42,8 +45,17 @@ export function WorkspaceHeader({ worktree, agent }: WorkspaceHeaderProps) {
       ) : null}
 
       <div className="no-drag flex items-center gap-0.5">
-        <IconButton label="Split terminal" size="sm">
-          <SplitSquareHorizontal className="size-3.5" />
+        <IconButton
+          label={`Split terminal (${splitState})`}
+          size="sm"
+          onClick={onSplit}
+          className={splitState !== "none" ? "bg-accent text-foreground" : ""}
+        >
+          {splitState === "vertical" ? (
+            <SplitSquareVertical className="size-3.5" />
+          ) : (
+            <SplitSquareHorizontal className="size-3.5" />
+          )}
         </IconButton>
         <IconButton label="Toggle details" size="sm">
           <PanelRight className="size-3.5" />
