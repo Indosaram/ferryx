@@ -1,0 +1,16 @@
+import "./react-Da2TLWQy.js";
+import "./jsx-runtime-Cv_nyRjc.js";
+import "./button-DszXJEV6.js";
+import "./store-CgXrfmaH.js";
+import "./plugin-manifest-Bs-50M_g.js";
+import "./agent-status-3vUKbY6l.js";
+import "./react-dom-Da8MQai-.js";
+import "./dist-DgqligFk.js";
+import "./agent-kind-Dfx6MnkP.js";
+import "./telemetry-ZyUPyKMD.js";
+import "./useMountedRef-1omUd-IV.js";
+import "./agent-paste-draft-C2PA7vXu.js";
+import "./agent-process-recognition-BB0O3DaN.js";
+import "./terminal-pty-input-transaction-2UskR-Bm.js";
+import { n as activeAgentNotesSendFailureMessage, r as getActiveTerminalNoteTarget, t as sendNotesToActiveAgentSession } from "./active-agent-note-send-CsxZ0dL2.js";
+export { activeAgentNotesSendFailureMessage, sendNotesToActiveAgentSession };

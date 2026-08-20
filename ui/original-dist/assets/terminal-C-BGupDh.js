@@ -1,0 +1,10 @@
+const TOGGLE_TERMINAL_PANE_EXPAND_EVENT = "orca-toggle-terminal-pane-expand";
+const FOCUS_TERMINAL_PANE_EVENT = "orca-focus-terminal-pane";
+const PASTE_TERMINAL_TEXT_EVENT = "orca-paste-terminal-text";
+const SPLIT_TERMINAL_PANE_EVENT = "orca-split-terminal-pane";
+const REQUEST_ACTIVE_TERMINAL_PANE_SPLIT_EVENT = "orca-request-active-terminal-pane-split";
+const CLOSE_TERMINAL_PANE_EVENT = "orca-close-terminal-pane";
+const BACKGROUND_MOUNT_TERMINAL_WORKTREE_EVENT = "orca-background-mount-terminal-worktree";
+const WAKE_HIBERNATED_AGENTS_WORKTREE_EVENT = "orca-wake-hibernated-agents-worktree";
+const SYNC_FIT_PANES_EVENT = "orca-sync-fit-panes";
+export { REQUEST_ACTIVE_TERMINAL_PANE_SPLIT_EVENT as a, TOGGLE_TERMINAL_PANE_EXPAND_EVENT as c, PASTE_TERMINAL_TEXT_EVENT as i, WAKE_HIBERNATED_AGENTS_WORKTREE_EVENT as l, CLOSE_TERMINAL_PANE_EVENT as n, SPLIT_TERMINAL_PANE_EVENT as o, FOCUS_TERMINAL_PANE_EVENT as r, SYNC_FIT_PANES_EVENT as s, BACKGROUND_MOUNT_TERMINAL_WORKTREE_EVENT as t };

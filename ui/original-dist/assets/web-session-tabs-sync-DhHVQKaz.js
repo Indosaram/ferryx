@@ -1,0 +1,18 @@
+import "./react-Da2TLWQy.js";
+import "./jsx-runtime-Cv_nyRjc.js";
+import "./button-DszXJEV6.js";
+import "./store-CgXrfmaH.js";
+import "./plugin-manifest-Bs-50M_g.js";
+import "./agent-status-3vUKbY6l.js";
+import "./react-dom-Da8MQai-.js";
+import "./dist-DgqligFk.js";
+import "./agent-kind-Dfx6MnkP.js";
+import "./telemetry-ZyUPyKMD.js";
+import "./useMountedRef-1omUd-IV.js";
+import "./web-runtime-session-CN2syA39.js";
+import "./agent-paste-draft-C2PA7vXu.js";
+import "./agent-process-recognition-BB0O3DaN.js";
+import "./terminal-pty-input-transaction-2UskR-Bm.js";
+import { _ as useWebSessionTabsSync, a as applyWebSessionTabsSnapshot, c as clearWebSessionTabsTrackingForEnvironment, d as resolveHostSessionTabIdForWebSessionTab, f as shouldApplyWebSessionTabsSnapshot, g as shouldSyncRuntimeSessionTabs, h as shouldSyncAllRuntimeSessionTabs, i as applyFreshWebSessionTabsSnapshots, l as getLastKnownHostTerminalTabCount, m as shouldRespawnWebRuntimeTerminalAfterWake, n as acceptReplayedWebSessionTabsSnapshot, o as applyWebSessionTabsSnapshots, p as shouldBootstrapInitialWebRuntimeTerminal, r as applyFreshWebSessionTabsSnapshot, s as applyWebSessionTabsStorePatch, t as WEB_SESSION_TABS_VISIBILITY_RESUME_STAGGER_MS, u as getLatestWebSessionTabsPublicationEpoch } from "./web-session-tabs-sync-CYKZbAxS.js";
+import "./pane-agent-owner-BPfoVAtS.js";
+export { acceptReplayedWebSessionTabsSnapshot, applyFreshWebSessionTabsSnapshot, applyWebSessionTabsStorePatch, resolveHostSessionTabIdForWebSessionTab };

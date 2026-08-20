@@ -1,0 +1,15 @@
+# Rust
+target/
+src-tauri/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node
+node_modules/
+ui/node_modules/
+dist/
+ui/dist/
+
+# OS
+.DS_Store
+Thumbs.db

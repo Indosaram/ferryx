@@ -1,0 +1,135 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worktree {
+    pub path: PathBuf,
+    pub head: String,
+    pub branch: Option<String>,
+    pub bare: bool,
+    pub detached: bool,
+    pub locked: Option<String>,
+    pub prunable: Option<String>,
+}
+
+impl Worktree {
+    /// Returns the short branch name if this worktree is checked out on a branch.
+    /// For example, `refs/heads/orca/ws1/feat` -> `orca/ws1/feat`.
+    pub fn branch_short_name(&self) -> Option<&str> {
+        self.branch.as_deref().map(|b| {
+            b.strip_prefix("refs/heads/").unwrap_or(b)
+        })
+    }
+
+    /// Extracts Orca workspace ID and slug if the worktree branch follows `orca/<ws-id>/<slug>`.
+    pub fn orca_info(&self) -> Option<OrcaWorktreeInfo> {
+        let branch = self.branch_short_name()?;
+        let parts: Vec<&str> = branch.split('/').collect();
+        if parts.len() >= 3 && parts[0] == "orca" {
+            Some(OrcaWorktreeInfo {
+                ws_id: parts[1].to_string(),
+                slug: parts[2..].join("/"),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrcaWorktreeInfo {
+    pub ws_id: String,
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirtyFile {
+    pub status_code: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirtyState {
+    pub is_dirty: bool,
+    pub files: Vec<DirtyFile>,
+}
+
+impl DirtyState {
+    pub fn clean() -> Self {
+        Self {
+            is_dirty: false,
+            files: Vec::new(),
+        }
+    }
+
+    pub fn dirty(files: Vec<DirtyFile>) -> Self {
+        Self {
+            is_dirty: !files.is_empty(),
+            files,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateWorktreeOptions {
+    pub ws_id: String,
+    pub slug: String,
+    pub path: PathBuf,
+    pub base_ref: Option<String>,
+}
+
+impl CreateWorktreeOptions {
+    pub fn new(ws_id: impl Into<String>, slug: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            ws_id: ws_id.into(),
+            slug: slug.into(),
+            path: path.into(),
+            base_ref: None,
+        }
+    }
+
+    pub fn with_base_ref(mut self, base_ref: impl Into<String>) -> Self {
+        self.base_ref = Some(base_ref.into());
+        self
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum WorktreeError {
+    #[error("Git command failed ({command}): {stderr} (exit code: {code:?})")]
+    GitError {
+        command: String,
+        stderr: String,
+        stdout: String,
+        code: Option<i32>,
+    },
+
+    #[error("Worktree at '{path}' is dirty ({count} uncommitted/untracked files); deletion forbidden for 1-writer-1-worktree isolation")]
+    DirtyWorktree {
+        path: PathBuf,
+        count: usize,
+        files: Vec<String>,
+    },
+
+    #[error("Worktree not found at '{path}'")]
+    WorktreeNotFound { path: PathBuf },
+
+    #[error("Worktree already exists at target path '{path}'")]
+    WorktreeAlreadyExists { path: PathBuf },
+
+    #[error("Branch already exists: '{branch}'")]
+    BranchAlreadyExists { branch: String },
+
+    #[error("Invalid workspace ID or slug for branch namespace: {reason}")]
+    InvalidNamespace { reason: String },
+
+    #[error("Repository root invalid or not found at '{path}'")]
+    InvalidRepoRoot { path: PathBuf },
+
+    #[error("Failed to parse git output: {0}")]
+    ParseError(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}

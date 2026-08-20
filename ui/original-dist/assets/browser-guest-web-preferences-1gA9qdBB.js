@@ -1,0 +1,2 @@
+const ORCA_BROWSER_GUEST_WEB_PREFERENCES_ATTRIBUTE = "disableHtmlFullscreenWindowResize=true";
+export { ORCA_BROWSER_GUEST_WEB_PREFERENCES_ATTRIBUTE as t };
