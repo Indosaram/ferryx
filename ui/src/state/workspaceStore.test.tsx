@@ -17,6 +17,13 @@ const worktree: Worktree = {
   isDirty: false,
 };
 
+const featureWorktree: Worktree = {
+  ...worktree,
+  worktreeId: "wt-feature",
+  path: "/repo/feature",
+  branch: "refs/heads/orca/ws-main/feature",
+};
+
 function createServices(): WorkspaceServices {
   let sessionNumber = 0;
   return {
@@ -104,5 +111,49 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(result.current.state.layout.primaryTabId).toBe(result.current.state.layout.tabs[0].id);
     expect(result.current.state.layout.secondaryTabId).toBeNull();
     expect(result.current.state.layout.split).toBe("none");
+  });
+
+  it("derives visible agents only from live terminal session metadata", async () => {
+    const services = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+
+    expect(result.current.agents).toEqual([]);
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+
+    expect(result.current.agents).toEqual([
+      expect.objectContaining({
+        id: "backend-1",
+        sessionId: "backend-1",
+        state: "working",
+        worktreeId: worktree.worktreeId,
+        worktreePath: worktree.path,
+        task: "main",
+      }),
+    ]);
+  });
+
+  it("removes deleted-worktree tabs, sessions, and agents during synchronization", async () => {
+    const services = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    await act(async () => {
+      await result.current.openTab(worktree);
+      await result.current.openTab(featureWorktree);
+    });
+    expect(result.current.agents).toHaveLength(2);
+
+    await act(async () => {
+      await result.current.syncWorktrees([worktree]);
+    });
+
+    expect(result.current.state.worktrees).toEqual([worktree]);
+    expect(Object.values(result.current.state.sessions).every((session) => session.worktreeId === worktree.worktreeId)).toBe(true);
+    expect(result.current.state.layout.tabs).toHaveLength(1);
+    expect(result.current.agents).toHaveLength(1);
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-2");
   });
 });
