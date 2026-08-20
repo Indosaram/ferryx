@@ -1,4 +1,4 @@
-use crate::terminal::PtyManager;
+use crate::terminal::{PtyManager, TerminalSignal};
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -17,6 +17,24 @@ pub struct SpawnTerminalRequest {
 pub struct TerminalOutputPayload {
     pub session_id: String,
     pub data: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalSignalRequest {
+    Interrupt,
+    Terminate,
+    Kill,
+}
+
+impl From<TerminalSignalRequest> for TerminalSignal {
+    fn from(value: TerminalSignalRequest) -> Self {
+        match value {
+            TerminalSignalRequest::Interrupt => TerminalSignal::Interrupt,
+            TerminalSignalRequest::Terminate => TerminalSignal::Terminate,
+            TerminalSignalRequest::Kill => TerminalSignal::Kill,
+        }
+    }
 }
 
 #[tauri::command]
@@ -97,13 +115,25 @@ pub async fn cmd_terminal_resize(
 }
 
 #[tauri::command]
+pub async fn cmd_terminal_signal(
+    pty_manager: State<'_, Arc<PtyManager>>,
+    session_id: String,
+    signal: TerminalSignalRequest,
+) -> Result<(), String> {
+    pty_manager
+        .signal(&session_id, signal.into())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn cmd_terminal_close(
     pty_manager: State<'_, Arc<PtyManager>>,
     session_id: String,
 ) -> Result<(), String> {
-    let _ = pty_manager.kill(&session_id);
-    pty_manager.remove_session(&session_id);
-    Ok(())
+    pty_manager
+        .close_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

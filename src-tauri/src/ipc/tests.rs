@@ -1,9 +1,9 @@
+use crate::ipc::*;
 use crate::terminal::PtyManager;
 use crate::worktree::WorktreeManager;
-use crate::ipc::*;
 use std::sync::Arc;
-use tempfile::tempdir;
 use tauri::{Listener, Manager};
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn test_tauri_mock_app_terminal_events() {
@@ -23,7 +23,7 @@ async fn test_tauri_mock_app_terminal_events() {
             cwd: None,
             cols: Some(80),
             rows: Some(24),
-            command: Some("echo hello_orca_terminal".into()),
+            command: None,
         }),
     )
     .await
@@ -37,12 +37,24 @@ async fn test_tauri_mock_app_terminal_events() {
         }
     });
 
-    // Wait for the event output
+    cmd_terminal_write(
+        pty_manager.clone(),
+        session_id.clone(),
+        "echo hello_orca_terminal\n".into(),
+    )
+    .await
+    .expect("write failed");
+
     let mut collected = String::new();
     let timeout = tokio::time::Duration::from_secs(5);
     let start = tokio::time::Instant::now();
     while start.elapsed() < timeout {
-        if let Ok(Some(payload)) = tokio::time::timeout(tokio::time::Duration::from_millis(500), rx_event.recv()).await {
+        if let Ok(Some(payload)) = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            rx_event.recv(),
+        )
+        .await
+        {
             collected.push_str(&payload.data);
             if collected.contains("hello_orca_terminal") {
                 break;
@@ -56,7 +68,6 @@ async fn test_tauri_mock_app_terminal_events() {
         collected
     );
 
-    // Test resize, write, list, close
     cmd_terminal_resize(pty_manager.clone(), session_id.clone(), 120, 40)
         .await
         .expect("resize failed");
@@ -68,6 +79,9 @@ async fn test_tauri_mock_app_terminal_events() {
     cmd_terminal_close(pty_manager.clone(), session_id.clone())
         .await
         .expect("close failed");
+    cmd_terminal_close(pty_manager.clone(), session_id.clone())
+        .await
+        .expect("second close must be idempotent");
     let sessions_after = cmd_terminal_list(pty_manager.clone())
         .await
         .expect("list failed");
@@ -116,13 +130,11 @@ async fn test_tauri_mock_app_worktree_commands() {
 
     let wt_manager = app.state::<WorktreeManager>();
 
-    // Test cmd_worktree_list
     let list = cmd_worktree_list(wt_manager.clone(), None)
         .await
         .expect("list failed");
     assert_eq!(list.len(), 1);
 
-    // Test cmd_worktree_create
     let wt_path = repo_path.join("wt_ipc_test");
     let created = cmd_worktree_create(
         wt_manager.clone(),
@@ -136,15 +148,16 @@ async fn test_tauri_mock_app_worktree_commands() {
     )
     .await
     .expect("create failed");
-    assert_eq!(created.path.canonicalize().unwrap(), wt_path.canonicalize().unwrap());
+    assert_eq!(
+        created.path.canonicalize().unwrap(),
+        wt_path.canonicalize().unwrap()
+    );
 
-    // Test cmd_worktree_status
     let status = cmd_worktree_status(wt_manager.clone(), wt_path.clone())
         .await
         .expect("status failed");
     assert!(!status.is_dirty);
 
-    // Test cmd_worktree_delete
     cmd_worktree_delete(
         wt_manager.clone(),
         DeleteWorktreeRequest {
@@ -176,8 +189,8 @@ async fn test_ipc_terminal_lifecycle() {
     let session = pty_manager.get_session(&session_id).unwrap();
     assert_eq!(session.get_size(), (100, 30));
 
-    pty_manager.kill(&session_id).unwrap();
-    pty_manager.remove_session(&session_id);
+    pty_manager.close_session(&session_id).await.unwrap();
+    pty_manager.close_session(&session_id).await.unwrap();
     assert!(!pty_manager.has_session(&session_id));
 }
 
@@ -222,7 +235,10 @@ async fn test_ipc_worktree_lifecycle() {
     let wt_path = repo_path.join("wt_feat");
     let opts = crate::worktree::model::CreateWorktreeOptions::new("ws1", "feat", &wt_path);
     let created = manager.create_worktree(opts).unwrap();
-    assert_eq!(created.path.canonicalize().unwrap(), wt_path.canonicalize().unwrap());
+    assert_eq!(
+        created.path.canonicalize().unwrap(),
+        wt_path.canonicalize().unwrap()
+    );
 
     let list_after = manager.list_worktrees().unwrap();
     assert_eq!(list_after.len(), 2);

@@ -19,6 +19,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             cmd_terminal_spawn,
             cmd_terminal_write,
             cmd_terminal_resize,
+            cmd_terminal_signal,
             cmd_terminal_close,
             cmd_terminal_list,
             cmd_worktree_list,

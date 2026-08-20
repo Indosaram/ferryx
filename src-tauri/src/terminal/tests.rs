@@ -3,6 +3,16 @@ use portable_pty::CommandBuilder;
 use std::time::Duration;
 use tokio::time::timeout;
 
+async fn wait_for_session_removal(manager: &PtyManager, session_id: &str) {
+    timeout(Duration::from_secs(5), async {
+        while manager.has_session(session_id) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("session should be removed from registry");
+}
+
 #[tokio::test]
 async fn test_spawn_write_echo_and_read() {
     let manager = PtyManager::new();
@@ -41,7 +51,7 @@ async fn test_spawn_write_echo_and_read() {
         String::from_utf8_lossy(&accumulated)
     );
 
-    let _ = manager.kill(&session_id);
+    manager.close_session(&session_id).await.expect("close failed");
 }
 
 #[tokio::test]
@@ -63,7 +73,7 @@ async fn test_resize() {
         .expect("failed to resize second time");
     assert_eq!(session.get_size(), (200, 60));
 
-    let _ = manager.kill(&session_id);
+    manager.close_session(&session_id).await.expect("close failed");
 }
 
 #[tokio::test]
@@ -80,24 +90,8 @@ async fn test_kill() {
 
     assert!(pid > 0);
 
-    manager.kill(&session_id).expect("failed to kill session");
-
-    // Wait briefly for the process to exit
-    let mut exited = false;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        if let Ok(alive) = manager.is_alive(&session_id) {
-            if !alive {
-                exited = true;
-                break;
-            }
-        } else {
-            exited = true;
-            break;
-        }
-    }
-
-    assert!(exited, "Process should have exited after kill");
+    manager.close_session(&session_id).await.expect("failed to close session");
+    assert!(!manager.has_session(&session_id));
 }
 
 #[tokio::test]
@@ -148,8 +142,8 @@ async fn test_multiple_concurrent_sessions() {
     assert!(found1, "Session 1 output: {}", String::from_utf8_lossy(&text1));
     assert!(found2, "Session 2 output: {}", String::from_utf8_lossy(&text2));
 
-    let _ = manager.kill(&id1);
-    let _ = manager.kill(&id2);
+    manager.close_session(&id1).await.expect("close 1");
+    manager.close_session(&id2).await.expect("close 2");
 }
 
 #[tokio::test]
@@ -187,11 +181,102 @@ async fn test_session_lifecycle_and_errors() {
     let sessions = manager.list_sessions();
     assert!(sessions.contains(&custom_id.to_string()));
 
-    let removed = manager.remove_session(custom_id);
-    assert!(removed.is_some());
+    manager.close_session(custom_id).await.expect("close failed");
     assert!(!manager.has_session(custom_id));
+}
 
-    if let Some(session) = removed {
-        let _ = session.kill();
+#[tokio::test]
+async fn natural_child_exit_auto_removes_session_and_records_exit_code() {
+    let manager = PtyManager::new();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg("sleep 0.1; exit 7");
+
+    let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+    let session = manager.get_session(&session_id).expect("session");
+
+    wait_for_session_removal(&manager, &session_id).await;
+    assert_eq!(
+        session.state(),
+        PtySessionState::Exited { code: Some(7) },
+        "natural exit must be reaped and persisted in lifecycle state"
+    );
+    assert!(session.is_reaped(), "child handle must be reaped");
+}
+
+#[tokio::test]
+async fn explicit_close_kills_reaps_and_removes_session() {
+    let manager = PtyManager::new();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg("sleep 30");
+
+    let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+    let session = manager.get_session(&session_id).expect("session");
+
+    manager.close_session(&session_id).await.expect("close");
+
+    assert!(!manager.has_session(&session_id));
+    assert!(matches!(session.state(), PtySessionState::Exited { .. }));
+    assert!(session.is_reaped(), "explicit close must reap the child");
+}
+
+#[tokio::test]
+async fn close_session_is_idempotent() {
+    let manager = PtyManager::new();
+    let (session_id, _rx) = manager
+        .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+        .expect("spawn");
+
+    manager.close_session(&session_id).await.expect("first close");
+    manager.close_session(&session_id).await.expect("second close");
+    assert!(!manager.has_session(&session_id));
+}
+
+#[tokio::test]
+async fn dropped_output_receiver_still_cleans_reader_and_session() {
+    let manager = PtyManager::new();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg("sleep 30");
+
+    let (session_id, rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+    let session = manager.get_session(&session_id).expect("session");
+    drop(rx);
+
+    wait_for_session_removal(&manager, &session_id).await;
+    assert!(session.is_reader_finished(), "reader task must finish");
+    assert!(session.is_reaped(), "receiver-drop cleanup must reap child");
+}
+
+#[tokio::test]
+async fn fast_spawn_close_race_is_safe() {
+    let manager = PtyManager::new();
+
+    for _ in 0..16 {
+        let (session_id, _rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn");
+        manager.close_session(&session_id).await.expect("close");
+        assert!(!manager.has_session(&session_id));
     }
+
+    assert_eq!(manager.session_count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupt_signal_targets_foreground_pty_process_group() {
+    let manager = PtyManager::new();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg("sleep 30");
+
+    let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+    manager
+        .signal(&session_id, TerminalSignal::Interrupt)
+        .expect("interrupt");
+
+    wait_for_session_removal(&manager, &session_id).await;
+    assert!(!manager.has_session(&session_id));
 }

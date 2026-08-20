@@ -94,8 +94,7 @@ async fn test_e2e_agent_worktree_and_terminal_lifecycle() {
     let dirty_after = worktree_mgr.check_dirty(&agent_wt_path).unwrap();
     assert!(!dirty_after.is_dirty, "Worktree must be clean after commit");
 
-    pty_mgr.kill(&session_id).unwrap();
-    pty_mgr.remove_session(&session_id);
+    pty_mgr.close_session(&session_id).await.unwrap();
     assert!(!pty_mgr.has_session(&session_id));
 
     worktree_mgr
