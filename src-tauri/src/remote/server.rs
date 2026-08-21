@@ -31,6 +31,7 @@ struct HealthResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PairExchangeRequest {
     code: String,
     device_name: String,
@@ -402,6 +403,15 @@ const EMBEDDED_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
+
+async fn get_terminal_preferences(
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
+    let _token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    Ok(Json(crate::terminal::load_terminal_preferences()))
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -413,6 +423,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/pair/exchange", post(pair_exchange))
         .route("/api/v1/sessions", get(list_sessions))
         .route("/api/v1/workspace/state", get(get_workspace_state))
+        .route("/api/v1/terminal/preferences", get(get_terminal_preferences))
         .route("/api/v1/workspace/worktrees", post(create_worktree).delete(delete_worktree))
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))

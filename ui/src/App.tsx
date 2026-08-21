@@ -79,41 +79,47 @@ export function App() {
       try {
         const session = await loadSession();
         if (cancelled || !session) return;
-        const ws = session.workspaces[session.activeWorkspaceId];
-        if (!ws) return;
+        const ws = session.workspaces?.[activeProject.workspaceId];
+        if (!ws || !ws.layout?.tabs?.length) return;
 
-        if (ws.layout.tabs.length > 0) {
-          for (const tab of ws.layout.tabs) {
-            const found = ws.worktrees.find((candidate: any) => candidate.path === tab.worktreePath);
-            const wt: Worktree = found ? {
-              path: found.path,
-              head: found.head,
-              branch: found.branch,
-              bare: false,
-              detached: false,
-              locked: found.isLocked ? "locked" : null,
-              prunable: null,
-            } : {
-              path: tab.worktreePath || ws.repoRoot,
-              head: "",
-              branch: tab.label,
-              bare: false,
-              detached: false,
-              locked: null,
-              prunable: null,
-            };
+        for (const tab of ws.layout.tabs) {
+          if (cancelled) return;
+          const found = ws.worktrees?.find((candidate: any) => candidate.path === tab.worktreePath);
+          const wt: Worktree = found ? {
+            path: found.path,
+            head: found.head,
+            branch: found.branch,
+            bare: false,
+            detached: false,
+            locked: found.isLocked ? "locked" : null,
+            prunable: null,
+          } : {
+            path: tab.worktreePath || ws.repoRoot,
+            head: "",
+            branch: tab.label,
+            bare: false,
+            detached: false,
+            locked: null,
+            prunable: null,
+          };
+          try {
             await ensureTabForWorktree(wt);
+          } catch {
+            // Safe fallback if worktree terminal is already open
           }
         }
       } catch (error) {
-        console.error("Session restore on boot failed:", error);
+        console.warn("Session restore on boot skipped:", error);
       }
     }
-    void restore();
+    const timer = setTimeout(() => {
+      void restore();
+    }, 150);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [ensureTabForWorktree]);
+  }, [activeProject.workspaceId, ensureTabForWorktree]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
@@ -129,7 +135,8 @@ export function App() {
 
   // Debounced auto-save on workspace state changes (500ms)
   useEffect(() => {
-    if (state.worktrees.length === 0) return;
+    // Do not save if tabs are empty (prevents overwriting session on unmounted / empty initial render)
+    if (state.worktrees.length === 0 || state.layout.tabs.length === 0) return;
     const timer = setTimeout(() => {
       const session = serializeWorkspaceState(
         activeProject.workspaceId,

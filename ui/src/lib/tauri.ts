@@ -1,3 +1,5 @@
+export const DEFAULT_TERMINAL_FONT_STACK = '"Geist Mono", "JetBrains Mono", "MesloLGS NF", "Noto Sans KR", monospace';
+import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -86,33 +88,40 @@ export async function listProjectBranches(workspaceId: string) {
 
 export async function getTerminalPreferences(): Promise<TerminalPreferences> {
   if (!isTauri()) {
+    if (getRemoteAuthToken()) {
+      try {
+        return await defaultRemoteClient.fetchJson<TerminalPreferences>("/api/v1/terminal/preferences");
+      } catch {
+        // Fallback below
+      }
+    }
     return {
-      fontFamily: "monospace",
+      fontFamily: DEFAULT_TERMINAL_FONT_STACK,
       fontSize: 13,
       macosOptionAsAlt: false,
       cursorStyle: "block",
       theme: {
-        background: "#282c34",
-        foreground: "#ffffff",
-        cursor: "#ffffff",
-        cursorAccent: "#282c34",
+        background: "#0a0a0a",
+        foreground: "#d4d4d4",
+        cursor: "#e5e5e5",
+        cursorAccent: "#0a0a0a",
         selectionBackground: "#52525299",
-        black: "#1d1f21",
-        red: "#cc6666",
-        green: "#b5bd68",
-        yellow: "#f0c674",
-        blue: "#81a2be",
-        magenta: "#b294bb",
-        cyan: "#8abeb7",
-        white: "#c5c8c6",
-        brightBlack: "#666666",
-        brightRed: "#d54e53",
-        brightGreen: "#b9ca4a",
-        brightYellow: "#e7c547",
-        brightBlue: "#7aa6da",
-        brightMagenta: "#c397d8",
-        brightCyan: "#70c0b1",
-        brightWhite: "#eaeaea",
+        black: "#171717",
+        red: "#f87171",
+        green: "#86efac",
+        yellow: "#fde68a",
+        blue: "#93c5fd",
+        magenta: "#d8b4fe",
+        cyan: "#67e8f9",
+        white: "#e5e5e5",
+        brightBlack: "#737373",
+        brightRed: "#fca5a5",
+        brightGreen: "#bbf7d0",
+        brightYellow: "#fef08a",
+        brightBlue: "#bfdbfe",
+        brightMagenta: "#e9d5ff",
+        brightCyan: "#a5f3fc",
+        brightWhite: "#fafafa",
         extendedAnsi: [],
       },
       source: "defaults",
@@ -124,7 +133,12 @@ export async function getTerminalPreferences(): Promise<TerminalPreferences> {
 }
 
 export async function listWorktrees(workspaceId: string) {
-  if (!isTauri()) return [] as Worktree[];
+  if (!isTauri()) {
+    if (getRemoteAuthToken()) {
+      return defaultRemoteClient.listWorktrees(workspaceId);
+    }
+    return [] as Worktree[];
+  }
   return invokeCommand<Worktree[]>("cmd_worktree_list", { workspaceId });
 }
 

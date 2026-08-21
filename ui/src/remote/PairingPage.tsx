@@ -41,9 +41,9 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[80vh] p-4">
-      <div className="w-full max-w-sm bg-neutral-900 border border-neutral-800 rounded-lg p-6 shadow-xl">
-        <h2 className="text-xl font-bold text-neutral-100 mb-2">Pair Device</h2>
-        <p className="text-xs text-neutral-400 mb-6">
+      <div className="w-full max-w-sm bg-card border border-border rounded-lg p-6 shadow-xl">
+        <h2 className="text-xl font-bold text-foreground mb-2">Pair Device</h2>
+        <p className="text-xs text-muted-foreground mb-6">
           Enter the 6-digit PIN from your rorca Desktop settings (valid for 1 minute).
         </p>
 
@@ -60,7 +60,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
               value={code}
               onChange={(e) => setCode(e.target.value)}
               placeholder="6-digit PIN" maxLength={6} inputMode="numeric" pattern="[0-9]*"
-              className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded font-mono text-sm text-neutral-100 focus:outline-none focus:border-blue-500"
+              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded font-mono text-sm text-foreground focus:outline-none focus:border-blue-500"
               disabled={loading}
               autoFocus
             />

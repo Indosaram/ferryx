@@ -8,6 +8,7 @@ import { attachWebglRenderer, loadTerminalAssets } from "../lib/terminalRenderer
 import {
   applyTerminalSettings,
   fetchCachedNativePreferences,
+  FALLBACK_PREFERENCES,
   loadTerminalSettings,
   resolveTerminalSettings,
   useTerminalSettings,
@@ -32,6 +33,7 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
   const settingsRef = useRef(settings);
   const refreshPreferencesRef = useRef(refreshNativePreferences);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [terminalReady, setTerminalReady] = useState(false);
 
   sessionRef.current = session;
   onBellRef.current = onBell;
@@ -40,7 +42,7 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
   refreshPreferencesRef.current = refreshNativePreferences;
 
   useEffect(() => {
-    if (active) {
+    if (active && terminalRef.current) {
       requestAnimationFrame(() => {
         fitRef.current?.fit();
         terminalRef.current?.focus();
@@ -63,6 +65,17 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
   ]);
 
   useEffect(() => {
+    const terminal = terminalRef.current;
+    const backendSessionId = session.backendSessionId;
+    if (!terminal || !backendSessionId) return;
+
+    const unsubscribe = terminalEventBus.subscribeOutput(backendSessionId, (text) => {
+      terminal.write(text);
+    });
+    return unsubscribe;
+  }, [session.backendSessionId, terminalReady]);
+
+  useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
@@ -70,6 +83,7 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
     let disposed = false;
     let cleanupTerminal: (() => void) | null = null;
     setConnectionError(null);
+    setTerminalReady(false);
 
     void initialize(host).catch((error: unknown) => {
       if (disposed) return;
@@ -77,18 +91,25 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
     });
 
     async function initialize(hostElement: HTMLDivElement) {
-      let latestNativePrefs = await fetchCachedNativePreferences();
+      let latestNativePrefs = await Promise.race([
+        fetchCachedNativePreferences(),
+        new Promise<typeof FALLBACK_PREFERENCES>((resolve) =>
+          setTimeout(() => resolve(FALLBACK_PREFERENCES), 1500),
+        ),
+      ]);
       if (disposed) return;
 
       if (typeof document !== "undefined" && "fonts" in document) {
         try {
-          await document.fonts.ready;
+          await Promise.race([
+            document.fonts.ready,
+            new Promise((resolve) => setTimeout(resolve, 300)),
+          ]);
         } catch {
         }
       }
       if (disposed) return;
 
-      // Always re-resolve using the latest localSettings and nativePreferences
       const finalSettings = resolveTerminalSettings(loadTerminalSettings(), latestNativePrefs);
 
       const { Terminal: TerminalConstructor, FitAddon: FitAddonConstructor } = await loadTerminalAssets();
@@ -113,6 +134,7 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
       terminal.open(hostElement);
       terminalRef.current = terminal;
       fitRef.current = fitAddon;
+      setTerminalReady(true);
 
       let disposeWebgl: () => void = () => undefined;
       void attachWebglRenderer(terminal, abortController.signal).then((dispose) => {
@@ -152,11 +174,6 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
       const focusTerminal = () => terminal.focus();
       hostElement.addEventListener("pointerdown", focusTerminal);
 
-      const backendSessionId = sessionRef.current.backendSessionId;
-      const unsubscribeOutput = backendSessionId
-        ? terminalEventBus.subscribeOutput(backendSessionId, (text) => terminal.write(text))
-        : () => undefined;
-
       if (!isTauriRuntime()) {
         terminal.writeln("\x1b[1;32mrorca\x1b[0m  UI preview");
         terminal.writeln("\x1b[90mLaunch through Tauri to attach the PTY session.\x1b[0m");
@@ -173,11 +190,11 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
         dataDisposable.dispose();
         bellDispose.dispose();
         titleDispose.dispose();
-        unsubscribeOutput();
         disposeWebgl();
         terminal.dispose();
         terminalRef.current = null;
         fitRef.current = null;
+        setTerminalReady(false);
       };
     }
 

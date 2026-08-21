@@ -48,7 +48,7 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({ onSendKey }) => {
   };
 
   return (
-    <div className="w-full bg-[#12141a] border-t border-[#262833] select-none touch-manipulation z-30">
+    <div className="w-full bg-card border-t border-border select-none touch-manipulation z-30">
       {/* Expanded utility row */}
       {isExpanded && (
         <div className="flex gap-1.5 px-2 pt-2 pb-1 overflow-x-auto no-scrollbar text-xs font-mono">
@@ -137,8 +137,8 @@ function KeyButton({
         active
           ? "bg-blue-600 border-blue-500 text-white shadow-sm"
           : highlight
-          ? "border-[#3b4252] text-foreground bg-[#1e222d] hover:bg-[#252b38]"
-          : "bg-[#1a1d26] border-[#2c3140] text-[#c9d1d9] hover:bg-[#222734] hover:text-white"
+          ? "border-border text-foreground bg-secondary hover:bg-secondary/80"
+          : "bg-secondary/60 border-border text-foreground hover:bg-secondary hover:text-white"
       } ${className}`}
     >
       {icon || label}

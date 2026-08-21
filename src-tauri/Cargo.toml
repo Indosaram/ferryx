@@ -30,6 +30,7 @@ tracing-subscriber = "0.3"
 parking_lot = "0.12"
 uuid = { version = "1.13", features = ["v4"] }
 axum = { version = "0.8", features = ["ws"] }
+mime_guess = "2.0"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 rand = "0.8"
 sha2 = "0.10"
