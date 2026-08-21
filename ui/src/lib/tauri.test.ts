@@ -8,7 +8,18 @@ const core = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => core);
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { createWorktree, listWorktrees, spawnTerminal, toIpcError } from "./tauri";
+import {
+  createWorktree,
+  deleteWorktree,
+  deleteWorktreeDestructive,
+  getWorktreeStatus,
+  listTerminalSessions,
+  listWorktrees,
+  previewWorktreeDelete,
+  signalTerminal,
+  spawnTerminal,
+  toIpcError,
+} from "./tauri";
 
 describe("Tauri IPC wrapper contract", () => {
   beforeEach(() => {
@@ -54,6 +65,45 @@ describe("Tauri IPC wrapper contract", () => {
     await listWorktrees("workspace-main");
 
     expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_list", { workspaceId: "workspace-main" });
+  });
+
+  it("wraps worktree status, preview, safe delete, and destructive delete commands", async () => {
+    core.invoke
+      .mockResolvedValueOnce({ isDirty: true, files: [] })
+      .mockResolvedValueOnce({ branch: "feature", head: "abc", upstream: null, merged: false, ahead: 1, behind: 0 })
+      .mockResolvedValue(undefined);
+    const request = { workspaceId: "workspace-main", worktree: { wsId: "ws-main", slug: "feature" } };
+
+    await getWorktreeStatus(request);
+    await previewWorktreeDelete(request);
+    await deleteWorktree({ ...request, deleteBranch: true });
+    await deleteWorktreeDestructive({ ...request, deleteBranch: true });
+
+    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_worktree_status", { request });
+    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_worktree_delete_preview", { request });
+    expect(core.invoke).toHaveBeenNthCalledWith(3, "cmd_worktree_delete", {
+      request: { ...request, deleteBranch: true },
+    });
+    expect(core.invoke).toHaveBeenNthCalledWith(4, "cmd_worktree_delete_destructive", {
+      request: { ...request, deleteBranch: true },
+    });
+  });
+
+  it("wraps terminal signal and terminal session listing", async () => {
+    core.invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce([
+      { sessionId: "terminal-1", worktreePath: "/repo/feature" },
+    ]);
+
+    await signalTerminal({ sessionId: "terminal-1", signal: "interrupt" });
+    await expect(listTerminalSessions()).resolves.toEqual([
+      { sessionId: "terminal-1", worktreePath: "/repo/feature" },
+    ]);
+
+    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_terminal_signal", {
+      sessionId: "terminal-1",
+      signal: "interrupt",
+    });
+    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_terminal_list", undefined);
   });
 
   it("normalizes rejected command invocations at the wrapper boundary", async () => {

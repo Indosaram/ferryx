@@ -31,6 +31,22 @@ export type DirtyState = {
   files: DirtyFile[];
 };
 
+export type BranchDeletionPreview = {
+  branch: string;
+  head: string;
+  upstream: string | null;
+  merged: boolean;
+  ahead: number | null;
+  behind: number | null;
+};
+
+export type TerminalSignal = "interrupt" | "terminate" | "kill";
+
+export type TerminalSessionSummary = {
+  sessionId: string;
+  worktreePath: string | null;
+};
+
 export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed";
 
 export type TerminalSession = {
@@ -90,7 +106,7 @@ export type TerminalLifecyclePayload = {
 export type WorktreeChangedPayload = {
   workspaceId: string;
   worktree: WorktreeIdentity;
-  kind: "created" | "deleted" | "destructivelyDeleted";
+  kind: "created" | "deleted" | "destructivelyDeleted" | "dirtyChanged" | "pruned";
 };
 
 export type StructuredIpcError = {

@@ -1,4 +1,4 @@
-import { Bot, GitBranch, PanelRight, Radio, SplitSquareHorizontal, SplitSquareVertical } from "lucide-react";
+import { Bot, CircleStop, GitBranch, Radio, SplitSquareHorizontal, SplitSquareVertical } from "lucide-react";
 
 import type { ActiveAgent, Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
@@ -9,6 +9,8 @@ type WorkspaceHeaderProps = {
   agent?: ActiveAgent;
   onSplit?: () => void;
   splitState?: "none" | "horizontal" | "vertical";
+  onInterrupt?: () => void;
+  canInterrupt?: boolean;
 };
 
 function branchName(worktree: Worktree) {
@@ -20,7 +22,14 @@ function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-export function WorkspaceHeader({ worktree, agent, onSplit, splitState = "none" }: WorkspaceHeaderProps) {
+export function WorkspaceHeader({
+  worktree,
+  agent,
+  onSplit,
+  splitState = "none",
+  onInterrupt,
+  canInterrupt = false,
+}: WorkspaceHeaderProps) {
   return (
     <header className="drag-region flex h-titlebar shrink-0 items-center border-b border-border bg-sidebar pl-3 pr-2">
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -57,8 +66,8 @@ export function WorkspaceHeader({ worktree, agent, onSplit, splitState = "none" 
             <SplitSquareHorizontal className="size-3.5" />
           )}
         </IconButton>
-        <IconButton label="Toggle details" size="sm">
-          <PanelRight className="size-3.5" />
+        <IconButton label="Interrupt terminal" size="sm" onClick={onInterrupt} disabled={!canInterrupt}>
+          <CircleStop className="size-3.5" />
         </IconButton>
       </div>
     </header>

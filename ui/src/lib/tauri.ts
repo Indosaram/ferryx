@@ -2,15 +2,28 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  BranchDeletionPreview,
+  DirtyState,
   StructuredIpcError,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
+  TerminalSessionSummary,
+  TerminalSignal,
   Worktree,
   WorktreeChangedPayload,
   WorktreeIdentity,
 } from "./types";
 
 export const DEFAULT_WORKSPACE_ID = "default";
+
+type WorktreeStatusRequest = {
+  workspaceId: string;
+  worktree: WorktreeIdentity;
+};
+
+type DeleteWorktreeRequest = WorktreeStatusRequest & {
+  deleteBranch?: boolean | null;
+};
 
 export function isTauriRuntime() {
   return isTauri();
@@ -35,6 +48,34 @@ export async function createWorktree(request: {
   });
 }
 
+export async function getWorktreeStatus(request: WorktreeStatusRequest) {
+  return invokeCommand<DirtyState>("cmd_worktree_status", { request });
+}
+
+export async function previewWorktreeDelete(request: WorktreeStatusRequest) {
+  return invokeCommand<BranchDeletionPreview>("cmd_worktree_delete_preview", { request });
+}
+
+export async function deleteWorktree(request: DeleteWorktreeRequest) {
+  await invokeCommand<void>("cmd_worktree_delete", {
+    request: {
+      workspaceId: request.workspaceId,
+      worktree: request.worktree,
+      deleteBranch: request.deleteBranch ?? null,
+    },
+  });
+}
+
+export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) {
+  await invokeCommand<void>("cmd_worktree_delete_destructive", {
+    request: {
+      workspaceId: request.workspaceId,
+      worktree: request.worktree,
+      deleteBranch: request.deleteBranch ?? null,
+    },
+  });
+}
+
 export async function spawnTerminal(request: { workspaceId: string; worktree: WorktreeIdentity | null }) {
   if (!isTauri()) return `preview:${request.workspaceId}:${request.worktree?.slug ?? "root"}:${crypto.randomUUID()}`;
   const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", { request });
@@ -51,9 +92,19 @@ export async function resizeTerminal(request: { sessionId: string; cols: number;
   await invokeCommand<void>("cmd_terminal_resize", request);
 }
 
+export async function signalTerminal(request: { sessionId: string; signal: TerminalSignal }) {
+  if (!isTauri()) return;
+  await invokeCommand<void>("cmd_terminal_signal", request);
+}
+
 export async function closeTerminal(sessionId: string) {
   if (!isTauri()) return;
   await invokeCommand<void>("cmd_terminal_close", { sessionId });
+}
+
+export async function listTerminalSessions() {
+  if (!isTauri()) return [] as TerminalSessionSummary[];
+  return invokeCommand<TerminalSessionSummary[]>("cmd_terminal_list");
 }
 
 export async function onTerminalOutput(handler: (payload: TerminalOutputPayload) => void): Promise<UnlistenFn> {

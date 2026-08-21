@@ -2,7 +2,7 @@ import { FolderPlus, LayoutDashboard, PanelLeftClose, Search, Settings2 } from "
 import { useRef } from "react";
 
 import { shortcutLabel } from "../lib/shortcuts";
-import type { ActiveAgent, Worktree } from "../lib/types";
+import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
 import { SectionHeader } from "./ui/SectionHeader";
 import { WorktreeList } from "./WorktreeList";
@@ -11,8 +11,11 @@ type SidebarProps = {
   worktrees: Worktree[];
   agents: ActiveAgent[];
   activePath: string;
+  statuses?: Record<string, DirtyState | undefined>;
   onSelectWorktree: (worktree: Worktree) => void;
   onCreateWorktree: () => void;
+  onRefreshWorktreeStatus?: (worktree: Worktree) => void;
+  onDeleteWorktree?: (worktree: Worktree) => void;
   onOpenCommandPalette: () => void;
   onOpenSettings?: () => void;
 };
@@ -21,8 +24,11 @@ export function Sidebar({
   worktrees,
   agents,
   activePath,
+  statuses = {},
   onSelectWorktree,
   onCreateWorktree,
+  onRefreshWorktreeStatus = () => undefined,
+  onDeleteWorktree = () => undefined,
   onOpenCommandPalette,
   onOpenSettings,
 }: SidebarProps) {
@@ -77,8 +83,11 @@ export function Sidebar({
           worktrees={worktrees}
           agents={agents}
           activePath={activePath}
+          statuses={statuses}
           onSelect={onSelectWorktree}
           onCreate={onCreateWorktree}
+          onRefreshStatus={onRefreshWorktreeStatus}
+          onDelete={onDeleteWorktree}
         />
       </div>
 

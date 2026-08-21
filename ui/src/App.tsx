@@ -6,11 +6,18 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
+import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import { worktreeErrorMessage } from "./lib/ipcErrors";
 import { useShortcuts } from "./lib/shortcuts";
-import { createWorktree, DEFAULT_WORKSPACE_ID, toIpcError } from "./lib/tauri";
-import { worktreeIdentity, type Worktree } from "./lib/types";
+import {
+  createWorktree,
+  DEFAULT_WORKSPACE_ID,
+  getWorktreeStatus,
+  signalTerminal,
+  toIpcError,
+} from "./lib/tauri";
+import { worktreeIdentity, type DirtyState, type Worktree } from "./lib/types";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore } from "./state/workspaceStore";
 
@@ -35,6 +42,8 @@ export function App() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
+  const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [newSlug, setNewSlug] = useState("");
   const [newBaseRef, setNewBaseRef] = useState("HEAD");
   const [createError, setCreateError] = useState<string | null>(null);
@@ -44,6 +53,8 @@ export function App() {
     [state.activeWorktreePath, state.worktrees],
   );
   const activeAgent = agents.find((agent) => agent.worktreePath === activeWorktree?.path);
+  const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.primaryTabId);
+  const activeSession = activeTab ? state.sessions[activeTab.sessionId] : undefined;
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
@@ -88,6 +99,19 @@ export function App() {
     }
   };
 
+  const handleRefreshWorktreeStatus = useCallback(
+    (worktree: Worktree) => {
+      const identity = worktreeIdentity(worktree);
+      if (!identity) return;
+      void getWorktreeStatus({ workspaceId: DEFAULT_WORKSPACE_ID, worktree: identity })
+        .then((status) => {
+          setWorktreeStatuses((current) => ({ ...current, [worktree.path]: status }));
+        })
+        .catch(reportRuntimeError);
+    },
+    [reportRuntimeError],
+  );
+
   const handleAddTerminalTab = useCallback(() => {
     if (!activeWorktree) return;
     void openTab(activeWorktree).catch(reportRuntimeError);
@@ -110,6 +134,11 @@ export function App() {
     },
     [handleSelectTerminalTab, state.layout.primaryTabId, state.layout.tabs],
   );
+
+  const handleInterruptTerminal = useCallback(() => {
+    if (!activeSession?.backendSessionId) return;
+    void signalTerminal({ sessionId: activeSession.backendSessionId, signal: "interrupt" }).catch(reportRuntimeError);
+  }, [activeSession?.backendSessionId, reportRuntimeError]);
 
   const handleSplit = () => {
     if (state.layout.split === "none") {
@@ -152,11 +181,14 @@ export function App() {
         worktrees={state.worktrees}
         agents={agents}
         activePath={activeWorktree?.path || ""}
+        statuses={worktreeStatuses}
         onSelectWorktree={handleSelectWorktree}
         onCreateWorktree={() => {
           setCreateError(null);
           setIsCreateOpen(true);
         }}
+        onRefreshWorktreeStatus={handleRefreshWorktreeStatus}
+        onDeleteWorktree={setDeleteTarget}
         onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
@@ -169,6 +201,8 @@ export function App() {
               agent={activeAgent}
               onSplit={handleSplit}
               splitState={state.layout.split}
+              onInterrupt={handleInterruptTerminal}
+              canInterrupt={Boolean(activeSession?.backendSessionId)}
             />
             <TabBar
               tabs={state.layout.tabs}
@@ -195,6 +229,20 @@ export function App() {
         onClose={() => setIsCommandPaletteOpen(false)}
       />
       <SettingsDialog open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      {deleteTarget ? (
+        <WorktreeDeleteDialog
+          worktree={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={() => {
+            setWorktreeStatuses((current) => {
+              const next = { ...current };
+              delete next[deleteTarget.path];
+              return next;
+            });
+            void refreshWorktrees();
+          }}
+        />
+      ) : null}
 
       {runtimeError && activeWorktree ? (
         <div className="pointer-events-none fixed bottom-3 right-3 z-40 max-w-error rounded-md border border-destructive/30 bg-card/95 px-3 py-2 text-[11px] text-destructive shadow-lg">
