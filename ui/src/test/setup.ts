@@ -11,6 +11,13 @@ Object.defineProperty(globalThis, "ResizeObserver", {
   value: ResizeObserverStub,
 });
 
+if (!globalThis.PointerEvent) {
+  Object.defineProperty(globalThis, "PointerEvent", {
+    configurable: true,
+    value: MouseEvent,
+  });
+}
+
 if (!globalThis.requestAnimationFrame) {
   Object.defineProperty(globalThis, "requestAnimationFrame", {
     configurable: true,
