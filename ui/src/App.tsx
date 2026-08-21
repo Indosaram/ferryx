@@ -2,6 +2,7 @@ import { FolderPlus, GitBranch, Plus, X } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
 import { CommandPalette } from "./components/CommandPalette";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
@@ -33,6 +34,7 @@ export function App() {
   });
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [newSlug, setNewSlug] = useState("");
   const [newBaseRef, setNewBaseRef] = useState("HEAD");
   const [createError, setCreateError] = useState<string | null>(null);
@@ -156,6 +158,7 @@ export function App() {
           setIsCreateOpen(true);
         }}
         onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+        onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
       <main className="flex h-full flex-1 flex-col overflow-hidden bg-card">
@@ -191,6 +194,7 @@ export function App() {
         onSelectTab={handleSelectTerminalTab}
         onClose={() => setIsCommandPaletteOpen(false)}
       />
+      <SettingsDialog open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
 
       {runtimeError && activeWorktree ? (
         <div className="pointer-events-none fixed bottom-3 right-3 z-40 max-w-error rounded-md border border-destructive/30 bg-card/95 px-3 py-2 text-[11px] text-destructive shadow-lg">

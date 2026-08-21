@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { isTauriRuntime, resizeTerminal, writeTerminal } from "../lib/tauri";
 import { terminalEventBus } from "../lib/terminalEvents";
 import { attachWebglRenderer, loadTerminalAssets } from "../lib/terminalRenderer";
+import { applyTerminalSettings, useTerminalSettings } from "../lib/terminalSettings";
 import type { TerminalSession } from "../lib/types";
 
 type TerminalPaneProps = {
@@ -41,9 +42,12 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef(session);
+  const { settings } = useTerminalSettings();
+  const settingsRef = useRef(settings);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   sessionRef.current = session;
+  settingsRef.current = settings;
 
   useEffect(() => {
     if (active) {
@@ -53,6 +57,13 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
       });
     }
   }, [active]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    applyTerminalSettings(terminal, settings);
+    requestAnimationFrame(() => fitRef.current?.fit());
+  }, [settings.fontSize, settings.scrollback]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -78,10 +89,10 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
         cursorBlink: true,
         cursorStyle: "bar",
         fontFamily: '"SF Mono", SFMono-Regular, ui-monospace, Menlo, monospace',
-        fontSize: 13,
+        fontSize: settingsRef.current.fontSize,
         lineHeight: 1.2,
         letterSpacing: 0,
-        scrollback: 10_000,
+        scrollback: settingsRef.current.scrollback,
         theme: TERMINAL_THEME,
       });
       const fitAddon = new FitAddonConstructor();
