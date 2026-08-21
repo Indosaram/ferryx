@@ -6,8 +6,8 @@ import { TabBar } from "./components/TabBar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import { worktreeErrorMessage } from "./lib/ipcErrors";
-import { createWorktree, toIpcError } from "./lib/tauri";
-import type { Worktree } from "./lib/types";
+import { createWorktree, DEFAULT_WORKSPACE_ID, toIpcError } from "./lib/tauri";
+import { worktreeIdentity, type Worktree } from "./lib/types";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore } from "./state/workspaceStore";
 
@@ -25,7 +25,7 @@ export function App() {
     syncWorktrees,
   } = useWorkspaceStore();
   const { runtimeError, refreshWorktrees, reportRuntimeError } = useWorkspaceRuntime({
-    activeWorktreeId: state.activeWorktreeId,
+    activeWorktreePath: state.activeWorktreePath,
     syncWorktrees,
     ensureTabForWorktree,
   });
@@ -35,10 +35,10 @@ export function App() {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const activeWorktree = useMemo(
-    () => state.worktrees.find((worktree) => worktree.worktreeId === state.activeWorktreeId) ?? null,
-    [state.activeWorktreeId, state.worktrees],
+    () => state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? null,
+    [state.activeWorktreePath, state.worktrees],
   );
-  const activeAgent = agents.find((agent) => agent.worktreeId === activeWorktree?.worktreeId);
+  const activeAgent = agents.find((agent) => agent.worktreePath === activeWorktree?.path);
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
@@ -54,7 +54,11 @@ export function App() {
 
     try {
       setCreateError(null);
-      await createWorktree({ wsId: activeWorktree.wsId, slug, baseRef: newBaseRef || null });
+      await createWorktree({
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        worktree: { wsId: worktreeIdentity(activeWorktree)?.wsId ?? DEFAULT_WORKSPACE_ID, slug },
+        baseRef: newBaseRef || null,
+      });
       setIsCreateOpen(false);
       setNewSlug("");
       await refreshWorktrees();

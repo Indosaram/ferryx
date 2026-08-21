@@ -10,8 +10,8 @@ function error(code: string, message: string): StructuredIpcError {
 describe("worktreeErrorMessage", () => {
   it("branches on the structured error code", () => {
     expect(worktreeErrorMessage(error("DIRTY_WORKTREE", "backend wording may change"))).toContain("uncommitted changes");
-    expect(worktreeErrorMessage(error("WORKTREE_WRITER_BUSY", "irrelevant"))).toContain("another writer session");
-    expect(worktreeErrorMessage(error("INVALID_BASE_REF", "irrelevant"))).toContain("base ref");
+    expect(worktreeErrorMessage(error("WRITER_ALREADY_ACTIVE", "irrelevant"))).toContain("another writer session");
+    expect(worktreeErrorMessage(error("GIT_ERROR", "irrelevant"))).toContain("base ref");
   });
 
   it("never infers an error code by parsing the message", () => {

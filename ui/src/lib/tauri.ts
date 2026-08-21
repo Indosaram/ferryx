@@ -7,30 +7,38 @@ import type {
   TerminalOutputPayload,
   Worktree,
   WorktreeChangedPayload,
+  WorktreeIdentity,
 } from "./types";
+
+export const DEFAULT_WORKSPACE_ID = "default";
 
 export function isTauriRuntime() {
   return isTauri();
 }
 
-export async function listWorktrees() {
+export async function listWorktrees(workspaceId: string) {
   if (!isTauri()) return [] as Worktree[];
-  return invokeCommand<Worktree[]>("cmd_worktree_list");
+  return invokeCommand<Worktree[]>("cmd_worktree_list", { workspaceId });
 }
 
-export async function createWorktree(request: { wsId: string; slug: string; baseRef?: string | null }) {
+export async function createWorktree(request: {
+  workspaceId: string;
+  worktree: WorktreeIdentity;
+  baseRef?: string | null;
+}) {
   return invokeCommand<Worktree>("cmd_worktree_create", {
     request: {
-      wsId: request.wsId,
-      slug: request.slug,
+      workspaceId: request.workspaceId,
+      worktree: request.worktree,
       baseRef: request.baseRef ?? null,
     },
   });
 }
 
-export async function spawnTerminal(request: { workspaceId: string; worktreeId: string }) {
-  if (!isTauri()) return `preview:${request.workspaceId}:${request.worktreeId}:${crypto.randomUUID()}`;
-  return invokeCommand<string>("cmd_terminal_spawn", { request });
+export async function spawnTerminal(request: { workspaceId: string; worktree: WorktreeIdentity | null }) {
+  if (!isTauri()) return `preview:${request.workspaceId}:${request.worktree?.slug ?? "root"}:${crypto.randomUUID()}`;
+  const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", { request });
+  return response.sessionId;
 }
 
 export async function writeTerminal(request: { sessionId: string; data: string }) {
@@ -64,7 +72,9 @@ export async function onWorktreeChanged(handler: (payload: WorktreeChangedPayloa
 }
 
 export function toIpcError(error: unknown): StructuredIpcError {
-  if (isStructuredIpcError(error)) return error;
+  if (isStructuredIpcError(error)) {
+    return { code: error.code, message: error.message, details: error.details ?? {} };
+  }
   return {
     code: "UNKNOWN",
     message: error instanceof Error ? error.message : "Unknown IPC error",
@@ -78,9 +88,8 @@ export function isStructuredIpcError(error: unknown): error is StructuredIpcErro
   return (
     typeof candidate.code === "string" &&
     typeof candidate.message === "string" &&
-    !!candidate.details &&
-    typeof candidate.details === "object" &&
-    !Array.isArray(candidate.details)
+    (candidate.details === undefined ||
+      (typeof candidate.details === "object" && candidate.details !== null && !Array.isArray(candidate.details)))
   );
 }
 

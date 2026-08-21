@@ -20,7 +20,7 @@ function session(id: string, backendSessionId: string): TerminalSession {
     id,
     cwd: "/repo",
     workspaceId: "ws-main",
-    worktreeId: "wt-main",
+    worktree: { wsId: "ws-main", slug: "main" },
     backendSessionId,
     lifecycle: "working",
   };

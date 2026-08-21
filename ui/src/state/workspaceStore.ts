@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 
-import { closeTerminal, spawnTerminal } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, spawnTerminal } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
+import { worktreeIdentity } from "../lib/types";
 import type {
   ActiveAgent,
   LayoutState,
@@ -11,25 +12,26 @@ import type {
   TerminalSession,
   TerminalTab,
   Worktree,
+  WorktreeIdentity,
 } from "../lib/types";
 import { createLayoutState, layoutReducer } from "./layout";
 
 export type WorkspaceState = {
   worktrees: Worktree[];
-  activeWorktreeId: string | null;
+  activeWorktreePath: string | null;
   sessions: Record<string, TerminalSession>;
   layout: LayoutState;
 };
 
 export type WorkspaceServices = {
   ensureTerminalEvents: () => Promise<void>;
-  spawnTerminal: (request: { workspaceId: string; worktreeId: string }) => Promise<string>;
+  spawnTerminal: (request: { workspaceId: string; worktree: WorktreeIdentity | null }) => Promise<string>;
   closeTerminal: (sessionId: string) => Promise<void>;
 };
 
 type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
-  | { type: "SELECT_WORKTREE"; worktreeId: string }
+  | { type: "SELECT_WORKTREE"; path: string }
   | { type: "ADD_TAB_WITH_SESSION"; tab: TerminalTab; session: TerminalSession }
   | {
       type: "ENABLE_SPLIT_WITH_SESSION";
@@ -86,16 +88,16 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
     async (worktree: Worktree, label?: string) => {
       await services.ensureTerminalEvents();
       const backendSessionId = await services.spawnTerminal({
-        workspaceId: worktree.wsId,
-        worktreeId: worktree.worktreeId,
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        worktree: worktreeIdentity(worktree),
       });
       const sessionId = createId("session");
       const tabId = createId("tab");
       const session: TerminalSession = {
         id: sessionId,
         cwd: worktree.path,
-        workspaceId: worktree.wsId,
-        worktreeId: worktree.worktreeId,
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        worktree: worktreeIdentity(worktree),
         backendSessionId,
         lifecycle: "working",
       };
@@ -113,10 +115,10 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
     async (worktree: Worktree) => {
       const binding = await createSpawnedTab(worktree);
       dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding });
-      if (!stateRef.current.worktrees.some((candidate) => candidate.worktreeId === worktree.worktreeId)) {
+      if (!stateRef.current.worktrees.some((candidate) => candidate.path === worktree.path)) {
         dispatch({ type: "SET_WORKTREES", worktrees: [...stateRef.current.worktrees, worktree] });
       }
-      dispatch({ type: "SELECT_WORKTREE", worktreeId: worktree.worktreeId });
+      dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
       return binding.tab.id;
     },
     [createSpawnedTab, dispatch],
@@ -125,8 +127,8 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
   const ensureTabForWorktree = useCallback(
     async (worktree: Worktree) => {
       const snapshot = stateRef.current;
-      const existing = snapshot.layout.tabs.find((tab) => snapshot.sessions[tab.sessionId]?.worktreeId === worktree.worktreeId);
-      dispatch({ type: "SELECT_WORKTREE", worktreeId: worktree.worktreeId });
+      const existing = snapshot.layout.tabs.find((tab) => snapshot.sessions[tab.sessionId]?.cwd === worktree.path);
+      dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
       if (existing) {
         dispatch({ type: "ACTIVATE_PRIMARY", tabId: existing.id });
         return existing.id;
@@ -156,7 +158,7 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
       const primaryTab = snapshot.layout.tabs.find((tab) => tab.id === primaryTabId);
       const primarySession = primaryTab ? snapshot.sessions[primaryTab.sessionId] : undefined;
       const activeWorktree =
-        (primarySession && snapshot.worktrees.find((worktree) => worktree.worktreeId === primarySession.worktreeId)) ??
+        (primarySession && snapshot.worktrees.find((worktree) => worktree.path === primarySession.cwd)) ??
         getActiveWorktree(snapshot);
       if (!activeWorktree) return;
 
@@ -176,7 +178,7 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
       let replacement: { tab: TerminalTab; session: TerminalSession } | undefined;
       if (snapshot.layout.tabs.length === 1) {
         const worktree =
-          (closingSession && snapshot.worktrees.find((candidate) => candidate.worktreeId === closingSession.worktreeId)) ??
+          (closingSession && snapshot.worktrees.find((candidate) => candidate.path === closingSession.cwd)) ??
           getActiveWorktree(snapshot);
         if (!worktree) return;
         replacement = await createSpawnedTab(worktree, closingTab.label);
@@ -191,8 +193,8 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
   const syncWorktrees = useCallback(
     async (worktrees: Worktree[]) => {
       const snapshot = stateRef.current;
-      const validWorktreeIds = new Set(worktrees.map((worktree) => worktree.worktreeId));
-      const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreeIds.has(session.worktreeId));
+      const validWorktreePaths = new Set(worktrees.map((worktree) => worktree.path));
+      const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(session.cwd));
       dispatch({ type: "SET_WORKTREES", worktrees });
       await Promise.allSettled(staleSessions.map((session) => closeBackendSession(session, services)));
     },
@@ -223,14 +225,14 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
   return state.layout.tabs.flatMap((tab) => {
     const session = state.sessions[tab.sessionId];
     if (!session) return [];
-    const worktree = state.worktrees.find((candidate) => candidate.worktreeId === session.worktreeId);
+    const worktree = state.worktrees.find((candidate) => candidate.path === session.cwd);
     return [
       {
         id: session.backendSessionId ?? session.id,
         name: tab.label,
         task: worktree?.branch?.replace(/^refs\/heads\//, "") ?? session.cwd,
         state: session.lifecycle,
-        worktreeId: session.worktreeId,
+        worktree: session.worktree,
         worktreePath: worktree?.path ?? session.cwd,
         sessionId: session.backendSessionId ?? session.id,
       },
@@ -241,7 +243,7 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
 function createInitialState(worktrees: Worktree[]): WorkspaceState {
   return {
     worktrees,
-    activeWorktreeId: worktrees[0]?.worktreeId ?? null,
+    activeWorktreePath: worktrees[0]?.path ?? null,
     sessions: {},
     layout: createLayoutState(),
   };
@@ -250,22 +252,22 @@ function createInitialState(worktrees: Worktree[]): WorkspaceState {
 function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
   switch (action.type) {
     case "SET_WORKTREES": {
-      const validWorktreeIds = new Set(action.worktrees.map((worktree) => worktree.worktreeId));
+      const validWorktreePaths = new Set(action.worktrees.map((worktree) => worktree.path));
       const sessions = Object.fromEntries(
-        Object.entries(state.sessions).filter(([, session]) => validWorktreeIds.has(session.worktreeId)),
+        Object.entries(state.sessions).filter(([, session]) => validWorktreePaths.has(session.cwd)),
       );
       let layout = state.layout;
       for (const tab of state.layout.tabs) {
         if (!sessions[tab.sessionId]) layout = layoutReducer(layout, { type: "CLOSE_TAB", tabId: tab.id });
       }
-      const activeWorktreeId = action.worktrees.some((worktree) => worktree.worktreeId === state.activeWorktreeId)
-        ? state.activeWorktreeId
-        : action.worktrees[0]?.worktreeId ?? null;
-      return { ...state, worktrees: action.worktrees, activeWorktreeId, sessions, layout };
+      const activeWorktreePath = action.worktrees.some((worktree) => worktree.path === state.activeWorktreePath)
+        ? state.activeWorktreePath
+        : action.worktrees[0]?.path ?? null;
+      return { ...state, worktrees: action.worktrees, activeWorktreePath, sessions, layout };
     }
     case "SELECT_WORKTREE":
-      return state.worktrees.some((worktree) => worktree.worktreeId === action.worktreeId)
-        ? { ...state, activeWorktreeId: action.worktreeId }
+      return state.worktrees.some((worktree) => worktree.path === action.path)
+        ? { ...state, activeWorktreePath: action.path }
         : state;
     case "ADD_TAB_WITH_SESSION":
       return {
@@ -337,12 +339,12 @@ async function closeBackendSession(session: TerminalSession | undefined, service
 }
 
 function getActiveWorktree(state: WorkspaceState) {
-  return state.worktrees.find((worktree) => worktree.worktreeId === state.activeWorktreeId) ?? state.worktrees[0] ?? null;
+  return state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? state.worktrees[0] ?? null;
 }
 
 function nextTabLabel(worktree: Worktree, tabs: TerminalTab[], sessions: Record<string, TerminalSession>) {
   const base = worktree.path === "." ? "main" : worktree.path.split(/[\\/]/).filter(Boolean).at(-1) ?? worktree.path;
-  const count = tabs.filter((tab) => sessions[tab.sessionId]?.worktreeId === worktree.worktreeId).length + 1;
+  const count = tabs.filter((tab) => sessions[tab.sessionId]?.cwd === worktree.path).length + 1;
   return count === 1 ? base : `${base} (${count})`;
 }
 

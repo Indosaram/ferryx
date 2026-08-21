@@ -5,16 +5,13 @@ import type { Worktree, WorktreeChangedPayload } from "../lib/types";
 import { useWorkspaceRuntime, type WorkspaceRuntimeServices } from "./workspaceRuntime";
 
 const worktree: Worktree = {
-  worktreeId: "wt-main",
-  wsId: "ws-main",
   path: "/repo/main",
   head: "abc123",
-  branch: "refs/heads/main",
+  branch: "refs/heads/orca/ws-main/main",
   bare: false,
   detached: false,
   locked: null,
   prunable: null,
-  isDirty: false,
 };
 
 function createServices() {
@@ -41,7 +38,7 @@ describe("useWorkspaceRuntime", () => {
     const ensureTabForWorktree = vi.fn(async () => "tab-main");
     const { result } = renderHook(() =>
       useWorkspaceRuntime({
-        activeWorktreeId: null,
+        activeWorktreePath: null,
         syncWorktrees,
         ensureTabForWorktree,
         services,
@@ -61,7 +58,7 @@ describe("useWorkspaceRuntime", () => {
     const { services } = createServices();
     const { result } = renderHook(() =>
       useWorkspaceRuntime({
-        activeWorktreeId: worktree.worktreeId,
+        activeWorktreePath: worktree.path,
         syncWorktrees: vi.fn(async () => undefined),
         ensureTabForWorktree: vi.fn(async () => "tab-main"),
         services,
@@ -79,7 +76,7 @@ describe("useWorkspaceRuntime", () => {
     const { services, emitWorktreeChanged } = createServices();
     renderHook(() =>
       useWorkspaceRuntime({
-        activeWorktreeId: worktree.worktreeId,
+        activeWorktreePath: worktree.path,
         syncWorktrees: vi.fn(async () => undefined),
         ensureTabForWorktree: vi.fn(async () => "tab-main"),
         services,
@@ -88,7 +85,11 @@ describe("useWorkspaceRuntime", () => {
 
     await waitFor(() => expect(services.listWorktrees).toHaveBeenCalledTimes(1));
     act(() =>
-      emitWorktreeChanged({ action: "dirty_changed", wsId: worktree.wsId, worktreeId: worktree.worktreeId }),
+      emitWorktreeChanged({
+        workspaceId: "default",
+        worktree: { wsId: "ws-main", slug: "main" },
+        kind: "created",
+      }),
     );
     await waitFor(() => expect(services.listWorktrees).toHaveBeenCalledTimes(2));
   });

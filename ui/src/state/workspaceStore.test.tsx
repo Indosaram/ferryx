@@ -5,21 +5,17 @@ import type { Worktree } from "../lib/types";
 import { useWorkspaceStore, type WorkspaceServices } from "./workspaceStore";
 
 const worktree: Worktree = {
-  worktreeId: "wt-main",
-  wsId: "ws-main",
   path: "/repo/main",
   head: "abc123",
-  branch: "refs/heads/main",
+  branch: "refs/heads/orca/ws-main/main",
   bare: false,
   detached: false,
   locked: null,
   prunable: null,
-  isDirty: false,
 };
 
 const featureWorktree: Worktree = {
   ...worktree,
-  worktreeId: "wt-feature",
   path: "/repo/feature",
   branch: "refs/heads/orca/ws-main/feature",
 };
@@ -49,7 +45,10 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(result.current.state.layout.secondaryTabId).not.toBeNull();
     expect(result.current.state.layout.split).toBe("horizontal");
     expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
-    expect(services.spawnTerminal).toHaveBeenCalledWith({ workspaceId: "ws-main", worktreeId: "wt-main" });
+    expect(services.spawnTerminal).toHaveBeenCalledWith({
+      workspaceId: "default",
+      worktree: { wsId: "ws-main", slug: "main" },
+    });
   });
 
   it("preserves backend session ids when only split orientation changes", async () => {
@@ -127,9 +126,9 @@ describe("useWorkspaceStore terminal ownership", () => {
         id: "backend-1",
         sessionId: "backend-1",
         state: "working",
-        worktreeId: worktree.worktreeId,
+        worktree: { wsId: "ws-main", slug: "main" },
         worktreePath: worktree.path,
-        task: "main",
+        task: "orca/ws-main/main",
       }),
     ]);
   });
@@ -151,7 +150,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     });
 
     expect(result.current.state.worktrees).toEqual([worktree]);
-    expect(Object.values(result.current.state.sessions).every((session) => session.worktreeId === worktree.worktreeId)).toBe(true);
+    expect(Object.values(result.current.state.sessions).every((session) => session.cwd === worktree.path)).toBe(true);
     expect(result.current.state.layout.tabs).toHaveLength(1);
     expect(result.current.agents).toHaveLength(1);
     expect(services.closeTerminal).toHaveBeenCalledWith("backend-2");

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  DEFAULT_WORKSPACE_ID,
   isTauriRuntime,
   listWorktrees,
   onWorktreeChanged,
@@ -11,13 +12,13 @@ import type { StructuredIpcError, Worktree, WorktreeChangedPayload } from "../li
 
 export type WorkspaceRuntimeServices = {
   ensureTerminalEvents: () => Promise<void>;
-  listWorktrees: () => Promise<Worktree[]>;
+  listWorktrees: (workspaceId: string) => Promise<Worktree[]>;
   onWorktreeChanged: (handler: (payload: WorktreeChangedPayload) => void) => Promise<() => void>;
   isTauriRuntime: () => boolean;
 };
 
 type UseWorkspaceRuntimeOptions = {
-  activeWorktreeId: string | null;
+  activeWorktreePath: string | null;
   syncWorktrees: (worktrees: Worktree[]) => Promise<void>;
   ensureTabForWorktree: (worktree: Worktree) => Promise<string>;
   services?: WorkspaceRuntimeServices;
@@ -31,8 +32,6 @@ const defaultServices: WorkspaceRuntimeServices = {
 };
 
 const PREVIEW_WORKTREE: Worktree = {
-  worktreeId: "preview-main",
-  wsId: "preview",
   path: ".",
   head: "main",
   branch: "refs/heads/main",
@@ -40,19 +39,18 @@ const PREVIEW_WORKTREE: Worktree = {
   detached: false,
   locked: null,
   prunable: null,
-  isDirty: false,
 };
 
 export function useWorkspaceRuntime({
-  activeWorktreeId,
+  activeWorktreePath,
   syncWorktrees,
   ensureTabForWorktree,
   services = defaultServices,
 }: UseWorkspaceRuntimeOptions) {
   const [runtimeError, setRuntimeError] = useState<StructuredIpcError | null>(null);
-  const activeWorktreeIdRef = useRef(activeWorktreeId);
+  const activeWorktreePathRef = useRef(activeWorktreePath);
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
-  activeWorktreeIdRef.current = activeWorktreeId;
+  activeWorktreePathRef.current = activeWorktreePath;
 
   const reportRuntimeError = useCallback((error: unknown) => {
     setRuntimeError(toIpcError(error));
@@ -63,10 +61,10 @@ export function useWorkspaceRuntime({
 
     const refreshPromise = (async () => {
       try {
-        const listed = await services.listWorktrees();
+        const listed = await services.listWorktrees(DEFAULT_WORKSPACE_ID);
         const worktrees = listed.length > 0 || services.isTauriRuntime() ? listed : [PREVIEW_WORKTREE];
         await syncWorktrees(worktrees);
-        const preferred = worktrees.find((worktree) => worktree.worktreeId === activeWorktreeIdRef.current) ?? worktrees[0];
+        const preferred = worktrees.find((worktree) => worktree.path === activeWorktreePathRef.current) ?? worktrees[0];
         if (preferred) await ensureTabForWorktree(preferred);
         setRuntimeError(null);
       } catch (error) {
