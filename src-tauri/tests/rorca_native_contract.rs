@@ -17,9 +17,9 @@ fn tauri_metadata_uses_rorca_identity_and_generated_icons() {
     let config: Value =
         serde_json::from_str(include_str!("../tauri.conf.json")).expect("parse tauri.conf.json");
 
-    assert_eq!(config["productName"], "ferryx");
+    assert_eq!(config["productName"], "Ferryx");
     assert_eq!(config["identifier"], "com.ferryx.app");
-    assert_eq!(config["app"]["windows"][0]["title"], "ferryx");
+    assert_eq!(config["app"]["windows"][0]["title"], "Ferryx");
 
     let configured_icons = config["bundle"]["icon"]
         .as_array()

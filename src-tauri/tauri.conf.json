@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ferryx",
+  "productName": "Ferryx",
   "version": "0.1.0",
   "identifier": "com.ferryx.app",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "ferryx",
+        "title": "Ferryx",
         "width": 1280,
         "height": 850,
         "minWidth": 800,
