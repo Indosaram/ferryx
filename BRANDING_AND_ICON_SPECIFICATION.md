@@ -1,26 +1,27 @@
-# Rorca Branding, Icon Assets & HMR Architecture Specification
+# Rorca Branding & Icon Assets Specification
 
-## 1. Canonical Branding & Icon Policy (STRICT - DO NOT REVERT)
+## 1. Canonical Branding & Transparent Icon Policy (STRICT - DO NOT REVERT)
 
 ### Master Asset Standard
-* **Theme**: Canonical **Monochrome / Grayscale (흑백)** brand icon.
-* **Master High-Res File**: `src-tauri/icons/icon.png` (1024x1024 RGBA master, ~982 KB).
-* **macOS Multi-Resolution Asset**: `src-tauri/icons/icon.icns` (~2.07 MB, full retina iconset).
-* **Windows Multi-Resolution Asset**: `src-tauri/icons/icon.ico` (~165 KB).
+* **Master Vector Source**: `ui/src/assets/rorca-icon.svg`
+  - Pure **transparent background** with alpha channel (no opaque `<rect fill="#151921"/>` or stroke rectangles).
+* **Generator Command**: `cargo tauri icon ui/src/assets/rorca-icon.svg`
+  - Automatically generates all cross-platform icons with transparent alpha channels.
+* **macOS Multi-Resolution Asset**: `src-tauri/icons/icon.icns` (Transparent background).
+* **Windows Multi-Resolution Asset**: `src-tauri/icons/icon.ico` (Transparent background).
+* **App Master PNG**: `src-tauri/icons/icon.png` (Transparent background, full alpha).
+
+### Web & PWA Synchronization (`ui/public/`)
+* All web favicons (`favicon.ico`, `favicon-16x16.png`, `favicon-32x32.png`), touch icons (`apple-touch-icon.png`), and PWA icons (`icon-192.png`, `icon-512.png`, `pwa-*.png`) must remain strictly synchronized with the transparent master asset.
 
 ### Forbidden Actions
-1. **DO NOT OVERWRITE OR DOWNGRADE ICONS**:
-   - Never replace `src-tauri/icons/` with low-resolution (e.g. 512x512 downsampled/template) assets.
-   - Never replace the canonical monochrome icon with the deprecated red/blue colored crab logo.
-   - Any script or automation generating icons must use the 1024x1024 monochrome master asset as source.
-2. **Web & PWA Icons (`ui/public/`)**:
-   - All web favicons (`favicon.ico`, `favicon-16x16.png`, `favicon-32x32.png`), touch icons (`apple-touch-icon.png`), and PWA icons (`icon-192.png`, `icon-512.png`, `pwa-*.png`) must remain strictly synchronized with the monochrome master asset.
+1. **DO NOT ADD OPAQUE SQUIRCLES OR RECTANGLES** to `ui/src/assets/rorca-icon.svg`.
+2. **DO NOT OVERWRITE WITH OPAQUE BLACK BOX ICONS**: All generated icons must preserve true PNG/ICNS alpha transparency.
 
 ---
 
 ## 2. Desktop Vite + Tauri HMR Topology (Single Loopback Endpoint)
 
-### Core Rules
 * **Host Binding**: Strictly `127.0.0.1` (IPv4 loopback). Avoid ambiguous `localhost` or IPv6 `::1`.
 * **Port**: Single unified port `5173` with `strictPort: true` for both HTTP dev server and WebSocket HMR (`ws://127.0.0.1:5173`).
 * **Watcher**: Polling watcher enabled (`usePolling: true, interval: 100`) in `ui/vite.config.ts` to prevent macOS FSEvents event-drop during atomic file saves.
@@ -40,5 +41,5 @@
 
 1. `cargo test --manifest-path src-tauri/Cargo.toml` (Exit 0)
 2. `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` (Exit 0, 0 warnings)
-3. `bun run --cwd ui test` (Exit 0, 37 test suites, 218 tests passing)
+3. `bun run --cwd ui test` (Exit 0, 38 test suites, 222 tests passing)
 4. `bun run --cwd ui build` (Exit 0, TypeScript 0 errors, Vite production build)

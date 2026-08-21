@@ -12,8 +12,6 @@
       <feDropShadow dx="0" dy="28" stdDeviation="30" flood-color="#020712" flood-opacity=".62"/>
     </filter>
   </defs>
-  <rect width="1024" height="1024" rx="228" fill="#151921"/>
-  <rect x="31" y="31" width="962" height="962" rx="202" fill="none" stroke="#2a3441" stroke-width="14"/>
   <g filter="url(#shadow)">
     <path d="M300 523c-74-6-122-51-158-116-11-20-12-49 8-64 21-16 49-8 62 14 26 43 52 61 91 66l-3 100Z" fill="#ed5a65"/>
     <path d="M724 523c74-6 122-51 158-116 11-20 12-49-8-64-21-16-49-8-62 14-26 43-52 61-91 66l3 100Z" fill="#ed5a65"/>
