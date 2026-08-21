@@ -21,7 +21,7 @@ import { StatusDot } from "./ui/StatusDot";
 import { WorktreeList } from "./WorktreeList";
 
 export const SIDEBAR_WIDTH_STORAGE_KEY = "orca.sidebar.width";
-export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "rorca.sidebar.collapsedProjects";
+export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedProjects";
 const DEFAULT_SIDEBAR_WIDTH = 236;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 420;

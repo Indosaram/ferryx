@@ -1,12 +1,12 @@
-use orca_lite_lib::ipc::{
+use ferryx_lib::ipc::{
     cmd_project_branches, cmd_project_register, IpcErrorCode, ProjectBranchesRequest,
     RegisterProjectRequest,
 };
-use orca_lite_lib::terminal::{
+use ferryx_lib::terminal::{
     load_terminal_preferences_from_path, parse_ghostty_config, TerminalPreferencesSource,
     TerminalPreferencesStatus, DEFAULT_TERMINAL_FONT_FAMILY,
 };
-use orca_lite_lib::worktree::{run_git, WorkspaceRegistry};
+use ferryx_lib::worktree::{run_git, WorkspaceRegistry};
 use serde_json::Value;
 use std::path::Path;
 use tauri::Manager;
@@ -17,8 +17,9 @@ fn tauri_metadata_uses_rorca_identity_and_generated_icons() {
     let config: Value =
         serde_json::from_str(include_str!("../tauri.conf.json")).expect("parse tauri.conf.json");
 
-    assert_eq!(config["productName"], "rorca");
-    assert_eq!(config["app"]["windows"][0]["title"], "rorca");
+    assert_eq!(config["productName"], "ferryx");
+    assert_eq!(config["identifier"], "com.ferryx.app");
+    assert_eq!(config["app"]["windows"][0]["title"], "ferryx");
 
     let configured_icons = config["bundle"]["icon"]
         .as_array()
@@ -92,9 +93,9 @@ fn ghostty_parser_handles_quotes_and_macos_option_keywords() {
 
 #[test]
 fn loads_real_ghostty_config_from_system() {
-    let prefs = orca_lite_lib::terminal::load_terminal_preferences();
+    let prefs = ferryx_lib::terminal::load_terminal_preferences();
     println!("SYSTEM LOADED: {:?}", prefs);
-    if prefs.source == orca_lite_lib::terminal::TerminalPreferencesSource::Ghostty {
+    if prefs.source == ferryx_lib::terminal::TerminalPreferencesSource::Ghostty {
         assert!(prefs.font_family.contains("MesloLGS NF"));
         assert!(prefs.macos_option_as_alt);
     }

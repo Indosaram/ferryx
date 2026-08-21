@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-describe("rorca browser document identity", () => {
-  it("uses the rorca title and crab-Orca favicon", () => {
+describe("ferryx browser document identity", () => {
+  it("uses the ferryx title and crab-Orca favicon", () => {
     const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
 
-    expect(html).toContain("<title>rorca</title>");
-    expect(html).toContain('href="/src/assets/rorca-icon.svg"');
+    expect(html).toContain("<title>ferryx</title>");
+    expect(html).toContain('href="/src/assets/ferryx-icon.svg"');
   });
 });

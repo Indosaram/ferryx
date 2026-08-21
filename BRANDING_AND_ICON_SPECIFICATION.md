@@ -1,22 +1,27 @@
-# Rorca Branding & Icon Assets Specification
+# Ferryx Branding & Icon Assets Specification
 
-## 1. Canonical Branding & Transparent Icon Policy (STRICT - DO NOT REVERT)
+## 1. Canonical Branding Policy (STRICT STANDARD: Ferryx Dark Squircle Icon)
+
+### Product Identity
+* **Product Name**: **Ferryx** (`ferryx`)
+* **Bundle Identifier**: `com.ferryx.app`
+* **Core Philosophy**: Ultra-lightweight, high-performance Rust native workspace & AI agent launcher.
 
 ### Master Asset Standard
-* **Master Vector Source**: `ui/src/assets/rorca-icon.svg`
-  - Pure **transparent background** with alpha channel (no opaque `<rect fill="#151921"/>` or stroke rectangles).
-* **Generator Command**: `cargo tauri icon ui/src/assets/rorca-icon.svg`
-  - Automatically generates all cross-platform icons with transparent alpha channels.
-* **macOS Multi-Resolution Asset**: `src-tauri/icons/icon.icns` (Transparent background).
-* **Windows Multi-Resolution Asset**: `src-tauri/icons/icon.ico` (Transparent background).
-* **App Master PNG**: `src-tauri/icons/icon.png` (Transparent background, full alpha).
+* **Asset Style**: **Ferryx Crab Dark Monochrome Squircle with 100% Transparent Outer Background**.
+* **Master Vector Source**: `ui/src/assets/ferryx-icon.svg`
+* **Master High-Res PNG**: `src-tauri/icons/icon.png` (1024x1024 RGBA canvas with centered 860x860 squircle and transparent `alpha=0` outer margins).
+* **macOS Multi-Resolution Asset**: `src-tauri/icons/icon.icns` (~2.07 MB, generated with zero outer black padding).
+* **Windows Multi-Resolution Asset**: `src-tauri/icons/icon.ico`.
+* **Cross-Platform Suites**: Complete 52-icon suite in `src-tauri/icons/` (Android mipmap, iOS AppIcons, Windows Store logos).
 
 ### Web & PWA Synchronization (`ui/public/`)
-* All web favicons (`favicon.ico`, `favicon-16x16.png`, `favicon-32x32.png`), touch icons (`apple-touch-icon.png`), and PWA icons (`icon-192.png`, `icon-512.png`, `pwa-*.png`) must remain strictly synchronized with the transparent master asset.
+* All web favicons (`favicon.ico`, `favicon-16x16.png`, `favicon-32x32.png`), touch icons (`apple-touch-icon.png`), and PWA icons (`icon-192.png`, `icon-512.png`, `pwa-*.png`) are strictly synchronized from the transparent-margin master icon.
 
-### Forbidden Actions
-1. **DO NOT ADD OPAQUE SQUIRCLES OR RECTANGLES** to `ui/src/assets/rorca-icon.svg`.
-2. **DO NOT OVERWRITE WITH OPAQUE BLACK BOX ICONS**: All generated icons must preserve true PNG/ICNS alpha transparency.
+### Strict Non-Reversion Rules
+1. **NO OUTER BLACK BOX**: The canvas outside the rounded squircle corners must remain 100% transparent (`RGBA [0, 0, 0, 0]`).
+2. **NO COLOR OVERWRITES**: Do not overwrite with red/blue colored assets.
+3. **CANONICAL IDENTITY**: The application name is strictly **Ferryx** (`ferryx`).
 
 ---
 
@@ -41,5 +46,5 @@
 
 1. `cargo test --manifest-path src-tauri/Cargo.toml` (Exit 0)
 2. `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` (Exit 0, 0 warnings)
-3. `bun run --cwd ui test` (Exit 0, 38 test suites, 222 tests passing)
+3. `bun run --cwd ui test` (Exit 0, 38 test suites, 226 tests passing)
 4. `bun run --cwd ui build` (Exit 0, TypeScript 0 errors, Vite production build)

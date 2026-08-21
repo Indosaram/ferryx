@@ -4,7 +4,7 @@ import type {
 } from "./types";
 import type { RegisteredProject } from "./tauri";
 
-const TOKEN_KEY = "rorca_remote_token";
+const TOKEN_KEY = "ferryx_remote_token";
 
 export function getRemoteAuthToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);

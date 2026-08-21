@@ -33,7 +33,7 @@ export type ShortcutDefinition = {
   title: string;
   group: "Tabs" | "Terminal Panes" | "Global" | "Workspaces";
   binding: ShortcutBinding;
-  source: "original" | "orca-lite";
+  source: "original" | "ferryx";
 };
 
 export const SHORTCUTS: readonly ShortcutDefinition[] = [
@@ -77,56 +77,56 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Select terminal tab 1",
     group: "Tabs",
     binding: { key: "1", control: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "tab.select2",
     title: "Select terminal tab 2",
     group: "Tabs",
     binding: { key: "2", control: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "tab.select3",
     title: "Select terminal tab 3",
     group: "Tabs",
     binding: { key: "3", control: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "tab.select4",
     title: "Select terminal tab 4",
     group: "Tabs",
     binding: { key: "4", control: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "workspace.select1",
     title: "Select workspace 1",
     group: "Workspaces",
     binding: { key: "1", mod: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "workspace.select2",
     title: "Select workspace 2",
     group: "Workspaces",
     binding: { key: "2", mod: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "workspace.select3",
     title: "Select workspace 3",
     group: "Workspaces",
     binding: { key: "3", mod: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "workspace.select4",
     title: "Select workspace 4",
     group: "Workspaces",
     binding: { key: "4", mod: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "terminal.splitRight",
@@ -147,7 +147,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Close split view",
     group: "Terminal Panes",
     binding: { key: "d", mod: true, alt: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
   {
     id: "sidebar.left.toggle",
@@ -161,7 +161,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Open command palette",
     group: "Global",
     binding: { key: "k", mod: true },
-    source: "orca-lite",
+    source: "ferryx",
   },
 ] as const;
 

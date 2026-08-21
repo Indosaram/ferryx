@@ -1,5 +1,5 @@
-use orca_lite_lib::terminal::PtyManager;
-use orca_lite_lib::worktree::{CreateWorktreeOptions, WorktreeError, WorktreeManager};
+use ferryx_lib::terminal::PtyManager;
+use ferryx_lib::worktree::{CreateWorktreeOptions, WorktreeError, WorktreeManager};
 use portable_pty::CommandBuilder;
 use std::fs;
 use std::time::Duration;
@@ -8,14 +8,14 @@ use tempfile::TempDir;
 fn setup_test_repo() -> (TempDir, WorktreeManager) {
     let temp_dir = TempDir::new().expect("temp dir");
     let repo_path = temp_dir.path();
-    orca_lite_lib::worktree::run_git(repo_path, &["init"]).expect("git init");
-    orca_lite_lib::worktree::run_git(repo_path, &["config", "user.name", "Orca Test"])
+    ferryx_lib::worktree::run_git(repo_path, &["init"]).expect("git init");
+    ferryx_lib::worktree::run_git(repo_path, &["config", "user.name", "Orca Test"])
         .expect("git user name");
-    orca_lite_lib::worktree::run_git(repo_path, &["config", "user.email", "test@orca.dev"])
+    ferryx_lib::worktree::run_git(repo_path, &["config", "user.email", "test@orca.dev"])
         .expect("git user email");
     fs::write(repo_path.join("README.md"), "# base\n").expect("write base");
-    orca_lite_lib::worktree::run_git(repo_path, &["add", "README.md"]).expect("git add");
-    orca_lite_lib::worktree::run_git(repo_path, &["commit", "-m", "base"]).expect("git commit");
+    ferryx_lib::worktree::run_git(repo_path, &["add", "README.md"]).expect("git add");
+    ferryx_lib::worktree::run_git(repo_path, &["commit", "-m", "base"]).expect("git commit");
     let manager = WorktreeManager::new(repo_path);
     (temp_dir, manager)
 }
@@ -63,15 +63,15 @@ fn default_delete_rejects_clean_unmerged_branch() {
     let wt = create_worktree(&manager, "unmerged-default");
 
     fs::write(wt.join("feature.txt"), "unmerged work\n").expect("write feature");
-    orca_lite_lib::worktree::run_git(&wt, &["add", "feature.txt"]).expect("git add");
-    orca_lite_lib::worktree::run_git(&wt, &["commit", "-m", "unmerged feature"])
+    ferryx_lib::worktree::run_git(&wt, &["add", "feature.txt"]).expect("git add");
+    ferryx_lib::worktree::run_git(&wt, &["commit", "-m", "unmerged feature"])
         .expect("feature commit");
     assert!(!manager.is_dirty(&wt).expect("clean status"));
 
     let err = manager.delete_worktree_and_branch(&wt, true).unwrap_err();
     assert!(matches!(err, WorktreeError::UnmergedBranch { .. }));
     assert!(wt.exists(), "default delete must preserve unmerged worktree");
-    let branches = orca_lite_lib::worktree::run_git(manager.repo_root(), &["branch", "--list"])
+    let branches = ferryx_lib::worktree::run_git(manager.repo_root(), &["branch", "--list"])
         .expect("list branches");
     assert!(branches.contains("orca/ws-safety/unmerged-default"));
 }
@@ -82,8 +82,8 @@ fn explicit_destructive_delete_removes_clean_unmerged_branch() {
     let wt = create_worktree(&manager, "unmerged-force");
 
     fs::write(wt.join("feature.txt"), "unmerged work\n").expect("write feature");
-    orca_lite_lib::worktree::run_git(&wt, &["add", "feature.txt"]).expect("git add");
-    orca_lite_lib::worktree::run_git(&wt, &["commit", "-m", "unmerged feature"])
+    ferryx_lib::worktree::run_git(&wt, &["add", "feature.txt"]).expect("git add");
+    ferryx_lib::worktree::run_git(&wt, &["commit", "-m", "unmerged feature"])
         .expect("feature commit");
 
     let preview = manager
@@ -97,7 +97,7 @@ fn explicit_destructive_delete_removes_clean_unmerged_branch() {
         .delete_worktree_and_branch_destructive(&wt, true)
         .expect("explicit destructive delete");
     assert!(!wt.exists());
-    let branches = orca_lite_lib::worktree::run_git(manager.repo_root(), &["branch", "--list"])
+    let branches = ferryx_lib::worktree::run_git(manager.repo_root(), &["branch", "--list"])
         .expect("list branches");
     assert!(!branches.contains("orca/ws-safety/unmerged-force"));
 }

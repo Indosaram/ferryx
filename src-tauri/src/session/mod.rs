@@ -1,7 +1,7 @@
 use crate::ipc::{IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,12 +96,29 @@ pub fn save_session_to_path(
     })?;
 
     let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, serialized).map_err(|e| {
-        IpcError::new(
-            IpcErrorCode::IoError,
-            format!("Failed to write temporary session state file: {}", e),
-        )
-    })?;
+    
+    // Durable atomic write: write -> sync_all -> rename -> parent fsync
+    {
+        use std::io::Write;
+        let mut file = File::create(&tmp_path).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Failed to create temporary session file: {}", e),
+            )
+        })?;
+        file.write_all(serialized.as_bytes()).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Failed to write session state: {}", e),
+            )
+        })?;
+        file.sync_all().map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Failed to fsync temporary session file: {}", e),
+            )
+        })?;
+    }
 
     fs::rename(&tmp_path, path).map_err(|e| {
         IpcError::new(
@@ -109,6 +126,13 @@ pub fn save_session_to_path(
             format!("Failed to atomically rename session state file: {}", e),
         )
     })?;
+
+    // Parent directory fsync
+    if let Some(parent) = path.parent() {
+        if let Ok(dir_file) = File::open(parent) {
+            let _ = dir_file.sync_all();
+        }
+    }
 
     Ok(())
 }
@@ -126,7 +150,13 @@ pub fn load_session_from_path(path: &Path) -> Result<Option<PersistedWorkspaceSe
     })?;
 
     match serde_json::from_str::<PersistedWorkspaceSession>(&content) {
-        Ok(session) => Ok(Some(session)),
+        Ok(session) => {
+            if session.version != 1 {
+                eprintln!("Warning: Unsupported session version {}, ignoring.", session.version);
+                return Ok(None);
+            }
+            Ok(Some(session))
+        }
         Err(err) => {
             let backup_path = path.with_extension("json.corrupted");
             let _ = fs::rename(path, backup_path);

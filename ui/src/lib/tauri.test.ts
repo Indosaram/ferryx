@@ -32,26 +32,26 @@ describe("Tauri IPC wrapper contract", () => {
 
   it("registers projects and lists real local branches through typed native DTOs", async () => {
     core.invoke
-      .mockResolvedValueOnce({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" })
+      .mockResolvedValueOnce({ workspaceId: "ferryx", repoRoot: "/repo/ferryx" })
       .mockResolvedValueOnce([
         { name: "feature/a", isCurrent: false },
         { name: "main", isCurrent: true },
       ]);
 
-    await expect(registerProject({ workspaceId: "orca-lite", repoPath: "/repo/orca-lite" })).resolves.toEqual({
-      workspaceId: "orca-lite",
-      repoRoot: "/repo/orca-lite",
+    await expect(registerProject({ workspaceId: "ferryx", repoPath: "/repo/ferryx" })).resolves.toEqual({
+      workspaceId: "ferryx",
+      repoRoot: "/repo/ferryx",
     });
-    await expect(listProjectBranches("orca-lite")).resolves.toEqual([
+    await expect(listProjectBranches("ferryx")).resolves.toEqual([
       { name: "feature/a", isCurrent: false },
       { name: "main", isCurrent: true },
     ]);
 
     expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_project_register", {
-      request: { workspaceId: "orca-lite", repoPath: "/repo/orca-lite" },
+      request: { workspaceId: "ferryx", repoPath: "/repo/ferryx" },
     });
     expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_project_branches", {
-      request: { workspaceId: "orca-lite" },
+      request: { workspaceId: "ferryx" },
     });
   });
 

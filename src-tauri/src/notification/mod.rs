@@ -21,25 +21,12 @@ pub use service::*;
 pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
     #[cfg(target_os = "macos")]
     {
-        const NOTIFICATION_PANE: &str =
-            "x-apple.systempreferences:com.apple.preference.notifications";
-
-        if run_opener("open", &[NOTIFICATION_PANE]) {
-            return OpenSystemSettingsResult {
-                opened: true,
-                reason: None,
-            };
-        }
-        // Fall back to the System Settings app if the pane URI is rejected.
-        if run_opener("open", &["-b", "com.apple.systempreferences"]) {
-            return OpenSystemSettingsResult {
-                opened: true,
-                reason: None,
-            };
-        }
+        // On macOS, running `open x-apple.systempreferences:...` or opening System Settings
+        // when the app is unbundled or unnotified causes unwanted disruptive UI popups.
+        // Explicitly report unsupported to avoid unexpected System Settings window launches.
         OpenSystemSettingsResult {
             opened: false,
-            reason: Some("could not open System Settings".into()),
+            reason: Some("opening system settings is disabled in dev/standalone mode".into()),
         }
     }
 
@@ -68,6 +55,7 @@ pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
+#[allow(dead_code)]
 fn run_opener(program: &str, args: &[&str]) -> bool {
     std::process::Command::new(program)
         .args(args)

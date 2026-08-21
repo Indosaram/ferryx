@@ -1,4 +1,4 @@
-use orca_lite_lib::session::{
+use ferryx_lib::session::{
     clear_session_from_path, load_session_from_path, save_session_to_path, PersistedLayout,
     PersistedTab, PersistedWorkspace, PersistedWorkspaceSession, PersistedWorktree,
 };

@@ -1,11 +1,11 @@
-use orca_lite_lib::ipc::{
+use ferryx_lib::ipc::{
     cmd_terminal_close, cmd_terminal_spawn, cmd_worktree_create, cmd_worktree_delete,
     cmd_worktree_status, CreateWorktreeRequest, DeleteWorktreeRequest, IpcErrorCode,
     SpawnTerminalRequest, TerminalLifecycleState, WorktreeChangeKind, WorktreeChangedPayload,
     WorktreeStatusRequest, WORKTREE_CHANGED_EVENT,
 };
-use orca_lite_lib::terminal::{PtyManager, TerminalService};
-use orca_lite_lib::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
+use ferryx_lib::terminal::{PtyManager, TerminalService};
+use ferryx_lib::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
 use std::fs;
 use std::sync::Arc;
 use tauri::{Listener, Manager};
@@ -31,7 +31,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .expect("register workspace");
 
     let pty = Arc::new(PtyManager::new());
-    let hub = Arc::new(orca_lite_lib::terminal::TerminalOutputHub::default());
+    let hub = Arc::new(ferryx_lib::terminal::TerminalOutputHub::default());
     let srv = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
 
     let app = tauri::test::mock_builder()
@@ -350,7 +350,7 @@ async fn dirty_delete_returns_structured_error_code() {
         .register("workspace-a", repo.path())
         .expect("register workspace");
     let pty = Arc::new(PtyManager::new());
-    let hub = Arc::new(orca_lite_lib::terminal::TerminalOutputHub::default());
+    let hub = Arc::new(ferryx_lib::terminal::TerminalOutputHub::default());
     let srv = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
 
     let app = tauri::test::mock_builder()

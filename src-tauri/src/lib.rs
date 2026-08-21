@@ -1,3 +1,4 @@
+pub mod daemon;
 pub mod browser;
 pub mod ipc;
 pub mod notification;
@@ -29,7 +30,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     if let Ok(repo_root) = std::env::current_dir() {
         if let Err(error) = workspace_registry.register("default", &repo_root) {
             tracing::debug!(
-                "Current directory is not a registrable rorca workspace ({}): {}",
+                "Current directory is not a registrable ferryx workspace ({}): {}",
                 repo_root.display(),
                 error
             );

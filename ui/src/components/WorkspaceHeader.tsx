@@ -24,7 +24,7 @@ function displayWorkspaceTitle(worktree: Worktree) {
     return parts.slice(2).join("/");
   }
   const branch = branchName(worktree);
-  if (branch && branch !== "detached HEAD" && branch !== "orca-lite") {
+  if (branch && branch !== "detached HEAD" && branch !== "ferryx" && branch !== "rorca" && branch !== "orca-lite") {
     return branch;
   }
   return "main";

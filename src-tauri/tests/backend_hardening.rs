@@ -1,5 +1,5 @@
-use orca_lite_lib::ipc::{CreateWorktreeRequest, SpawnTerminalRequest};
-use orca_lite_lib::worktree::{
+use ferryx_lib::ipc::{CreateWorktreeRequest, SpawnTerminalRequest};
+use ferryx_lib::worktree::{
     run_git, CreateWorktreeOptions, DirtyState, WorktreeError, WorktreeManager,
 };
 use serde_json::json;

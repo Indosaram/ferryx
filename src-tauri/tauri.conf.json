@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "rorca",
+  "productName": "ferryx",
   "version": "0.1.0",
-  "identifier": "com.orca.lite",
+  "identifier": "com.ferryx.app",
   "build": {
     "beforeDevCommand": "bun run --cwd ui dev",
     "devUrl": "http://127.0.0.1:5173",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "rorca",
+        "title": "ferryx",
         "width": 1280,
         "height": 850,
         "minWidth": 800,

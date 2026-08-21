@@ -1,6 +1,6 @@
-use orca_lite_lib::terminal::PtyManager;
-use orca_lite_lib::worktree::model::CreateWorktreeOptions;
-use orca_lite_lib::worktree::WorktreeManager;
+use ferryx_lib::terminal::PtyManager;
+use ferryx_lib::worktree::model::CreateWorktreeOptions;
+use ferryx_lib::worktree::WorktreeManager;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::time::Duration;
