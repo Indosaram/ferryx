@@ -6,6 +6,7 @@ import { TabBar } from "./components/TabBar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import { worktreeErrorMessage } from "./lib/ipcErrors";
+import { useShortcuts } from "./lib/shortcuts";
 import { createWorktree, DEFAULT_WORKSPACE_ID, toIpcError } from "./lib/tauri";
 import { worktreeIdentity, type Worktree } from "./lib/types";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
@@ -30,6 +31,7 @@ export function App() {
     ensureTabForWorktree,
   });
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [newSlug, setNewSlug] = useState("");
   const [newBaseRef, setNewBaseRef] = useState("HEAD");
   const [createError, setCreateError] = useState<string | null>(null);
@@ -67,14 +69,28 @@ export function App() {
     }
   };
 
-  const handleAddTerminalTab = () => {
+  const handleAddTerminalTab = useCallback(() => {
     if (!activeWorktree) return;
     void openTab(activeWorktree).catch(reportRuntimeError);
-  };
+  }, [activeWorktree, openTab, reportRuntimeError]);
 
-  const handleCloseTab = (tabId: string) => {
-    void closeTab(tabId).catch(reportRuntimeError);
-  };
+  const handleCloseTab = useCallback(
+    (tabId: string) => {
+      void closeTab(tabId).catch(reportRuntimeError);
+    },
+    [closeTab, reportRuntimeError],
+  );
+
+  const handleCycleTab = useCallback(
+    (offset: number) => {
+      const tabs = state.layout.tabs;
+      if (tabs.length < 2) return;
+      const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.id === state.layout.primaryTabId));
+      const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
+      activatePrimary(tabs[nextIndex].id);
+    },
+    [activatePrimary, state.layout.primaryTabId, state.layout.tabs],
+  );
 
   const handleSplit = () => {
     if (state.layout.split === "none") {
@@ -86,8 +102,36 @@ export function App() {
     }
   };
 
+  const shortcutHandlers = useMemo(
+    () => ({
+      "tab.newTerminal": handleAddTerminalTab,
+      "tab.close": () => {
+        if (state.layout.primaryTabId) handleCloseTab(state.layout.primaryTabId);
+      },
+      "tab.next": () => handleCycleTab(1),
+      "tab.previous": () => handleCycleTab(-1),
+      "terminal.splitRight": () => void enableSplit("horizontal").catch(reportRuntimeError),
+      "terminal.splitDown": () => void enableSplit("vertical").catch(reportRuntimeError),
+      "terminal.unsplit": disableSplit,
+      "commandPalette.open": () => setIsCommandPaletteOpen(true),
+    }),
+    [
+      disableSplit,
+      enableSplit,
+      handleAddTerminalTab,
+      handleCloseTab,
+      handleCycleTab,
+      reportRuntimeError,
+      state.layout.primaryTabId,
+    ],
+  );
+  useShortcuts(shortcutHandlers);
+
   return (
-    <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
+    <div
+      className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+      data-command-palette-open={isCommandPaletteOpen ? "true" : "false"}
+    >
       <Sidebar
         worktrees={state.worktrees}
         agents={agents}
