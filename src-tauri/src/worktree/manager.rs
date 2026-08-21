@@ -89,8 +89,9 @@ impl Drop for WriterLeaseGuard {
 /// Manages Git worktrees under a canonical repository root.
 ///
 /// Every filesystem path accepted by this manager must stay inside `repo_root` after
-/// canonicalization. IPC callers should prefer identity-based resolution through
-/// `WorkspaceRegistry` instead of passing paths directly.
+/// canonicalization. Construction accepts either that root or any directory within it,
+/// then resolves the canonical root. IPC callers should prefer identity-based resolution
+/// through `WorkspaceRegistry` instead of passing paths directly.
 #[derive(Debug, Clone)]
 pub struct WorktreeManager {
     repo_root: PathBuf,
@@ -126,10 +127,6 @@ impl WorktreeManager {
                 path: canonical.clone(),
             }
         })?;
-        if git_root != canonical {
-            return Err(WorktreeError::InvalidRepoRoot { path: canonical });
-        }
-
         Ok(Self {
             repo_root: git_root,
             writer_leases: WriterLeaseRegistry::default(),

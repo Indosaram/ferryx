@@ -232,4 +232,16 @@ prunable reason gitdir gone
             Err(WorktreeError::WorkspaceNotFound { .. })
         ));
     }
+
+    #[test]
+    fn worktree_manager_resolves_nested_git_directory_to_canonical_root() {
+        let (_temp, manager) = setup_test_repo();
+        let nested_directory = manager.repo_root().join("src-tauri");
+        fs::create_dir_all(&nested_directory).expect("create nested launch directory");
+
+        let resolved = WorktreeManager::try_new(&nested_directory)
+            .expect("nested Git directory must resolve to its repository root");
+
+        assert_eq!(resolved.repo_root(), manager.repo_root());
+    }
 }
