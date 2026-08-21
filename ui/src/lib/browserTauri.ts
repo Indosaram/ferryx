@@ -6,6 +6,23 @@ import type {
   LogicalRect,
 } from "./types";
 
+const browserLifecycleQueues = new Map<string, Promise<void>>();
+
+function enqueueBrowserLifecycle(browserId: string, operation: () => Promise<void>): Promise<void> {
+  const previous = browserLifecycleQueues.get(browserId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(operation);
+  browserLifecycleQueues.set(browserId, next);
+
+  const clearIfCurrent = () => {
+    if (browserLifecycleQueues.get(browserId) === next) {
+      browserLifecycleQueues.delete(browserId);
+    }
+  };
+  void next.then(clearIfCurrent, clearIfCurrent);
+
+  return next;
+}
+
 export async function createBrowser(request: CreateBrowserRequest): Promise<BrowserState> {
   return invoke<BrowserState>("cmd_browser_create", { request });
 }
@@ -22,8 +39,8 @@ export async function setBrowserBounds(browserId: string, bounds: LogicalRect): 
   return invoke<void>("cmd_browser_set_bounds", { browserId, bounds });
 }
 
-export async function setBrowserVisible(browserId: string, visible: boolean): Promise<void> {
-  return invoke<void>("cmd_browser_set_visible", { browserId, visible });
+export function setBrowserVisible(browserId: string, visible: boolean): Promise<void> {
+  return enqueueBrowserLifecycle(browserId, () => invoke<void>("cmd_browser_set_visible", { browserId, visible }));
 }
 
 export async function setBrowserZoom(browserId: string, zoomFactor: number): Promise<number> {
@@ -38,8 +55,8 @@ export async function getBrowserState(browserId: string): Promise<BrowserState> 
   return invoke<BrowserState>("cmd_browser_get_state", { browserId });
 }
 
-export async function closeBrowser(browserId: string): Promise<void> {
-  return invoke<void>("cmd_browser_close", { browserId });
+export function closeBrowser(browserId: string): Promise<void> {
+  return enqueueBrowserLifecycle(browserId, () => invoke<void>("cmd_browser_close", { browserId }));
 }
 
 export async function listBrowsers(): Promise<BrowserSessionSummary[]> {

@@ -12,10 +12,25 @@ Object.defineProperty(globalThis, "ResizeObserver", {
 });
 
 if (!globalThis.PointerEvent) {
-  Object.defineProperty(globalThis, "PointerEvent", {
-    configurable: true,
-    value: MouseEvent,
-  });
+  if (typeof MouseEvent !== "undefined") {
+    Object.defineProperty(globalThis, "PointerEvent", {
+      configurable: true,
+      value: MouseEvent,
+    });
+  }
+}
+
+// jsdom does not currently expose DragEvent. Testing Library falls back to a plain Event in
+// that case, which silently drops MouseEvent coordinates such as clientX/clientY. Use the
+// MouseEvent constructor as the closest available browser primitive so drag/drop tests exercise
+// the same edge calculations as the real WebView. Testing Library supplies dataTransfer itself.
+if (!globalThis.DragEvent) {
+  if (typeof MouseEvent !== "undefined") {
+    Object.defineProperty(globalThis, "DragEvent", {
+      configurable: true,
+      value: MouseEvent,
+    });
+  }
 }
 
 if (!globalThis.requestAnimationFrame) {

@@ -2,10 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
-// @ts-expect-error process.env is injected by node/vite
-const host = process.env.TAURI_DEV_HOST;
+const DEV_HOST = "127.0.0.1";
+const DEV_PORT = 5173;
 
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -15,19 +14,18 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
-    port: 5173,
+    host: DEV_HOST,
+    port: DEV_PORT,
     strictPort: true,
-    host: host || false,
-    hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 5174,
-        }
-      : undefined,
+    hmr: {
+      protocol: "ws",
+      host: DEV_HOST,
+      clientPort: DEV_PORT,
+    },
     watch: {
-      // 3. tell vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      usePolling: true,
+      interval: 100,
+      ignored: ["**/src-tauri/**", "**/target/**", "**/.git/**"],
     },
   },
 });

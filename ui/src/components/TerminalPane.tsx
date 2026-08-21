@@ -5,7 +5,13 @@ import { useEffect, useRef, useState } from "react";
 import { isTauriRuntime, resizeTerminal, writeTerminal } from "../lib/tauri";
 import { terminalEventBus } from "../lib/terminalEvents";
 import { attachWebglRenderer, loadTerminalAssets } from "../lib/terminalRenderer";
-import { applyTerminalSettings, useTerminalSettings } from "../lib/terminalSettings";
+import {
+  applyTerminalSettings,
+  fetchCachedNativePreferences,
+  loadTerminalSettings,
+  resolveTerminalSettings,
+  useTerminalSettings,
+} from "../lib/terminalSettings";
 import type { TerminalSession } from "../lib/types";
 
 type TerminalPaneProps = {
@@ -15,30 +21,6 @@ type TerminalPaneProps = {
   onTitleChange?: (title: string) => void;
 };
 
-const TERMINAL_THEME = {
-  background: "#0a0a0a",
-  foreground: "#d4d4d4",
-  cursor: "#e5e5e5",
-  cursorAccent: "#0a0a0a",
-  selectionBackground: "#52525299",
-  black: "#171717",
-  red: "#f87171",
-  green: "#86efac",
-  yellow: "#fde68a",
-  blue: "#93c5fd",
-  magenta: "#d8b4fe",
-  cyan: "#67e8f9",
-  white: "#e5e5e5",
-  brightBlack: "#737373",
-  brightRed: "#fca5a5",
-  brightGreen: "#bbf7d0",
-  brightYellow: "#fef08a",
-  brightBlue: "#bfdbfe",
-  brightMagenta: "#e9d5ff",
-  brightCyan: "#a5f3fc",
-  brightWhite: "#fafafa",
-} as const;
-
 export function TerminalPane({ session, active, onBell, onTitleChange }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -46,14 +28,16 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
   const sessionRef = useRef(session);
   const onBellRef = useRef(onBell);
   const onTitleChangeRef = useRef(onTitleChange);
-  const { settings } = useTerminalSettings();
+  const { settings, refreshNativePreferences } = useTerminalSettings();
   const settingsRef = useRef(settings);
+  const refreshPreferencesRef = useRef(refreshNativePreferences);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   sessionRef.current = session;
   onBellRef.current = onBell;
   onTitleChangeRef.current = onTitleChange;
   settingsRef.current = settings;
+  refreshPreferencesRef.current = refreshNativePreferences;
 
   useEffect(() => {
     if (active) {
@@ -69,7 +53,14 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
     if (!terminal) return;
     applyTerminalSettings(terminal, settings);
     requestAnimationFrame(() => fitRef.current?.fit());
-  }, [settings.fontFamily, settings.fontSize, settings.macosOptionAsAlt, settings.scrollback]);
+  }, [
+    settings.fontFamily,
+    settings.fontSize,
+    settings.macosOptionAsAlt,
+    settings.scrollback,
+    settings.cursorStyle,
+    settings.theme,
+  ]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -86,21 +77,36 @@ export function TerminalPane({ session, active, onBell, onTitleChange }: Termina
     });
 
     async function initialize(hostElement: HTMLDivElement) {
+      let latestNativePrefs = await fetchCachedNativePreferences();
+      if (disposed) return;
+
+      if (typeof document !== "undefined" && "fonts" in document) {
+        try {
+          await document.fonts.ready;
+        } catch {
+        }
+      }
+      if (disposed) return;
+
+      // Always re-resolve using the latest localSettings and nativePreferences
+      const finalSettings = resolveTerminalSettings(loadTerminalSettings(), latestNativePrefs);
+
       const { Terminal: TerminalConstructor, FitAddon: FitAddonConstructor } = await loadTerminalAssets();
       if (disposed) return;
 
       const terminal = new TerminalConstructor({
         allowProposedApi: false,
+        customGlyphs: true,
         convertEol: true,
         cursorBlink: true,
-        cursorStyle: "bar",
-        fontFamily: settingsRef.current.fontFamily,
-        fontSize: settingsRef.current.fontSize,
-        lineHeight: 1.2,
+        cursorStyle: finalSettings.cursorStyle ?? "block",
+        fontFamily: finalSettings.fontFamily,
+        fontSize: finalSettings.fontSize,
+        lineHeight: 1.0,
         letterSpacing: 0,
-        macOptionIsMeta: settingsRef.current.macosOptionAsAlt,
-        scrollback: settingsRef.current.scrollback,
-        theme: TERMINAL_THEME,
+        macOptionIsMeta: finalSettings.macosOptionAsAlt,
+        scrollback: finalSettings.scrollback,
+        theme: finalSettings.theme,
       });
       const fitAddon = new FitAddonConstructor();
       terminal.loadAddon(fitAddon);

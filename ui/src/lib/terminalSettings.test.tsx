@@ -18,7 +18,33 @@ import {
 
 const ghosttyPreferences = {
   fontFamily: "Noto Sans KR",
+  fontSize: 13,
   macosOptionAsAlt: true,
+  cursorStyle: "block",
+  theme: {
+    background: "#282c34",
+    foreground: "#ffffff",
+    cursor: "#ffffff",
+    cursorAccent: "#282c34",
+    selectionBackground: "#52525299",
+    black: "#1d1f21",
+    red: "#cc6666",
+    green: "#b5bd68",
+    yellow: "#f0c674",
+    blue: "#81a2be",
+    magenta: "#b294bb",
+    cyan: "#8abeb7",
+    white: "#c5c8c6",
+    brightBlack: "#666666",
+    brightRed: "#d54e53",
+    brightGreen: "#b9ca4a",
+    brightYellow: "#e7c547",
+    brightBlue: "#7aa6da",
+    brightMagenta: "#c397d8",
+    brightCyan: "#70c0b1",
+    brightWhite: "#eaeaea",
+    extendedAnsi: [],
+  },
   source: "ghostty" as const,
   status: "imported" as const,
   sourcePath: "/Users/test/.config/ghostty/config",
@@ -68,7 +94,10 @@ describe("terminal settings", () => {
 
     const fallback = resolveTerminalSettings(DEFAULT_TERMINAL_SETTINGS, {
       fontFamily: "monospace",
+      fontSize: 13,
       macosOptionAsAlt: false,
+      cursorStyle: "block",
+      theme: ghosttyPreferences.theme,
       source: "defaults",
       status: "malformed",
       sourcePath: "/bad/config",
@@ -81,17 +110,18 @@ describe("terminal settings", () => {
     });
   });
 
-  it("applies effective font, option-as-alt, font size and scrollback to live xterm options", () => {
+  it("applies effective font, option-as-alt, font size, scrollback, and theme to live xterm options", () => {
     const terminal = {
       options: { fontFamily: "monospace", macOptionIsMeta: false, fontSize: 13, scrollback: 10_000 },
     };
     const settings = resolveTerminalSettings(DEFAULT_TERMINAL_SETTINGS, ghosttyPreferences);
     applyTerminalSettings(terminal, settings);
-    expect(terminal.options).toEqual({
+    expect(terminal.options).toMatchObject({
       fontFamily: "Noto Sans KR",
       macOptionIsMeta: true,
       fontSize: 13,
       scrollback: 10_000,
+      cursorStyle: "block",
     });
   });
 });

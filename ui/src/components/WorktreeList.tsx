@@ -1,9 +1,10 @@
 import { GitBranch, LockKeyhole, RefreshCcw, Trash2 } from "lucide-react";
 
+import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
-import { StatusDot } from "./ui/StatusDot";
+import { StatusDot, type StatusDotState } from "./ui/StatusDot";
 
 type WorktreeListProps = {
   worktrees: Worktree[];
@@ -11,6 +12,7 @@ type WorktreeListProps = {
   agents: ActiveAgent[];
   statuses: Record<string, DirtyState | undefined>;
   unreadWorktreePaths?: Record<string, boolean>;
+  activityByWorktreePath?: Record<string, ActivitySummary | undefined>;
   onSelect: (worktree: Worktree) => void;
   onCreate: () => void;
   onRefreshStatus: (worktree: Worktree) => void;
@@ -18,18 +20,20 @@ type WorktreeListProps = {
   label?: string;
 };
 
-function basename(path: string) {
-  if (path === ".") return "main";
-  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
-}
-
 function branchName(worktree: Worktree) {
   return worktree.branch?.replace(/^refs\/heads\//, "") ?? "detached HEAD";
 }
 
 function workspaceName(worktree: Worktree) {
   const parts = branchName(worktree).split("/");
-  return parts[0] === "orca" && parts.length > 2 ? parts.slice(2).join("/") : basename(worktree.path);
+  if (parts[0] === "orca" && parts.length > 2) {
+    return parts.slice(2).join("/");
+  }
+  const branch = branchName(worktree);
+  if (branch && branch !== "detached HEAD" && branch !== "orca-lite") {
+    return branch;
+  }
+  return "main";
 }
 
 /** The repository root worktree is the one that is not an `orca/<ws>/<slug>` worktree branch. */
@@ -43,6 +47,7 @@ export function WorktreeList({
   agents,
   statuses,
   unreadWorktreePaths,
+  activityByWorktreePath,
   onSelect,
   onCreate,
   onRefreshStatus,
@@ -72,7 +77,12 @@ export function WorktreeList({
         const status = statuses[worktree.path];
         const primary = isPrimaryWorktree(worktree);
         const canDelete = !primary;
-        const hasUnread = Boolean(unreadWorktreePaths?.[worktree.path] && worktree.path !== activePath);
+        const summary = activityByWorktreePath?.[worktree.path];
+        const hasUnread = !active && Boolean(summary?.hasUnread || unreadWorktreePaths?.[worktree.path]);
+        const displaySummary = summary ? { ...summary, hasUnread } : undefined;
+        const aggregateIndicator = resolveActivityIndicator(displaySummary);
+        const indicator: StatusDotState | null = aggregateIndicator ?? (summary === undefined && agent ? agent.state : null);
+
         return (
           <li
             key={worktree.path}
@@ -95,13 +105,16 @@ export function WorktreeList({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
-                    {agent ? <StatusDot state={agent.state} /> : <span className="size-1.5 shrink-0 rounded-full bg-status-idle" />}
+                    <span
+                      data-testid="worktree-status-dot"
+                      data-activity-state={indicator ?? "idle"}
+                      className="inline-flex size-3 shrink-0 items-center justify-center"
+                    >
+                      {indicator ? <StatusDot state={indicator} /> : <span className="size-1.5 shrink-0 rounded-full bg-status-idle" />}
+                    </span>
                     <span className="min-w-0 flex-1 truncate text-[12px] font-medium leading-tight text-foreground">
                       {workspaceName(worktree)}
                     </span>
-                    {hasUnread ? (
-                      <span className="size-1.5 shrink-0 rounded-full bg-blue-500" data-testid="worktree-unread-dot" />
-                    ) : null}
                     {primary ? (
                       <span className="shrink-0 rounded-full bg-worktree-sidebar-foreground/10 px-1.5 py-px text-[10px] font-medium leading-none text-muted-foreground">
                         primary

@@ -82,7 +82,7 @@ async fn test_remote_server_health_and_lifecycle() {
     };
 
     let (handle, addr) = start_remote_server(Arc::clone(&state)).await.expect("start server");
-    assert!(addr.ip().is_loopback());
+    assert!(addr.ip().is_unspecified() || addr.ip().is_loopback());
 
     // Health endpoint
     let client = reqwest_like_health(&format!("http://{addr}/api/v1/health")).await;

@@ -3,7 +3,6 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/src/assets/rorca-icon.svg" />
-    <link rel="icon" type="image/svg+xml" href="/src/assets/rorca-icon.svg" />
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
@@ -13,6 +12,7 @@
   </head>
   <body class="bg-[#09090b] text-[#fafafa] antialiased">
     <div id="root"></div>
+    <!-- Vite injects /@vite/client in dev; keeping a single app entry avoids duplicate HMR clients. -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

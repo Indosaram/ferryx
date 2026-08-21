@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 export type ShortcutActionId =
   | "tab.newTerminal"
+  | "tab.newBrowser"
   | "tab.close"
   | "tab.next"
   | "tab.previous"
@@ -41,6 +42,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "New terminal tab",
     group: "Tabs",
     binding: { key: "t", mod: true },
+    source: "original",
+  },
+  {
+    id: "tab.newBrowser",
+    title: "New browser tab",
+    group: "Tabs",
+    binding: { key: "b", mod: true, shift: true },
     source: "original",
   },
   {

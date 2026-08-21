@@ -15,11 +15,8 @@ describe("layoutReducer with per-tab split trees", () => {
 
     expect(state.tabs).toHaveLength(2);
     expect(state.activeTabId).toBe("tab-1");
-    expect(state.layoutsByTabId["tab-1"]).toBeDefined();
     expect(state.layoutsByTabId["tab-1"].root).toEqual({ type: "leaf", leafId: "leaf-init" });
     expect(state.layoutsByTabId["tab-1"].sessionIdsByLeafId["leaf-init"]).toBe("session-1");
-
-    expect(state.layoutsByTabId["tab-2"]).toBeDefined();
     expect(state.layoutsByTabId["tab-2"].root).toEqual({ type: "leaf", leafId: "leaf-init" });
     expect(state.layoutsByTabId["tab-2"].sessionIdsByLeafId["leaf-init"]).toBe("session-2");
   });
@@ -29,7 +26,6 @@ describe("layoutReducer with per-tab split trees", () => {
     const tab2 = tab("tab-2", "session-2");
     let state = createLayoutState([tab1, tab2], tab1.id);
 
-    // Split tab-1 horizontally
     state = layoutReducer(state, {
       type: "SPLIT_PANE",
       tabId: "tab-1",
@@ -39,24 +35,17 @@ describe("layoutReducer with per-tab split trees", () => {
       sessionId: "session-1-right",
     });
 
-    // tab-1 should now have a horizontal split
-    const tab1Layout = state.layoutsByTabId["tab-1"];
-    expect(tab1Layout.root).toMatchObject({
+    expect(state.layoutsByTabId["tab-1"].root).toMatchObject({
       type: "split",
       direction: "horizontal",
       first: { type: "leaf", leafId: "leaf-init" },
       second: { type: "leaf", leafId: "leaf-right" },
       ratio: 0.5,
     });
-    expect(tab1Layout.sessionIdsByLeafId["leaf-right"]).toBe("session-1-right");
-    expect(tab1Layout.activeLeafId).toBe("leaf-right");
+    expect(state.layoutsByTabId["tab-1"].sessionIdsByLeafId["leaf-right"]).toBe("session-1-right");
+    expect(state.layoutsByTabId["tab-1"].activeLeafId).toBe("leaf-right");
+    expect(state.layoutsByTabId["tab-2"].root).toEqual({ type: "leaf", leafId: "leaf-init" });
 
-    // tab-2 must remain completely untouched with its own single leaf
-    const tab2Layout = state.layoutsByTabId["tab-2"];
-    expect(tab2Layout.root).toEqual({ type: "leaf", leafId: "leaf-init" });
-    expect(Object.keys(tab2Layout.sessionIdsByLeafId)).toHaveLength(1);
-
-    // Split the right pane of tab-1 vertically (nested split on the right pane!)
     state = layoutReducer(state, {
       type: "SPLIT_PANE",
       tabId: "tab-1",
@@ -66,8 +55,7 @@ describe("layoutReducer with per-tab split trees", () => {
       sessionId: "session-1-bottom",
     });
 
-    const updatedTab1 = state.layoutsByTabId["tab-1"];
-    expect(updatedTab1.root).toMatchObject({
+    expect(state.layoutsByTabId["tab-1"].root).toMatchObject({
       type: "split",
       direction: "horizontal",
       first: { type: "leaf", leafId: "leaf-init" },
@@ -78,6 +66,31 @@ describe("layoutReducer with per-tab split trees", () => {
         second: { type: "leaf", leafId: "leaf-right-bottom" },
       },
     });
+  });
+
+  it("rejects missing split targets and duplicate leaf ids without creating orphan session bindings", () => {
+    const initial = createLayoutState([tab("tab-1", "session-1")], "tab-1");
+
+    const missingTarget = layoutReducer(initial, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "missing",
+      direction: "horizontal",
+      newLeafId: "orphan",
+      sessionId: "session-orphan",
+    });
+    expect(missingTarget).toBe(initial);
+    expect(missingTarget.layoutsByTabId["tab-1"].sessionIdsByLeafId).toEqual({ "leaf-init": "session-1" });
+
+    const duplicateLeaf = layoutReducer(initial, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-init",
+      direction: "horizontal",
+      newLeafId: "leaf-init",
+      sessionId: "session-orphan",
+    });
+    expect(duplicateLeaf).toBe(initial);
   });
 
   it("closes an individual pane and collapses the parent split into the sibling", () => {
@@ -92,11 +105,7 @@ describe("layoutReducer with per-tab split trees", () => {
       sessionId: "session-2",
     });
 
-    state = layoutReducer(state, {
-      type: "CLOSE_PANE",
-      tabId: "tab-1",
-      leafId: "leaf-2",
-    });
+    state = layoutReducer(state, { type: "CLOSE_PANE", tabId: "tab-1", leafId: "leaf-2" });
 
     const tab1Layout = state.layoutsByTabId["tab-1"];
     expect(tab1Layout.root).toEqual({ type: "leaf", leafId: "leaf-init" });
@@ -104,9 +113,64 @@ describe("layoutReducer with per-tab split trees", () => {
     expect(tab1Layout.sessionIdsByLeafId["leaf-2"]).toBeUndefined();
   });
 
+  it("selects the adjacent tab when closing the active tab", () => {
+    const tabs = [tab("tab-1", "s1"), tab("tab-2", "s2"), tab("tab-3", "s3"), tab("tab-4", "s4")];
+    let state = createLayoutState(tabs, "tab-2");
+
+    state = layoutReducer(state, { type: "CLOSE_TAB", tabId: "tab-2" });
+    expect(state.activeTabId).toBe("tab-3");
+
+    state = layoutReducer({ ...state, activeTabId: "tab-4" }, { type: "CLOSE_TAB", tabId: "tab-4" });
+    expect(state.activeTabId).toBe("tab-3");
+  });
+
+  it("reorders tabs by stable tab id without disturbing active tab or pane layouts", () => {
+    const state = createLayoutState([tab("tab-1", "s1"), tab("tab-2", "s2"), tab("tab-3", "s3")], "tab-2");
+    const layouts = state.layoutsByTabId;
+
+    const reordered = layoutReducer(state, { type: "REORDER_TAB", tabId: "tab-1", targetIndex: 2 });
+
+    expect(reordered.tabs.map((item) => item.id)).toEqual(["tab-2", "tab-3", "tab-1"]);
+    expect(reordered.activeTabId).toBe("tab-2");
+    expect(reordered.layoutsByTabId).toBe(layouts);
+  });
+
+  it("renames and pins tabs in layout state while rejecting blank titles", () => {
+    let state = createLayoutState([tab("tab-1", "s1")], "tab-1");
+    state = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "  custom title  " });
+    state = layoutReducer(state, { type: "SET_TAB_PINNED", tabId: "tab-1", pinned: true });
+
+    expect(state.tabs[0]).toMatchObject({ label: "custom title", pinned: true });
+    const unchanged = layoutReducer(state, { type: "RENAME_TAB", tabId: "tab-1", label: "   " });
+    expect(unchanged).toBe(state);
+  });
+
+  it("ignores focus requests for leaves that do not exist", () => {
+    const state = createLayoutState([tab("tab-1", "session-1")], "tab-1");
+    const focused = layoutReducer(state, { type: "FOCUS_PANE", tabId: "tab-1", leafId: "missing" });
+    expect(focused).toBe(state);
+    expect(focused.layoutsByTabId["tab-1"].activeLeafId).toBe("leaf-init");
+  });
+
+  it("normalizes stale pane session mappings to the actual leaf set", () => {
+    const state = createLayoutState([tab("tab-1", "session-1")], "tab-1");
+    const malformed = {
+      ...state,
+      layoutsByTabId: {
+        ...state.layoutsByTabId,
+        "tab-1": {
+          ...state.layoutsByTabId["tab-1"],
+          sessionIdsByLeafId: { "leaf-init": "session-1", ghost: "session-ghost" },
+        },
+      },
+    };
+
+    const normalized = layoutReducer(malformed, { type: "ACTIVATE_TAB", tabId: "tab-1" });
+    expect(normalized.layoutsByTabId["tab-1"].sessionIdsByLeafId).toEqual({ "leaf-init": "session-1" });
+  });
+
   it("swaps pane positions for drag-and-drop reorder", () => {
-    const tab1 = tab("tab-1", "session-1");
-    let state = createLayoutState([tab1], tab1.id);
+    let state = createLayoutState([tab("tab-1", "session-1")], "tab-1");
     state = layoutReducer(state, {
       type: "SPLIT_PANE",
       tabId: "tab-1",
@@ -131,8 +195,7 @@ describe("layoutReducer with per-tab split trees", () => {
   });
 
   it("adjusts split ratio at dot path", () => {
-    const tab1 = tab("tab-1", "session-1");
-    let state = createLayoutState([tab1], tab1.id);
+    let state = createLayoutState([tab("tab-1", "session-1")], "tab-1");
     state = layoutReducer(state, {
       type: "SPLIT_PANE",
       tabId: "tab-1",
@@ -142,16 +205,7 @@ describe("layoutReducer with per-tab split trees", () => {
       sessionId: "session-2",
     });
 
-    state = layoutReducer(state, {
-      type: "SET_PANE_RATIO",
-      tabId: "tab-1",
-      path: "",
-      ratio: 0.7,
-    });
-
-    expect(state.layoutsByTabId["tab-1"].root).toMatchObject({
-      type: "split",
-      ratio: 0.7,
-    });
+    state = layoutReducer(state, { type: "SET_PANE_RATIO", tabId: "tab-1", path: "", ratio: 0.7 });
+    expect(state.layoutsByTabId["tab-1"].root).toMatchObject({ type: "split", ratio: 0.7 });
   });
 });

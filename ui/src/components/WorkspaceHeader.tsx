@@ -18,9 +18,16 @@ function branchName(worktree: Worktree) {
   return worktree.branch?.replace(/^refs\/heads\//, "") ?? "detached HEAD";
 }
 
-function basename(path: string) {
-  if (path === ".") return "main";
-  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+function displayWorkspaceTitle(worktree: Worktree) {
+  const parts = branchName(worktree).split("/");
+  if (parts[0] === "orca" && parts.length > 2) {
+    return parts.slice(2).join("/");
+  }
+  const branch = branchName(worktree);
+  if (branch && branch !== "detached HEAD" && branch !== "orca-lite") {
+    return branch;
+  }
+  return "main";
 }
 
 export function WorkspaceHeader({
@@ -57,7 +64,7 @@ export function WorkspaceHeader({
           <GitBranch className="size-3.5" />
         </div>
         <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[12px] font-medium text-foreground">{basename(worktree.path)}</span>
+          <span className="truncate text-[12px] font-medium text-foreground">{displayWorkspaceTitle(worktree)}</span>
           <span className="truncate font-mono text-[10px] text-muted-foreground/65">{branchName(worktree)}</span>
           {agent ? <StatusDot state={agent.state} /> : null}
         </div>

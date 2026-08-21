@@ -17,9 +17,13 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
     const el = containerRef.current;
     if (!el) return;
 
+    const updateVisibility = (nextVisible: boolean) => {
+      void setBrowserVisible(tab.browserId, nextVisible).catch(() => undefined);
+    };
+
     const updateBounds = () => {
       if (!visible) {
-        void setBrowserVisible(tab.browserId, false);
+        updateVisibility(false);
         return;
       }
 
@@ -29,8 +33,8 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
         y: rect.y,
         width: rect.width,
         height: rect.height,
-      });
-      void setBrowserVisible(tab.browserId, true);
+      }).catch(() => undefined);
+      updateVisibility(true);
     };
 
     updateBounds();
@@ -45,6 +49,8 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
     return () => {
       resizeObserver.disconnect();
       window.removeEventListener("resize", updateBounds);
+      // Native child webviews outlive React DOM nodes; cleanup also covers Fast Refresh remounts.
+      updateVisibility(false);
     };
   }, [tab.browserId, visible]);
 

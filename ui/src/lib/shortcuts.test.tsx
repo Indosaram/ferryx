@@ -5,6 +5,7 @@ import { SHORTCUTS, shortcutLabel, useShortcuts, type ShortcutActionId } from ".
 
 const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventInit][] = [
   ["new terminal tab", "tab.newTerminal", { key: "t", metaKey: true }],
+  ["new browser tab", "tab.newBrowser", { key: "b", metaKey: true, shiftKey: true }],
   ["close active tab", "tab.close", { key: "w", metaKey: true }],
   ["next terminal tab", "tab.next", { key: "PageDown", ctrlKey: true }],
   ["previous terminal tab", "tab.previous", { key: "PageUp", ctrlKey: true }],
@@ -32,6 +33,7 @@ describe("shortcut registry", () => {
   it("contains the required frontend actions with platform-aware Mod labels", () => {
     expect(SHORTCUTS.map((shortcut) => shortcut.id)).toEqual([
       "tab.newTerminal",
+      "tab.newBrowser",
       "tab.close",
       "tab.next",
       "tab.previous",
@@ -102,6 +104,7 @@ describe("shortcut registry", () => {
   it.each(TERMINAL_CHORD_CASES)("routes %s when xterm is focused", (_label, actionId, eventInit) => {
     const handlers = {
       "tab.newTerminal": vi.fn(),
+      "tab.newBrowser": vi.fn(),
       "tab.close": vi.fn(),
       "tab.next": vi.fn(),
       "tab.previous": vi.fn(),
@@ -137,6 +140,7 @@ describe("shortcut registry", () => {
   it("does not steal typing shortcuts from editable fields except command palette", () => {
     const handlers = {
       "tab.newTerminal": vi.fn(),
+      "tab.close": vi.fn(),
       "commandPalette.open": vi.fn(),
     };
     renderHook(() => useShortcuts(handlers, { isMac: false }));

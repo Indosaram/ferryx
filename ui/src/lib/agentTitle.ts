@@ -1,8 +1,15 @@
+import { activityStateToAgentState, type TerminalActivityState } from "./activity";
 import type { AgentState } from "./types";
 
-const BRAILLE_SPINNER_RE = /[\u2800-\u28FF]/;
+const AGENT_SPINNER_RE = /[\u2800-\u28FF✦✳⏲]/u;
 const ANSI_ESCAPE_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
 const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/g;
+const LEADING_ACTIVITY_GLYPHS_RE = /^[\u2800-\u28FF✦✳⏲✋◇\s*•\-–—|/\\~]+/u;
+
+const WAITING_RE = /\b(waiting|awaiting|needs? input|requires? input|permission|action required|approval|confirm(?:ation)?|user input)\b/i;
+const DONE_RE = /\b(done|completed?|finished|idle)\b/i;
+const DONE_GLYPH_RE = /^[◇*](?:\s|$)/u;
+const WORKING_RE = /\b(working|thinking|running|executing|processing)\b/i;
 
 export type ParsedAgentInfo = {
   isAgent: boolean;
@@ -18,6 +25,34 @@ export function normalizeTerminalTitle(rawTitle: string): string {
   return rawTitle.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHARS_RE, "").trim();
 }
 
+export function containsAgentSpinnerGlyph(rawTitle: string): boolean {
+  return AGENT_SPINNER_RE.test(normalizeTerminalTitle(rawTitle));
+}
+
+/**
+ * Classifies the activity encoded in a terminal OSC title. Attention and completion keywords
+ * intentionally outrank spinner glyphs because several agents leave their spinner prefix in the
+ * title while presenting a permission prompt or final completion state.
+ */
+export function classifyTerminalTitleActivity(rawTitle: string): TerminalActivityState | null {
+  const normalized = normalizeTerminalTitle(rawTitle);
+  if (!normalized) return null;
+
+  if (normalized.includes("✋") || WAITING_RE.test(normalized)) return "waiting";
+  if (DONE_RE.test(normalized) || DONE_GLYPH_RE.test(normalized)) return "done";
+  if (containsAgentSpinnerGlyph(normalized) || WORKING_RE.test(normalized)) return "working";
+  return null;
+}
+
+function resolveParsedAgentState(normalized: string, fallback: AgentState = "waiting"): AgentState {
+  const activity = classifyTerminalTitleActivity(normalized);
+  return activity ? activityStateToAgentState(activity) : fallback;
+}
+
+function stripLeadingActivityGlyphs(title: string) {
+  return title.replace(LEADING_ACTIVITY_GLYPHS_RE, "").trim();
+}
+
 export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {
   const normalized = normalizeTerminalTitle(rawTitle);
   if (!normalized) return null;
@@ -26,38 +61,16 @@ export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {
 
   const isOmo = /\bomo\b/i.test(lower);
   if (isOmo) {
-    const withoutSpinner = normalized.replace(/^[\u2800-\u28FF\s*•\-–—|/\\~]+/, "").trim();
+    const withoutSpinner = stripLeadingActivityGlyphs(normalized);
     const taskMatch = /^omo\s*[:\-–—|]?\s*(.*)$/i.exec(withoutSpinner);
     const task = taskMatch && taskMatch[1]?.trim() ? taskMatch[1].trim() : withoutSpinner;
-
-    let state: AgentState = "working";
-    if (
-      lower.includes("needs input") ||
-      lower.includes("waiting") ||
-      lower.includes("permission") ||
-      lower.includes("action required") ||
-      lower.includes("approval") ||
-      lower.includes("prompt")
-    ) {
-      state = "waiting";
-    } else if (
-      BRAILLE_SPINNER_RE.test(normalized) ||
-      lower.includes("working") ||
-      lower.includes("thinking") ||
-      lower.includes("running") ||
-      lower.includes("executing")
-    ) {
-      state = "working";
-    } else if (lower.includes("done") || lower.includes("completed") || lower.includes("idle")) {
-      state = "waiting";
-    }
 
     return {
       isAgent: true,
       agentType: "omo",
       name: "OMO",
       task: task || "OMO Agent",
-      state,
+      state: resolveParsedAgentState(normalized),
       displayTitle: normalized,
     };
   }
@@ -68,25 +81,25 @@ export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {
     /\bclaude\b/i.test(lower) ||
     lower.includes("claude code")
   ) {
-    const withoutSpinner = normalized.replace(/^[\u2800-\u28FF✳*•\-–—|/\\~]+/, "").trim();
+    const withoutSpinner = stripLeadingActivityGlyphs(normalized);
     return {
       isAgent: true,
       agentType: "claude",
       name: "Claude Code",
       task: withoutSpinner || "Claude Code",
-      state: BRAILLE_SPINNER_RE.test(normalized) || lower.includes("working") ? "working" : "waiting",
+      state: resolveParsedAgentState(normalized),
       displayTitle: normalized,
     };
   }
 
   if (/\bcodex\b/i.test(lower)) {
-    const withoutSpinner = normalized.replace(/^[\u2800-\u28FF*•\-–—|/\\~]+/, "").trim();
+    const withoutSpinner = stripLeadingActivityGlyphs(normalized);
     return {
       isAgent: true,
       agentType: "codex",
       name: "Codex",
       task: withoutSpinner || "Codex",
-      state: BRAILLE_SPINNER_RE.test(normalized) || lower.includes("working") ? "working" : "waiting",
+      state: resolveParsedAgentState(normalized),
       displayTitle: normalized,
     };
   }
@@ -105,13 +118,13 @@ export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {
 
   for (const agent of knownAgents) {
     if (agent.pattern.test(lower)) {
-      const withoutSpinner = normalized.replace(/^[\u2800-\u28FF*•\-–—|/\\~]+/, "").trim();
+      const withoutSpinner = stripLeadingActivityGlyphs(normalized);
       return {
         isAgent: true,
         agentType: agent.type,
         name: agent.name,
         task: withoutSpinner || agent.name,
-        state: BRAILLE_SPINNER_RE.test(normalized) || lower.includes("working") ? "working" : "waiting",
+        state: resolveParsedAgentState(normalized),
         displayTitle: normalized,
       };
     }
@@ -131,6 +144,6 @@ export function formatTabLabelFromTitle(title: string, fallbackLabel: string): s
   const normalized = normalizeTerminalTitle(title);
   if (!normalized) return fallbackLabel;
 
-  const cleaned = normalized.replace(/^[\u2800-\u28FF\s*•\-–—|/\\~]+/, "").trim();
+  const cleaned = stripLeadingActivityGlyphs(normalized);
   return cleaned || normalized;
 }

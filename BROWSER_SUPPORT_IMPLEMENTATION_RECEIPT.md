@@ -38,5 +38,22 @@
 |---|---|---|---|
 | **Gate 1** | `cargo test --manifest-path src-tauri/Cargo.toml` | **PASS (Exit 0)** | 단위 테스트 + 통합 테스트 전수 통과 (URL 검증, BrowserManager 라이프사이클 테스트 포함) |
 | **Gate 2** | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` | **PASS (Exit 0)** | 0 warnings (Strict lint 통과) |
-| **Gate 3** | `bun run --cwd ui test` | **PASS (Exit 0)** | 27 test files, 173 tests passed (BrowserToolbar 컴포넌트 테스트 포함) |
+| **Gate 3** | `bun run --cwd ui test` | **PASS (Exit 0)** | 28 test files, 177 tests passed (NewTabPopover 및 BrowserToolbar 컴포넌트 테스트 포함) |
 | **Gate 4** | `bun run --cwd ui build` | **PASS (Exit 0)** | TypeScript 컴파일 에러 0건, Vite 프로덕션 번들 정상 빌드 완료 |
+
+---
+
+## 3. NewTabPopover 컨트롤 추가 내역
+
+1. **`ui/src/components/NewTabPopover.tsx`**:
+   - 탭바 `+` 버튼 클릭 시 표시되는 플로팅 팝오버 메뉴.
+   - 상단 `"Search open tabs, files, URLs, agents..."` 쿼리 입력창 지원 (URL 입력 시 브라우저 탭 생성, 일반 검색어 입력 시 Google 검색 브라우저 탭 생성, 공백 시 새 터미널 생성).
+   - **New Terminal** (`⌘T` / `Ctrl+T`) 항목.
+   - **New Browser Tab** (`⌘⇧B` / `Ctrl+Shift+B`) 항목.
+   - 바깥 영역 클릭 및 `ESC` 키 닫기 이벤트 핸들러.
+
+2. **단축키 및 연동 (`ui/src/lib/shortcuts.ts`, `ui/src/App.tsx`, `ui/src/components/TabBar.tsx`)**:
+   - `tab.newBrowser` (`⌘⇧B` / `Ctrl+Shift+B`) 단축키 등록.
+   - `TabBar`의 `+` 버튼과 `NewTabPopover` 상태 연동.
+   - 단위 테스트(`NewTabPopover.test.tsx`) 4종 추가 및 100% 통과.
+

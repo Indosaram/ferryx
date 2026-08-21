@@ -26,9 +26,38 @@ export type LocalBranch = {
   isCurrent: boolean;
 };
 
+export type TerminalThemeColors = {
+  background: string;
+  foreground: string;
+  cursor: string;
+  cursorAccent: string;
+  selectionBackground: string;
+  selectionForeground?: string;
+  black: string;
+  red: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  magenta: string;
+  cyan: string;
+  white: string;
+  brightBlack: string;
+  brightRed: string;
+  brightGreen: string;
+  brightYellow: string;
+  brightBlue: string;
+  brightMagenta: string;
+  brightCyan: string;
+  brightWhite: string;
+  extendedAnsi?: string[];
+};
+
 export type TerminalPreferences = {
   fontFamily: string;
+  fontSize: number;
   macosOptionAsAlt: boolean;
+  cursorStyle: string;
+  theme: TerminalThemeColors;
   source: "defaults" | "ghostty";
   status: "imported" | "absent" | "malformed";
   sourcePath: string | null;
@@ -59,7 +88,33 @@ export async function getTerminalPreferences(): Promise<TerminalPreferences> {
   if (!isTauri()) {
     return {
       fontFamily: "monospace",
+      fontSize: 13,
       macosOptionAsAlt: false,
+      cursorStyle: "block",
+      theme: {
+        background: "#282c34",
+        foreground: "#ffffff",
+        cursor: "#ffffff",
+        cursorAccent: "#282c34",
+        selectionBackground: "#52525299",
+        black: "#1d1f21",
+        red: "#cc6666",
+        green: "#b5bd68",
+        yellow: "#f0c674",
+        blue: "#81a2be",
+        magenta: "#b294bb",
+        cyan: "#8abeb7",
+        white: "#c5c8c6",
+        brightBlack: "#666666",
+        brightRed: "#d54e53",
+        brightGreen: "#b9ca4a",
+        brightYellow: "#e7c547",
+        brightBlue: "#7aa6da",
+        brightMagenta: "#c397d8",
+        brightCyan: "#70c0b1",
+        brightWhite: "#eaeaea",
+        extendedAnsi: [],
+      },
       source: "defaults",
       status: "absent",
       sourcePath: null,
@@ -211,6 +266,7 @@ export type RemoteGatewayStatus = {
   mode: RemoteNetworkMode;
   port: number;
   boundAddress: string | null;
+  localIp: string | null;
   tailscale: TailscaleStatus;
 };
 
@@ -235,6 +291,7 @@ export async function getRemoteStatus(): Promise<RemoteGatewayStatus> {
       mode: "off",
       port: 43821,
       boundAddress: null,
+      localIp: null,
       tailscale: {
         installed: false,
         running: false,

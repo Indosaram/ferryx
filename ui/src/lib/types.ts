@@ -66,6 +66,7 @@ export type TerminalTab = {
   id: string;
   label: string;
   sessionId: string;
+  pinned?: boolean;
 };
 
 export type BrowserProfileId = "default" | "private";
@@ -104,6 +105,7 @@ export type BrowserTab = {
   loading?: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  pinned?: boolean;
 };
 
 export type WorkspaceTab = TerminalTab | BrowserTab;
@@ -312,4 +314,3 @@ export interface PersistedWorkspaceSession {
   activeWorkspaceId: string;
   workspaces: Record<string, PersistedWorkspace>;
 }
-

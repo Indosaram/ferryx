@@ -1,0 +1,95 @@
+import type { AgentState } from "./types";
+
+export type TerminalActivityState = "working" | "waiting" | "done";
+
+export type TerminalActivity = {
+  state: TerminalActivityState;
+  title: string;
+  isAgent: boolean;
+  agentType?: string;
+};
+
+export type ActivitySummary = {
+  workingCount: number;
+  waitingCount: number;
+  doneCount: number;
+  runningCount: number;
+  hasWorking: boolean;
+  hasWaiting: boolean;
+  hasDone: boolean;
+  hasUnread: boolean;
+};
+
+export type ActivityIndicatorState = TerminalActivityState | "unread" | null;
+
+export function summarizeActivities(
+  activities: Iterable<TerminalActivity>,
+  hasUnread = false,
+): ActivitySummary {
+  let workingCount = 0;
+  let waitingCount = 0;
+  let doneCount = 0;
+
+  for (const activity of activities) {
+    if (activity.state === "working") workingCount += 1;
+    else if (activity.state === "waiting") waitingCount += 1;
+    else doneCount += 1;
+  }
+
+  return {
+    workingCount,
+    waitingCount,
+    doneCount,
+    runningCount: workingCount,
+    hasWorking: workingCount > 0,
+    hasWaiting: waitingCount > 0,
+    hasDone: doneCount > 0,
+    hasUnread,
+  };
+}
+
+export function combineActivitySummaries(
+  summaries: Iterable<ActivitySummary>,
+  hasUnread = false,
+): ActivitySummary {
+  let workingCount = 0;
+  let waitingCount = 0;
+  let doneCount = 0;
+  let unread = hasUnread;
+
+  for (const summary of summaries) {
+    workingCount += summary.workingCount;
+    waitingCount += summary.waitingCount;
+    doneCount += summary.doneCount;
+    unread ||= summary.hasUnread;
+  }
+
+  return {
+    workingCount,
+    waitingCount,
+    doneCount,
+    runningCount: workingCount,
+    hasWorking: workingCount > 0,
+    hasWaiting: waitingCount > 0,
+    hasDone: doneCount > 0,
+    hasUnread: unread,
+  };
+}
+
+/**
+ * Visual precedence mirrors Orca: user attention wins over live work, live work wins over
+ * retained notifications, and a completed-but-read agent is shown last.
+ */
+export function resolveActivityIndicator(summary: ActivitySummary | undefined): ActivityIndicatorState {
+  if (!summary) return null;
+  if (summary.hasWaiting) return "waiting";
+  if (summary.hasWorking) return "working";
+  if (summary.hasUnread) return "unread";
+  if (summary.hasDone) return "done";
+  return null;
+}
+
+export function activityStateToAgentState(state: TerminalActivityState): AgentState {
+  if (state === "done") return "exited";
+  return state;
+}

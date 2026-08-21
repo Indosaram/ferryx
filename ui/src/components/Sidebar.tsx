@@ -10,12 +10,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
 import { isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
 import type { RegisteredProject } from "../lib/tauri";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
 import { SectionHeader } from "./ui/SectionHeader";
+import { StatusDot } from "./ui/StatusDot";
 import { WorktreeList } from "./WorktreeList";
 
 export const SIDEBAR_WIDTH_STORAGE_KEY = "orca.sidebar.width";
@@ -33,6 +35,8 @@ type SidebarProps = {
   agents: ActiveAgent[];
   activePath: string;
   statuses?: Record<string, DirtyState | undefined>;
+  unreadWorktreePaths?: Record<string, boolean>;
+  activityByWorktreePath?: Record<string, ActivitySummary | undefined>;
   onSelectProject?: (project: RegisteredProject) => void;
   onAddProject?: () => void;
   onSelectWorktree: (worktree: Worktree) => void;
@@ -54,6 +58,8 @@ export function Sidebar({
   agents,
   activePath,
   statuses = {},
+  unreadWorktreePaths,
+  activityByWorktreePath,
   onSelectProject = () => undefined,
   onAddProject = () => undefined,
   onSelectWorktree,
@@ -217,6 +223,17 @@ export function Sidebar({
             const active = project.workspaceId === activeProjectId;
             const expanded = !collapsedProjects.has(project.workspaceId);
             const projectWorktrees = worktreesByProject.get(project.workspaceId) ?? [];
+            const projectActivity = summarizeProjectActivity(
+              projectWorktrees,
+              activityByWorktreePath,
+              unreadWorktreePaths,
+            );
+            const attentionState = projectActivity.hasWaiting
+              ? "waiting"
+              : projectActivity.hasUnread
+                ? "unread"
+                : null;
+
             return (
               <div key={project.workspaceId} className="pb-0.5">
                 <div
@@ -243,10 +260,29 @@ export function Sidebar({
                     type="button"
                     onClick={() => onSelectProject(project)}
                     aria-current={active ? "true" : undefined}
+                    aria-label={project.workspaceId}
                     className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     <FolderGit2 className="size-3.5 shrink-0" />
                     <span className="min-w-0 flex-1 truncate">{project.workspaceId}</span>
+                    {projectActivity.runningCount > 0 ? (
+                      <span
+                        data-testid="project-running-badge"
+                        className="shrink-0 rounded-full bg-status-working/12 px-1.5 py-px text-[9px] font-medium leading-none text-status-working"
+                      >
+                        {projectActivity.runningCount} running
+                      </span>
+                    ) : null}
+                    {attentionState ? (
+                      <span
+                        data-testid="project-attention-indicator"
+                        data-attention-state={attentionState}
+                        title={attentionState === "waiting" ? "Agent needs attention" : "Unread activity"}
+                        className="inline-flex size-3 shrink-0 items-center justify-center"
+                      >
+                        <StatusDot state={attentionState} />
+                      </span>
+                    ) : null}
                   </button>
                 </div>
 
@@ -257,6 +293,8 @@ export function Sidebar({
                       agents={agents}
                       activePath={active ? activePath : ""}
                       statuses={statuses}
+                      unreadWorktreePaths={unreadWorktreePaths}
+                      activityByWorktreePath={activityByWorktreePath}
                       onSelect={onSelectWorktree}
                       onCreate={onCreateWorktree}
                       onRefreshStatus={onRefreshWorktreeStatus}
@@ -295,6 +333,18 @@ export function Sidebar({
       </div>
     </aside>
   );
+}
+
+function summarizeProjectActivity(
+  worktrees: Worktree[],
+  activityByWorktreePath: Record<string, ActivitySummary | undefined> | undefined,
+  unreadWorktreePaths: Record<string, boolean> | undefined,
+): ActivitySummary {
+  const summaries = worktrees
+    .map((worktree) => activityByWorktreePath?.[worktree.path])
+    .filter((summary): summary is ActivitySummary => Boolean(summary));
+  const hasUnread = worktrees.some((worktree) => Boolean(unreadWorktreePaths?.[worktree.path]));
+  return combineActivitySummaries(summaries, hasUnread);
 }
 
 /**

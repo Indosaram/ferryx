@@ -34,6 +34,7 @@ pub struct RemoteGatewayStatusResponse {
     pub mode: RemoteNetworkMode,
     pub port: u16,
     pub bound_address: Option<String>,
+    pub local_ip: Option<String>,
     pub tailscale: TailscaleStatus,
 }
 
@@ -62,11 +63,13 @@ pub async fn cmd_remote_status(
     let bound_address = state.bound_address.read().clone();
     let tailscale = check_tailscale_status(&SystemCommandRunner);
 
+    let local_ip = get_local_ip();
     Ok(RemoteGatewayStatusResponse {
         enabled: is_running,
         mode: config.mode,
         port: config.port,
         bound_address,
+        local_ip,
         tailscale,
     })
 }
@@ -131,7 +134,7 @@ pub async fn cmd_remote_pairing_create(
     let code = manager.state().auth_manager.create_pairing_code(perm);
     Ok(CreatePairingCodeResponse {
         code,
-        expires_in_seconds: 300,
+        expires_in_seconds: 60,
     })
 }
 
@@ -153,4 +156,11 @@ pub async fn cmd_remote_device_revoke(
 #[tauri::command]
 pub async fn cmd_tailscale_status() -> Result<TailscaleStatus, IpcError> {
     Ok(check_tailscale_status(&SystemCommandRunner))
+}
+
+fn get_local_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip().to_string())
 }

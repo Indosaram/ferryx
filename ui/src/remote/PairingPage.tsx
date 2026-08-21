@@ -44,7 +44,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
       <div className="w-full max-w-sm bg-neutral-900 border border-neutral-800 rounded-lg p-6 shadow-xl">
         <h2 className="text-xl font-bold text-neutral-100 mb-2">Pair Device</h2>
         <p className="text-xs text-neutral-400 mb-6">
-          Enter the one-time pairing code from your rorca Desktop settings to connect.
+          Enter the 6-digit PIN from your rorca Desktop settings (valid for 1 minute).
         </p>
 
         {error && (
@@ -59,7 +59,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder="Pairing Code"
+              placeholder="6-digit PIN" maxLength={6} inputMode="numeric" pattern="[0-9]*"
               className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded font-mono text-sm text-neutral-100 focus:outline-none focus:border-blue-500"
               disabled={loading}
               autoFocus

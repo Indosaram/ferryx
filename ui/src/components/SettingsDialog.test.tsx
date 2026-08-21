@@ -121,9 +121,7 @@ describe("SettingsDialog", () => {
       expect(screen.getByText(shortcut.title)).toBeInTheDocument();
       expect(screen.getByText(shortcutLabel(shortcut.id))).toBeInTheDocument();
     }
-    expect(screen.queryByText(/browser/i)).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Keyboard Shortcuts" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Keyboard Shortcuts" })).not.toHaveTextContent(/browser/i);
   });
 
   it("navigates to Notifications section and displays toggles, permission status, volume slider, and test button", async () => {

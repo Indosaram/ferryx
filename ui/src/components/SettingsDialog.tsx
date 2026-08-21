@@ -627,21 +627,36 @@ export function NotificationSettings() {
 function RemoteAccessSettings() {
   const [status, setStatus] = useState<RemoteGatewayStatus | null>(null);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const refreshStatus = async () => {
+    try {
+      const s = await getRemoteStatus();
+      setStatus(s);
+    } catch {
+      // ignore
+    }
+  };
 
   useEffect(() => {
-    getRemoteStatus().then(setStatus).catch(() => {});
+    refreshStatus();
   }, []);
 
-  const handleToggle = async (mode: "off" | "tailscale" | "localNetwork") => {
+  const handleToggle = async (enabled: boolean) => {
     setLoading(true);
     try {
-      if (mode === "off") {
+      if (!enabled) {
         const s = await disableRemoteGateway();
         setStatus(s);
+        setPairingCode(null);
+        setQrDataUrl(null);
       } else {
-        const s = await enableRemoteGateway({ mode });
+        const s = await enableRemoteGateway({ mode: "localNetwork" });
         setStatus(s);
+        // Auto-generate pairing PIN and QR upon enable
+        generatePairing(s);
       }
     } catch {
       // ignore
@@ -650,49 +665,62 @@ function RemoteAccessSettings() {
     }
   };
 
-  const handleGeneratePairing = async () => {
+  const generatePairing = async (currentStatus?: RemoteGatewayStatus | null) => {
+    const s = currentStatus ?? status;
     try {
       const res = await createPairingCode("control");
       setPairingCode(res.code);
+
+      // Determine host for QR URL: Tailscale domain preferred, fallback to local IP, then localhost
+      const port = s?.port ?? 43821;
+      let host = s?.localIp ? `${s.localIp}:${port}` : `localhost:${port}`;
+      let proto = "http";
+      if (s?.tailscale?.running && s?.tailscale?.selfDns) {
+        host = s.tailscale.selfDns;
+        proto = "https";
+      }
+
+      const connectUrl = `${proto}://${host}/#pair=${res.code}`;
+      const QRCode = (await import("qrcode")).default;
+      const dataUrl = await QRCode.toDataURL(connectUrl, {
+        width: 180,
+        margin: 1,
+        color: { dark: "#ffffff", light: "#171717" },
+      });
+      setQrDataUrl(dataUrl);
     } catch {
       // ignore
     }
   };
+
+  const port = status?.port ?? 43821;
+  const localUrl = status?.localIp ? `http://${status.localIp}:${port}` : `http://localhost:${port}`;
+  const tailscaleUrl = status?.tailscale?.running && status?.tailscale?.selfDns ? `https://${status.tailscale.selfDns}` : null;
 
   return (
     <section aria-labelledby="settings-remote-heading">
       <SettingsHeading
         icon={<Radio />}
         title="Remote Access"
-        description="Access desktop terminal sessions securely via Tailscale or local network."
+        description="Access desktop terminal sessions directly from your mobile browser or other devices."
       />
       <h2 id="settings-remote-heading" className="sr-only">Remote Access</h2>
       <div className="border-y border-border">
         <SettingRow
-          label="Remote Access Mode"
-          description="Tailscale binds to 127.0.0.1 for Tailscale Serve; Local Network binds to 0.0.0.0."
+          label="Remote Access"
+          description="Enable access to live terminal sessions over your local network and Tailscale."
         >
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => handleToggle("off")}
+              onClick={() => handleToggle(!status?.enabled)}
               disabled={loading}
-              className={`px-3 py-1 rounded text-xs ${status?.mode === "off" || !status?.enabled ? "bg-primary text-primary-foreground font-medium" : "bg-muted text-muted-foreground"}`}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                status?.enabled
+                  ? "bg-emerald-600 text-white hover:bg-emerald-500"
+                  : "bg-muted text-muted-foreground hover:bg-muted/80"
+              }`}
             >
-              Off
-            </button>
-            <button
-              onClick={() => handleToggle("tailscale")}
-              disabled={loading}
-              className={`px-3 py-1 rounded text-xs ${status?.mode === "tailscale" && status?.enabled ? "bg-primary text-primary-foreground font-medium" : "bg-muted text-muted-foreground"}`}
-            >
-              Tailscale
-            </button>
-            <button
-              onClick={() => handleToggle("localNetwork")}
-              disabled={loading}
-              className={`px-3 py-1 rounded text-xs ${status?.mode === "localNetwork" && status?.enabled ? "bg-primary text-primary-foreground font-medium" : "bg-muted text-muted-foreground"}`}
-            >
-              LAN
+              {status?.enabled ? "Active" : "Disabled"}
             </button>
           </div>
         </SettingRow>
@@ -700,28 +728,54 @@ function RemoteAccessSettings() {
         {status?.enabled && (
           <>
             <SettingRow
-              label="Gateway Address"
-              description="Listener address and port for incoming remote terminal connections."
+              label="Instant QR Connect"
+              description="Scan this QR code with your phone camera to pair and connect immediately without typing."
             >
-              <span className="font-mono text-xs text-foreground bg-muted px-2 py-1 rounded">
-                {status.boundAddress || `Port ${status.port}`}
-              </span>
+              <div className="flex flex-col items-center gap-2 bg-neutral-900 border border-neutral-800 p-3 rounded-lg">
+                {qrDataUrl ? (
+                  <img src={qrDataUrl} alt="Pairing QR Code" className="w-[160px] h-[160px] rounded" />
+                ) : (
+                  <div className="w-[160px] h-[160px] flex items-center justify-center text-xs text-muted-foreground">
+                    Generating...
+                  </div>
+                )}
+                {pairingCode && (
+                  <div className="flex items-center justify-between w-full px-1">
+                    <span className="font-mono text-xs text-emerald-400 font-semibold">
+                      PIN: {pairingCode}
+                    </span>
+                    <button
+                      onClick={() => generatePairing()}
+                      className="text-[10px] text-muted-foreground hover:text-foreground underline"
+                    >
+                      New Code
+                    </button>
+                  </div>
+                )}
+              </div>
             </SettingRow>
 
             <SettingRow
-              label="Device Pairing"
-              description="Generate a one-time 5-minute pairing code for your mobile device or browser."
+              label="Connection URLs"
+              description="Direct browser address for mobile and other devices on your network."
             >
-              <div className="flex flex-col items-end gap-2">
-                <button
-                  onClick={handleGeneratePairing}
-                  className="px-3 py-1 bg-secondary text-secondary-foreground hover:bg-secondary/80 rounded text-xs font-medium"
-                >
-                  Pair Device
-                </button>
-                {pairingCode && (
-                  <div className="font-mono text-xs bg-muted px-2 py-1 rounded text-primary">
-                    Code: {pairingCode}
+              <div className="space-y-1 text-right">
+                <div className="flex items-center justify-end gap-1.5 font-mono text-[11px] text-foreground">
+                  <span>{localUrl}</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(localUrl);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1500);
+                    }}
+                    className="text-[10px] px-1.5 py-0.5 bg-muted hover:bg-muted/80 rounded"
+                  >
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                {tailscaleUrl && (
+                  <div className="font-mono text-[10px] text-muted-foreground">
+                    Tailscale: {tailscaleUrl}
                   </div>
                 )}
               </div>

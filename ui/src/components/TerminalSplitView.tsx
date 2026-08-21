@@ -1,11 +1,12 @@
-import { Columns2, GripVertical, Rows2, X } from "lucide-react";
+import { Columns2, Rows2, X } from "lucide-react";
 import React, { useRef, useState } from "react";
 
+import type { ActivitySummary } from "../lib/activity";
 import type { LayoutState, TabPaneLayout, TerminalSession, WorkspaceTab } from "../lib/types";
 import type { PaneDirection, PaneNode } from "../state/paneTree";
+import { BrowserPane } from "./BrowserPane";
 import { TabBar } from "./TabBar";
 import { TerminalPane } from "./TerminalPane";
-import { BrowserPane } from "./BrowserPane";
 import { IconButton } from "./ui/IconButton";
 
 type TerminalSplitViewProps = {
@@ -13,8 +14,14 @@ type TerminalSplitViewProps = {
   sessions: Record<string, TerminalSession>;
   onActivateTab?: (tabId: string) => void;
   onCloseTab?: (tabId: string) => void;
+  onCloseOtherTabs?: (tabId: string) => void;
+  onCloseTabsToRight?: (tabId: string) => void;
+  onCloseTabsToLeft?: (tabId: string) => void;
+  onReorderTab?: (tabId: string, targetIndex: number) => void;
+  onRenameTab?: (tabId: string, label: string) => void;
+  onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab?: () => void;
-  onAddBrowserTab?: () => void;
+  onAddBrowserTab?: (url?: string) => void;
   onNavigateBrowserTab?: (tabId: string, url: string) => void;
   onReloadBrowserTab?: (tabId: string) => void;
   onSplitPane?: (tabId: string, leafId: string, direction: PaneDirection) => void;
@@ -22,9 +29,10 @@ type TerminalSplitViewProps = {
   onSetRatio?: (tabId: string, path: string, ratio: number) => void;
   onSwapPanes?: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane?: (tabId: string, leafId: string) => void;
-  onTitleChange?: (tabId: string, title: string) => void;
+  onTitleChange?: (tabId: string, title: string, sessionId?: string) => void;
   onBell?: (sessionId: string, tabId: string) => void;
   unreadTabIds?: Record<string, boolean>;
+  activityByTabId?: Record<string, ActivitySummary | undefined>;
   leadingSpacer?: number;
 };
 
@@ -33,6 +41,12 @@ export function TerminalSplitView({
   sessions,
   onActivateTab = () => undefined,
   onCloseTab = () => undefined,
+  onCloseOtherTabs,
+  onCloseTabsToRight,
+  onCloseTabsToLeft,
+  onReorderTab,
+  onRenameTab,
+  onToggleTabPin,
   onAddTab = () => undefined,
   onAddBrowserTab = () => undefined,
   onNavigateBrowserTab = () => undefined,
@@ -45,46 +59,54 @@ export function TerminalSplitView({
   onTitleChange = () => undefined,
   onBell,
   unreadTabIds,
+  activityByTabId,
   leadingSpacer = 0,
 }: TerminalSplitViewProps) {
   const [draggedLeafId, setDraggedLeafId] = useState<{ tabId: string; leafId: string } | null>(null);
 
-  const activeTab = layout.tabs.find((t) => t.id === layout.activeTabId) ?? layout.tabs[0] ?? null;
-  if (!activeTab) {
-    return <div className="relative flex-1 overflow-hidden bg-terminal" data-testid="terminal-layout" />;
-  }
+  const activeTab = layout.tabs.find((tab) => tab.id === layout.activeTabId) ?? layout.tabs[0] ?? null;
+  const activeTabLayout = activeTab ? getTabPaneLayout(layout, activeTab) : null;
+  const isBrowserTab = activeTab?.kind === "browser";
 
-  const isBrowserTab = activeTab.kind === "browser";
-
-  const activeTabLayout: TabPaneLayout = layout.layoutsByTabId?.[activeTab.id] ?? {
-    root: { type: "leaf", leafId: "leaf-default" },
-    activeLeafId: "leaf-default",
-    expandedLeafId: null,
-    sessionIdsByLeafId: { "leaf-default": isBrowserTab ? "" : activeTab.sessionId },
+  const splitTab = (tabId: string, direction: PaneDirection) => {
+    const tab = layout.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.kind === "browser") return;
+    const tabLayout = getTabPaneLayout(layout, tab);
+    const targetLeafId = tabLayout.activeLeafId ?? firstLeafId(tabLayout.root);
+    if (targetLeafId) onSplitPane(tab.id, targetLeafId, direction);
   };
 
   return (
     <div className="relative flex flex-1 flex-col overflow-hidden bg-terminal" data-testid="terminal-layout">
       <TabBar
         tabs={layout.tabs}
-        activeTabId={activeTab.id}
+        activeTabId={activeTab?.id ?? ""}
         unreadTabIds={unreadTabIds}
+        activityByTabId={activityByTabId}
         onActivate={onActivateTab}
         onClose={onCloseTab}
+        onCloseOthers={onCloseOtherTabs}
+        onCloseToRight={onCloseTabsToRight}
+        onCloseToLeft={onCloseTabsToLeft}
+        onReorderTabs={onReorderTab}
+        onRenameTab={onRenameTab}
+        onTogglePin={onToggleTabPin}
+        onSplitRight={(tabId) => splitTab(tabId, "horizontal")}
+        onSplitDown={(tabId) => splitTab(tabId, "vertical")}
         onAdd={onAddTab}
         onAddBrowser={onAddBrowserTab}
         leadingSpacer={leadingSpacer}
       />
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-terminal">
-        {isBrowserTab ? (
+        {!activeTab ? null : isBrowserTab ? (
           <BrowserPane
             tab={activeTab}
             visible={true}
             onNavigate={(url) => onNavigateBrowserTab(activeTab.id, url)}
             onReload={() => onReloadBrowserTab(activeTab.id)}
           />
-        ) : (
+        ) : activeTabLayout ? (
           <PaneRenderer
             node={activeTabLayout.root}
             tab={activeTab}
@@ -101,10 +123,26 @@ export function TerminalSplitView({
             onTitleChange={onTitleChange}
             onBell={onBell}
           />
-        )}
+        ) : null}
       </div>
     </div>
   );
+}
+
+function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPaneLayout {
+  const isBrowserTab = tab.kind === "browser";
+  return layout.layoutsByTabId?.[tab.id] ?? {
+    root: { type: "leaf", leafId: "leaf-default" },
+    activeLeafId: "leaf-default",
+    expandedLeafId: null,
+    sessionIdsByLeafId: { "leaf-default": isBrowserTab ? "" : tab.sessionId },
+  };
+}
+
+function firstLeafId(node: PaneNode): string {
+  let current = node;
+  while (current.type === "split") current = current.first;
+  return current.leafId;
 }
 
 type PaneRendererProps = {
@@ -114,13 +152,13 @@ type PaneRendererProps = {
   sessions: Record<string, TerminalSession>;
   path: string;
   draggedLeafId: { tabId: string; leafId: string } | null;
-  setDraggedLeafId: (val: { tabId: string; leafId: string } | null) => void;
+  setDraggedLeafId: (value: { tabId: string; leafId: string } | null) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-  onTitleChange: (tabId: string, title: string) => void;
+  onTitleChange: (tabId: string, title: string, sessionId?: string) => void;
   onBell?: (sessionId: string, tabId: string) => void;
 };
 
@@ -164,9 +202,7 @@ function PaneRenderer(props: PaneRendererProps) {
 
   return (
     <div
-      className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden ${
-        isHorizontal ? "flex-row" : "flex-col"
-      }`}
+      className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden ${isHorizontal ? "flex-row" : "flex-col"}`}
       data-testid="pane-split"
       data-direction={node.direction}
     >
@@ -200,12 +236,12 @@ type PaneLeafViewProps = {
   isOnlyLeaf: boolean;
   isActive: boolean;
   draggedLeafId: { tabId: string; leafId: string } | null;
-  setDraggedLeafId: (val: { tabId: string; leafId: string } | null) => void;
+  setDraggedLeafId: (value: { tabId: string; leafId: string } | null) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-  onTitleChange: (tabId: string, title: string) => void;
+  onTitleChange: (tabId: string, title: string, sessionId?: string) => void;
   onBell?: (sessionId: string, tabId: string) => void;
 };
 
@@ -225,10 +261,15 @@ function PaneLeafView({
   onBell,
 }: PaneLeafViewProps) {
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isHoveredTop, setIsHoveredTop] = useState(false);
 
-  const handleDragStart = (e: React.DragEvent) => {
-    e.dataTransfer.setData("text/plain", `${tab.id}:${leafId}`);
-    e.dataTransfer.effectAllowed = "move";
+  const handleDragStart = (event: React.DragEvent) => {
+    if (event.target instanceof Element && event.target.closest("button")) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.setData("text/plain", `${tab.id}:${leafId}`);
+    event.dataTransfer.effectAllowed = "move";
     setDraggedLeafId({ tabId: tab.id, leafId });
   };
 
@@ -237,20 +278,22 @@ function PaneLeafView({
     setIsDragOver(false);
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragOver = (event: React.DragEvent) => {
     if (draggedLeafId && draggedLeafId.tabId === tab.id && draggedLeafId.leafId !== leafId) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
       setIsDragOver(true);
     }
   };
 
-  const handleDragLeave = () => {
+  const handleDragLeave = (event: React.DragEvent) => {
+    const related = event.relatedTarget;
+    if (related instanceof Node && event.currentTarget.contains(related)) return;
     setIsDragOver(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
+  const handleDrop = (event: React.DragEvent) => {
+    event.preventDefault();
     setIsDragOver(false);
     if (draggedLeafId && draggedLeafId.tabId === tab.id && draggedLeafId.leafId !== leafId) {
       onSwapPanes(tab.id, draggedLeafId.leafId, leafId);
@@ -260,7 +303,7 @@ function PaneLeafView({
 
   return (
     <div
-      className={`group/pane relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal transition-all ${
+      className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal transition-all ${
         isDragOver ? "ring-2 ring-primary/80 ring-inset" : ""
       }`}
       data-testid="pane-leaf"
@@ -271,56 +314,68 @@ function PaneLeafView({
       onClick={() => onFocusPane(tab.id, leafId)}
     >
       <div
-        className="pointer-events-none absolute top-1.5 left-2 z-20 flex h-7 items-center gap-1.5 rounded-md border border-border/80 bg-card/90 px-2 text-[11px] text-muted-foreground shadow-sm backdrop-blur-sm opacity-0 transition-opacity duration-150 group-hover/pane:pointer-events-auto group-hover/pane:opacity-100 select-none"
-        data-testid="pane-toolbar"
-      >
-        <div
-          draggable
-          onDragStart={handleDragStart}
-          onDragEnd={handleDragEnd}
-          className="flex cursor-grab items-center p-0.5 text-muted-foreground hover:text-foreground active:cursor-grabbing"
-          title="Drag to reorder pane"
-          data-testid="pane-drag-handle"
-        >
-          <GripVertical className="size-3.5" />
-        </div>
-        <span className="truncate font-mono text-[11px] text-foreground/80">
-          {tab.label}
-        </span>
+        className="absolute inset-x-0 top-0 z-20 h-6"
+        data-testid="pane-toolbar-hotspot"
+        onMouseEnter={() => setIsHoveredTop(true)}
+        onMouseLeave={(event) => {
+          const related = event.relatedTarget;
+          if (!(related instanceof Element) || !related.closest('[data-testid="pane-toolbar"]')) {
+            setIsHoveredTop(false);
+          }
+        }}
+      />
 
-        <div className="ml-1 flex items-center gap-0.5 border-l border-border/60 pl-1">
+      <div
+        draggable
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        className={`pointer-events-none absolute inset-x-0 top-0 z-30 flex h-6 cursor-grab items-center justify-between border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground backdrop-blur-md transition-opacity duration-150 active:cursor-grabbing select-none ${
+          isHoveredTop ? "pointer-events-auto opacity-100" : "opacity-0"
+        }`}
+        data-testid="pane-toolbar"
+        onMouseEnter={() => setIsHoveredTop(true)}
+        onMouseLeave={() => setIsHoveredTop(false)}
+      >
+        <div className="pointer-events-none flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-[10px] font-medium text-muted-foreground/70">{tab.label}</span>
+        </div>
+
+        <div className="flex items-center gap-0.5">
           <IconButton
             label="Split pane right"
             size="sm"
-            onClick={(e) => {
-              e.stopPropagation();
+            className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+            onClick={(event) => {
+              event.stopPropagation();
               onSplitPane(tab.id, leafId, "horizontal");
             }}
           >
-            <Columns2 className="size-3.5" />
+            <Columns2 className="size-3" />
           </IconButton>
           <IconButton
             label="Split pane down"
             size="sm"
-            onClick={(e) => {
-              e.stopPropagation();
+            className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+            onClick={(event) => {
+              event.stopPropagation();
               onSplitPane(tab.id, leafId, "vertical");
             }}
           >
-            <Rows2 className="size-3.5" />
+            <Rows2 className="size-3" />
           </IconButton>
-          {!isOnlyLeaf && (
+          {!isOnlyLeaf ? (
             <IconButton
               label="Close split view"
               size="sm"
-              onClick={(e) => {
-                e.stopPropagation();
+              className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+              onClick={(event) => {
+                event.stopPropagation();
                 onClosePane(tab.id, leafId);
               }}
             >
-              <X className="size-3.5" />
+              <X className="size-3" />
             </IconButton>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -329,7 +384,7 @@ function PaneLeafView({
           key={`${leafId}:${session.id}`}
           session={session}
           active={isActive}
-          onTitleChange={(title) => onTitleChange(tab.id, title)}
+          onTitleChange={(title) => onTitleChange(tab.id, title, session.id)}
           onBell={() => onBell?.(session.id, tab.id)}
         />
       </div>
@@ -350,24 +405,26 @@ function PaneResizeDivider({ direction, ratio, onRatioChange }: PaneResizeDivide
   const draggingRef = useRef(false);
   const isHorizontal = direction === "horizontal";
 
-  const handlePointerDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    draggingRef.current = true;
-    document.body.style.cursor = isHorizontal ? "col-resize" : "row-resize";
-
+  const handlePointerDown = (event: React.PointerEvent) => {
+    event.preventDefault();
     const parent = dividerRef.current?.parentElement;
     if (!parent) return;
+
+    draggingRef.current = true;
+    document.body.style.cursor = isHorizontal ? "col-resize" : "row-resize";
     const parentRect = parent.getBoundingClientRect();
 
-    const handlePointerMove = (ev: PointerEvent) => {
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
       if (!draggingRef.current) return;
       const totalSize = isHorizontal ? parentRect.width : parentRect.height;
       if (totalSize <= 0) return;
-      const pos = isHorizontal ? ev.clientX - parentRect.left : ev.clientY - parentRect.top;
-      const clampedRatio = Math.max(
-        MIN_PANE_SIZE_PX / totalSize,
-        Math.min(1 - MIN_PANE_SIZE_PX / totalSize, pos / totalSize)
-      );
+      if (totalSize <= MIN_PANE_SIZE_PX * 2) {
+        onRatioChange(0.5);
+        return;
+      }
+      const position = isHorizontal ? pointerEvent.clientX - parentRect.left : pointerEvent.clientY - parentRect.top;
+      const minimumRatio = MIN_PANE_SIZE_PX / totalSize;
+      const clampedRatio = Math.max(minimumRatio, Math.min(1 - minimumRatio, position / totalSize));
       onRatioChange(Number(clampedRatio.toFixed(4)));
     };
 
@@ -394,9 +451,7 @@ function PaneResizeDivider({ direction, ratio, onRatioChange }: PaneResizeDivide
       data-divider-hit-target="true"
       onPointerDown={handlePointerDown}
       className={`no-drag relative z-20 flex shrink-0 touch-none items-center justify-center ${
-        isHorizontal
-          ? "w-1.5 cursor-col-resize hover:bg-primary/20"
-          : "h-1.5 cursor-row-resize hover:bg-primary/20"
+        isHorizontal ? "w-1.5 cursor-col-resize hover:bg-primary/20" : "h-1.5 cursor-row-resize hover:bg-primary/20"
       }`}
     >
       <span

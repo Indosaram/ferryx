@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const PAIRING_EXPIRY: Duration = Duration::from_secs(300); // 5 minutes
+const PAIRING_EXPIRY: Duration = Duration::from_secs(60); // 1 minute (60 seconds)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,11 +54,8 @@ impl AuthManager {
     }
 
     pub fn create_pairing_code(&self, default_permission: DevicePermission) -> String {
-        let code: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect();
+        let pin: u32 = rand::thread_rng().gen_range(100_000..=999_999);
+        let code = format!("{pin:06}");
 
         self.pairing_codes.write().insert(
             code.clone(),

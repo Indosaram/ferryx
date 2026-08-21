@@ -265,8 +265,8 @@ const REMOTE_HTML: &str = r##"<!DOCTYPE html>
     <div id="pairing-view" class="hidden">
       <div class="card">
         <h2 style="margin-bottom: 12px; font-size: 18px;">Pair Device</h2>
-        <p style="color: #94a3b8; font-size: 13px; margin-bottom: 16px;">Enter pairing code from your rorca desktop app:</p>
-        <input type="text" id="pair-code-input" placeholder="Pairing Code" style="width: 100%; padding: 10px; background: #0f1117; border: 1px solid #2d3345; border-radius: 6px; color: white; margin-bottom: 16px; font-family: monospace;" />
+        <p style="color: #94a3b8; font-size: 13px; margin-bottom: 16px;">Enter 6-digit PIN (valid for 1 minute) from rorca Settings:</p>
+        <input type="text" id="pair-code-input" placeholder="6-digit PIN" maxlength="6" inputmode="numeric" pattern="[0-9]*" style="width: 100%; padding: 10px; background: #0f1117; border: 1px solid #2d3345; border-radius: 6px; color: white; margin-bottom: 16px; font-family: monospace;" />
         <button class="btn" id="pair-submit-btn" style="width: 100%;">Connect Device</button>
       </div>
     </div>
@@ -480,9 +480,8 @@ pub async fn start_remote_server(
 ) -> Result<(RemoteServerHandle, SocketAddr), String> {
     let config = state.config.read().clone();
     let bind_host = match config.mode {
-        RemoteNetworkMode::Off => return Err("Remote gateway mode is OFF".into()),
-        RemoteNetworkMode::LocalNetwork => "0.0.0.0",
-        RemoteNetworkMode::Tailscale => "127.0.0.1",
+        RemoteNetworkMode::Off => return Err("Remote gateway is OFF".into()),
+        _ => "0.0.0.0",
     };
 
     let bind_addr: SocketAddr = format!("{bind_host}:{}", config.port)

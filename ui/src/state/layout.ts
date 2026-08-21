@@ -16,6 +16,9 @@ export type LayoutAction =
   | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean }
   | { type: "CLOSE_TAB"; tabId: string; replacementTab?: WorkspaceTab }
   | { type: "ACTIVATE_TAB"; tabId: string }
+  | { type: "REORDER_TAB"; tabId: string; targetIndex: number }
+  | { type: "RENAME_TAB"; tabId: string; label: string }
+  | { type: "SET_TAB_PINNED"; tabId: string; pinned: boolean }
   | {
       type: "SPLIT_PANE";
       tabId: string;
@@ -78,7 +81,8 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
       });
     }
     case "CLOSE_TAB": {
-      if (!state.tabs.some((tab) => tab.id === action.tabId)) return normalizeLayout(state);
+      const closingIndex = state.tabs.findIndex((tab) => tab.id === action.tabId);
+      if (closingIndex < 0) return normalizeLayout(state);
 
       let tabs = state.tabs.filter((tab) => tab.id !== action.tabId);
       const layoutsByTabId = { ...state.layoutsByTabId };
@@ -96,8 +100,15 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
         };
       }
 
-      let activeTabId = state.activeTabId === action.tabId ? tabs[0]?.id ?? null : state.activeTabId;
-      if (activeTabId && !tabs.some((tab) => tab.id === activeTabId)) activeTabId = tabs[0]?.id ?? null;
+      let activeTabId = state.activeTabId;
+      if (state.activeTabId === action.tabId) {
+        // Match native tab-strip behavior: prefer the tab that was immediately to the right,
+        // falling back to the previous tab when the closed tab was the rightmost one.
+        activeTabId = tabs[Math.min(closingIndex, tabs.length - 1)]?.id ?? null;
+      }
+      if (activeTabId && !tabs.some((tab) => tab.id === activeTabId)) {
+        activeTabId = tabs[Math.min(closingIndex, tabs.length - 1)]?.id ?? tabs[0]?.id ?? null;
+      }
 
       return normalizeLayout({ tabs, activeTabId, layoutsByTabId });
     }
@@ -105,11 +116,39 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
       if (!state.tabs.some((tab) => tab.id === action.tabId)) return state;
       return normalizeLayout({ ...state, activeTabId: action.tabId });
     }
+    case "REORDER_TAB": {
+      const sourceIndex = state.tabs.findIndex((tab) => tab.id === action.tabId);
+      if (sourceIndex < 0 || state.tabs.length < 2 || !Number.isFinite(action.targetIndex)) return state;
+      const targetIndex = Math.max(0, Math.min(state.tabs.length - 1, Math.trunc(action.targetIndex)));
+      if (sourceIndex === targetIndex) return state;
+      const tabs = [...state.tabs];
+      const [moved] = tabs.splice(sourceIndex, 1);
+      tabs.splice(targetIndex, 0, moved);
+      return { ...state, tabs };
+    }
+    case "RENAME_TAB": {
+      const label = action.label.trim();
+      if (!label || !state.tabs.some((tab) => tab.id === action.tabId)) return state;
+      return {
+        ...state,
+        tabs: state.tabs.map((tab) => (tab.id === action.tabId ? { ...tab, label } : tab)),
+      };
+    }
+    case "SET_TAB_PINNED": {
+      if (!state.tabs.some((tab) => tab.id === action.tabId)) return state;
+      return {
+        ...state,
+        tabs: state.tabs.map((tab) => (tab.id === action.tabId ? { ...tab, pinned: action.pinned } : tab)),
+      };
+    }
     case "SPLIT_PANE": {
       const tabLayout = state.layoutsByTabId[action.tabId];
       if (!tabLayout) return state;
       const targetLeafId = action.targetLeafId ?? tabLayout.activeLeafId ?? findFirstLeafId(tabLayout.root);
+      const existingLeafIds = collectLeafIds(tabLayout.root);
+      if (!targetLeafId || !existingLeafIds.includes(targetLeafId)) return state;
       const newLeafId = action.newLeafId ?? `leaf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      if (existingLeafIds.includes(newLeafId)) return state;
       const newRoot = splitLeaf(tabLayout.root, targetLeafId, newLeafId, action.direction, action.position, action.ratio);
       const newSessionIds = { ...tabLayout.sessionIdsByLeafId, [newLeafId]: action.sessionId };
       return {
@@ -128,6 +167,8 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
     case "CLOSE_PANE": {
       const tabLayout = state.layoutsByTabId[action.tabId];
       if (!tabLayout) return state;
+      const leafIds = collectLeafIds(tabLayout.root);
+      if (!leafIds.includes(action.leafId)) return state;
       const fallbackLeafId = findSiblingLeafId(tabLayout.root, action.leafId);
       const newRoot = removeLeaf(tabLayout.root, action.leafId);
       if (!newRoot) {
@@ -157,7 +198,7 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
     }
     case "FOCUS_PANE": {
       const tabLayout = state.layoutsByTabId[action.tabId];
-      if (!tabLayout) return state;
+      if (!tabLayout || !collectLeafIds(tabLayout.root).includes(action.leafId)) return state;
       return {
         ...state,
         layoutsByTabId: {
@@ -199,7 +240,7 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
     }
     case "TOGGLE_PANE_EXPANDED": {
       const tabLayout = state.layoutsByTabId[action.tabId];
-      if (!tabLayout) return state;
+      if (!tabLayout || !collectLeafIds(tabLayout.root).includes(action.leafId)) return state;
       const isExpanded = tabLayout.expandedLeafId === action.leafId;
       return {
         ...state,
@@ -243,10 +284,15 @@ function normalizeLayout(state: LayoutState): LayoutState {
       const leaves = collectLeafIds(existing.root);
       const activeLeafId = leaves.includes(existing.activeLeafId ?? "") ? existing.activeLeafId : leaves[0] ?? null;
       const expandedLeafId = leaves.includes(existing.expandedLeafId ?? "") ? existing.expandedLeafId : null;
+      const defaultSessionId = tab.kind === "browser" ? "" : tab.sessionId;
+      const sessionIdsByLeafId = Object.fromEntries(
+        leaves.map((leafId) => [leafId, existing.sessionIdsByLeafId[leafId] ?? defaultSessionId]),
+      );
       layoutsByTabId[tab.id] = {
         ...existing,
         activeLeafId,
         expandedLeafId,
+        sessionIdsByLeafId,
       };
     } else {
       const leafId = "leaf-default";

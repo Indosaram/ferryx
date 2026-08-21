@@ -8,12 +8,12 @@ import { Sidebar, SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY } from "./components/Si
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { IconButton } from "./components/ui/IconButton";
-import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
-import type { PaneDirection } from "./state/paneTree";
-import { DEFAULT_WORKSPACE_ID, getWorktreeStatus, registerProject, saveSession, loadSession, type RegisteredProject } from "./lib/tauri";
-import { worktreeIdentity, type DirtyState, type Worktree } from "./lib/types";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
+import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
+import { DEFAULT_WORKSPACE_ID, getWorktreeStatus, loadSession, registerProject, saveSession, type RegisteredProject } from "./lib/tauri";
+import { worktreeIdentity, type DirtyState, type Worktree } from "./lib/types";
 import { registerWindowCloseGuard } from "./lib/updater";
+import type { PaneDirection } from "./state/paneTree";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore } from "./state/workspaceStore";
 
@@ -33,15 +33,24 @@ export function App() {
   const {
     state,
     agents,
+    tabActivity,
+    worktreeActivity,
+    updateSessionTitleActivity,
     openTab,
     createBrowserTab,
     navigateBrowserTab,
     reloadBrowserTab,
     ensureTabForWorktree,
     closeTab,
+    closeOtherTabs,
+    closeTabsToRight,
+    closeTabsToLeft,
     splitPane,
     closePane,
     activateTab,
+    reorderTab,
+    renameTab,
+    setTabPinned,
     focusPane,
     setPaneRatio,
     swapPanes,
@@ -96,8 +105,8 @@ export function App() {
             await ensureTabForWorktree(wt);
           }
         }
-      } catch (e) {
-        console.error("Session restore on boot failed:", e);
+      } catch (error) {
+        console.error("Session restore on boot failed:", error);
       }
     }
     void restore();
@@ -127,8 +136,8 @@ export function App() {
         activeProject.repoRoot,
         state,
       );
-      void Promise.resolve(saveSession(session)).catch((e) =>
-        console.error("Failed to auto-save session:", e),
+      void Promise.resolve(saveSession(session)).catch((error) =>
+        console.error("Failed to auto-save session:", error),
       );
     }, 500);
     return () => clearTimeout(timer);
@@ -252,6 +261,27 @@ export function App() {
     [closeTab, reportRuntimeError],
   );
 
+  const handleCloseOtherTabs = useCallback(
+    (tabId: string) => {
+      void closeOtherTabs(tabId).catch(reportRuntimeError);
+    },
+    [closeOtherTabs, reportRuntimeError],
+  );
+
+  const handleCloseTabsToRight = useCallback(
+    (tabId: string) => {
+      void closeTabsToRight(tabId).catch(reportRuntimeError);
+    },
+    [closeTabsToRight, reportRuntimeError],
+  );
+
+  const handleCloseTabsToLeft = useCallback(
+    (tabId: string) => {
+      void closeTabsToLeft(tabId).catch(reportRuntimeError);
+    },
+    [closeTabsToLeft, reportRuntimeError],
+  );
+
   const handleCycleTab = useCallback(
     (offset: number) => {
       const tabs = state.layout.tabs;
@@ -265,8 +295,8 @@ export function App() {
 
   const handleSplitActive = useCallback(
     (direction: PaneDirection) => {
-      const activeTab = state.layout.tabs.find((t) => t.id === state.layout.activeTabId) ?? state.layout.tabs[0];
-      if (!activeTab) return;
+      const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+      if (!activeTab || activeTab.kind === "browser") return;
       const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
       const targetLeafId = activeLayout?.activeLeafId ?? "leaf-default";
       void splitPane(activeTab.id, targetLeafId, direction).catch(reportRuntimeError);
@@ -275,14 +305,13 @@ export function App() {
   );
 
   const handleUnsplitActive = useCallback(() => {
-    const activeTab = state.layout.tabs.find((t) => t.id === state.layout.activeTabId) ?? state.layout.tabs[0];
-    if (!activeTab) return;
+    const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+    if (!activeTab || activeTab.kind === "browser") return;
     const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
     if (!activeLayout || activeLayout.root.type === "leaf") return;
     const activeLeafId = activeLayout.activeLeafId ?? "leaf-default";
     void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
-  }, [closePane, reportRuntimeError, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs],
-  );
+  }, [closePane, reportRuntimeError, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs]);
 
   // Cmd+1..9 walks the sidebar tree top to bottom: every expanded project contributes its
   // worktrees in order, so the numbering matches exactly what the user can see. The accordion
@@ -291,9 +320,7 @@ export function App() {
     (index: number) => {
       const visible = listVisibleWorktrees(projects, state.worktrees, activeProject.workspaceId);
       const target = visible[index];
-      if (target) {
-        handleSelectWorktree(target);
-      }
+      if (target) handleSelectWorktree(target);
     },
     [activeProject.workspaceId, handleSelectWorktree, projects, state.worktrees],
   );
@@ -301,9 +328,7 @@ export function App() {
   const handleSelectTerminalTabByIndex = useCallback(
     (index: number) => {
       const target = state.layout.tabs[index];
-      if (target) {
-        handleSelectTerminalTab(target.id);
-      }
+      if (target) handleSelectTerminalTab(target.id);
     },
     [handleSelectTerminalTab, state.layout.tabs],
   );
@@ -311,6 +336,7 @@ export function App() {
   const shortcutHandlers = useMemo(
     () => ({
       "tab.newTerminal": handleAddTerminalTab,
+      "tab.newBrowser": () => void createBrowserTab("http://localhost:3000").catch(reportRuntimeError),
       "tab.close": () => {
         if (state.layout.activeTabId) handleCloseTab(state.layout.activeTabId);
       },
@@ -331,6 +357,7 @@ export function App() {
       "commandPalette.open": () => setIsCommandPaletteOpen(true),
     }),
     [
+      createBrowserTab,
       handleAddTerminalTab,
       handleCloseTab,
       handleCycleTab,
@@ -338,6 +365,7 @@ export function App() {
       handleSelectWorktreeByIndex,
       handleSplitActive,
       handleUnsplitActive,
+      reportRuntimeError,
       state.layout.activeTabId,
       toggleSidebar,
     ],
@@ -355,6 +383,8 @@ export function App() {
           agents={agents}
           activePath={activeWorktree?.path || ""}
           statuses={worktreeStatuses}
+          unreadWorktreePaths={state.unreadWorktreePaths}
+          activityByWorktreePath={worktreeActivity}
           onSelectProject={handleSelectProject}
           onAddProject={() => setIsAddProjectOpen(true)}
           onSelectWorktree={handleSelectWorktree}
@@ -383,17 +413,26 @@ export function App() {
           <TerminalSplitView
             layout={state.layout}
             sessions={state.sessions}
+            unreadTabIds={state.unreadTabIds}
+            activityByTabId={tabActivity}
             onActivateTab={handleSelectTerminalTab}
             onCloseTab={handleCloseTab}
+            onCloseOtherTabs={handleCloseOtherTabs}
+            onCloseTabsToRight={handleCloseTabsToRight}
+            onCloseTabsToLeft={handleCloseTabsToLeft}
+            onReorderTab={reorderTab}
+            onRenameTab={renameTab}
+            onToggleTabPin={setTabPinned}
             onAddTab={handleAddTerminalTab}
-            onAddBrowserTab={() => void createBrowserTab("http://localhost:3000")}
-            onNavigateBrowserTab={(tabId, url) => void navigateBrowserTab(tabId, url)}
-            onReloadBrowserTab={(tabId) => void reloadBrowserTab(tabId)}
+            onAddBrowserTab={(url) => void createBrowserTab(url ?? "http://localhost:3000").catch(reportRuntimeError)}
+            onNavigateBrowserTab={(tabId, url) => void navigateBrowserTab(tabId, url).catch(reportRuntimeError)}
+            onReloadBrowserTab={(tabId) => void reloadBrowserTab(tabId).catch(reportRuntimeError)}
             onSplitPane={(tabId: string, leafId: string, direction: PaneDirection) => splitPane(tabId, leafId, direction).catch(reportRuntimeError)}
             onClosePane={(tabId: string, leafId: string) => closePane(tabId, leafId).catch(reportRuntimeError)}
             onSetRatio={setPaneRatio}
             onSwapPanes={swapPanes}
             onFocusPane={focusPane}
+            onTitleChange={updateSessionTitleActivity}
             leadingSpacer={isSidebarOpen ? 0 : (isMacShortcutPlatform() ? 108 : 36)}
           />
         ) : (
