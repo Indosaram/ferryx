@@ -37,6 +37,9 @@ pub enum WorktreeChangeKind {
     Created,
     Deleted,
     DestructivelyDeleted,
+    #[serde(rename = "dirtyChanged")]
+    DirtyChanged,
+    Pruned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,32 +128,39 @@ async fn delete_worktree<R: Runtime>(
     let event_workspace_id = workspace_id.clone();
     let event_identity = identity.clone();
 
-    run_blocking(move || {
+    let pruned = run_blocking(move || {
         let (manager, worktree) = registry
             .resolve_worktree(&workspace_id, &identity)
             .map_err(IpcError::from)?;
-        if destructive {
-            manager
-                .delete_worktree_and_branch_destructive(&worktree.path, delete_branch)
-                .map_err(IpcError::from)
-        } else {
-            manager
-                .delete_worktree_and_branch(&worktree.path, delete_branch)
-                .map_err(IpcError::from)
-        }
+        manager
+            .delete_worktree_and_branch_with_prune_status(
+                &worktree.path,
+                delete_branch,
+                destructive,
+            )
+            .map_err(IpcError::from)
     })
     .await?;
 
     emit_worktree_changed(
         &app,
-        event_workspace_id,
-        event_identity,
+        event_workspace_id.clone(),
+        event_identity.clone(),
         if destructive {
             WorktreeChangeKind::DestructivelyDeleted
         } else {
             WorktreeChangeKind::Deleted
         },
-    )
+    )?;
+    if pruned {
+        emit_worktree_changed(
+            &app,
+            event_workspace_id,
+            event_identity,
+            WorktreeChangeKind::Pruned,
+        )?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -189,16 +199,34 @@ pub async fn cmd_worktree_delete_preview(
 }
 
 #[tauri::command]
-pub async fn cmd_worktree_status(
+pub async fn cmd_worktree_status<R: Runtime>(
+    app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
     request: WorktreeStatusRequest,
 ) -> Result<DirtyState, IpcError> {
     let registry = (*registry).clone();
-    run_blocking(move || {
+    let workspace_id = request.workspace_id.clone();
+    let identity = request.worktree.clone();
+    let event_workspace_id = workspace_id.clone();
+    let event_identity = identity.clone();
+
+    let (status, changed) = run_blocking(move || {
         let (manager, worktree) = registry
-            .resolve_worktree(&request.workspace_id, &request.worktree)
+            .resolve_worktree(&workspace_id, &identity)
             .map_err(IpcError::from)?;
-        manager.check_dirty(&worktree.path).map_err(IpcError::from)
+        manager
+            .observe_dirty_state(&worktree.path)
+            .map_err(IpcError::from)
     })
-    .await
+    .await?;
+
+    if changed {
+        emit_worktree_changed(
+            &app,
+            event_workspace_id,
+            event_identity,
+            WorktreeChangeKind::DirtyChanged,
+        )?;
+    }
+    Ok(status)
 }

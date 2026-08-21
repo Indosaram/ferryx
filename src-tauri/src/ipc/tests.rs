@@ -129,6 +129,7 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
     assert!(created.path.exists());
 
     let status = cmd_worktree_status(
+        app.handle().clone(),
         registry_state.clone(),
         WorktreeStatusRequest {
             workspace_id: "workspace-test".into(),

@@ -1,7 +1,8 @@
 use orca_lite_lib::ipc::{
     cmd_terminal_close, cmd_terminal_spawn, cmd_worktree_create, cmd_worktree_delete,
-    CreateWorktreeRequest, DeleteWorktreeRequest, IpcErrorCode, SpawnTerminalRequest,
-    TerminalLifecycleState, WorktreeChangeKind, WorktreeChangedPayload, WORKTREE_CHANGED_EVENT,
+    cmd_worktree_status, CreateWorktreeRequest, DeleteWorktreeRequest, IpcErrorCode,
+    SpawnTerminalRequest, TerminalLifecycleState, WorktreeChangeKind, WorktreeChangedPayload,
+    WorktreeStatusRequest, WORKTREE_CHANGED_EVENT,
 };
 use orca_lite_lib::terminal::PtyManager;
 use orca_lite_lib::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
@@ -113,6 +114,226 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .expect("deleted event");
     assert_eq!(deleted_event.kind, WorktreeChangeKind::Deleted);
     assert_eq!(deleted_event.worktree, identity);
+
+    let pruned_event = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("pruned event timeout")
+        .expect("pruned event");
+    assert_eq!(pruned_event.workspace_id, "workspace-a");
+    assert_eq!(pruned_event.worktree, identity);
+    assert_eq!(pruned_event.kind, WorktreeChangeKind::Pruned);
+}
+
+#[tokio::test]
+async fn worktree_status_emits_dirty_changed_on_clean_to_dirty_transition() {
+    let repo = setup_repo();
+    let registry = WorkspaceRegistry::new();
+    registry
+        .register("workspace-a", repo.path())
+        .expect("register workspace");
+    let app = tauri::test::mock_builder()
+        .manage(registry.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let identity = WorktreeIdentity {
+        ws_id: "agent".into(),
+        slug: "dirty-transition".into(),
+    };
+    let created = cmd_worktree_create(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        CreateWorktreeRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+            base_ref: None,
+        },
+    )
+    .await
+    .expect("create worktree");
+
+    let initial = cmd_worktree_status(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        WorktreeStatusRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+        },
+    )
+    .await
+    .expect("initial clean status");
+    assert!(!initial.is_dirty);
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<WorktreeChangedPayload>(4);
+    app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<WorktreeChangedPayload>(event.payload()) {
+            let _ = event_tx.try_send(payload);
+        }
+    });
+
+    fs::write(created.path.join("dirty.txt"), "dirty\n").expect("dirty file");
+    let dirty = cmd_worktree_status(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        WorktreeStatusRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+        },
+    )
+    .await
+    .expect("dirty status");
+    assert!(dirty.is_dirty);
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("dirtyChanged event timeout")
+        .expect("dirtyChanged event");
+    assert_eq!(event.workspace_id, "workspace-a");
+    assert_eq!(event.worktree, identity);
+    assert_eq!(event.kind, WorktreeChangeKind::DirtyChanged);
+    assert_eq!(
+        serde_json::to_value(event.kind).expect("serialize dirtyChanged kind"),
+        serde_json::json!("dirtyChanged")
+    );
+}
+
+#[tokio::test]
+async fn worktree_status_emits_dirty_changed_on_dirty_to_clean_transition() {
+    let repo = setup_repo();
+    let registry = WorkspaceRegistry::new();
+    registry
+        .register("workspace-a", repo.path())
+        .expect("register workspace");
+    let app = tauri::test::mock_builder()
+        .manage(registry.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let identity = WorktreeIdentity {
+        ws_id: "agent".into(),
+        slug: "clean-transition".into(),
+    };
+    let created = cmd_worktree_create(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        CreateWorktreeRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+            base_ref: None,
+        },
+    )
+    .await
+    .expect("create worktree");
+    let dirty_file = created.path.join("dirty.txt");
+    fs::write(&dirty_file, "dirty\n").expect("dirty file");
+
+    let initial = cmd_worktree_status(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        WorktreeStatusRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+        },
+    )
+    .await
+    .expect("initial dirty status");
+    assert!(initial.is_dirty);
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<WorktreeChangedPayload>(4);
+    app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<WorktreeChangedPayload>(event.payload()) {
+            let _ = event_tx.try_send(payload);
+        }
+    });
+
+    fs::remove_file(dirty_file).expect("clean dirty file");
+    let clean = cmd_worktree_status(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        WorktreeStatusRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+        },
+    )
+    .await
+    .expect("clean status");
+    assert!(!clean.is_dirty);
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("dirtyChanged event timeout")
+        .expect("dirtyChanged event");
+    assert_eq!(event.workspace_id, "workspace-a");
+    assert_eq!(event.worktree, identity);
+    assert_eq!(event.kind, WorktreeChangeKind::DirtyChanged);
+}
+
+#[tokio::test]
+async fn worktree_status_does_not_emit_when_dirty_state_is_unchanged() {
+    let repo = setup_repo();
+    let registry = WorkspaceRegistry::new();
+    registry
+        .register("workspace-a", repo.path())
+        .expect("register workspace");
+    let app = tauri::test::mock_builder()
+        .manage(registry.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let identity = WorktreeIdentity {
+        ws_id: "agent".into(),
+        slug: "unchanged-dirty".into(),
+    };
+    let created = cmd_worktree_create(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        CreateWorktreeRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+            base_ref: None,
+        },
+    )
+    .await
+    .expect("create worktree");
+    fs::write(created.path.join("dirty.txt"), "dirty\n").expect("dirty file");
+
+    let initial = cmd_worktree_status(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        WorktreeStatusRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity.clone(),
+        },
+    )
+    .await
+    .expect("initial dirty status");
+    assert!(initial.is_dirty);
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<WorktreeChangedPayload>(4);
+    app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<WorktreeChangedPayload>(event.payload()) {
+            let _ = event_tx.try_send(payload);
+        }
+    });
+
+    let unchanged = cmd_worktree_status(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        WorktreeStatusRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity,
+        },
+    )
+    .await
+    .expect("unchanged dirty status");
+    assert!(unchanged.is_dirty);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), event_rx.recv())
+            .await
+            .is_err(),
+        "unchanged dirty state must not emit worktree_changed"
+    );
 }
 
 #[tokio::test]

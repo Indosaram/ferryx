@@ -97,6 +97,7 @@ pub struct WorktreeManager {
     repo_root: PathBuf,
     writer_leases: WriterLeaseRegistry,
     delete_lock: Arc<Mutex<()>>,
+    dirty_snapshots: Arc<Mutex<HashMap<PathBuf, bool>>>,
 }
 
 impl WorktreeManager {
@@ -131,6 +132,7 @@ impl WorktreeManager {
             repo_root: git_root,
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
+            dirty_snapshots: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -425,6 +427,20 @@ impl WorktreeManager {
         git_status_porcelain(&canonical)
     }
 
+    pub fn observe_dirty_state(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<(DirtyState, bool), WorktreeError> {
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        let state = git_status_porcelain(&canonical)?;
+        let previous = self
+            .dirty_snapshots
+            .lock()
+            .insert(canonical, state.is_dirty);
+        let changed = matches!(previous, Some(previous_dirty) if previous_dirty != state.is_dirty);
+        Ok((state, changed))
+    }
+
     pub fn is_dirty(&self, worktree_path: &Path) -> Result<bool, WorktreeError> {
         self.check_dirty(worktree_path).map(|state| state.is_dirty)
     }
@@ -444,7 +460,7 @@ impl WorktreeManager {
         &self,
         worktree_path: &Path,
         force: bool,
-    ) -> Result<(), WorktreeError> {
+    ) -> Result<bool, WorktreeError> {
         let canonical = self.canonical_worktree_path(worktree_path)?;
         self.ensure_no_writer(&canonical)?;
         let dirty_state = self.check_dirty(&canonical)?;
@@ -459,13 +475,13 @@ impl WorktreeManager {
         }
 
         git_worktree_remove(&self.repo_root, &canonical, force)?;
-        let _ = git_worktree_prune(&self.repo_root);
-        Ok(())
+        self.dirty_snapshots.lock().remove(&canonical);
+        Ok(git_worktree_prune(&self.repo_root).is_ok())
     }
 
     pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
-        self.remove_worktree_locked(worktree_path, force)
+        self.remove_worktree_locked(worktree_path, force).map(|_| ())
     }
 
     pub fn safe_delete(&self, worktree_path: &Path) -> Result<(), WorktreeError> {
@@ -538,32 +554,51 @@ impl WorktreeManager {
         })
     }
 
-    pub fn delete_worktree_and_branch(
+    fn delete_worktree_and_branch_inner(
         &self,
         worktree_path: &Path,
         delete_branch: bool,
-    ) -> Result<(), WorktreeError> {
+        destructive: bool,
+    ) -> Result<bool, WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
         self.ensure_no_writer(worktree_path)?;
 
-        let branch_preview = if delete_branch {
+        let branch = if delete_branch {
             let preview = self.branch_deletion_preview(worktree_path)?;
-            if !preview.merged {
+            if !destructive && !preview.merged {
                 return Err(WorktreeError::UnmergedBranch {
                     branch: preview.branch,
                     head: preview.head,
                 });
             }
-            Some(preview)
+            Some(preview.branch)
         } else {
             None
         };
 
-        self.remove_worktree_locked(worktree_path, false)?;
-        if let Some(preview) = branch_preview {
-            git_branch_delete(&self.repo_root, &preview.branch, false)?;
+        let pruned = self.remove_worktree_locked(worktree_path, false)?;
+        if let Some(branch) = branch {
+            git_branch_delete(&self.repo_root, &branch, destructive)?;
         }
-        Ok(())
+        Ok(pruned)
+    }
+
+    pub(crate) fn delete_worktree_and_branch_with_prune_status(
+        &self,
+        worktree_path: &Path,
+        delete_branch: bool,
+        destructive: bool,
+    ) -> Result<bool, WorktreeError> {
+        self.delete_worktree_and_branch_inner(worktree_path, delete_branch, destructive)
+    }
+
+    pub fn delete_worktree_and_branch(
+        &self,
+        worktree_path: &Path,
+        delete_branch: bool,
+    ) -> Result<(), WorktreeError> {
+        self.delete_worktree_and_branch_inner(worktree_path, delete_branch, false)
+            .map(|_| ())
     }
 
     pub fn delete_worktree_and_branch_destructive(
@@ -571,18 +606,7 @@ impl WorktreeManager {
         worktree_path: &Path,
         delete_branch: bool,
     ) -> Result<(), WorktreeError> {
-        let _delete_guard = self.delete_lock.lock();
-        self.ensure_no_writer(worktree_path)?;
-        let branch = if delete_branch {
-            Some(self.branch_deletion_preview(worktree_path)?.branch)
-        } else {
-            None
-        };
-
-        self.remove_worktree_locked(worktree_path, false)?;
-        if let Some(branch) = branch {
-            git_branch_delete(&self.repo_root, &branch, true)?;
-        }
-        Ok(())
+        self.delete_worktree_and_branch_inner(worktree_path, delete_branch, true)
+            .map(|_| ())
     }
 }
