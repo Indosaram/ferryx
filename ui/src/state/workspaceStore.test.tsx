@@ -20,39 +20,85 @@ const featureWorktree: Worktree = {
   branch: "refs/heads/orca/ws-main/feature",
 };
 
-function createServices(): WorkspaceServices {
+type ExitDeferred = {
+  promise: Promise<void>;
+  resolve: () => void;
+};
+
+function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean } = {}) {
   let sessionNumber = 0;
-  return {
-    ensureTerminalEvents: vi.fn(async () => undefined),
-    spawnTerminal: vi.fn(async () => `backend-${++sessionNumber}`),
-    closeTerminal: vi.fn(async () => undefined),
+  const activeByWorktree = new Map<string, string>();
+  const worktreeBySession = new Map<string, string>();
+  const exits = new Map<string, ExitDeferred>();
+
+  const getExit = (sessionId: string) => {
+    const existing = exits.get(sessionId);
+    if (existing) return existing;
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const deferred = { promise, resolve };
+    exits.set(sessionId, deferred);
+    return deferred;
   };
+
+  const confirmExit = (sessionId: string) => {
+    const key = worktreeBySession.get(sessionId);
+    if (key && activeByWorktree.get(key) === sessionId) activeByWorktree.delete(key);
+    worktreeBySession.delete(sessionId);
+    const deferred = getExit(sessionId);
+    exits.delete(sessionId);
+    deferred.resolve();
+  };
+
+  const services: WorkspaceServices = {
+    ensureTerminalEvents: vi.fn(async () => undefined),
+    spawnTerminal: vi.fn(async (request) => {
+      const key = `${request.workspaceId}:${request.worktree?.wsId ?? "root"}:${request.worktree?.slug ?? "root"}`;
+      if (activeByWorktree.has(key)) {
+        throw { code: "WRITER_ALREADY_ACTIVE", message: "writer already active", details: { worktree: request.worktree } };
+      }
+      const sessionId = `backend-${++sessionNumber}`;
+      activeByWorktree.set(key, sessionId);
+      worktreeBySession.set(sessionId, key);
+      return sessionId;
+    }),
+    closeTerminal: vi.fn(async (sessionId) => {
+      const deferred = getExit(sessionId);
+      if (autoConfirmExit) queueMicrotask(() => confirmExit(sessionId));
+      await deferred.promise;
+    }),
+    waitForTerminalExit: vi.fn(async (sessionId) => {
+      await getExit(sessionId).promise;
+    }),
+  };
+
+  return { services, confirmExit };
 }
 
 describe("useWorkspaceStore terminal ownership", () => {
-  it("creates exactly one backend PTY per logical tab when single-tab split is enabled", async () => {
-    const services = createServices();
+  it("enables a single-tab mirror split without spawning another backend PTY", async () => {
+    const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
     await act(async () => {
       await result.current.openTab(worktree);
     });
+    vi.mocked(services.spawnTerminal).mockClear();
+
     await act(async () => {
       await result.current.enableSplit("horizontal");
     });
 
-    expect(result.current.state.layout.tabs).toHaveLength(2);
-    expect(result.current.state.layout.secondaryTabId).not.toBeNull();
+    expect(result.current.state.layout.tabs).toHaveLength(1);
+    expect(result.current.state.layout.secondaryTabId).toBe(result.current.state.layout.primaryTabId);
     expect(result.current.state.layout.split).toBe("horizontal");
-    expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
-    expect(services.spawnTerminal).toHaveBeenCalledWith({
-      workspaceId: "default",
-      worktree: { wsId: "ws-main", slug: "main" },
-    });
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
   });
 
   it("preserves backend session ids when only split orientation changes", async () => {
-    const services = createServices();
+    const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
     await act(async () => {
@@ -66,11 +112,11 @@ describe("useWorkspaceStore terminal ownership", () => {
 
     expect(result.current.state.layout.split).toBe("vertical");
     expect(after).toEqual(before);
-    expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
   });
 
-  it("closes the last tab by atomically replacing it with a valid spawned tab", async () => {
-    const services = createServices();
+  it("spawns a last-tab replacement only after lifecycle-confirmed writer release", async () => {
+    const { services, confirmExit } = createServices({ autoConfirmExit: false });
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
     await act(async () => {
@@ -80,8 +126,18 @@ describe("useWorkspaceStore terminal ownership", () => {
     const closingSessionId = result.current.state.layout.tabs[0].sessionId;
     const closingBackendId = result.current.state.sessions[closingSessionId].backendSessionId!;
 
+    const closePromise = result.current.closeTab(closingTabId);
+    await vi.waitFor(() => expect(services.closeTerminal).toHaveBeenCalledWith(closingBackendId));
+
+    expect(services.waitForTerminalExit).toHaveBeenCalledWith(closingBackendId, 5_000);
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(services.waitForTerminalExit).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(services.closeTerminal).mock.invocationCallOrder[0],
+    );
+
+    confirmExit(closingBackendId);
     await act(async () => {
-      await result.current.closeTab(closingTabId);
+      await closePromise;
     });
 
     expect(result.current.state.layout.tabs).toHaveLength(1);
@@ -89,15 +145,20 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(result.current.state.layout.tabs[0].id).not.toBe(closingTabId);
     expect(result.current.state.layout.secondaryTabId).toBeNull();
     expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
-    expect(services.closeTerminal).toHaveBeenCalledWith(closingBackendId);
+    expect(vi.mocked(services.closeTerminal).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(services.spawnTerminal).mock.invocationCallOrder[1],
+    );
   });
 
   it("keeps layout invariants valid when the secondary tab closes", async () => {
-    const services = createServices();
-    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
 
     await act(async () => {
       await result.current.openTab(worktree);
+      await result.current.openTab(featureWorktree);
       await result.current.enableSplit("horizontal");
     });
     const secondaryTabId = result.current.state.layout.secondaryTabId!;
@@ -113,7 +174,7 @@ describe("useWorkspaceStore terminal ownership", () => {
   });
 
   it("derives visible agents only from live terminal session metadata", async () => {
-    const services = createServices();
+    const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
     expect(result.current.agents).toEqual([]);
@@ -134,7 +195,7 @@ describe("useWorkspaceStore terminal ownership", () => {
   });
 
   it("removes deleted-worktree tabs, sessions, and agents during synchronization", async () => {
-    const services = createServices();
+    const { services } = createServices();
     const { result } = renderHook(() =>
       useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
     );

@@ -8,15 +8,31 @@ function tab(id: string, sessionId: string): TerminalTab {
 }
 
 describe("layoutReducer", () => {
-  it("enables a split from a single tab atomically by adding and selecting a secondary tab", () => {
+  it("enables a single-tab mirror split without adding another logical tab", () => {
     const primary = tab("tab-1", "session-1");
-    const secondary = tab("tab-2", "session-2");
     const state = createLayoutState([primary], primary.id);
 
     const next = layoutReducer(state, {
       type: "ENABLE_SPLIT",
       orientation: "horizontal",
-      secondaryTab: secondary,
+      secondaryTabId: primary.id,
+    });
+
+    expect(next.tabs).toEqual([primary]);
+    expect(next.primaryTabId).toBe(primary.id);
+    expect(next.secondaryTabId).toBe(primary.id);
+    expect(next.split).toBe("horizontal");
+  });
+
+  it("uses an existing other tab as the secondary pane when available", () => {
+    const primary = tab("tab-1", "session-1");
+    const secondary = tab("tab-2", "session-2");
+    const state = createLayoutState([primary, secondary], primary.id);
+
+    const next = layoutReducer(state, {
+      type: "ENABLE_SPLIT",
+      orientation: "horizontal",
+      secondaryTabId: secondary.id,
     });
 
     expect(next.tabs).toEqual([primary, secondary]);
@@ -27,11 +43,10 @@ describe("layoutReducer", () => {
 
   it("rotates split orientation without changing tab identity", () => {
     const primary = tab("tab-1", "session-1");
-    const secondary = tab("tab-2", "session-2");
     const split = layoutReducer(createLayoutState([primary], primary.id), {
       type: "ENABLE_SPLIT",
       orientation: "horizontal",
-      secondaryTab: secondary,
+      secondaryTabId: primary.id,
     });
 
     const rotated = layoutReducer(split, { type: "ROTATE_SPLIT" });
@@ -62,10 +77,10 @@ describe("layoutReducer", () => {
   it("never leaves stale split ids when the secondary tab closes", () => {
     const primary = tab("tab-1", "session-1");
     const secondary = tab("tab-2", "session-2");
-    const split = layoutReducer(createLayoutState([primary], primary.id), {
+    const split = layoutReducer(createLayoutState([primary, secondary], primary.id), {
       type: "ENABLE_SPLIT",
       orientation: "horizontal",
-      secondaryTab: secondary,
+      secondaryTabId: secondary.id,
     });
 
     const next = layoutReducer(split, { type: "CLOSE_TAB", tabId: secondary.id });

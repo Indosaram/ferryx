@@ -69,8 +69,11 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
         : state.tabs;
       const primaryTabId = state.primaryTabId ?? tabs[0]?.id ?? null;
       const requestedSecondaryId = action.secondaryTab?.id ?? action.secondaryTabId ?? null;
-      const secondaryTabId =
-        requestedSecondaryId && requestedSecondaryId !== primaryTabId && tabs.some((tab) => tab.id === requestedSecondaryId)
+      const requestedExists = !!requestedSecondaryId && tabs.some((tab) => tab.id === requestedSecondaryId);
+      const mirrorRequested = requestedExists && requestedSecondaryId === primaryTabId && tabs.length === 1;
+      const secondaryTabId = mirrorRequested
+        ? primaryTabId
+        : requestedExists && requestedSecondaryId !== primaryTabId
           ? requestedSecondaryId
           : tabs.find((tab) => tab.id !== primaryTabId)?.id ?? null;
 
@@ -101,7 +104,8 @@ function normalizeLayout(state: LayoutState): LayoutState {
   let split = state.split;
   let secondaryTabId = tabs.some((tab) => tab.id === state.secondaryTabId) ? state.secondaryTabId : null;
 
-  if (secondaryTabId === primaryTabId) {
+  const isMirror = split !== "none" && tabs.length === 1 && secondaryTabId === primaryTabId;
+  if (secondaryTabId === primaryTabId && !isMirror) {
     secondaryTabId = tabs.find((tab) => tab.id !== primaryTabId)?.id ?? null;
   }
 

@@ -16,6 +16,8 @@ import type {
 } from "../lib/types";
 import { createLayoutState, layoutReducer } from "./layout";
 
+const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
+
 export type WorkspaceState = {
   worktrees: Worktree[];
   activeWorktreePath: string | null;
@@ -27,18 +29,13 @@ export type WorkspaceServices = {
   ensureTerminalEvents: () => Promise<void>;
   spawnTerminal: (request: { workspaceId: string; worktree: WorktreeIdentity | null }) => Promise<string>;
   closeTerminal: (sessionId: string) => Promise<void>;
+  waitForTerminalExit: (sessionId: string, timeoutMs: number) => Promise<void>;
 };
 
 type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "SELECT_WORKTREE"; path: string }
   | { type: "ADD_TAB_WITH_SESSION"; tab: TerminalTab; session: TerminalSession }
-  | {
-      type: "ENABLE_SPLIT_WITH_SESSION";
-      tab: TerminalTab;
-      session: TerminalSession;
-      orientation: Exclude<SplitMode, "none">;
-    }
   | { type: "ENABLE_SPLIT_EXISTING"; tabId: string; orientation: Exclude<SplitMode, "none"> }
   | {
       type: "CLOSE_TAB";
@@ -60,6 +57,7 @@ const defaultServices: WorkspaceServices = {
   ensureTerminalEvents,
   spawnTerminal,
   closeTerminal,
+  waitForTerminalExit,
 };
 
 export function useWorkspaceStore({ initialWorktrees = [], services = defaultServices }: UseWorkspaceStoreOptions = {}) {
@@ -149,23 +147,15 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
       }
 
       const primaryTabId = snapshot.layout.primaryTabId;
+      if (!primaryTabId) return;
       const existingSecondary = snapshot.layout.tabs.find((tab) => tab.id !== primaryTabId);
-      if (existingSecondary) {
-        dispatch({ type: "ENABLE_SPLIT_EXISTING", tabId: existingSecondary.id, orientation });
-        return;
-      }
-
-      const primaryTab = snapshot.layout.tabs.find((tab) => tab.id === primaryTabId);
-      const primarySession = primaryTab ? snapshot.sessions[primaryTab.sessionId] : undefined;
-      const activeWorktree =
-        (primarySession && snapshot.worktrees.find((worktree) => worktree.path === primarySession.cwd)) ??
-        getActiveWorktree(snapshot);
-      if (!activeWorktree) return;
-
-      const binding = await createSpawnedTab(activeWorktree);
-      dispatch({ type: "ENABLE_SPLIT_WITH_SESSION", ...binding, orientation });
+      dispatch({
+        type: "ENABLE_SPLIT_EXISTING",
+        tabId: existingSecondary?.id ?? primaryTabId,
+        orientation,
+      });
     },
-    [createSpawnedTab, dispatch, openTab],
+    [dispatch, openTab],
   );
 
   const closeTab = useCallback(
@@ -175,16 +165,19 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
       if (!closingTab) return;
       const closingSession = snapshot.sessions[closingTab.sessionId];
 
-      let replacement: { tab: TerminalTab; session: TerminalSession } | undefined;
       if (snapshot.layout.tabs.length === 1) {
         const worktree =
           (closingSession && snapshot.worktrees.find((candidate) => candidate.path === closingSession.cwd)) ??
           getActiveWorktree(snapshot);
         if (!worktree) return;
-        replacement = await createSpawnedTab(worktree, closingTab.label);
+
+        await closeBackendSessionAndWait(closingSession, services);
+        const replacement = await createSpawnedTab(worktree, closingTab.label);
+        dispatch({ type: "CLOSE_TAB", tabId, replacement });
+        return;
       }
 
-      dispatch({ type: "CLOSE_TAB", tabId, replacement });
+      dispatch({ type: "CLOSE_TAB", tabId });
       await closeBackendSession(closingSession, services);
     },
     [createSpawnedTab, dispatch, services],
@@ -275,16 +268,6 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
         sessions: { ...state.sessions, [action.session.id]: action.session },
         layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab }),
       };
-    case "ENABLE_SPLIT_WITH_SESSION":
-      return {
-        ...state,
-        sessions: { ...state.sessions, [action.session.id]: action.session },
-        layout: layoutReducer(state.layout, {
-          type: "ENABLE_SPLIT",
-          orientation: action.orientation,
-          secondaryTab: action.tab,
-        }),
-      };
     case "ENABLE_SPLIT_EXISTING":
       return {
         ...state,
@@ -336,6 +319,34 @@ async function closeBackendSession(session: TerminalSession | undefined, service
   } finally {
     terminalEventBus.clearSession(session.backendSessionId);
   }
+}
+
+async function closeBackendSessionAndWait(session: TerminalSession | undefined, services: WorkspaceServices) {
+  if (!session?.backendSessionId) return;
+  const backendSessionId = session.backendSessionId;
+  const exitPromise = services.waitForTerminalExit(backendSessionId, LAST_TAB_EXIT_TIMEOUT_MS);
+  try {
+    await services.closeTerminal(backendSessionId);
+    await exitPromise;
+  } finally {
+    terminalEventBus.clearSession(backendSessionId);
+  }
+}
+
+function waitForTerminalExit(sessionId: string, timeoutMs: number) {
+  return new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const unsubscribe = terminalEventBus.subscribeLifecycle((payload) => {
+      if (payload.sessionId !== sessionId || (payload.state !== "exited" && payload.state !== "failed")) return;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    });
+    timer = setTimeout(() => {
+      unsubscribe();
+      resolve();
+    }, timeoutMs);
+  });
 }
 
 function getActiveWorktree(state: WorkspaceState) {
