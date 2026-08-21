@@ -22,6 +22,14 @@ pub enum IpcErrorCode {
     IoError,
     ParseError,
     SessionNotFound,
+    BrowserNotFound,
+    BrowserUrlInvalid,
+    BrowserUrlSchemeDenied,
+    BrowserBoundsInvalid,
+    BrowserCreateFailed,
+    BrowserNavigationFailed,
+    BrowserHistoryFailed,
+    BrowserCloseFailed,
     PtyCreationError,
     PtySpawnError,
     PtyIoError,
@@ -172,5 +180,25 @@ impl From<PtyError> for IpcError {
             PtyError::Other(_) => IpcErrorCode::InternalError,
         };
         Self::new(code, error.to_string())
+    }
+}
+
+impl From<crate::browser::BrowserError> for IpcError {
+    fn from(error: crate::browser::BrowserError) -> Self {
+        let message = error.to_string();
+        let code = match error {
+            crate::browser::BrowserError::NotFound(_) => IpcErrorCode::BrowserNotFound,
+            crate::browser::BrowserError::InvalidUrl(_) => IpcErrorCode::BrowserUrlInvalid,
+            crate::browser::BrowserError::SchemeDenied(_) => IpcErrorCode::BrowserUrlSchemeDenied,
+            crate::browser::BrowserError::InvalidBounds => IpcErrorCode::BrowserBoundsInvalid,
+            crate::browser::BrowserError::UnsupportedProfile(_) => IpcErrorCode::InternalError,
+            crate::browser::BrowserError::CreateFailed(_) => IpcErrorCode::BrowserCreateFailed,
+            crate::browser::BrowserError::NavigationFailed(_) => IpcErrorCode::BrowserNavigationFailed,
+            crate::browser::BrowserError::HistoryFailed(_) => IpcErrorCode::BrowserHistoryFailed,
+            crate::browser::BrowserError::CloseFailed(_) => IpcErrorCode::BrowserCloseFailed,
+            crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::InternalError,
+            crate::browser::BrowserError::Internal(_) => IpcErrorCode::InternalError,
+        };
+        Self::new(code, message)
     }
 }

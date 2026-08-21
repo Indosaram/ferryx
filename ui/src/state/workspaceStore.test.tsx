@@ -135,7 +135,8 @@ describe("useWorkspaceStore terminal ownership", () => {
       await result.current.openTab(worktree);
     });
     const closingTabId = result.current.state.layout.activeTabId!;
-    const closingSessionId = result.current.state.layout.tabs[0].sessionId;
+    const closingTab = result.current.state.layout.tabs[0];
+    const closingSessionId = closingTab.kind === "browser" ? "" : closingTab.sessionId;
     const closingBackendId = result.current.state.sessions[closingSessionId].backendSessionId!;
 
     const closePromise = result.current.closeTab(closingTabId);

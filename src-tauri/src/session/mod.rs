@@ -23,6 +23,12 @@ pub struct PersistedTab {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_title: Option<String>,
     pub worktree_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane_tree: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ids_by_leaf_id: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_leaf_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +37,8 @@ pub struct PersistedLayout {
     pub split_mode: String,
     pub primary_tab_id: Option<String>,
     pub secondary_tab_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_tab_id: Option<String>,
     pub tabs: Vec<PersistedTab>,
 }
 
@@ -171,12 +179,16 @@ mod tests {
                     split_mode: "none".to_string(),
                     primary_tab_id: Some("tab-1".to_string()),
                     secondary_tab_id: None,
+                    active_tab_id: Some("tab-1".to_string()),
                     tabs: vec![PersistedTab {
                         id: "tab-1".to_string(),
                         session_id: "term-1".to_string(),
                         label: "main".to_string(),
                         custom_title: None,
                         worktree_path: "/tmp/repo".to_string(),
+                        pane_tree: None,
+                        session_ids_by_leaf_id: None,
+                        active_leaf_id: None,
                     }],
                 },
                 terminal_sessions: HashMap::new(),

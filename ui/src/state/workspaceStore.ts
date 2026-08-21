@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import { closeTerminal, DEFAULT_WORKSPACE_ID, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { worktreeIdentity } from "../lib/types";
 import type {
   ActiveAgent,
+  BrowserTab,
   LayoutState,
   TerminalLifecycle,
   TerminalLifecyclePayload,
   TerminalSession,
   TerminalTab,
+  WorkspaceTab,
   Worktree,
   WorktreeIdentity,
 } from "../lib/types";
@@ -36,13 +39,15 @@ export type WorkspaceServices = {
 
 type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
+  | { type: "RESTORE_WORKSPACE"; state: WorkspaceState }
   | { type: "SELECT_WORKTREE"; path: string }
-  | { type: "ADD_TAB_WITH_SESSION"; tab: TerminalTab; session: TerminalSession }
+  | { type: "ADD_TAB_WITH_SESSION"; tab: WorkspaceTab; session?: TerminalSession }
   | {
       type: "CLOSE_TAB";
       tabId: string;
-      replacement?: { tab: TerminalTab; session: TerminalSession };
+      replacement?: { tab: WorkspaceTab; session?: TerminalSession };
     }
+  | { type: "UPDATE_BROWSER_TAB"; tabId: string; updates: Partial<BrowserTab> }
   | { type: "ACTIVATE_TAB"; tabId: string }
   | {
       type: "SPLIT_PANE";
@@ -148,7 +153,9 @@ export function useWorkspaceStore({
   const ensureTabForWorktree = useCallback(
     async (worktree: Worktree) => {
       const snapshot = stateRef.current;
-      const existing = snapshot.layout.tabs.find((tab) => snapshot.sessions[tab.sessionId]?.cwd === worktree.path);
+      const existing = snapshot.layout.tabs.find(
+        (tab) => tab.kind !== "browser" && snapshot.sessions[tab.sessionId]?.cwd === worktree.path,
+      );
       dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
       if (existing) {
         dispatch({ type: "ACTIVATE_TAB", tabId: existing.id });
@@ -163,7 +170,7 @@ export function useWorkspaceStore({
     async (tabId: string, targetLeafId: string, direction: PaneDirection) => {
       const snapshot = stateRef.current;
       const tab = snapshot.layout.tabs.find((t) => t.id === tabId);
-      if (!tab) return;
+      if (!tab || tab.kind === "browser") return;
       const targetSession = snapshot.sessions[tab.sessionId];
       const worktree = targetSession
         ? snapshot.worktrees.find((w) => w.path === targetSession.cwd) ?? getActiveWorktree(snapshot)
@@ -205,6 +212,10 @@ export function useWorkspaceStore({
       const snapshot = stateRef.current;
       const closingTab = snapshot.layout.tabs.find((tab) => tab.id === tabId);
       if (!closingTab) return;
+      if (closingTab.kind === "browser") {
+        dispatch({ type: "CLOSE_TAB", tabId });
+        return;
+      }
       const closingSession = snapshot.sessions[closingTab.sessionId];
 
       if (snapshot.layout.tabs.length === 1) {
@@ -247,11 +258,79 @@ export function useWorkspaceStore({
     [dispatch]
   );
 
+  const restoreWorkspace = useCallback(
+    (restoredState: WorkspaceState) => dispatch({ type: "RESTORE_WORKSPACE", state: restoredState }),
+    [dispatch],
+  );
+
+  const createBrowserTab = useCallback(
+    async (url = "http://localhost:3000", label?: string) => {
+      const activeWorktree = getActiveWorktree(stateRef.current);
+      const state = await createBrowser({
+        workspaceId,
+        worktreePath: activeWorktree?.path,
+        url,
+        visible: true,
+      });
+
+      const tabId = createId("tab");
+      const browserTab: BrowserTab = {
+        kind: "browser",
+        id: tabId,
+        label: label ?? "Browser",
+        browserId: state.browserId,
+        url: state.url,
+        title: state.title,
+        loading: state.loading,
+        canGoBack: state.canGoBack,
+        canGoForward: state.canGoForward,
+      };
+
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab: browserTab });
+      return tabId;
+    },
+    [workspaceId],
+  );
+
+  const navigateBrowserTabAction = useCallback(
+    async (tabId: string, url: string) => {
+      const tab = stateRef.current.layout.tabs.find((t) => t.id === tabId);
+      if (!tab || tab.kind !== "browser") return;
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { url, loading: true } });
+      await navigateBrowser(tab.browserId, url);
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { loading: false } });
+    },
+    [],
+  );
+
+  const reloadBrowserTabAction = useCallback(
+    async (tabId: string) => {
+      const tab = stateRef.current.layout.tabs.find((t) => t.id === tabId);
+      if (!tab || tab.kind !== "browser") return;
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { loading: true } });
+      await reloadBrowser(tab.browserId);
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { loading: false } });
+    },
+    [],
+  );
+
+  const openWorkspacePortInBrowser = useCallback(
+    async (port: number) => {
+      const url = `http://localhost:${port}`;
+      return createBrowserTab(url, `Port ${port}`);
+    },
+    [createBrowserTab],
+  );
+
   return {
     state,
     agents: selectAgents(state),
     openTab,
+    createBrowserTab,
+    navigateBrowserTab: navigateBrowserTabAction,
+    reloadBrowserTab: reloadBrowserTabAction,
     ensureTabForWorktree,
+    openWorkspacePortInBrowser,
     closeTab,
     splitPane,
     closePane,
@@ -260,6 +339,7 @@ export function useWorkspaceStore({
     setPaneRatio,
     swapPanes,
     syncWorktrees,
+    restoreWorkspace,
     markTabUnread: (tabId: string) => dispatch({ type: "MARK_TAB_UNREAD", tabId }),
     clearTabUnread: (tabId: string) => dispatch({ type: "CLEAR_TAB_UNREAD", tabId }),
     markWorktreeUnread: (worktreePath: string) => dispatch({ type: "MARK_WORKTREE_UNREAD", worktreePath }),
@@ -269,6 +349,7 @@ export function useWorkspaceStore({
 
 export function selectAgents(state: WorkspaceState): ActiveAgent[] {
   return state.layout.tabs.flatMap((tab) => {
+    if (tab.kind === "browser") return [];
     const session = state.sessions[tab.sessionId];
     if (!session) return [];
     const worktree = state.worktrees.find((candidate) => candidate.path === session.cwd);
@@ -299,6 +380,8 @@ function createInitialState(worktrees: Worktree[]): WorkspaceState {
 
 function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
   switch (action.type) {
+    case "RESTORE_WORKSPACE":
+      return action.state;
     case "SET_WORKTREES": {
       const validWorktreePaths = new Set(action.worktrees.map((worktree) => worktree.path));
       const sessions = Object.fromEntries(
@@ -306,12 +389,23 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       );
       let layout = state.layout;
       for (const tab of state.layout.tabs) {
-        if (!sessions[tab.sessionId]) layout = layoutReducer(layout, { type: "CLOSE_TAB", tabId: tab.id });
+        if (tab.kind !== "browser" && !sessions[tab.sessionId]) {
+          layout = layoutReducer(layout, { type: "CLOSE_TAB", tabId: tab.id });
+        }
       }
       const activeWorktreePath = action.worktrees.some((worktree) => worktree.path === state.activeWorktreePath)
         ? state.activeWorktreePath
         : action.worktrees[0]?.path ?? null;
       return { ...state, worktrees: action.worktrees, activeWorktreePath, sessions, layout };
+    }
+    case "UPDATE_BROWSER_TAB": {
+      const tabs = state.layout.tabs.map((tab) => {
+        if (tab.id === action.tabId && tab.kind === "browser") {
+          return { ...tab, ...action.updates };
+        }
+        return tab;
+      });
+      return { ...state, layout: { ...state.layout, tabs } };
     }
     case "SELECT_WORKTREE": {
       const unreadWorktreePaths = { ...state.unreadWorktreePaths };
@@ -340,12 +434,17 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       delete unreadWorktreePaths[action.worktreePath];
       return { ...state, unreadWorktreePaths };
     }
-    case "ADD_TAB_WITH_SESSION":
+    case "ADD_TAB_WITH_SESSION": {
+      const sessions = action.session
+        ? { ...state.sessions, [action.session.id]: action.session }
+        : state.sessions;
+      const sessionId = action.session?.id;
       return {
         ...state,
-        sessions: { ...state.sessions, [action.session.id]: action.session },
-        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab, sessionId: action.session.id }),
+        sessions,
+        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab, sessionId }),
       };
+    }
     case "SPLIT_PANE":
       return {
         ...state,
@@ -371,8 +470,8 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
     case "CLOSE_TAB": {
       const closingTab = state.layout.tabs.find((tab) => tab.id === action.tabId);
       const sessions = { ...state.sessions };
-      if (closingTab) delete sessions[closingTab.sessionId];
-      if (action.replacement) sessions[action.replacement.session.id] = action.replacement.session;
+      if (closingTab && closingTab.kind !== "browser") delete sessions[closingTab.sessionId];
+      if (action.replacement?.session) sessions[action.replacement.session.id] = action.replacement.session;
       return {
         ...state,
         sessions,
@@ -440,9 +539,9 @@ function getActiveWorktree(state: WorkspaceState) {
   return state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? state.worktrees[0] ?? null;
 }
 
-function nextTabLabel(worktree: Worktree, tabs: TerminalTab[], sessions: Record<string, TerminalSession>) {
+function nextTabLabel(worktree: Worktree, tabs: WorkspaceTab[], sessions: Record<string, TerminalSession>) {
   const base = worktree.path === "." ? "main" : worktree.path.split(/[\\/]/).filter(Boolean).at(-1) ?? worktree.path;
-  const count = tabs.filter((tab) => sessions[tab.sessionId]?.cwd === worktree.path).length + 1;
+  const count = tabs.filter((tab) => tab.kind !== "browser" && sessions[tab.sessionId]?.cwd === worktree.path).length + 1;
   return count === 1 ? base : `${base} (${count})`;
 }
 

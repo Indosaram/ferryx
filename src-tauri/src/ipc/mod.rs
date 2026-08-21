@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod error;
 pub mod notifications;
 pub mod preferences;
@@ -22,6 +23,7 @@ mod blocking_contract_tests;
 #[cfg(test)]
 mod tests;
 
+pub use browser::*;
 pub use error::*;
 pub use notifications::*;
 pub use preferences::*;

@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod ipc;
 pub mod notification;
 pub mod remote;
@@ -23,6 +24,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let workspace_registry = WorkspaceRegistry::new();
     // Lazily initialized: a machine with no audio output device must still launch.
     let notification_audio = Arc::new(NotificationAudioPlayer::new());
+    let browser_manager = Arc::new(browser::BrowserManager::new());
 
     if let Ok(repo_root) = std::env::current_dir() {
         if let Err(error) = workspace_registry.register("default", &repo_root) {
@@ -45,6 +47,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(remote_manager)
         .manage(workspace_registry)
         .manage(notification_audio)
+        .manage(browser_manager)
         .invoke_handler(tauri::generate_handler![
             cmd_terminal_spawn,
             cmd_terminal_write,
@@ -78,6 +81,17 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             cmd_session_save,
             cmd_session_load,
             cmd_session_clear,
+            cmd_browser_create,
+            cmd_browser_navigate,
+            cmd_browser_reload,
+            cmd_browser_set_bounds,
+            cmd_browser_set_visible,
+            cmd_browser_set_zoom,
+            cmd_browser_focus,
+            cmd_browser_get_state,
+            cmd_browser_close,
+            cmd_browser_list,
+            cmd_browser_open_external,
         ])
 }
 

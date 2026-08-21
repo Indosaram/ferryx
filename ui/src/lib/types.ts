@@ -62,9 +62,68 @@ export type TerminalSession = {
 };
 
 export type TerminalTab = {
+  kind?: "terminal";
   id: string;
   label: string;
   sessionId: string;
+};
+
+export type BrowserProfileId = "default" | "private";
+
+export type LogicalRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type BrowserState = {
+  browserId: string;
+  webviewLabel: string;
+  workspaceId?: string | null;
+  worktreePath?: string | null;
+  profileId: BrowserProfileId;
+  generation: number;
+  url: string;
+  title?: string | null;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  zoomFactor: number;
+  loadError?: string | null;
+  visible: boolean;
+};
+
+export type BrowserTab = {
+  kind: "browser";
+  id: string;
+  label: string;
+  browserId: string;
+  url: string;
+  title?: string | null;
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+};
+
+export type WorkspaceTab = TerminalTab | BrowserTab;
+
+export type CreateBrowserRequest = {
+  workspaceId?: string | null;
+  worktreePath?: string | null;
+  url: string;
+  profile?: BrowserProfileId;
+  bounds?: LogicalRect;
+  visible?: boolean;
+};
+
+export type BrowserSessionSummary = {
+  browserId: string;
+  webviewLabel: string;
+  workspaceId?: string | null;
+  url: string;
+  title?: string | null;
+  visible: boolean;
 };
 
 export type Pane = {
@@ -94,7 +153,7 @@ export type TabPaneLayout = {
 };
 
 export type LayoutState = {
-  tabs: TerminalTab[];
+  tabs: WorkspaceTab[];
   primaryTabId?: string | null;
   secondaryTabId?: string | null;
   split?: SplitMode;
@@ -216,12 +275,16 @@ export interface PersistedTab {
   label: string;
   customTitle?: string;
   worktreePath: string;
+  paneTree?: PaneNode;
+  sessionIdsByLeafId?: Record<string, string>;
+  activeLeafId?: string | null;
 }
 
 export interface PersistedLayout {
   splitMode: string;
   primaryTabId: string | null;
   secondaryTabId: string | null;
+  activeTabId: string | null;
   tabs: PersistedTab[];
 }
 

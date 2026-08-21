@@ -21,17 +21,26 @@ export function serializeWorkspaceState(
     isLocked: Boolean(wt.locked),
   }));
 
-  const persistedTabs: PersistedTab[] = state.layout.tabs.map((tab) => ({
-    id: tab.id,
-    sessionId: tab.sessionId,
-    label: tab.label,
-    worktreePath: state.sessions[tab.sessionId]?.cwd ?? "",
-  }));
+  const persistedTabs: PersistedTab[] = state.layout.tabs.map((tab) => {
+    const tabLayout = state.layout.layoutsByTabId[tab.id];
+    const sessionId = tab.kind === "browser" ? tab.browserId : tab.sessionId;
+    const worktreePath = tab.kind === "browser" ? "" : (state.sessions[tab.sessionId]?.cwd ?? "");
+    return {
+      id: tab.id,
+      sessionId,
+      label: tab.label,
+      worktreePath,
+      paneTree: tabLayout?.root,
+      sessionIdsByLeafId: tabLayout?.sessionIdsByLeafId,
+      activeLeafId: tabLayout?.activeLeafId,
+    };
+  });
 
   const persistedLayout: PersistedLayout = {
     splitMode: state.layout.split ?? "none",
     primaryTabId: state.layout.primaryTabId ?? null,
     secondaryTabId: state.layout.secondaryTabId ?? null,
+    activeTabId: state.layout.activeTabId ?? null,
     tabs: persistedTabs,
   };
 

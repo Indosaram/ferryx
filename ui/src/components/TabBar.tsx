@@ -1,16 +1,17 @@
-import { Plus, TerminalSquare, X } from "lucide-react";
+import { Globe, Plus, TerminalSquare, X } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { cn } from "../lib/cn";
-import type { TerminalTab } from "../lib/types";
+import type { WorkspaceTab } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
 
 type TabBarProps = {
-  tabs: TerminalTab[];
+  tabs: WorkspaceTab[];
   activeTabId: string;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
   onAdd: () => void;
+  onAddBrowser?: () => void;
   actions?: ReactNode;
   showAdd?: boolean;
   leadingSpacer?: number;
@@ -51,7 +52,11 @@ export function TabBar({
                 active ? "bg-terminal text-foreground" : "bg-card text-muted-foreground hover:bg-accent/45 hover:text-foreground",
               )}
             >
-              <TerminalSquare className="size-3 shrink-0" />
+              {tab.kind === "browser" ? (
+                <Globe className="size-3 shrink-0 text-blue-400" />
+              ) : (
+                <TerminalSquare className="size-3 shrink-0" />
+              )}
               <span className="min-w-0 flex-1 truncate text-left">{tab.label}</span>
               {isUnread ? <span className="size-1.5 shrink-0 rounded-full bg-blue-500" data-testid="tab-unread-dot" /> : null}
               <span

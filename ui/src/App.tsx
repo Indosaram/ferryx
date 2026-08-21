@@ -34,6 +34,9 @@ export function App() {
     state,
     agents,
     openTab,
+    createBrowserTab,
+    navigateBrowserTab,
+    reloadBrowserTab,
     ensureTabForWorktree,
     closeTab,
     splitPane,
@@ -60,6 +63,49 @@ export function App() {
       .catch(reportRuntimeError);
   }, [activeProject.repoRoot, activeProject.workspaceId, refreshWorktrees, reportRuntimeError]);
 
+  // Initial session restore on startup
+  useEffect(() => {
+    let cancelled = false;
+    async function restore() {
+      try {
+        const session = await loadSession();
+        if (cancelled || !session) return;
+        const ws = session.workspaces[session.activeWorkspaceId];
+        if (!ws) return;
+
+        if (ws.layout.tabs.length > 0) {
+          for (const tab of ws.layout.tabs) {
+            const found = ws.worktrees.find((candidate: any) => candidate.path === tab.worktreePath);
+            const wt: Worktree = found ? {
+              path: found.path,
+              head: found.head,
+              branch: found.branch,
+              bare: false,
+              detached: false,
+              locked: found.isLocked ? "locked" : null,
+              prunable: null,
+            } : {
+              path: tab.worktreePath || ws.repoRoot,
+              head: "",
+              branch: tab.label,
+              bare: false,
+              detached: false,
+              locked: null,
+              prunable: null,
+            };
+            await ensureTabForWorktree(wt);
+          }
+        }
+      } catch (e) {
+        console.error("Session restore on boot failed:", e);
+      }
+    }
+    void restore();
+    return () => {
+      cancelled = true;
+    };
+  }, [ensureTabForWorktree]);
+
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
       const session = serializeWorkspaceState(
@@ -81,7 +127,7 @@ export function App() {
         activeProject.repoRoot,
         state,
       );
-      void saveSession(session).catch((e) =>
+      void Promise.resolve(saveSession(session)).catch((e) =>
         console.error("Failed to auto-save session:", e),
       );
     }, 500);
@@ -163,7 +209,12 @@ export function App() {
   const handleSelectTerminalTab = useCallback(
     (tabId: string) => {
       const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
-      const session = tab ? state.sessions[tab.sessionId] : undefined;
+      if (!tab) return;
+      if (tab.kind === "browser") {
+        activateTab(tabId);
+        return;
+      }
+      const session = state.sessions[tab.sessionId];
       const worktree = session ? state.worktrees.find((candidate) => candidate.path === session.cwd) : undefined;
       if (!worktree || worktree.path === state.activeWorktreePath) {
         activateTab(tabId);
@@ -335,6 +386,9 @@ export function App() {
             onActivateTab={handleSelectTerminalTab}
             onCloseTab={handleCloseTab}
             onAddTab={handleAddTerminalTab}
+            onAddBrowserTab={() => void createBrowserTab("http://localhost:3000")}
+            onNavigateBrowserTab={(tabId, url) => void navigateBrowserTab(tabId, url)}
+            onReloadBrowserTab={(tabId) => void reloadBrowserTab(tabId)}
             onSplitPane={(tabId: string, leafId: string, direction: PaneDirection) => splitPane(tabId, leafId, direction).catch(reportRuntimeError)}
             onClosePane={(tabId: string, leafId: string) => closePane(tabId, leafId).catch(reportRuntimeError)}
             onSetRatio={setPaneRatio}

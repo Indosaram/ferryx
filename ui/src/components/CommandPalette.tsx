@@ -2,12 +2,12 @@ import { GitBranch, Search, TerminalSquare, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { SHORTCUTS, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
-import type { TerminalTab, Worktree } from "../lib/types";
+import type { WorkspaceTab, Worktree } from "../lib/types";
 
 export type CommandPaletteProps = {
   open: boolean;
   worktrees: Worktree[];
-  tabs: TerminalTab[];
+  tabs: WorkspaceTab[];
   onSelectWorktree: (worktree: Worktree) => void;
   onSelectTab: (tabId: string) => void;
   onClose: () => void;

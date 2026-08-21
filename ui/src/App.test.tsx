@@ -7,6 +7,9 @@ const native = vi.hoisted(() => ({
   listProjectBranches: vi.fn(),
   registerProject: vi.fn(),
   signalTerminal: vi.fn(),
+  saveSession: vi.fn().mockResolvedValue(undefined),
+  loadSession: vi.fn().mockResolvedValue(null),
+  clearSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 const workspace = vi.hoisted(() => ({
@@ -58,6 +61,9 @@ vi.mock("./lib/tauri", () => ({
   listProjectBranches: native.listProjectBranches,
   registerProject: native.registerProject,
   signalTerminal: native.signalTerminal,
+  saveSession: native.saveSession,
+  loadSession: native.loadSession,
+  clearSession: native.clearSession,
   toIpcError: (error: unknown) => error,
 }));
 

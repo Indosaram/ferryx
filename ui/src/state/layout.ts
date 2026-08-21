@@ -1,4 +1,4 @@
-import type { LayoutState, TabPaneLayout, TerminalTab } from "../lib/types";
+import type { LayoutState, TabPaneLayout, WorkspaceTab } from "../lib/types";
 import {
   collectLeafIds,
   createLeafNode,
@@ -13,8 +13,8 @@ import {
 } from "./paneTree";
 
 export type LayoutAction =
-  | { type: "ADD_TAB"; tab: TerminalTab; sessionId?: string; activate?: boolean }
-  | { type: "CLOSE_TAB"; tabId: string; replacementTab?: TerminalTab }
+  | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean }
+  | { type: "CLOSE_TAB"; tabId: string; replacementTab?: WorkspaceTab }
   | { type: "ACTIVATE_TAB"; tabId: string }
   | {
       type: "SPLIT_PANE";
@@ -33,15 +33,16 @@ export type LayoutAction =
   | { type: "TOGGLE_PANE_EXPANDED"; tabId: string; leafId: string }
   | { type: "EQUALIZE_PANES"; tabId: string };
 
-export function createLayoutState(tabs: TerminalTab[] = [], activeTabId?: string | null): LayoutState {
+export function createLayoutState(tabs: WorkspaceTab[] = [], activeTabId?: string | null): LayoutState {
   const layoutsByTabId: Record<string, TabPaneLayout> = {};
   for (const tab of tabs) {
     const leafId = "leaf-init";
+    const sessionId = tab.kind === "browser" ? "" : tab.sessionId;
     layoutsByTabId[tab.id] = {
       root: createLeafNode(leafId),
       activeLeafId: leafId,
       expandedLeafId: null,
-      sessionIdsByLeafId: { [leafId]: tab.sessionId },
+      sessionIdsByLeafId: { [leafId]: sessionId },
     };
   }
 
@@ -60,7 +61,8 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
       const layoutsByTabId = { ...state.layoutsByTabId };
       if (!layoutsByTabId[action.tab.id]) {
         const leafId = `leaf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        const sessionId = action.sessionId ?? action.tab.sessionId;
+        const defaultSessionId = action.tab.kind === "browser" ? "" : action.tab.sessionId;
+        const sessionId = action.sessionId ?? defaultSessionId;
         layoutsByTabId[action.tab.id] = {
           root: createLeafNode(leafId),
           activeLeafId: leafId,
@@ -85,11 +87,12 @@ export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutS
       if (tabs.length === 0 && action.replacementTab) {
         tabs = [action.replacementTab];
         const leafId = "leaf-replacement";
+        const defaultSessionId = action.replacementTab.kind === "browser" ? "" : action.replacementTab.sessionId;
         layoutsByTabId[action.replacementTab.id] = {
           root: createLeafNode(leafId),
           activeLeafId: leafId,
           expandedLeafId: null,
-          sessionIdsByLeafId: { [leafId]: action.replacementTab.sessionId },
+          sessionIdsByLeafId: { [leafId]: defaultSessionId },
         };
       }
 
@@ -247,11 +250,12 @@ function normalizeLayout(state: LayoutState): LayoutState {
       };
     } else {
       const leafId = "leaf-default";
+      const defaultSessionId = tab.kind === "browser" ? "" : tab.sessionId;
       layoutsByTabId[tab.id] = {
         root: createLeafNode(leafId),
         activeLeafId: leafId,
         expandedLeafId: null,
-        sessionIdsByLeafId: { [leafId]: tab.sessionId },
+        sessionIdsByLeafId: { [leafId]: defaultSessionId },
       };
     }
   }
@@ -259,7 +263,7 @@ function normalizeLayout(state: LayoutState): LayoutState {
   return { tabs, activeTabId, layoutsByTabId };
 }
 
-function dedupeTabs(tabs: TerminalTab[]) {
+function dedupeTabs(tabs: WorkspaceTab[]) {
   const seen = new Set<string>();
   return tabs.filter((tab) => {
     if (seen.has(tab.id)) return false;
