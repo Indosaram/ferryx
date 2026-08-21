@@ -13,10 +13,10 @@
 :root {
   color-scheme: dark;
 
-  --radius: 0.625rem;
+  --radius: 0.5rem;
 
-  --background: #0a0a0a;
-  --background-rgb: 10 10 10;
+  --background: #23262d;
+  --background-rgb: 35 38 45;
   --foreground: #fafafa;
   --foreground-rgb: 250 250 250;
   --card: #171717;

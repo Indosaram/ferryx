@@ -1,122 +1,262 @@
-import type { LayoutState, SplitMode, TerminalTab } from "../lib/types";
+import type { LayoutState, TabPaneLayout, TerminalTab } from "../lib/types";
+import {
+  collectLeafIds,
+  createLeafNode,
+  equalizeRatios,
+  findFirstLeafId,
+  findSiblingLeafId,
+  PaneDirection,
+  removeLeaf,
+  setRatioAtPath,
+  splitLeaf,
+  swapLeaves,
+} from "./paneTree";
 
 export type LayoutAction =
-  | { type: "ADD_TAB"; tab: TerminalTab; activate?: boolean }
+  | { type: "ADD_TAB"; tab: TerminalTab; sessionId?: string; activate?: boolean }
   | { type: "CLOSE_TAB"; tabId: string; replacementTab?: TerminalTab }
-  | { type: "ACTIVATE_PRIMARY"; tabId: string }
-  | { type: "ACTIVATE_SECONDARY"; tabId: string }
+  | { type: "ACTIVATE_TAB"; tabId: string }
   | {
-      type: "ENABLE_SPLIT";
-      orientation: Exclude<SplitMode, "none">;
-      secondaryTabId?: string;
-      secondaryTab?: TerminalTab;
+      type: "SPLIT_PANE";
+      tabId: string;
+      targetLeafId?: string;
+      direction: PaneDirection;
+      newLeafId?: string;
+      sessionId: string;
+      position?: "first" | "second";
+      ratio?: number;
     }
-  | { type: "ROTATE_SPLIT" }
-  | { type: "DISABLE_SPLIT" };
+  | { type: "CLOSE_PANE"; tabId: string; leafId: string; replacementSessionId?: string }
+  | { type: "FOCUS_PANE"; tabId: string; leafId: string }
+  | { type: "SET_PANE_RATIO"; tabId: string; path: string; ratio: number }
+  | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
+  | { type: "TOGGLE_PANE_EXPANDED"; tabId: string; leafId: string }
+  | { type: "EQUALIZE_PANES"; tabId: string };
 
-export function createLayoutState(tabs: TerminalTab[] = [], primaryTabId?: string | null): LayoutState {
+export function createLayoutState(tabs: TerminalTab[] = [], activeTabId?: string | null): LayoutState {
+  const layoutsByTabId: Record<string, TabPaneLayout> = {};
+  for (const tab of tabs) {
+    const leafId = "leaf-init";
+    layoutsByTabId[tab.id] = {
+      root: createLeafNode(leafId),
+      activeLeafId: leafId,
+      expandedLeafId: null,
+      sessionIdsByLeafId: { [leafId]: tab.sessionId },
+    };
+  }
+
   return normalizeLayout({
     tabs,
-    primaryTabId: primaryTabId ?? tabs[0]?.id ?? null,
-    secondaryTabId: null,
-    split: "none",
+    activeTabId: activeTabId ?? tabs[0]?.id ?? null,
+    layoutsByTabId,
   });
 }
 
 export function layoutReducer(state: LayoutState, action: LayoutAction): LayoutState {
   switch (action.type) {
     case "ADD_TAB": {
-      const tabs = state.tabs.some((tab) => tab.id === action.tab.id) ? state.tabs : [...state.tabs, action.tab];
+      const exists = state.tabs.some((tab) => tab.id === action.tab.id);
+      const tabs = exists ? state.tabs : [...state.tabs, action.tab];
+      const layoutsByTabId = { ...state.layoutsByTabId };
+      if (!layoutsByTabId[action.tab.id]) {
+        const leafId = `leaf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const sessionId = action.sessionId ?? action.tab.sessionId;
+        layoutsByTabId[action.tab.id] = {
+          root: createLeafNode(leafId),
+          activeLeafId: leafId,
+          expandedLeafId: null,
+          sessionIdsByLeafId: { [leafId]: sessionId },
+        };
+      }
       return normalizeLayout({
         ...state,
         tabs,
-        primaryTabId: action.activate === false ? state.primaryTabId : action.tab.id,
+        activeTabId: action.activate === false ? state.activeTabId : action.tab.id,
+        layoutsByTabId,
       });
     }
     case "CLOSE_TAB": {
       if (!state.tabs.some((tab) => tab.id === action.tabId)) return normalizeLayout(state);
 
       let tabs = state.tabs.filter((tab) => tab.id !== action.tabId);
-      if (tabs.length === 0 && action.replacementTab) tabs = [action.replacementTab];
+      const layoutsByTabId = { ...state.layoutsByTabId };
+      delete layoutsByTabId[action.tabId];
 
-      let primaryTabId = state.primaryTabId === action.tabId ? tabs[0]?.id ?? null : state.primaryTabId;
-      if (primaryTabId && !tabs.some((tab) => tab.id === primaryTabId)) primaryTabId = tabs[0]?.id ?? null;
-
-      let secondaryTabId = state.secondaryTabId === action.tabId ? null : state.secondaryTabId;
-      if (secondaryTabId && !tabs.some((tab) => tab.id === secondaryTabId)) secondaryTabId = null;
-
-      let split = state.split;
-      if (split !== "none") {
-        if (!secondaryTabId || secondaryTabId === primaryTabId) {
-          secondaryTabId = tabs.find((tab) => tab.id !== primaryTabId)?.id ?? null;
-        }
-        if (!secondaryTabId) split = "none";
+      if (tabs.length === 0 && action.replacementTab) {
+        tabs = [action.replacementTab];
+        const leafId = "leaf-replacement";
+        layoutsByTabId[action.replacementTab.id] = {
+          root: createLeafNode(leafId),
+          activeLeafId: leafId,
+          expandedLeafId: null,
+          sessionIdsByLeafId: { [leafId]: action.replacementTab.sessionId },
+        };
       }
 
-      return normalizeLayout({ tabs, primaryTabId, secondaryTabId, split });
-    }
-    case "ACTIVATE_PRIMARY": {
-      if (!state.tabs.some((tab) => tab.id === action.tabId)) return state;
-      return normalizeLayout({ ...state, primaryTabId: action.tabId });
-    }
-    case "ACTIVATE_SECONDARY": {
-      if (state.split === "none" || !state.tabs.some((tab) => tab.id === action.tabId)) return state;
-      return normalizeLayout({ ...state, secondaryTabId: action.tabId });
-    }
-    case "ENABLE_SPLIT": {
-      const tabs = action.secondaryTab && !state.tabs.some((tab) => tab.id === action.secondaryTab?.id)
-        ? [...state.tabs, action.secondaryTab]
-        : state.tabs;
-      const primaryTabId = state.primaryTabId ?? tabs[0]?.id ?? null;
-      const requestedSecondaryId = action.secondaryTab?.id ?? action.secondaryTabId ?? null;
-      const requestedExists = !!requestedSecondaryId && tabs.some((tab) => tab.id === requestedSecondaryId);
-      const mirrorRequested = requestedExists && requestedSecondaryId === primaryTabId && tabs.length === 1;
-      const secondaryTabId = mirrorRequested
-        ? primaryTabId
-        : requestedExists && requestedSecondaryId !== primaryTabId
-          ? requestedSecondaryId
-          : tabs.find((tab) => tab.id !== primaryTabId)?.id ?? null;
+      let activeTabId = state.activeTabId === action.tabId ? tabs[0]?.id ?? null : state.activeTabId;
+      if (activeTabId && !tabs.some((tab) => tab.id === activeTabId)) activeTabId = tabs[0]?.id ?? null;
 
-      return normalizeLayout({
-        tabs,
-        primaryTabId,
-        secondaryTabId,
-        split: secondaryTabId ? action.orientation : "none",
-      });
+      return normalizeLayout({ tabs, activeTabId, layoutsByTabId });
     }
-    case "ROTATE_SPLIT":
-      return normalizeLayout({
+    case "ACTIVATE_TAB": {
+      if (!state.tabs.some((tab) => tab.id === action.tabId)) return state;
+      return normalizeLayout({ ...state, activeTabId: action.tabId });
+    }
+    case "SPLIT_PANE": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      const targetLeafId = action.targetLeafId ?? tabLayout.activeLeafId ?? findFirstLeafId(tabLayout.root);
+      const newLeafId = action.newLeafId ?? `leaf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const newRoot = splitLeaf(tabLayout.root, targetLeafId, newLeafId, action.direction, action.position, action.ratio);
+      const newSessionIds = { ...tabLayout.sessionIdsByLeafId, [newLeafId]: action.sessionId };
+      return {
         ...state,
-        split: state.split === "horizontal" ? "vertical" : state.split === "vertical" ? "horizontal" : "none",
-      });
-    case "DISABLE_SPLIT":
-      return normalizeLayout({ ...state, split: "none", secondaryTabId: null });
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: {
+            ...tabLayout,
+            root: newRoot,
+            activeLeafId: newLeafId,
+            sessionIdsByLeafId: newSessionIds,
+          },
+        },
+      };
+    }
+    case "CLOSE_PANE": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      const fallbackLeafId = findSiblingLeafId(tabLayout.root, action.leafId);
+      const newRoot = removeLeaf(tabLayout.root, action.leafId);
+      if (!newRoot) {
+        // Last pane in tab was closed -> close tab
+        return layoutReducer(state, { type: "CLOSE_TAB", tabId: action.tabId });
+      }
+      const newSessionIds = { ...tabLayout.sessionIdsByLeafId };
+      delete newSessionIds[action.leafId];
+      const nextActiveLeafId =
+        tabLayout.activeLeafId === action.leafId
+          ? fallbackLeafId ?? findFirstLeafId(newRoot)
+          : tabLayout.activeLeafId;
+      const nextExpanded = tabLayout.expandedLeafId === action.leafId ? null : tabLayout.expandedLeafId;
+      return {
+        ...state,
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: {
+            ...tabLayout,
+            root: newRoot,
+            activeLeafId: nextActiveLeafId,
+            expandedLeafId: nextExpanded,
+            sessionIdsByLeafId: newSessionIds,
+          },
+        },
+      };
+    }
+    case "FOCUS_PANE": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      return {
+        ...state,
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: {
+            ...tabLayout,
+            activeLeafId: action.leafId,
+          },
+        },
+      };
+    }
+    case "SET_PANE_RATIO": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      return {
+        ...state,
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: {
+            ...tabLayout,
+            root: setRatioAtPath(tabLayout.root, action.path, action.ratio),
+          },
+        },
+      };
+    }
+    case "SWAP_PANES": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      return {
+        ...state,
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: {
+            ...tabLayout,
+            root: swapLeaves(tabLayout.root, action.sourceLeafId, action.targetLeafId),
+          },
+        },
+      };
+    }
+    case "TOGGLE_PANE_EXPANDED": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      const isExpanded = tabLayout.expandedLeafId === action.leafId;
+      return {
+        ...state,
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: {
+            ...tabLayout,
+            expandedLeafId: isExpanded ? null : action.leafId,
+          },
+        },
+      };
+    }
+    case "EQUALIZE_PANES": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      return {
+        ...state,
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: {
+            ...tabLayout,
+            root: equalizeRatios(tabLayout.root),
+          },
+        },
+      };
+    }
   }
 }
 
 function normalizeLayout(state: LayoutState): LayoutState {
   const tabs = dedupeTabs(state.tabs);
   if (tabs.length === 0) {
-    return { tabs: [], primaryTabId: null, secondaryTabId: null, split: "none" };
+    return { tabs: [], activeTabId: null, layoutsByTabId: {} };
   }
 
-  const primaryTabId = tabs.some((tab) => tab.id === state.primaryTabId) ? state.primaryTabId : tabs[0].id;
-  let split = state.split;
-  let secondaryTabId = tabs.some((tab) => tab.id === state.secondaryTabId) ? state.secondaryTabId : null;
-
-  const isMirror = split !== "none" && tabs.length === 1 && secondaryTabId === primaryTabId;
-  if (secondaryTabId === primaryTabId && !isMirror) {
-    secondaryTabId = tabs.find((tab) => tab.id !== primaryTabId)?.id ?? null;
+  const activeTabId = tabs.some((tab) => tab.id === state.activeTabId) ? state.activeTabId : tabs[0].id;
+  const layoutsByTabId: Record<string, TabPaneLayout> = {};
+  for (const tab of tabs) {
+    const existing = state.layoutsByTabId[tab.id];
+    if (existing) {
+      const leaves = collectLeafIds(existing.root);
+      const activeLeafId = leaves.includes(existing.activeLeafId ?? "") ? existing.activeLeafId : leaves[0] ?? null;
+      const expandedLeafId = leaves.includes(existing.expandedLeafId ?? "") ? existing.expandedLeafId : null;
+      layoutsByTabId[tab.id] = {
+        ...existing,
+        activeLeafId,
+        expandedLeafId,
+      };
+    } else {
+      const leafId = "leaf-default";
+      layoutsByTabId[tab.id] = {
+        root: createLeafNode(leafId),
+        activeLeafId: leafId,
+        expandedLeafId: null,
+        sessionIdsByLeafId: { [leafId]: tab.sessionId },
+      };
+    }
   }
 
-  if (split !== "none" && !secondaryTabId) {
-    secondaryTabId = tabs.find((tab) => tab.id !== primaryTabId)?.id ?? null;
-  }
-
-  if (split !== "none" && !secondaryTabId) split = "none";
-  if (split === "none") secondaryTabId = null;
-
-  return { tabs, primaryTabId, secondaryTabId, split };
+  return { tabs, activeTabId, layoutsByTabId };
 }
 
 function dedupeTabs(tabs: TerminalTab[]) {

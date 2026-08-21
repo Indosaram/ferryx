@@ -11,6 +11,8 @@ import type { TerminalSession } from "../lib/types";
 type TerminalPaneProps = {
   session: TerminalSession;
   active: boolean;
+  onBell?: () => void;
+  onTitleChange?: (title: string) => void;
 };
 
 const TERMINAL_THEME = {
@@ -37,16 +39,20 @@ const TERMINAL_THEME = {
   brightWhite: "#fafafa",
 } as const;
 
-export function TerminalPane({ session, active }: TerminalPaneProps) {
+export function TerminalPane({ session, active, onBell, onTitleChange }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef(session);
+  const onBellRef = useRef(onBell);
+  const onTitleChangeRef = useRef(onTitleChange);
   const { settings } = useTerminalSettings();
   const settingsRef = useRef(settings);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   sessionRef.current = session;
+  onBellRef.current = onBell;
+  onTitleChangeRef.current = onTitleChange;
   settingsRef.current = settings;
 
   useEffect(() => {
@@ -63,7 +69,7 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
     if (!terminal) return;
     applyTerminalSettings(terminal, settings);
     requestAnimationFrame(() => fitRef.current?.fit());
-  }, [settings.fontSize, settings.scrollback]);
+  }, [settings.fontFamily, settings.fontSize, settings.macosOptionAsAlt, settings.scrollback]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -88,10 +94,11 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
         convertEol: true,
         cursorBlink: true,
         cursorStyle: "bar",
-        fontFamily: '"SF Mono", SFMono-Regular, ui-monospace, Menlo, monospace',
+        fontFamily: settingsRef.current.fontFamily,
         fontSize: settingsRef.current.fontSize,
         lineHeight: 1.2,
         letterSpacing: 0,
+        macOptionIsMeta: settingsRef.current.macosOptionAsAlt,
         scrollback: settingsRef.current.scrollback,
         theme: TERMINAL_THEME,
       });
@@ -133,6 +140,9 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
         });
       });
 
+      const bellDispose = terminal.onBell(() => onBellRef.current?.());
+      const titleDispose = terminal.onTitleChange((title) => onTitleChangeRef.current?.(title));
+
       const focusTerminal = () => terminal.focus();
       hostElement.addEventListener("pointerdown", focusTerminal);
 
@@ -142,7 +152,7 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
         : () => undefined;
 
       if (!isTauriRuntime()) {
-        terminal.writeln("\x1b[1;32mORCA Lite\x1b[0m  UI preview");
+        terminal.writeln("\x1b[1;32mrorca\x1b[0m  UI preview");
         terminal.writeln("\x1b[90mLaunch through Tauri to attach the PTY session.\x1b[0m");
         terminal.write("\r\n\x1b[34m~\x1b[0m \x1b[32m❯\x1b[0m ");
       }
@@ -155,6 +165,8 @@ export function TerminalPane({ session, active }: TerminalPaneProps) {
         resizeObserver.disconnect();
         hostElement.removeEventListener("pointerdown", focusTerminal);
         dataDisposable.dispose();
+        bellDispose.dispose();
+        titleDispose.dispose();
         unsubscribeOutput();
         disposeWebgl();
         terminal.dispose();

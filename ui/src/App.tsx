@@ -1,67 +1,164 @@
-import { FolderPlus, GitBranch, Plus, X } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { PanelLeft } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { CommandPalette } from "./components/CommandPalette";
+import { AddProjectDialog, AddWorktreeDialog } from "./components/ProjectDialogs";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { Sidebar } from "./components/Sidebar";
-import { TabBar } from "./components/TabBar";
+import { Sidebar, SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY } from "./components/Sidebar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
-import { WorkspaceHeader } from "./components/WorkspaceHeader";
-import { worktreeErrorMessage } from "./lib/ipcErrors";
-import { useShortcuts } from "./lib/shortcuts";
-import {
-  createWorktree,
-  DEFAULT_WORKSPACE_ID,
-  getWorktreeStatus,
-  signalTerminal,
-  toIpcError,
-} from "./lib/tauri";
+import { IconButton } from "./components/ui/IconButton";
+import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
+import type { PaneDirection } from "./state/paneTree";
+import { DEFAULT_WORKSPACE_ID, getWorktreeStatus, registerProject, saveSession, loadSession, type RegisteredProject } from "./lib/tauri";
 import { worktreeIdentity, type DirtyState, type Worktree } from "./lib/types";
+import { serializeWorkspaceState } from "./lib/sessionPersistence";
+import { registerWindowCloseGuard } from "./lib/updater";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore } from "./state/workspaceStore";
 
+const PROJECTS_STORAGE_KEY = "rorca.projects";
+const ACTIVE_PROJECT_STORAGE_KEY = "rorca.active-project";
+export const SIDEBAR_OPEN_STORAGE_KEY = "orca.sidebar.open";
+const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: "." };
+
 export function App() {
+  const [projects, setProjects] = useState<RegisteredProject[]>(loadProjects);
+  const [activeProjectId, setActiveProjectId] = useState(loadActiveProjectId);
+  const activeProject = useMemo(
+    () => projects.find((project) => project.workspaceId === activeProjectId) ?? projects[0] ?? DEFAULT_PROJECT,
+    [activeProjectId, projects],
+  );
+
   const {
     state,
     agents,
     openTab,
     ensureTabForWorktree,
     closeTab,
-    enableSplit,
-    rotateSplit,
-    disableSplit,
-    activatePrimary,
+    splitPane,
+    closePane,
+    activateTab,
+    focusPane,
+    setPaneRatio,
+    swapPanes,
     syncWorktrees,
-  } = useWorkspaceStore();
+  } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
   const { runtimeError, refreshWorktrees, reportRuntimeError } = useWorkspaceRuntime({
+    workspaceId: activeProject.workspaceId,
     activeWorktreePath: state.activeWorktreePath,
     syncWorktrees,
     ensureTabForWorktree,
   });
+
+  useEffect(() => {
+    void registerProject({
+      workspaceId: activeProject.workspaceId,
+      repoPath: activeProject.repoRoot,
+    })
+      .then(() => refreshWorktrees())
+      .catch(reportRuntimeError);
+  }, [activeProject.repoRoot, activeProject.workspaceId, refreshWorktrees, reportRuntimeError]);
+
+  useEffect(() => {
+    const unregister = registerWindowCloseGuard(async () => {
+      const session = serializeWorkspaceState(
+        activeProject.workspaceId,
+        activeProject.repoRoot,
+        state,
+      );
+      await saveSession(session);
+    });
+    return unregister;
+  }, [activeProject.repoRoot, activeProject.workspaceId, state]);
+
+  // Debounced auto-save on workspace state changes (500ms)
+  useEffect(() => {
+    if (state.worktrees.length === 0) return;
+    const timer = setTimeout(() => {
+      const session = serializeWorkspaceState(
+        activeProject.workspaceId,
+        activeProject.repoRoot,
+        state,
+      );
+      void saveSession(session).catch((e) =>
+        console.error("Failed to auto-save session:", e),
+      );
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [activeProject.repoRoot, activeProject.workspaceId, state]);
+
+  const [isAddProjectOpen, setIsAddProjectOpen] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
-  const [newSlug, setNewSlug] = useState("");
-  const [newBaseRef, setNewBaseRef] = useState("HEAD");
-  const [createError, setCreateError] = useState<string | null>(null);
+  // A worktree picked from another project can only be activated once that project's worktrees
+  // have loaded into the store, so the request is parked here until the path shows up.
+  const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
+
+  const toggleSidebar = useCallback(() => {
+    setIsSidebarOpen((current) => {
+      const next = !current;
+      persistSidebarOpen(next);
+      return next;
+    });
+  }, []);
 
   const activeWorktree = useMemo(
     () => state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? null,
     [state.activeWorktreePath, state.worktrees],
   );
-  const activeAgent = agents.find((agent) => agent.worktreePath === activeWorktree?.path);
-  const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.primaryTabId);
-  const activeSession = activeTab ? state.sessions[activeTab.sessionId] : undefined;
+
+  const handleSelectProject = useCallback(
+    (project: RegisteredProject) => {
+      if (project.workspaceId === activeProject.workspaceId) return;
+      setActiveProjectId(project.workspaceId);
+      persistActiveProjectId(project.workspaceId);
+      setWorktreeStatuses({});
+      setDeleteTarget(null);
+      // Any selection parked for the previous project is abandoned by this switch.
+      setPendingWorktreePath(null);
+    },
+    [activeProject.workspaceId],
+  );
+
+  const handleRegisteredProject = useCallback((project: RegisteredProject) => {
+    setProjects((current) => {
+      const next = [...current.filter((candidate) => candidate.workspaceId !== project.workspaceId), project];
+      persistProjects(next);
+      return next;
+    });
+    setActiveProjectId(project.workspaceId);
+    persistActiveProjectId(project.workspaceId);
+    setWorktreeStatuses({});
+  }, []);
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
+      // A worktree selected from another project's tree must switch the active project first,
+      // because the workspace store only ever holds the active project's worktrees.
+      const ownerId = worktreeIdentity(worktree)?.wsId;
+      const owner = ownerId ? projects.find((project) => project.workspaceId === ownerId) : undefined;
+      if (owner && owner.workspaceId !== activeProject.workspaceId) {
+        handleSelectProject(owner);
+        setPendingWorktreePath(worktree.path);
+        return;
+      }
       void ensureTabForWorktree(worktree).catch(reportRuntimeError);
     },
-    [ensureTabForWorktree, reportRuntimeError],
+    [activeProject.workspaceId, ensureTabForWorktree, handleSelectProject, projects, reportRuntimeError],
   );
+
+  useEffect(() => {
+    if (!pendingWorktreePath) return;
+    const target = state.worktrees.find((worktree) => worktree.path === pendingWorktreePath);
+    if (!target) return;
+    setPendingWorktreePath(null);
+    void ensureTabForWorktree(target).catch(reportRuntimeError);
+  }, [ensureTabForWorktree, pendingWorktreePath, reportRuntimeError, state.worktrees]);
 
   const handleSelectTerminalTab = useCallback(
     (tabId: string) => {
@@ -69,47 +166,27 @@ export function App() {
       const session = tab ? state.sessions[tab.sessionId] : undefined;
       const worktree = session ? state.worktrees.find((candidate) => candidate.path === session.cwd) : undefined;
       if (!worktree || worktree.path === state.activeWorktreePath) {
-        activatePrimary(tabId);
+        activateTab(tabId);
         return;
       }
       void ensureTabForWorktree(worktree)
-        .then(() => activatePrimary(tabId))
+        .then(() => activateTab(tabId))
         .catch(reportRuntimeError);
     },
-    [activatePrimary, ensureTabForWorktree, reportRuntimeError, state.activeWorktreePath, state.layout.tabs, state.sessions, state.worktrees],
+    [activateTab, ensureTabForWorktree, reportRuntimeError, state.activeWorktreePath, state.layout.tabs, state.sessions, state.worktrees],
   );
-
-  const handleCreateWorktreeSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    const slug = newSlug.trim();
-    if (!slug || !activeWorktree) return;
-
-    try {
-      setCreateError(null);
-      await createWorktree({
-        workspaceId: DEFAULT_WORKSPACE_ID,
-        worktree: { wsId: worktreeIdentity(activeWorktree)?.wsId ?? DEFAULT_WORKSPACE_ID, slug },
-        baseRef: newBaseRef || null,
-      });
-      setIsCreateOpen(false);
-      setNewSlug("");
-      await refreshWorktrees();
-    } catch (error) {
-      setCreateError(worktreeErrorMessage(toIpcError(error)));
-    }
-  };
 
   const handleRefreshWorktreeStatus = useCallback(
     (worktree: Worktree) => {
       const identity = worktreeIdentity(worktree);
       if (!identity) return;
-      void getWorktreeStatus({ workspaceId: DEFAULT_WORKSPACE_ID, worktree: identity })
+      void getWorktreeStatus({ workspaceId: activeProject.workspaceId, worktree: identity })
         .then((status) => {
           setWorktreeStatuses((current) => ({ ...current, [worktree.path]: status }));
         })
         .catch(reportRuntimeError);
     },
-    [reportRuntimeError],
+    [activeProject.workspaceId, reportRuntimeError],
   );
 
   const handleAddTerminalTab = useCallback(() => {
@@ -128,93 +205,145 @@ export function App() {
     (offset: number) => {
       const tabs = state.layout.tabs;
       if (tabs.length < 2) return;
-      const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.id === state.layout.primaryTabId));
+      const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.id === state.layout.activeTabId));
       const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
       handleSelectTerminalTab(tabs[nextIndex].id);
     },
-    [handleSelectTerminalTab, state.layout.primaryTabId, state.layout.tabs],
+    [handleSelectTerminalTab, state.layout.activeTabId, state.layout.tabs],
   );
 
-  const handleInterruptTerminal = useCallback(() => {
-    if (!activeSession?.backendSessionId) return;
-    void signalTerminal({ sessionId: activeSession.backendSessionId, signal: "interrupt" }).catch(reportRuntimeError);
-  }, [activeSession?.backendSessionId, reportRuntimeError]);
+  const handleSplitActive = useCallback(
+    (direction: PaneDirection) => {
+      const activeTab = state.layout.tabs.find((t) => t.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+      if (!activeTab) return;
+      const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+      const targetLeafId = activeLayout?.activeLeafId ?? "leaf-default";
+      void splitPane(activeTab.id, targetLeafId, direction).catch(reportRuntimeError);
+    },
+    [reportRuntimeError, splitPane, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs],
+  );
 
-  const handleSplit = () => {
-    if (state.layout.split === "none") {
-      void enableSplit("horizontal").catch(reportRuntimeError);
-    } else if (state.layout.split === "horizontal") {
-      rotateSplit();
-    } else {
-      disableSplit();
-    }
-  };
+  const handleUnsplitActive = useCallback(() => {
+    const activeTab = state.layout.tabs.find((t) => t.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+    if (!activeTab) return;
+    const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+    if (!activeLayout || activeLayout.root.type === "leaf") return;
+    const activeLeafId = activeLayout.activeLeafId ?? "leaf-default";
+    void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
+  }, [closePane, reportRuntimeError, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs],
+  );
+
+  // Cmd+1..9 walks the sidebar tree top to bottom: every expanded project contributes its
+  // worktrees in order, so the numbering matches exactly what the user can see. The accordion
+  // state lives in the sidebar and is read at press time so it can never go stale here.
+  const handleSelectWorktreeByIndex = useCallback(
+    (index: number) => {
+      const visible = listVisibleWorktrees(projects, state.worktrees, activeProject.workspaceId);
+      const target = visible[index];
+      if (target) {
+        handleSelectWorktree(target);
+      }
+    },
+    [activeProject.workspaceId, handleSelectWorktree, projects, state.worktrees],
+  );
+
+  const handleSelectTerminalTabByIndex = useCallback(
+    (index: number) => {
+      const target = state.layout.tabs[index];
+      if (target) {
+        handleSelectTerminalTab(target.id);
+      }
+    },
+    [handleSelectTerminalTab, state.layout.tabs],
+  );
 
   const shortcutHandlers = useMemo(
     () => ({
       "tab.newTerminal": handleAddTerminalTab,
       "tab.close": () => {
-        if (state.layout.primaryTabId) handleCloseTab(state.layout.primaryTabId);
+        if (state.layout.activeTabId) handleCloseTab(state.layout.activeTabId);
       },
       "tab.next": () => handleCycleTab(1),
       "tab.previous": () => handleCycleTab(-1),
-      "terminal.splitRight": () => void enableSplit("horizontal").catch(reportRuntimeError),
-      "terminal.splitDown": () => void enableSplit("vertical").catch(reportRuntimeError),
-      "terminal.unsplit": disableSplit,
+      "tab.select1": () => handleSelectTerminalTabByIndex(0),
+      "tab.select2": () => handleSelectTerminalTabByIndex(1),
+      "tab.select3": () => handleSelectTerminalTabByIndex(2),
+      "tab.select4": () => handleSelectTerminalTabByIndex(3),
+      "workspace.select1": () => handleSelectWorktreeByIndex(0),
+      "workspace.select2": () => handleSelectWorktreeByIndex(1),
+      "workspace.select3": () => handleSelectWorktreeByIndex(2),
+      "workspace.select4": () => handleSelectWorktreeByIndex(3),
+      "terminal.splitRight": () => handleSplitActive("horizontal"),
+      "terminal.splitDown": () => handleSplitActive("vertical"),
+      "terminal.unsplit": handleUnsplitActive,
+      "sidebar.left.toggle": toggleSidebar,
       "commandPalette.open": () => setIsCommandPaletteOpen(true),
     }),
     [
-      disableSplit,
-      enableSplit,
       handleAddTerminalTab,
       handleCloseTab,
       handleCycleTab,
-      reportRuntimeError,
-      state.layout.primaryTabId,
+      handleSelectTerminalTabByIndex,
+      handleSelectWorktreeByIndex,
+      handleSplitActive,
+      handleUnsplitActive,
+      state.layout.activeTabId,
+      toggleSidebar,
     ],
   );
   useShortcuts(shortcutHandlers);
 
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
-      <Sidebar
-        worktrees={state.worktrees}
-        agents={agents}
-        activePath={activeWorktree?.path || ""}
-        statuses={worktreeStatuses}
-        onSelectWorktree={handleSelectWorktree}
-        onCreateWorktree={() => {
-          setCreateError(null);
-          setIsCreateOpen(true);
-        }}
-        onRefreshWorktreeStatus={handleRefreshWorktreeStatus}
-        onDeleteWorktree={setDeleteTarget}
-        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-      />
+      {isSidebarOpen ? (
+        <Sidebar
+          open={true}
+          projects={projects}
+          activeProjectId={activeProject.workspaceId}
+          worktrees={state.worktrees}
+          agents={agents}
+          activePath={activeWorktree?.path || ""}
+          statuses={worktreeStatuses}
+          onSelectProject={handleSelectProject}
+          onAddProject={() => setIsAddProjectOpen(true)}
+          onSelectWorktree={handleSelectWorktree}
+          onCreateWorktree={() => setIsCreateOpen(true)}
+          onRefreshWorktreeStatus={handleRefreshWorktreeStatus}
+          onDeleteWorktree={setDeleteTarget}
+          onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onToggle={toggleSidebar}
+        />
+      ) : (
+        <div className="relative w-0 shrink-0 overflow-visible">
+          <div className="titlebar-left-floating absolute top-0 left-0 z-20 flex h-titlebar shrink-0 items-center border-b border-r border-border bg-card px-2">
+            {isMacShortcutPlatform() ? (
+              <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" />
+            ) : null}
+            <IconButton label="Show sidebar" className="no-drag" size="sm" onClick={toggleSidebar}>
+              <PanelLeft className="size-3.5" />
+            </IconButton>
+          </div>
+        </div>
+      )}
 
-      <main className="flex h-full flex-1 flex-col overflow-hidden bg-card">
+      <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
         {activeWorktree ? (
-          <>
-            <WorkspaceHeader
-              worktree={activeWorktree}
-              agent={activeAgent}
-              onSplit={handleSplit}
-              splitState={state.layout.split}
-              onInterrupt={handleInterruptTerminal}
-              canInterrupt={Boolean(activeSession?.backendSessionId)}
-            />
-            <TabBar
-              tabs={state.layout.tabs}
-              activeTabId={state.layout.primaryTabId ?? ""}
-              onActivate={handleSelectTerminalTab}
-              onClose={handleCloseTab}
-              onAdd={handleAddTerminalTab}
-            />
-            <TerminalSplitView layout={state.layout} sessions={state.sessions} />
-          </>
+          <TerminalSplitView
+            layout={state.layout}
+            sessions={state.sessions}
+            onActivateTab={handleSelectTerminalTab}
+            onCloseTab={handleCloseTab}
+            onAddTab={handleAddTerminalTab}
+            onSplitPane={(tabId: string, leafId: string, direction: PaneDirection) => splitPane(tabId, leafId, direction).catch(reportRuntimeError)}
+            onClosePane={(tabId: string, leafId: string) => closePane(tabId, leafId).catch(reportRuntimeError)}
+            onSetRatio={setPaneRatio}
+            onSwapPanes={swapPanes}
+            onFocusPane={focusPane}
+            leadingSpacer={isSidebarOpen ? 0 : (isMacShortcutPlatform() ? 108 : 36)}
+          />
         ) : (
-          <div className="flex h-full flex-1 items-center justify-center text-xs text-muted-foreground">
+          <div className="flex h-full flex-1 items-center justify-center bg-[#23262d] text-xs text-muted-foreground">
             {runtimeError ? `Workspace unavailable (${runtimeError.code})` : "No workspace available"}
           </div>
         )}
@@ -229,8 +358,22 @@ export function App() {
         onClose={() => setIsCommandPaletteOpen(false)}
       />
       <SettingsDialog open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      {isAddProjectOpen ? (
+        <AddProjectDialog onClose={() => setIsAddProjectOpen(false)} onRegistered={handleRegisteredProject} />
+      ) : null}
+      {isCreateOpen ? (
+        <AddWorktreeDialog
+          project={activeProject}
+          onClose={() => setIsCreateOpen(false)}
+          onCreated={async (worktree) => {
+            await refreshWorktrees();
+            await ensureTabForWorktree(worktree).catch(reportRuntimeError);
+          }}
+        />
+      ) : null}
       {deleteTarget ? (
         <WorktreeDeleteDialog
+          workspaceId={activeProject.workspaceId}
           worktree={deleteTarget}
           onClose={() => setDeleteTarget(null)}
           onDeleted={() => {
@@ -245,80 +388,110 @@ export function App() {
       ) : null}
 
       {runtimeError && activeWorktree ? (
-        <div className="pointer-events-none fixed bottom-3 right-3 z-40 max-w-error rounded-md border border-destructive/30 bg-card/95 px-3 py-2 text-[11px] text-destructive shadow-lg">
+        <div className="pointer-events-none fixed bottom-3 right-3 z-40 max-w-error border border-destructive/30 bg-card/95 px-3 py-2 text-[11px] text-destructive shadow-lg">
           {runtimeError.code}: {runtimeError.message}
-        </div>
-      ) : null}
-
-      {isCreateOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <form
-            onSubmit={handleCreateWorktreeSubmit}
-            className="w-96 animate-enter space-y-4 rounded-xl border border-border bg-card p-5 shadow-2xl"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-semibold">
-                <FolderPlus className="size-4 text-primary" />
-                <span>Create New Worktree</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsCreateOpen(false)}
-                className="text-muted-foreground hover:text-foreground"
-              >
-                <X className="size-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="mb-1 block text-muted-foreground">Branch / Worktree Slug</label>
-                <input
-                  type="text"
-                  autoFocus
-                  placeholder="e.g. feature-auth"
-                  value={newSlug}
-                  onChange={(event) => setNewSlug(event.target.value)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-muted-foreground">Base Ref / Branch</label>
-                <div className="flex items-center gap-2 rounded-md border border-input bg-background px-3 py-1.5 text-xs text-foreground">
-                  <GitBranch className="size-3.5 text-muted-foreground" />
-                  <input
-                    type="text"
-                    value={newBaseRef}
-                    onChange={(event) => setNewBaseRef(event.target.value)}
-                    className="flex-1 bg-transparent focus:outline-none"
-                  />
-                </div>
-              </div>
-              {createError ? <p className="rounded-md bg-destructive/10 px-2 py-1.5 text-destructive">{createError}</p> : null}
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setIsCreateOpen(false)}
-                className="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-              >
-                <Plus className="size-3.5" />
-                <span>Create Worktree</span>
-              </button>
-            </div>
-          </form>
         </div>
       ) : null}
     </div>
   );
+}
+
+/**
+ * Flattens the sidebar tree into the worktree order the user actually sees: projects in order,
+ * each expanded project followed by its own worktrees. Collapsed projects contribute nothing.
+ */
+function listVisibleWorktrees(
+  projects: RegisteredProject[],
+  worktrees: Worktree[],
+  activeProjectId: string,
+): Worktree[] {
+  const collapsed = loadCollapsedProjectIds(projects, activeProjectId);
+  const known = new Set(projects.map((project) => project.workspaceId));
+  const visible: Worktree[] = [];
+
+  for (const project of projects) {
+    if (collapsed.has(project.workspaceId)) continue;
+    for (const worktree of worktrees) {
+      // Worktrees name their owning project in the `orca/<wsId>/<slug>` branch; anything else
+      // belongs to the active project, the only one whose worktrees the store holds.
+      const ownerId = worktreeIdentity(worktree)?.wsId;
+      const owner = ownerId && known.has(ownerId) ? ownerId : activeProjectId;
+      if (owner === project.workspaceId) visible.push(worktree);
+    }
+  }
+
+  return visible;
+}
+
+/** Mirrors the sidebar accordion defaults: persisted state wins, otherwise only the active project is expanded. */
+function loadCollapsedProjectIds(projects: RegisteredProject[], activeProjectId: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
+    // Nothing persisted yet: the sidebar starts with only the active project expanded.
+    return new Set(
+      projects.filter((project) => project.workspaceId !== activeProjectId).map((project) => project.workspaceId),
+    );
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function loadProjects(): RegisteredProject[] {
+  try {
+    const raw = window.localStorage.getItem(PROJECTS_STORAGE_KEY);
+    if (!raw) return [DEFAULT_PROJECT];
+    const parsed = JSON.parse(raw) as RegisteredProject[];
+    if (!Array.isArray(parsed)) return [DEFAULT_PROJECT];
+    const valid = parsed.filter(
+      (project) => project && typeof project.workspaceId === "string" && typeof project.repoRoot === "string",
+    );
+    return valid.length > 0 ? valid : [DEFAULT_PROJECT];
+  } catch {
+    return [DEFAULT_PROJECT];
+  }
+}
+
+function persistProjects(projects: RegisteredProject[]) {
+  try {
+    window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+  } catch {
+    // A local persistence failure must not block native project registration.
+  }
+}
+
+function loadActiveProjectId() {
+  try {
+    return window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || DEFAULT_WORKSPACE_ID;
+  } catch {
+    return DEFAULT_WORKSPACE_ID;
+  }
+}
+
+function persistActiveProjectId(workspaceId: string) {
+  try {
+    window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, workspaceId);
+  } catch {
+    // The selected project still remains active for this session.
+  }
+}
+
+function loadSidebarOpen() {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY);
+    return raw !== null ? raw !== "false" : true;
+  } catch {
+    return true;
+  }
+}
+
+function persistSidebarOpen(open: boolean) {
+  try {
+    window.localStorage.setItem(SIDEBAR_OPEN_STORAGE_KEY, String(open));
+  } catch {
+    // Persistence failure should not break in-memory state.
+  }
 }
 
 export default App;

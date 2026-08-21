@@ -18,6 +18,7 @@ export type WorkspaceRuntimeServices = {
 };
 
 type UseWorkspaceRuntimeOptions = {
+  workspaceId?: string;
   activeWorktreePath: string | null;
   syncWorktrees: (worktrees: Worktree[]) => Promise<void>;
   ensureTabForWorktree: (worktree: Worktree) => Promise<string>;
@@ -42,6 +43,7 @@ const PREVIEW_WORKTREE: Worktree = {
 };
 
 export function useWorkspaceRuntime({
+  workspaceId = DEFAULT_WORKSPACE_ID,
   activeWorktreePath,
   syncWorktrees,
   ensureTabForWorktree,
@@ -61,7 +63,7 @@ export function useWorkspaceRuntime({
 
     const refreshPromise = (async () => {
       try {
-        const listed = await services.listWorktrees(DEFAULT_WORKSPACE_ID);
+        const listed = await services.listWorktrees(workspaceId);
         const worktrees = listed.length > 0 || services.isTauriRuntime() ? listed : [PREVIEW_WORKTREE];
         await syncWorktrees(worktrees);
         const preferred = worktrees.find((worktree) => worktree.path === activeWorktreePathRef.current) ?? worktrees[0];
@@ -76,7 +78,7 @@ export function useWorkspaceRuntime({
 
     refreshInFlightRef.current = refreshPromise;
     return refreshPromise;
-  }, [ensureTabForWorktree, reportRuntimeError, services, syncWorktrees]);
+  }, [ensureTabForWorktree, reportRuntimeError, services, syncWorktrees, workspaceId]);
 
   useEffect(() => {
     let disposed = false;

@@ -1,5 +1,5 @@
 use crate::ipc::{run_blocking, IpcError};
-use crate::terminal::{PtyManager, PtySessionState, TerminalSignal};
+use crate::terminal::{PtySessionState, TerminalService, TerminalSignal};
 use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::CommandBuilder;
@@ -78,7 +78,7 @@ impl From<TerminalSignalRequest> for TerminalSignal {
 #[tauri::command]
 pub async fn cmd_terminal_spawn<R: Runtime>(
     app: AppHandle<R>,
-    pty_manager: State<'_, Arc<PtyManager>>,
+    terminal_service: State<'_, Arc<TerminalService>>,
     registry: State<'_, WorkspaceRegistry>,
     request: SpawnTerminalRequest,
 ) -> Result<SpawnTerminalResponse, IpcError> {
@@ -97,10 +97,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
 
     let mut cmd = CommandBuilder::new_default_prog();
     cmd.cwd(&cwd);
-    let (session_id, mut rx) = pty_manager
+    let (session_id, mut broadcast_rx) = terminal_service
         .spawn_in_worktree(cmd, cols, rows, &worktree_manager, &cwd)
         .map_err(IpcError::from)?;
-    let session = pty_manager
+    let session = terminal_service
         .get_session(&session_id)
         .ok_or_else(|| IpcError::internal(format!("PTY session '{session_id}' disappeared during spawn")))?;
 
@@ -111,7 +111,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         reason: None,
     };
     if let Err(error) = app.emit(TERMINAL_LIFECYCLE_EVENT, started) {
-        let _ = pty_manager.close_session(&session_id).await;
+        let _ = terminal_service.close_session(&session_id).await;
         return Err(IpcError::internal(format!(
             "failed to emit terminal lifecycle event: {error}"
         )));
@@ -120,17 +120,27 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let session_id_clone = session_id.clone();
     let app_handle = app.clone();
     tokio::spawn(async move {
-        while let Some(chunk) = rx.recv().await {
-            let payload = TerminalOutputPayload {
-                session_id: session_id_clone.clone(),
-                data: STANDARD.encode(chunk),
-            };
-            if let Err(error) = app_handle.emit(TERMINAL_OUTPUT_EVENT, payload) {
-                tracing::debug!("Failed to emit terminal output event: {error}");
-                break;
+        loop {
+            match broadcast_rx.recv().await {
+                Ok(chunk) => {
+                    let payload = TerminalOutputPayload {
+                        session_id: session_id_clone.clone(),
+                        data: STANDARD.encode(chunk),
+                    };
+                    if let Err(error) = app_handle.emit(TERMINAL_OUTPUT_EVENT, payload) {
+                        tracing::debug!("Failed to emit terminal output event: {error}");
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(lag)) => {
+                    tracing::warn!("Tauri desktop subscriber lagged by {lag} messages");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
             }
         }
-        drop(rx);
 
         for _ in 0..100 {
             let lifecycle = match session.state() {
@@ -166,44 +176,44 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_terminal_write(
-    pty_manager: State<'_, Arc<PtyManager>>,
+    terminal_service: State<'_, Arc<TerminalService>>,
     session_id: String,
     data: String,
 ) -> Result<(), IpcError> {
-    pty_manager
+    terminal_service
         .write_input(&session_id, data.as_bytes())
         .map_err(IpcError::from)
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_resize(
-    pty_manager: State<'_, Arc<PtyManager>>,
+    terminal_service: State<'_, Arc<TerminalService>>,
     session_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), IpcError> {
-    pty_manager
+    terminal_service
         .resize(&session_id, cols, rows)
         .map_err(IpcError::from)
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_signal(
-    pty_manager: State<'_, Arc<PtyManager>>,
+    terminal_service: State<'_, Arc<TerminalService>>,
     session_id: String,
     signal: TerminalSignalRequest,
 ) -> Result<(), IpcError> {
-    pty_manager
+    terminal_service
         .signal(&session_id, signal.into())
         .map_err(IpcError::from)
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_close(
-    pty_manager: State<'_, Arc<PtyManager>>,
+    terminal_service: State<'_, Arc<TerminalService>>,
     session_id: String,
 ) -> Result<(), IpcError> {
-    pty_manager
+    terminal_service
         .close_session(&session_id)
         .await
         .map_err(IpcError::from)
@@ -211,13 +221,13 @@ pub async fn cmd_terminal_close(
 
 #[tauri::command]
 pub async fn cmd_terminal_list(
-    pty_manager: State<'_, Arc<PtyManager>>,
+    terminal_service: State<'_, Arc<TerminalService>>,
 ) -> Result<Vec<TerminalSessionSummary>, IpcError> {
-    Ok(pty_manager
+    Ok(terminal_service
         .list_sessions()
         .into_iter()
         .filter_map(|session_id| {
-            pty_manager
+            terminal_service
                 .get_session(&session_id)
                 .map(|session| TerminalSessionSummary {
                     session_id,

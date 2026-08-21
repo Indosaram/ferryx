@@ -1,8 +1,24 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
 import { WorktreeDeleteDialog, type WorktreeDeleteServices } from "./WorktreeDeleteDialog";
+
+const native = vi.hoisted(() => ({
+  previewWorktreeDelete: vi.fn(),
+  deleteWorktree: vi.fn(),
+  deleteWorktreeDestructive: vi.fn(),
+}));
+
+vi.mock("../lib/tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/tauri")>();
+  return {
+    ...actual,
+    previewWorktreeDelete: native.previewWorktreeDelete,
+    deleteWorktree: native.deleteWorktree,
+    deleteWorktreeDestructive: native.deleteWorktreeDestructive,
+  };
+});
 
 const worktree: Worktree = {
   path: "/repo/feature",
@@ -32,6 +48,14 @@ function createServices(overrides: Partial<WorktreeDeleteServices> = {}): Worktr
   };
 }
 
+beforeEach(() => {
+  native.previewWorktreeDelete.mockReset();
+  native.deleteWorktree.mockReset();
+  native.deleteWorktreeDestructive.mockReset();
+  native.previewWorktreeDelete.mockResolvedValue(preview);
+  native.deleteWorktree.mockResolvedValue(undefined);
+  native.deleteWorktreeDestructive.mockResolvedValue(undefined);
+});
 afterEach(cleanup);
 
 describe("WorktreeDeleteDialog", () => {
@@ -50,6 +74,27 @@ describe("WorktreeDeleteDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
     await waitFor(() => expect(services.deleteSafe).toHaveBeenCalledWith(worktree));
     expect(onDeleted).toHaveBeenCalledOnce();
+  });
+
+  it("scopes native preview and safe deletion to the selected registered workspace", async () => {
+    render(
+      <WorktreeDeleteDialog
+        {...({ workspaceId: "project-a", worktree, onClose: vi.fn(), onDeleted: vi.fn() } as any)}
+      />,
+    );
+
+    await screen.findByText("orca/ws-main/feature");
+    expect(native.previewWorktreeDelete).toHaveBeenCalledWith({
+      workspaceId: "project-a",
+      worktree: { wsId: "ws-main", slug: "feature" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
+    await waitFor(() => expect(native.deleteWorktree).toHaveBeenCalledWith({
+      workspaceId: "project-a",
+      worktree: { wsId: "ws-main", slug: "feature" },
+      deleteBranch: true,
+    }));
   });
 
   it("offers destructive deletion only for the UNMERGED_BRANCH error code", async () => {

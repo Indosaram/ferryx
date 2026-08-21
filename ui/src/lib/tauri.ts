@@ -16,6 +16,24 @@ import type {
 
 export const DEFAULT_WORKSPACE_ID = "default";
 
+export type RegisteredProject = {
+  workspaceId: string;
+  repoRoot: string;
+};
+
+export type LocalBranch = {
+  name: string;
+  isCurrent: boolean;
+};
+
+export type TerminalPreferences = {
+  fontFamily: string;
+  macosOptionAsAlt: boolean;
+  source: "defaults" | "ghostty";
+  status: "imported" | "absent" | "malformed";
+  sourcePath: string | null;
+};
+
 type WorktreeStatusRequest = {
   workspaceId: string;
   worktree: WorktreeIdentity;
@@ -27,6 +45,27 @@ type DeleteWorktreeRequest = WorktreeStatusRequest & {
 
 export function isTauriRuntime() {
   return isTauri();
+}
+
+export async function registerProject(request: { workspaceId: string; repoPath: string }) {
+  return invokeCommand<RegisteredProject>("cmd_project_register", { request });
+}
+
+export async function listProjectBranches(workspaceId: string) {
+  return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
+}
+
+export async function getTerminalPreferences(): Promise<TerminalPreferences> {
+  if (!isTauri()) {
+    return {
+      fontFamily: "monospace",
+      macosOptionAsAlt: false,
+      source: "defaults",
+      status: "absent",
+      sourcePath: null,
+    };
+  }
+  return invokeCommand<TerminalPreferences>("cmd_terminal_preferences");
 }
 
 export async function listWorktrees(workspaceId: string) {
@@ -102,6 +141,10 @@ export async function closeTerminal(sessionId: string) {
   await invokeCommand<void>("cmd_terminal_close", { sessionId });
 }
 
+export async function waitForTerminalExit(_sessionId: string, _timeoutMs = 5000) {
+  return;
+}
+
 export async function listTerminalSessions() {
   if (!isTauri()) return [] as TerminalSessionSummary[];
   return invokeCommand<TerminalSessionSummary[]>("cmd_terminal_list");
@@ -151,3 +194,148 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
     throw toIpcError(error);
   }
 }
+
+
+export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale";
+
+export type TailscaleStatus = {
+  installed: boolean;
+  running: boolean;
+  tailnetName: string | null;
+  selfDns: string | null;
+  serveActive: boolean;
+};
+
+export type RemoteGatewayStatus = {
+  enabled: boolean;
+  mode: RemoteNetworkMode;
+  port: number;
+  boundAddress: string | null;
+  tailscale: TailscaleStatus;
+};
+
+export type DeviceInfo = {
+  id: string;
+  name: string;
+  permission: "view" | "control";
+  createdAt: number;
+  lastSeenAt: number;
+  revoked: boolean;
+};
+
+export type CreatePairingCodeResponse = {
+  code: string;
+  expiresInSeconds: number;
+};
+
+export async function getRemoteStatus(): Promise<RemoteGatewayStatus> {
+  if (!isTauri()) {
+    return {
+      enabled: false,
+      mode: "off",
+      port: 43821,
+      boundAddress: null,
+      tailscale: {
+        installed: false,
+        running: false,
+        tailnetName: null,
+        selfDns: null,
+        serveActive: false,
+      },
+    };
+  }
+  return invokeCommand<RemoteGatewayStatus>("cmd_remote_status");
+}
+
+export async function enableRemoteGateway(request: {
+  mode: RemoteNetworkMode;
+  port?: number;
+  allowControl?: boolean;
+}): Promise<RemoteGatewayStatus> {
+  return invokeCommand<RemoteGatewayStatus>("cmd_remote_enable", { request });
+}
+
+export async function disableRemoteGateway(): Promise<RemoteGatewayStatus> {
+  return invokeCommand<RemoteGatewayStatus>("cmd_remote_disable");
+}
+
+export async function createPairingCode(permission?: "view" | "control"): Promise<CreatePairingCodeResponse> {
+  return invokeCommand<CreatePairingCodeResponse>("cmd_remote_pairing_create", { permission });
+}
+
+export async function listRemoteDevices(): Promise<DeviceInfo[]> {
+  if (!isTauri()) return [];
+  return invokeCommand<DeviceInfo[]>("cmd_remote_devices");
+}
+
+export async function revokeRemoteDevice(deviceId: string): Promise<boolean> {
+  return invokeCommand<boolean>("cmd_remote_device_revoke", { deviceId });
+}
+
+export async function getTailscaleStatus(): Promise<TailscaleStatus> {
+  if (!isTauri()) {
+    return {
+      installed: false,
+      running: false,
+      tailnetName: null,
+      selfDns: null,
+      serveActive: false,
+    };
+  }
+  return invokeCommand<TailscaleStatus>("cmd_tailscale_status");
+}
+
+
+export async function dispatchNotification(req: import('./types').DispatchNotificationArgs): Promise<import('./types').DispatchNotificationResult> {
+  return invokeCommand<import('./types').DispatchNotificationResult>('cmd_notification_dispatch', { req });
+}
+
+export async function getNotificationPermissionStatus(): Promise<import('./types').NotificationPermissionStatus> {
+  return invokeCommand<import('./types').NotificationPermissionStatus>('cmd_notification_get_permission_status');
+}
+
+export async function requestNotificationPermission(): Promise<import('./types').NotificationPermissionRequest> {
+  return invokeCommand<import('./types').NotificationPermissionRequest>('cmd_notification_request_permission');
+}
+
+export async function probeNotificationDelivery(force?: boolean): Promise<import('./types').NotificationProbeResult> {
+  return invokeCommand<import('./types').NotificationProbeResult>('cmd_notification_probe_delivery', { force });
+}
+
+export async function openNotificationSystemSettings(): Promise<import('./types').OpenSystemSettingsResult> {
+  return invokeCommand<import('./types').OpenSystemSettingsResult>('cmd_notification_open_system_settings');
+}
+
+export async function playNotificationSound(args: {
+  soundId: string;
+  customSoundPath?: string | null;
+  volume?: number;
+  force?: boolean;
+}): Promise<import('./types').PlaySoundResult> {
+  return invokeCommand<import('./types').PlaySoundResult>('cmd_notification_play_sound', {
+    soundId: args.soundId,
+    customSoundPath: args.customSoundPath ?? null,
+    volume: args.volume ?? 1.0,
+    force: args.force ?? false,
+  });
+}
+
+export async function pickNotificationAudio(): Promise<import('./types').PickedAudioFile | null> {
+  return invokeCommand<import('./types').PickedAudioFile | null>('cmd_notification_pick_audio');
+}
+
+export async function saveSession(session: import('./types').PersistedWorkspaceSession): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>('cmd_session_save', { session });
+}
+
+export async function loadSession(): Promise<import('./types').PersistedWorkspaceSession | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<import('./types').PersistedWorkspaceSession | null>('cmd_session_load');
+}
+
+export async function clearSession(): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>('cmd_session_clear');
+}
+

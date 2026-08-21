@@ -14,6 +14,16 @@ const worktree: Worktree = {
   prunable: null,
 };
 
+const rootWorktree: Worktree = {
+  path: "/repo",
+  head: "abc123",
+  branch: "refs/heads/main",
+  bare: false,
+  detached: false,
+  locked: null,
+  prunable: null,
+};
+
 afterEach(cleanup);
 
 describe("WorktreeList actions", () => {
@@ -56,5 +66,46 @@ describe("WorktreeList actions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Delete worktree" }));
     expect(onDelete).toHaveBeenCalledWith(worktree);
+  });
+
+  it("badges the repository root as primary and blocks deleting it", () => {
+    render(
+      <WorktreeList
+        worktrees={[rootWorktree, worktree]}
+        activePath={rootWorktree.path}
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRefreshStatus={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    // Only the root worktree carries the primary badge.
+    expect(screen.getAllByText("primary")).toHaveLength(1);
+
+    const [rootDelete, featureDelete] = screen.getAllByRole("button", { name: "Delete worktree" });
+    expect(rootDelete).toBeDisabled();
+    expect(featureDelete).toBeEnabled();
+  });
+
+  it("offers worktree creation from the empty state", () => {
+    const onCreate = vi.fn();
+    render(
+      <WorktreeList
+        worktrees={[]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onCreate={onCreate}
+        onRefreshStatus={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /create the first worktree/i }));
+    expect(onCreate).toHaveBeenCalledOnce();
   });
 });

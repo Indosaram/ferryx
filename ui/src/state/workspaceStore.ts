@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 
-import { closeTerminal, DEFAULT_WORKSPACE_ID, spawnTerminal } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { worktreeIdentity } from "../lib/types";
 import type {
   ActiveAgent,
   LayoutState,
-  SplitMode,
   TerminalLifecycle,
   TerminalLifecyclePayload,
   TerminalSession,
@@ -14,6 +13,7 @@ import type {
   Worktree,
   WorktreeIdentity,
 } from "../lib/types";
+import type { PaneDirection } from "./paneTree";
 import { createLayoutState, layoutReducer } from "./layout";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
@@ -23,6 +23,8 @@ export type WorkspaceState = {
   activeWorktreePath: string | null;
   sessions: Record<string, TerminalSession>;
   layout: LayoutState;
+  unreadTabIds: Record<string, boolean>;
+  unreadWorktreePaths: Record<string, boolean>;
 };
 
 export type WorkspaceServices = {
@@ -36,19 +38,36 @@ type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "SELECT_WORKTREE"; path: string }
   | { type: "ADD_TAB_WITH_SESSION"; tab: TerminalTab; session: TerminalSession }
-  | { type: "ENABLE_SPLIT_EXISTING"; tabId: string; orientation: Exclude<SplitMode, "none"> }
   | {
       type: "CLOSE_TAB";
       tabId: string;
       replacement?: { tab: TerminalTab; session: TerminalSession };
     }
-  | { type: "ACTIVATE_PRIMARY"; tabId: string }
-  | { type: "ACTIVATE_SECONDARY"; tabId: string }
-  | { type: "ROTATE_SPLIT" }
-  | { type: "DISABLE_SPLIT" }
-  | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle };
+  | { type: "ACTIVATE_TAB"; tabId: string }
+  | {
+      type: "SPLIT_PANE";
+      tabId: string;
+      targetLeafId?: string;
+      direction: PaneDirection;
+      newLeafId: string;
+      session: TerminalSession;
+    }
+  | {
+      type: "CLOSE_PANE";
+      tabId: string;
+      leafId: string;
+    }
+  | { type: "FOCUS_PANE"; tabId: string; leafId: string }
+  | { type: "SET_PANE_RATIO"; tabId: string; path: string; ratio: number }
+  | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
+  | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
+  | { type: "MARK_TAB_UNREAD"; tabId: string }
+  | { type: "CLEAR_TAB_UNREAD"; tabId: string }
+  | { type: "MARK_WORKTREE_UNREAD"; worktreePath: string }
+  | { type: "CLEAR_WORKTREE_UNREAD"; worktreePath: string };
 
 type UseWorkspaceStoreOptions = {
+  workspaceId?: string;
   initialWorktrees?: Worktree[];
   services?: WorkspaceServices;
 };
@@ -60,7 +79,11 @@ const defaultServices: WorkspaceServices = {
   waitForTerminalExit,
 };
 
-export function useWorkspaceStore({ initialWorktrees = [], services = defaultServices }: UseWorkspaceStoreOptions = {}) {
+export function useWorkspaceStore({
+  workspaceId = DEFAULT_WORKSPACE_ID,
+  initialWorktrees = [],
+  services = defaultServices,
+}: UseWorkspaceStoreOptions = {}) {
   const [state, reactDispatch] = useReducer(workspaceReducer, initialWorktrees, createInitialState);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -86,7 +109,7 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
     async (worktree: Worktree, label?: string) => {
       await services.ensureTerminalEvents();
       const backendSessionId = await services.spawnTerminal({
-        workspaceId: DEFAULT_WORKSPACE_ID,
+        workspaceId,
         worktree: worktreeIdentity(worktree),
       });
       const sessionId = createId("session");
@@ -94,7 +117,7 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
       const session: TerminalSession = {
         id: sessionId,
         cwd: worktree.path,
-        workspaceId: DEFAULT_WORKSPACE_ID,
+        workspaceId,
         worktree: worktreeIdentity(worktree),
         backendSessionId,
         lifecycle: "working",
@@ -106,7 +129,7 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
       };
       return { tab, session };
     },
-    [services],
+    [services, workspaceId],
   );
 
   const openTab = useCallback(
@@ -128,7 +151,7 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
       const existing = snapshot.layout.tabs.find((tab) => snapshot.sessions[tab.sessionId]?.cwd === worktree.path);
       dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
       if (existing) {
-        dispatch({ type: "ACTIVATE_PRIMARY", tabId: existing.id });
+        dispatch({ type: "ACTIVATE_TAB", tabId: existing.id });
         return existing.id;
       }
       return openTab(worktree);
@@ -136,26 +159,45 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
     [dispatch, openTab],
   );
 
-  const enableSplit = useCallback(
-    async (orientation: Exclude<SplitMode, "none"> = "horizontal") => {
-      let snapshot = stateRef.current;
-      if (!snapshot.layout.primaryTabId) {
-        const activeWorktree = getActiveWorktree(snapshot);
-        if (!activeWorktree) return;
-        await openTab(activeWorktree);
-        snapshot = stateRef.current;
-      }
+  const splitPane = useCallback(
+    async (tabId: string, targetLeafId: string, direction: PaneDirection) => {
+      const snapshot = stateRef.current;
+      const tab = snapshot.layout.tabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      const targetSession = snapshot.sessions[tab.sessionId];
+      const worktree = targetSession
+        ? snapshot.worktrees.find((w) => w.path === targetSession.cwd) ?? getActiveWorktree(snapshot)
+        : getActiveWorktree(snapshot);
+      if (!worktree) return;
 
-      const primaryTabId = snapshot.layout.primaryTabId;
-      if (!primaryTabId) return;
-      const existingSecondary = snapshot.layout.tabs.find((tab) => tab.id !== primaryTabId);
+      const newLeafId = createId("leaf");
       dispatch({
-        type: "ENABLE_SPLIT_EXISTING",
-        tabId: existingSecondary?.id ?? primaryTabId,
-        orientation,
+        type: "SPLIT_PANE",
+        tabId,
+        targetLeafId,
+        direction,
+        newLeafId,
+        session: targetSession ?? {
+          id: tab.sessionId,
+          cwd: worktree.path,
+          workspaceId,
+          worktree: worktreeIdentity(worktree),
+          backendSessionId: null,
+          lifecycle: "working",
+        },
       });
     },
-    [dispatch, openTab],
+    [dispatch, workspaceId],
+  );
+
+  const closePane = useCallback(
+    async (tabId: string, leafId: string) => {
+      const snapshot = stateRef.current;
+      const tabLayout = snapshot.layout.layoutsByTabId?.[tabId];
+      if (!tabLayout) return;
+      dispatch({ type: "CLOSE_PANE", tabId, leafId });
+    },
+    [dispatch],
   );
 
   const closeTab = useCallback(
@@ -194,10 +236,16 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
     [dispatch, services],
   );
 
-  const rotateSplit = useCallback(() => dispatch({ type: "ROTATE_SPLIT" }), [dispatch]);
-  const disableSplit = useCallback(() => dispatch({ type: "DISABLE_SPLIT" }), [dispatch]);
-  const activatePrimary = useCallback((tabId: string) => dispatch({ type: "ACTIVATE_PRIMARY", tabId }), [dispatch]);
-  const activateSecondary = useCallback((tabId: string) => dispatch({ type: "ACTIVATE_SECONDARY", tabId }), [dispatch]);
+  const activateTab = useCallback((tabId: string) => dispatch({ type: "ACTIVATE_TAB", tabId }), [dispatch]);
+  const focusPane = useCallback((tabId: string, leafId: string) => dispatch({ type: "FOCUS_PANE", tabId, leafId }), [dispatch]);
+  const setPaneRatio = useCallback(
+    (tabId: string, path: string, ratio: number) => dispatch({ type: "SET_PANE_RATIO", tabId, path, ratio }),
+    [dispatch]
+  );
+  const swapPanes = useCallback(
+    (tabId: string, sourceLeafId: string, targetLeafId: string) => dispatch({ type: "SWAP_PANES", tabId, sourceLeafId, targetLeafId }),
+    [dispatch]
+  );
 
   return {
     state,
@@ -205,12 +253,17 @@ export function useWorkspaceStore({ initialWorktrees = [], services = defaultSer
     openTab,
     ensureTabForWorktree,
     closeTab,
-    enableSplit,
-    rotateSplit,
-    disableSplit,
-    activatePrimary,
-    activateSecondary,
+    splitPane,
+    closePane,
+    activateTab,
+    focusPane,
+    setPaneRatio,
+    swapPanes,
     syncWorktrees,
+    markTabUnread: (tabId: string) => dispatch({ type: "MARK_TAB_UNREAD", tabId }),
+    clearTabUnread: (tabId: string) => dispatch({ type: "CLEAR_TAB_UNREAD", tabId }),
+    markWorktreeUnread: (worktreePath: string) => dispatch({ type: "MARK_WORKTREE_UNREAD", worktreePath }),
+    clearWorktreeUnread: (worktreePath: string) => dispatch({ type: "CLEAR_WORKTREE_UNREAD", worktreePath }),
   };
 }
 
@@ -239,6 +292,8 @@ function createInitialState(worktrees: Worktree[]): WorkspaceState {
     activeWorktreePath: worktrees[0]?.path ?? null,
     sessions: {},
     layout: createLayoutState(),
+    unreadTabIds: {},
+    unreadWorktreePaths: {},
   };
 }
 
@@ -258,23 +313,59 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
         : action.worktrees[0]?.path ?? null;
       return { ...state, worktrees: action.worktrees, activeWorktreePath, sessions, layout };
     }
-    case "SELECT_WORKTREE":
+    case "SELECT_WORKTREE": {
+      const unreadWorktreePaths = { ...state.unreadWorktreePaths };
+      delete unreadWorktreePaths[action.path];
       return state.worktrees.some((worktree) => worktree.path === action.path)
-        ? { ...state, activeWorktreePath: action.path }
+        ? { ...state, activeWorktreePath: action.path, unreadWorktreePaths }
         : state;
+    }
+    case "MARK_TAB_UNREAD":
+      return {
+        ...state,
+        unreadTabIds: { ...state.unreadTabIds, [action.tabId]: true },
+      };
+    case "CLEAR_TAB_UNREAD": {
+      const unreadTabIds = { ...state.unreadTabIds };
+      delete unreadTabIds[action.tabId];
+      return { ...state, unreadTabIds };
+    }
+    case "MARK_WORKTREE_UNREAD":
+      return {
+        ...state,
+        unreadWorktreePaths: { ...state.unreadWorktreePaths, [action.worktreePath]: true },
+      };
+    case "CLEAR_WORKTREE_UNREAD": {
+      const unreadWorktreePaths = { ...state.unreadWorktreePaths };
+      delete unreadWorktreePaths[action.worktreePath];
+      return { ...state, unreadWorktreePaths };
+    }
     case "ADD_TAB_WITH_SESSION":
       return {
         ...state,
         sessions: { ...state.sessions, [action.session.id]: action.session },
-        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab }),
+        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab, sessionId: action.session.id }),
       };
-    case "ENABLE_SPLIT_EXISTING":
+    case "SPLIT_PANE":
+      return {
+        ...state,
+        sessions: { ...state.sessions, [action.session.id]: action.session },
+        layout: layoutReducer(state.layout, {
+          type: "SPLIT_PANE",
+          tabId: action.tabId,
+          targetLeafId: action.targetLeafId,
+          direction: action.direction,
+          newLeafId: action.newLeafId,
+          sessionId: action.session.id,
+        }),
+      };
+    case "CLOSE_PANE":
       return {
         ...state,
         layout: layoutReducer(state.layout, {
-          type: "ENABLE_SPLIT",
-          orientation: action.orientation,
-          secondaryTabId: action.tabId,
+          type: "CLOSE_PANE",
+          tabId: action.tabId,
+          leafId: action.leafId,
         }),
       };
     case "CLOSE_TAB": {
@@ -292,14 +383,26 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
         }),
       };
     }
-    case "ACTIVATE_PRIMARY":
-      return { ...state, layout: layoutReducer(state.layout, { type: "ACTIVATE_PRIMARY", tabId: action.tabId }) };
-    case "ACTIVATE_SECONDARY":
-      return { ...state, layout: layoutReducer(state.layout, { type: "ACTIVATE_SECONDARY", tabId: action.tabId }) };
-    case "ROTATE_SPLIT":
-      return { ...state, layout: layoutReducer(state.layout, { type: "ROTATE_SPLIT" }) };
-    case "DISABLE_SPLIT":
-      return { ...state, layout: layoutReducer(state.layout, { type: "DISABLE_SPLIT" }) };
+    case "ACTIVATE_TAB": {
+      const unreadTabIds = { ...state.unreadTabIds };
+      delete unreadTabIds[action.tabId];
+      return { ...state, unreadTabIds, layout: layoutReducer(state.layout, { type: "ACTIVATE_TAB", tabId: action.tabId }) };
+    }
+    case "FOCUS_PANE":
+      return {
+        ...state,
+        layout: layoutReducer(state.layout, { type: "FOCUS_PANE", tabId: action.tabId, leafId: action.leafId }),
+      };
+    case "SET_PANE_RATIO":
+      return {
+        ...state,
+        layout: layoutReducer(state.layout, { type: "SET_PANE_RATIO", tabId: action.tabId, path: action.path, ratio: action.ratio }),
+      };
+    case "SWAP_PANES":
+      return {
+        ...state,
+        layout: layoutReducer(state.layout, { type: "SWAP_PANES", tabId: action.tabId, sourceLeafId: action.sourceLeafId, targetLeafId: action.targetLeafId }),
+      };
     case "SESSION_LIFECYCLE": {
       const sessions = Object.fromEntries(
         Object.entries(state.sessions).map(([id, session]) => [
@@ -331,22 +434,6 @@ async function closeBackendSessionAndWait(session: TerminalSession | undefined, 
   } finally {
     terminalEventBus.clearSession(backendSessionId);
   }
-}
-
-function waitForTerminalExit(sessionId: string, timeoutMs: number) {
-  return new Promise<void>((resolve) => {
-    let timer: ReturnType<typeof setTimeout>;
-    const unsubscribe = terminalEventBus.subscribeLifecycle((payload) => {
-      if (payload.sessionId !== sessionId || (payload.state !== "exited" && payload.state !== "failed")) return;
-      clearTimeout(timer);
-      unsubscribe();
-      resolve();
-    });
-    timer = setTimeout(() => {
-      unsubscribe();
-      resolve();
-    }, timeoutMs);
-  });
 }
 
 function getActiveWorktree(state: WorkspaceState) {

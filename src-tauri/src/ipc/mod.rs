@@ -1,4 +1,9 @@
 pub mod error;
+pub mod notifications;
+pub mod preferences;
+pub mod project;
+pub mod remote;
+pub mod session;
 pub mod terminal;
 pub mod worktree;
 
@@ -18,5 +23,10 @@ mod blocking_contract_tests;
 mod tests;
 
 pub use error::*;
+pub use notifications::*;
+pub use preferences::*;
+pub use project::*;
+pub use remote::*;
+pub use session::*;
 pub use terminal::*;
 pub use worktree::*;

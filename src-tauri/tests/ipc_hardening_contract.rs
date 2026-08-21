@@ -4,7 +4,7 @@ use orca_lite_lib::ipc::{
     SpawnTerminalRequest, TerminalLifecycleState, WorktreeChangeKind, WorktreeChangedPayload,
     WorktreeStatusRequest, WORKTREE_CHANGED_EVENT,
 };
-use orca_lite_lib::terminal::PtyManager;
+use orca_lite_lib::terminal::{PtyManager, TerminalService};
 use orca_lite_lib::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
 use std::fs;
 use std::sync::Arc;
@@ -30,8 +30,14 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .register("workspace-a", repo.path())
         .expect("register workspace");
 
+    let pty = Arc::new(PtyManager::new());
+    let hub = Arc::new(orca_lite_lib::terminal::TerminalOutputHub::default());
+    let srv = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+
     let app = tauri::test::mock_builder()
-        .manage(Arc::new(PtyManager::new()))
+        .manage(pty)
+        .manage(hub)
+        .manage(srv)
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -73,7 +79,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
 
     let spawned = cmd_terminal_spawn(
         app.handle().clone(),
-        app.state::<Arc<PtyManager>>(),
+        app.state::<Arc<TerminalService>>(),
         app.state::<WorkspaceRegistry>(),
         SpawnTerminalRequest {
             workspace_id: "workspace-a".into(),
@@ -92,7 +98,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
     assert_eq!(session.writer_worktree(), Some(canonical_created.clone()));
     assert_eq!(session.writer_owner_id(), Some(spawned.session_id.clone()));
 
-    cmd_terminal_close(app.state::<Arc<PtyManager>>(), spawned.session_id)
+    cmd_terminal_close(app.state::<Arc<TerminalService>>(), spawned.session_id)
         .await
         .expect("close terminal");
 
@@ -343,8 +349,14 @@ async fn dirty_delete_returns_structured_error_code() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
+    let pty = Arc::new(PtyManager::new());
+    let hub = Arc::new(orca_lite_lib::terminal::TerminalOutputHub::default());
+    let srv = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+
     let app = tauri::test::mock_builder()
-        .manage(Arc::new(PtyManager::new()))
+        .manage(pty)
+        .manage(hub)
+        .manage(srv)
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");

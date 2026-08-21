@@ -12,10 +12,13 @@ import {
   createWorktree,
   deleteWorktree,
   deleteWorktreeDestructive,
+  getTerminalPreferences,
   getWorktreeStatus,
+  listProjectBranches,
   listTerminalSessions,
   listWorktrees,
   previewWorktreeDelete,
+  registerProject,
   signalTerminal,
   spawnTerminal,
   toIpcError,
@@ -25,6 +28,45 @@ describe("Tauri IPC wrapper contract", () => {
   beforeEach(() => {
     core.invoke.mockReset();
     core.isTauri.mockReturnValue(true);
+  });
+
+  it("registers projects and lists real local branches through typed native DTOs", async () => {
+    core.invoke
+      .mockResolvedValueOnce({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" })
+      .mockResolvedValueOnce([
+        { name: "feature/a", isCurrent: false },
+        { name: "main", isCurrent: true },
+      ]);
+
+    await expect(registerProject({ workspaceId: "orca-lite", repoPath: "/repo/orca-lite" })).resolves.toEqual({
+      workspaceId: "orca-lite",
+      repoRoot: "/repo/orca-lite",
+    });
+    await expect(listProjectBranches("orca-lite")).resolves.toEqual([
+      { name: "feature/a", isCurrent: false },
+      { name: "main", isCurrent: true },
+    ]);
+
+    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_project_register", {
+      request: { workspaceId: "orca-lite", repoPath: "/repo/orca-lite" },
+    });
+    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_project_branches", {
+      request: { workspaceId: "orca-lite" },
+    });
+  });
+
+  it("fetches the native effective Ghostty terminal preferences", async () => {
+    const preferences = {
+      fontFamily: "Noto Sans KR",
+      macosOptionAsAlt: true,
+      source: "ghostty",
+      status: "imported",
+      sourcePath: "/Users/test/.config/ghostty/config",
+    };
+    core.invoke.mockResolvedValue(preferences);
+
+    await expect(getTerminalPreferences()).resolves.toEqual(preferences);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_preferences", undefined);
   });
 
   it("spawns terminals with only workspace and worktree identities", async () => {

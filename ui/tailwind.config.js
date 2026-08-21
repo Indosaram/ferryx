@@ -56,9 +56,9 @@ export default {
         sans: ["Geist", "ui-sans-serif", "system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
       },
       spacing: {
-        sidebar: "16.5rem",
-        titlebar: "2.5rem",
-        tabbar: "2.25rem",
+        sidebar: "14.75rem",
+        titlebar: "2.25rem",
+        tabbar: "2rem",
       },
       minWidth: {
         tab: "8rem",

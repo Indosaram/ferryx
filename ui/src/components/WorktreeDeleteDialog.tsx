@@ -1,5 +1,5 @@
 import { AlertTriangle, GitBranch, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   DEFAULT_WORKSPACE_ID,
@@ -17,28 +17,38 @@ export type WorktreeDeleteServices = {
 };
 
 type WorktreeDeleteDialogProps = {
+  workspaceId?: string;
   worktree: Worktree;
   onClose: () => void;
   onDeleted: () => void;
   services?: WorktreeDeleteServices;
 };
 
-const defaultServices: WorktreeDeleteServices = {
-  previewDelete: async (worktree) => {
-    const identity = requireIdentity(worktree);
-    return previewWorktreeDelete({ workspaceId: DEFAULT_WORKSPACE_ID, worktree: identity });
-  },
-  deleteSafe: async (worktree) => {
-    const identity = requireIdentity(worktree);
-    await deleteWorktree({ workspaceId: DEFAULT_WORKSPACE_ID, worktree: identity, deleteBranch: true });
-  },
-  deleteDestructive: async (worktree) => {
-    const identity = requireIdentity(worktree);
-    await deleteWorktreeDestructive({ workspaceId: DEFAULT_WORKSPACE_ID, worktree: identity, deleteBranch: true });
-  },
-};
+function createDefaultServices(workspaceId: string): WorktreeDeleteServices {
+  return {
+    previewDelete: async (worktree) => {
+      const identity = requireIdentity(worktree);
+      return previewWorktreeDelete({ workspaceId, worktree: identity });
+    },
+    deleteSafe: async (worktree) => {
+      const identity = requireIdentity(worktree);
+      await deleteWorktree({ workspaceId, worktree: identity, deleteBranch: true });
+    },
+    deleteDestructive: async (worktree) => {
+      const identity = requireIdentity(worktree);
+      await deleteWorktreeDestructive({ workspaceId, worktree: identity, deleteBranch: true });
+    },
+  };
+}
 
-export function WorktreeDeleteDialog({ worktree, onClose, onDeleted, services = defaultServices }: WorktreeDeleteDialogProps) {
+export function WorktreeDeleteDialog({
+  workspaceId = DEFAULT_WORKSPACE_ID,
+  worktree,
+  onClose,
+  onDeleted,
+  services,
+}: WorktreeDeleteDialogProps) {
+  const resolvedServices = useMemo(() => services ?? createDefaultServices(workspaceId), [services, workspaceId]);
   const [preview, setPreview] = useState<BranchDeletionPreview | null>(null);
   const [error, setError] = useState<StructuredIpcError | null>(null);
   const [destructiveRequired, setDestructiveRequired] = useState(false);
@@ -50,7 +60,7 @@ export function WorktreeDeleteDialog({ worktree, onClose, onDeleted, services = 
     setError(null);
     setDestructiveRequired(false);
     setBusy(true);
-    void services
+    void resolvedServices
       .previewDelete(worktree)
       .then((result) => {
         if (!cancelled) setPreview(result);
@@ -64,7 +74,7 @@ export function WorktreeDeleteDialog({ worktree, onClose, onDeleted, services = 
     return () => {
       cancelled = true;
     };
-  }, [services, worktree]);
+  }, [resolvedServices, worktree]);
 
   const finishDelete = () => {
     onDeleted();
@@ -75,7 +85,7 @@ export function WorktreeDeleteDialog({ worktree, onClose, onDeleted, services = 
     setBusy(true);
     setError(null);
     try {
-      await services.deleteSafe(worktree);
+      await resolvedServices.deleteSafe(worktree);
       finishDelete();
     } catch (cause) {
       const ipcError = toIpcError(cause);
@@ -90,7 +100,7 @@ export function WorktreeDeleteDialog({ worktree, onClose, onDeleted, services = 
     setBusy(true);
     setError(null);
     try {
-      await services.deleteDestructive(worktree);
+      await resolvedServices.deleteDestructive(worktree);
       finishDelete();
     } catch (cause) {
       setError(toIpcError(cause));

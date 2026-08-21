@@ -1,3 +1,5 @@
+import type { PaneNode } from "../state/paneTree";
+
 export type WorktreeIdentity = {
   wsId: string;
   slug: string;
@@ -72,11 +74,33 @@ export type Pane = {
 
 export type SplitMode = "none" | "horizontal" | "vertical";
 
+export type NestedSplit = {
+  orientation: Exclude<SplitMode, "none">;
+  tabId: string;
+};
+
+/**
+ * The split arrangement of a single tab. Every tab owns an independent pane tree,
+ * so splitting one tab never disturbs the panes of another.
+ */
+export type TabPaneLayout = {
+  root: PaneNode;
+  /** Leaf that receives keyboard focus inside this tab. */
+  activeLeafId: string | null;
+  /** Leaf temporarily zoomed to fill the tab, or `null` when every pane is visible. */
+  expandedLeafId: string | null;
+  /** Terminal session rendered by each leaf of `root`. */
+  sessionIdsByLeafId: Record<string, string>;
+};
+
 export type LayoutState = {
   tabs: TerminalTab[];
-  primaryTabId: string | null;
-  secondaryTabId: string | null;
-  split: SplitMode;
+  primaryTabId?: string | null;
+  secondaryTabId?: string | null;
+  split?: SplitMode;
+  nestedSplit?: NestedSplit | null;
+  activeTabId: string | null;
+  layoutsByTabId: Record<string, TabPaneLayout>;
 };
 
 export type AgentState = "starting" | "working" | "waiting" | "exited" | "failed";
@@ -109,8 +133,120 @@ export type WorktreeChangedPayload = {
   kind: "created" | "deleted" | "destructivelyDeleted" | "dirtyChanged" | "pruned";
 };
 
+export type NotificationSource = "agent-task-complete" | "terminal-bell" | "system";
+export type NotificationAuthorization = "not-determined" | "denied" | "authorized" | "provisional" | "unknown";
+export type NotificationPlatform = "macos" | "windows" | "linux" | "unknown";
+
+export interface NotificationPermissionStatus {
+  platform?: NotificationPlatform;
+  supported?: boolean;
+  authorization: NotificationAuthorization;
+  alertsEnabled?: boolean | null;
+  soundsEnabled?: boolean | null;
+  requested?: boolean;
+  authoritative?: boolean;
+  canOpenSettings?: boolean;
+  status?: string;
+}
+
+export interface NotificationPermissionRequest {
+  granted: boolean;
+  status?: NotificationPermissionStatus;
+  error?: string | null;
+}
+
+export interface DispatchNotificationArgs {
+  source?: NotificationSource | string;
+  title?: string;
+  body?: string;
+  notificationId?: string;
+  workspaceLabel?: string;
+  worktreeLabel?: string;
+  terminalTitle?: string;
+  agentLabel?: string;
+}
+
+export interface DispatchNotificationResult {
+  submitted?: boolean;
+  delivered?: boolean;
+  reason?: "permission-required" | "blocked-by-system" | "unsupported" | "backend-error" | string;
+}
+
+export interface NotificationProbeResult {
+  outcome?: "submitted" | "ready" | "permission-required" | "blocked-by-system" | "unsupported" | "failed" | string;
+  status?: NotificationPermissionStatus;
+  testSubmitted?: boolean;
+  success?: boolean;
+}
+
+export interface OpenSystemSettingsResult {
+  opened: boolean;
+  reason?: string | null;
+}
+
+export interface PlaySoundResult {
+  played: boolean;
+  reason?: string | null;
+}
+
+export interface PickedAudioFile {
+  path: string;
+  displayName?: string;
+  extension?: string;
+  sizeBytes?: number;
+}
+
 export type StructuredIpcError = {
   code: string;
   message: string;
   details?: Record<string, unknown>;
 };
+
+export interface PersistedWorktree {
+  path: string;
+  branch: string;
+  head: string;
+  isMain: boolean;
+  isLocked: boolean;
+}
+
+export interface PersistedTab {
+  id: string;
+  sessionId: string;
+  label: string;
+  customTitle?: string;
+  worktreePath: string;
+}
+
+export interface PersistedLayout {
+  splitMode: string;
+  primaryTabId: string | null;
+  secondaryTabId: string | null;
+  tabs: PersistedTab[];
+}
+
+export interface PersistedTerminalSession {
+  sessionId: string;
+  worktreePath: string;
+  cwd: string;
+  lastCommand?: string;
+  recentScrollback?: string;
+  createdAt: number;
+}
+
+export interface PersistedWorkspace {
+  workspaceId: string;
+  repoRoot: string;
+  worktrees: PersistedWorktree[];
+  activeWorktreePath: string | null;
+  layout: PersistedLayout;
+  terminalSessions: Record<string, PersistedTerminalSession>;
+}
+
+export interface PersistedWorkspaceSession {
+  version: number;
+  timestamp: number;
+  activeWorkspaceId: string;
+  workspaces: Record<string, PersistedWorkspace>;
+}
+

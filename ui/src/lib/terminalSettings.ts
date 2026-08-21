@@ -1,12 +1,29 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import { getTerminalPreferences, type TerminalPreferences } from "./tauri";
 
 export type TerminalSettings = {
+  fontFamily: string | null;
+  macosOptionAsAlt: boolean | null;
   fontSize: number;
   scrollback: number;
 };
 
+export type TerminalSettingSource = "local" | "ghostty" | "fallback";
+
+export type EffectiveTerminalSettings = {
+  fontFamily: string;
+  macosOptionAsAlt: boolean;
+  fontSize: number;
+  scrollback: number;
+  fontFamilySource: TerminalSettingSource;
+  macosOptionAsAltSource: TerminalSettingSource;
+};
+
 export const TERMINAL_SETTINGS_STORAGE_KEY = "orca.terminal.settings";
 export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
+  fontFamily: null,
+  macosOptionAsAlt: null,
   fontSize: 13,
   scrollback: 10_000,
 };
@@ -16,9 +33,18 @@ const FONT_SIZE_MIN = 10;
 const FONT_SIZE_MAX = 24;
 const SCROLLBACK_MIN = 1_000;
 const SCROLLBACK_MAX = 100_000;
+const FALLBACK_PREFERENCES: TerminalPreferences = {
+  fontFamily: "monospace",
+  macosOptionAsAlt: false,
+  source: "defaults",
+  status: "absent",
+  sourcePath: null,
+};
 
 type TerminalOptionsTarget = {
   options: {
+    fontFamily?: string;
+    macOptionIsMeta?: boolean;
     fontSize?: number;
     scrollback?: number;
   };
@@ -51,21 +77,57 @@ export function saveTerminalSettings(
   return normalized;
 }
 
-export function applyTerminalSettings(terminal: TerminalOptionsTarget, settings: TerminalSettings) {
+export function resolveTerminalSettings(
+  local: TerminalSettings,
+  nativePreferences: TerminalPreferences = FALLBACK_PREFERENCES,
+): EffectiveTerminalSettings {
+  const ghosttyImported = nativePreferences.source === "ghostty" && nativePreferences.status === "imported";
+  const localFontFamily = normalizeOptionalFontFamily(local.fontFamily);
+  const hasLocalOptionOverride = typeof local.macosOptionAsAlt === "boolean";
+
+  return {
+    fontFamily: localFontFamily ?? (nativePreferences.fontFamily || "monospace"),
+    macosOptionAsAlt: hasLocalOptionOverride ? local.macosOptionAsAlt! : nativePreferences.macosOptionAsAlt,
+    fontSize: local.fontSize,
+    scrollback: local.scrollback,
+    fontFamilySource: localFontFamily ? "local" : ghosttyImported ? "ghostty" : "fallback",
+    macosOptionAsAltSource: hasLocalOptionOverride ? "local" : ghosttyImported ? "ghostty" : "fallback",
+  };
+}
+
+export function applyTerminalSettings(terminal: TerminalOptionsTarget, settings: EffectiveTerminalSettings) {
+  terminal.options.fontFamily = settings.fontFamily;
+  terminal.options.macOptionIsMeta = settings.macosOptionAsAlt;
   terminal.options.fontSize = settings.fontSize;
   terminal.options.scrollback = settings.scrollback;
 }
 
 export function useTerminalSettings() {
-  const [settings, setSettings] = useState<TerminalSettings>(() => loadTerminalSettings());
+  const [localSettings, setLocalSettings] = useState<TerminalSettings>(() => loadTerminalSettings());
+  const [nativePreferences, setNativePreferences] = useState<TerminalPreferences>(FALLBACK_PREFERENCES);
+
+  const refreshNativePreferences = useCallback(async () => {
+    try {
+      const preferences = await getTerminalPreferences();
+      setNativePreferences(preferences);
+      return preferences;
+    } catch {
+      setNativePreferences(FALLBACK_PREFERENCES);
+      return FALLBACK_PREFERENCES;
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshNativePreferences();
+  }, [refreshNativePreferences]);
 
   useEffect(() => {
     const handleSettings = (event: Event) => {
       const detail = (event as CustomEvent<TerminalSettings>).detail;
-      if (detail) setSettings(normalizeTerminalSettings(detail));
+      if (detail) setLocalSettings(normalizeTerminalSettings(detail));
     };
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === TERMINAL_SETTINGS_STORAGE_KEY) setSettings(loadTerminalSettings());
+      if (event.key === TERMINAL_SETTINGS_STORAGE_KEY) setLocalSettings(loadTerminalSettings());
     };
     window.addEventListener(TERMINAL_SETTINGS_EVENT, handleSettings);
     window.addEventListener("storage", handleStorage);
@@ -76,17 +138,30 @@ export function useTerminalSettings() {
   }, []);
 
   const updateSettings = useCallback((patch: Partial<TerminalSettings>) => {
-    setSettings((current) => saveTerminalSettings({ ...current, ...patch }));
+    setLocalSettings((current) => saveTerminalSettings({ ...current, ...patch }));
   }, []);
 
-  return { settings, updateSettings };
+  const settings = useMemo(
+    () => resolveTerminalSettings(localSettings, nativePreferences),
+    [localSettings, nativePreferences],
+  );
+
+  return { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences };
 }
 
 function normalizeTerminalSettings(settings: Partial<TerminalSettings>): TerminalSettings {
   return {
+    fontFamily: normalizeOptionalFontFamily(settings.fontFamily),
+    macosOptionAsAlt: typeof settings.macosOptionAsAlt === "boolean" ? settings.macosOptionAsAlt : null,
     fontSize: clampInteger(settings.fontSize, DEFAULT_TERMINAL_SETTINGS.fontSize, FONT_SIZE_MIN, FONT_SIZE_MAX),
     scrollback: clampInteger(settings.scrollback, DEFAULT_TERMINAL_SETTINGS.scrollback, SCROLLBACK_MIN, SCROLLBACK_MAX),
   };
+}
+
+function normalizeOptionalFontFamily(value: string | null | undefined) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function clampInteger(value: number | undefined, fallback: number, min: number, max: number) {

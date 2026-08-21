@@ -78,7 +78,7 @@ function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean 
 }
 
 describe("useWorkspaceStore terminal ownership", () => {
-  it("enables a single-tab mirror split without spawning another backend PTY", async () => {
+  it("splits a pane in a tab tree using existing sessions without spawning another PTY", async () => {
     const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
@@ -87,32 +87,44 @@ describe("useWorkspaceStore terminal ownership", () => {
     });
     vi.mocked(services.spawnTerminal).mockClear();
 
+    const tabId = result.current.state.layout.activeTabId!;
+    const tabLayout = result.current.state.layout.layoutsByTabId[tabId];
+    const leafId = tabLayout.activeLeafId!;
+
     await act(async () => {
-      await result.current.enableSplit("horizontal");
+      await result.current.splitPane(tabId, leafId, "horizontal");
     });
 
     expect(result.current.state.layout.tabs).toHaveLength(1);
-    expect(result.current.state.layout.secondaryTabId).toBe(result.current.state.layout.primaryTabId);
-    expect(result.current.state.layout.split).toBe("horizontal");
+    const updatedLayout = result.current.state.layout.layoutsByTabId[tabId];
+    expect(updatedLayout.root.type).toBe("split");
     expect(services.spawnTerminal).not.toHaveBeenCalled();
   });
 
-  it("preserves backend session ids when only split orientation changes", async () => {
+  it("closes individual panes in a tab layout", async () => {
     const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
     await act(async () => {
       await result.current.openTab(worktree);
-      await result.current.enableSplit("horizontal");
     });
 
-    const before = Object.values(result.current.state.sessions).map((session) => session.backendSessionId);
-    act(() => result.current.rotateSplit());
-    const after = Object.values(result.current.state.sessions).map((session) => session.backendSessionId);
+    const tabId = result.current.state.layout.activeTabId!;
+    const leafId = result.current.state.layout.layoutsByTabId[tabId].activeLeafId!;
 
-    expect(result.current.state.layout.split).toBe("vertical");
-    expect(after).toEqual(before);
-    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await result.current.splitPane(tabId, leafId, "horizontal");
+    });
+
+    const splitLayout = result.current.state.layout.layoutsByTabId[tabId];
+    const newLeafId = splitLayout.activeLeafId!;
+
+    await act(async () => {
+      await result.current.closePane(tabId, newLeafId);
+    });
+
+    const finalLayout = result.current.state.layout.layoutsByTabId[tabId];
+    expect(finalLayout.root.type).toBe("leaf");
   });
 
   it("spawns a last-tab replacement only after lifecycle-confirmed writer release", async () => {
@@ -122,7 +134,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     await act(async () => {
       await result.current.openTab(worktree);
     });
-    const closingTabId = result.current.state.layout.primaryTabId!;
+    const closingTabId = result.current.state.layout.activeTabId!;
     const closingSessionId = result.current.state.layout.tabs[0].sessionId;
     const closingBackendId = result.current.state.sessions[closingSessionId].backendSessionId!;
 
@@ -141,36 +153,12 @@ describe("useWorkspaceStore terminal ownership", () => {
     });
 
     expect(result.current.state.layout.tabs).toHaveLength(1);
-    expect(result.current.state.layout.primaryTabId).toBe(result.current.state.layout.tabs[0].id);
+    expect(result.current.state.layout.activeTabId).toBe(result.current.state.layout.tabs[0].id);
     expect(result.current.state.layout.tabs[0].id).not.toBe(closingTabId);
-    expect(result.current.state.layout.secondaryTabId).toBeNull();
     expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
     expect(vi.mocked(services.closeTerminal).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(services.spawnTerminal).mock.invocationCallOrder[1],
     );
-  });
-
-  it("keeps layout invariants valid when the secondary tab closes", async () => {
-    const { services } = createServices();
-    const { result } = renderHook(() =>
-      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
-    );
-
-    await act(async () => {
-      await result.current.openTab(worktree);
-      await result.current.openTab(featureWorktree);
-      await result.current.enableSplit("horizontal");
-    });
-    const secondaryTabId = result.current.state.layout.secondaryTabId!;
-
-    await act(async () => {
-      await result.current.closeTab(secondaryTabId);
-    });
-
-    expect(result.current.state.layout.tabs).toHaveLength(1);
-    expect(result.current.state.layout.primaryTabId).toBe(result.current.state.layout.tabs[0].id);
-    expect(result.current.state.layout.secondaryTabId).toBeNull();
-    expect(result.current.state.layout.split).toBe("none");
   });
 
   it("derives visible agents only from live terminal session metadata", async () => {

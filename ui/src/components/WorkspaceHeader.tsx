@@ -1,5 +1,7 @@
-import { Bot, CircleStop, GitBranch, Radio, SplitSquareHorizontal, SplitSquareVertical } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Bot, GitBranch, PanelLeft, Radio } from "lucide-react";
 
+import { isMacShortcutPlatform } from "../lib/shortcuts";
 import type { ActiveAgent, Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
@@ -7,10 +9,9 @@ import { StatusDot } from "./ui/StatusDot";
 type WorkspaceHeaderProps = {
   worktree: Worktree;
   agent?: ActiveAgent;
-  onSplit?: () => void;
-  splitState?: "none" | "horizontal" | "vertical";
-  onInterrupt?: () => void;
-  canInterrupt?: boolean;
+  sidebarOpen?: boolean;
+  onToggleSidebar?: () => void;
+  isMac?: boolean;
 };
 
 function branchName(worktree: Worktree) {
@@ -25,51 +26,53 @@ function basename(path: string) {
 export function WorkspaceHeader({
   worktree,
   agent,
-  onSplit,
-  splitState = "none",
-  onInterrupt,
-  canInterrupt = false,
+  sidebarOpen = true,
+  onToggleSidebar,
+  isMac = isMacShortcutPlatform(),
 }: WorkspaceHeaderProps) {
+  const startWindowDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest(".no-drag")) return;
+    void getCurrentWindow().startDragging();
+  };
+
   return (
-    <header className="drag-region flex h-titlebar shrink-0 items-center border-b border-border bg-sidebar pl-3 pr-2">
+    <header
+      data-tauri-drag-region
+      onPointerDown={startWindowDrag}
+      className="drag-region flex h-titlebar shrink-0 items-center border-b border-border bg-card pl-3 pr-2"
+    >
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <div className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent text-muted-foreground">
+        {!sidebarOpen ? (
+          <>
+            {isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
+            {onToggleSidebar ? (
+              <IconButton label="Show sidebar" className="no-drag mr-1" size="sm" onClick={onToggleSidebar}>
+                <PanelLeft className="size-3.5" />
+              </IconButton>
+            ) : null}
+          </>
+        ) : null}
+        <div className="flex size-5 shrink-0 items-center justify-center text-muted-foreground/75">
           <GitBranch className="size-3.5" />
         </div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="truncate text-[13px] font-semibold text-foreground">{basename(worktree.path)}</span>
-            {agent ? <StatusDot state={agent.state} /> : null}
-          </div>
-          <div className="truncate font-mono text-[10px] text-muted-foreground">{branchName(worktree)}</div>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[12px] font-medium text-foreground">{basename(worktree.path)}</span>
+          <span className="truncate font-mono text-[10px] text-muted-foreground/65">{branchName(worktree)}</span>
+          {agent ? <StatusDot state={agent.state} /> : null}
         </div>
       </div>
 
       {agent ? (
-        <div className="no-drag mr-2 hidden items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px] text-muted-foreground md:flex">
+        <div
+          data-testid="workspace-agent-chip"
+          className="no-drag hidden h-6 items-center gap-1.5 border-l border-border pl-2 text-[10px] text-muted-foreground md:flex"
+        >
           <Bot className="size-3" />
           <span className="max-w-agent truncate">{agent.name}</span>
           <Radio className="size-2.5 text-status-working" />
         </div>
       ) : null}
-
-      <div className="no-drag flex items-center gap-0.5">
-        <IconButton
-          label={`Split terminal (${splitState})`}
-          size="sm"
-          onClick={onSplit}
-          className={splitState !== "none" ? "bg-accent text-foreground" : ""}
-        >
-          {splitState === "vertical" ? (
-            <SplitSquareVertical className="size-3.5" />
-          ) : (
-            <SplitSquareHorizontal className="size-3.5" />
-          )}
-        </IconButton>
-        <IconButton label="Interrupt terminal" size="sm" onClick={onInterrupt} disabled={!canInterrupt}>
-          <CircleStop className="size-3.5" />
-        </IconButton>
-      </div>
     </header>
   );
 }

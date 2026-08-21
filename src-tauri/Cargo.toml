@@ -29,6 +29,37 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 parking_lot = "0.12"
 uuid = { version = "1.13", features = ["v4"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+rand = "0.8"
+sha2 = "0.10"
+futures-util = "0.3"
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
+rodio = { version = "0.22", default-features = false, features = [
+    "playback",
+    "wav",
+    "mp3",
+    "flac",
+    "vorbis",
+    "mp4",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSBundle",
+    "NSError",
+    "NSString",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNUserNotificationCenter",
+    "UNNotificationSettings",
+] }
+block2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3.17"

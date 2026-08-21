@@ -41,7 +41,10 @@ impl WorkspaceRegistry {
         let workspace_id = Self::validate_workspace_id(workspace_id.as_ref())?.to_string();
         let manager = WorktreeManager::try_new(repo_root.as_ref().to_path_buf())?;
         let mut workspaces = self.workspaces.write();
-        if workspaces.contains_key(&workspace_id) {
+        if let Some(existing) = workspaces.get(&workspace_id) {
+            if existing.repo_root() == manager.repo_root() {
+                return Ok(());
+            }
             return Err(WorktreeError::WorkspaceAlreadyRegistered { workspace_id });
         }
         workspaces.insert(workspace_id, manager);

@@ -27,10 +27,16 @@ pub enum PtyError {
     Other(String),
 }
 
+pub mod output_hub;
+pub mod preferences;
 pub mod pty;
+pub mod service;
 pub mod session;
 
+pub use output_hub::*;
+pub use preferences::*;
 pub use pty::*;
+pub use service::*;
 pub use session::*;
 
 #[cfg(test)]

@@ -1,0 +1,344 @@
+//! Notification IPC commands.
+//!
+//! The frontend never calls `@tauri-apps/plugin-notification` or
+//! `plugin-dialog` directly. Every OS interaction goes through these typed
+//! commands, which keeps platform differences out of React, gives tests one
+//! mockable contract, and avoids granting broad guest plugin capabilities.
+
+use crate::ipc::{run_blocking, IpcError};
+use crate::notification::{
+    open_system_notification_settings, picked_audio_file, DispatchNotificationRequest,
+    DispatchNotificationResult, NativeNotificationBackend, NotificationAudioPlayer,
+    NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+    NotificationProbeResult, NotificationService, OpenSystemSettingsResult, PickedAudioFile,
+    PlaySoundResult, SUPPORTED_AUDIO_EXTENSIONS,
+};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::{AppHandle, Runtime, State};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_notification::NotificationExt;
+
+/// Native backend built on `tauri-plugin-notification`.
+pub struct TauriNotificationBackend<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> TauriNotificationBackend<R> {
+    pub fn new(app: AppHandle<R>) -> Self {
+        Self { app }
+    }
+}
+
+impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
+    fn submit(&self, content: &NotificationContent) -> Result<(), String> {
+        self.app
+            .notification()
+            .builder()
+            .title(&content.title)
+            .body(&content.body)
+            .show()
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Build a service bound to the running app.
+///
+/// The permission provider is the authoritative platform one; on macOS that is
+/// `UNUserNotificationCenter`, not Tauri's desktop `permission_state()`.
+fn service_for<R: Runtime>(app: &AppHandle<R>) -> NotificationService {
+    NotificationService::with_platform_permissions(Box::new(TauriNotificationBackend::new(
+        app.clone(),
+    )))
+}
+
+/// Raise one native notification for an application event.
+#[tauri::command]
+pub async fn cmd_notification_dispatch<R: Runtime>(
+    app: AppHandle<R>,
+    request: DispatchNotificationRequest,
+) -> Result<DispatchNotificationResult, IpcError> {
+    run_blocking(move || Ok(service_for(&app).dispatch(&request))).await
+}
+
+/// Read the current authoritative permission status.
+#[tauri::command]
+pub async fn cmd_notification_get_permission_status<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<NotificationPermissionStatusDto, IpcError> {
+    run_blocking(move || Ok(service_for(&app).permission_status())).await
+}
+
+/// Request notification authorization.
+///
+/// Only ever invoked from an explicit user action (master switch, test
+/// notification, or "Allow notifications") - never at startup.
+#[tauri::command]
+pub async fn cmd_notification_request_permission<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<NotificationPermissionRequestDto, IpcError> {
+    run_blocking(move || Ok(service_for(&app).request_permission())).await
+}
+
+/// Report notification readiness, optionally sending a visible test.
+///
+/// Never claims a banner was seen: Focus/Do-Not-Disturb suppression is
+/// invisible to the application.
+#[tauri::command]
+pub async fn cmd_notification_probe_delivery<R: Runtime>(
+    app: AppHandle<R>,
+    send_test: Option<bool>,
+) -> Result<NotificationProbeResult, IpcError> {
+    let send_test = send_test.unwrap_or(false);
+    run_blocking(move || Ok(service_for(&app).probe_delivery(send_test))).await
+}
+
+/// Open the OS notification settings page for rorca.
+#[tauri::command]
+pub async fn cmd_notification_open_system_settings() -> Result<OpenSystemSettingsResult, IpcError> {
+    run_blocking(|| Ok(open_system_notification_settings())).await
+}
+
+/// Play a custom notification sound.
+///
+/// A failure here is a structured result rather than an IPC error: the
+/// notification itself may already have been delivered successfully.
+#[tauri::command]
+pub async fn cmd_notification_play_sound(
+    player: State<'_, Arc<NotificationAudioPlayer>>,
+    path: PathBuf,
+    volume: Option<f32>,
+    force: Option<bool>,
+) -> Result<PlaySoundResult, IpcError> {
+    let player = Arc::clone(&player);
+    let volume = volume.unwrap_or(100.0);
+    let force = force.unwrap_or(false);
+    run_blocking(move || Ok(player.play(&path, volume, force))).await
+}
+
+/// Pick a custom notification sound through the native file dialog.
+///
+/// Returns only the path and display name; the file is never read into the
+/// WebView, and no general filesystem access is exposed.
+#[tauri::command]
+pub async fn cmd_notification_pick_audio<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<PickedAudioFile>, IpcError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    app.dialog()
+        .file()
+        .add_filter("Audio", SUPPORTED_AUDIO_EXTENSIONS)
+        .pick_file(move |selected| {
+            let _ = tx.send(selected);
+        });
+
+    let selected = rx
+        .await
+        .map_err(|_| IpcError::internal("audio file dialog closed unexpectedly"))?;
+
+    // User cancelled the dialog.
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+
+    let path = selected
+        .into_path()
+        .map_err(|error| IpcError::internal(format!("invalid audio selection: {error}")))?;
+
+    Ok(Some(picked_audio_file(path)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notification::{
+        is_supported_audio_extension, NotificationAuthorization, NotificationDispatchReason,
+        NotificationPlatform, NotificationProbeOutcome, NotificationSource, PlaySoundReason,
+    };
+    use serde_json::json;
+    use tauri::Manager;
+
+    /// Mock app managing the same audio state `lib.rs` registers.
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .manage(Arc::new(NotificationAudioPlayer::new()))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app")
+    }
+
+    #[tokio::test]
+    async fn play_sound_command_reports_missing_file_without_erroring() {
+        let app = mock_app();
+        let player = app.state::<Arc<NotificationAudioPlayer>>();
+
+        let result = cmd_notification_play_sound(
+            player,
+            PathBuf::from("/nonexistent/orca-ding.wav"),
+            Some(80.0),
+            Some(true),
+        )
+        .await
+        .expect("command must resolve, not fail");
+
+        assert!(!result.played);
+        assert_eq!(result.reason, Some(PlaySoundReason::NotFound));
+    }
+
+    #[tokio::test]
+    async fn play_sound_command_rejects_unsupported_formats() {
+        let app = mock_app();
+        let player = app.state::<Arc<NotificationAudioPlayer>>();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("payload.sh");
+        std::fs::write(&path, b"#!/bin/sh\necho nope").expect("write file");
+
+        let result = cmd_notification_play_sound(player, path, Some(50.0), Some(true))
+            .await
+            .expect("command resolves");
+
+        assert_eq!(result.reason, Some(PlaySoundReason::UnsupportedFormat));
+    }
+
+    #[tokio::test]
+    async fn play_sound_command_tolerates_omitted_optional_arguments() {
+        let app = mock_app();
+        let player = app.state::<Arc<NotificationAudioPlayer>>();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("missing.wav");
+
+        let result = cmd_notification_play_sound(player, path, None, None)
+            .await
+            .expect("command resolves");
+
+        assert!(!result.played);
+    }
+
+    #[tokio::test]
+    async fn open_system_settings_command_returns_a_structured_result() {
+        let result = cmd_notification_open_system_settings()
+            .await
+            .expect("command resolves");
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            assert!(!result.opened);
+            assert_eq!(result.reason.as_deref(), Some("unsupported"));
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            // Opening can legitimately fail in a headless session; only the
+            // structured shape is guaranteed.
+            assert!(result.opened || result.reason.is_some());
+        }
+    }
+
+    #[test]
+    fn dispatch_command_payload_matches_the_frontend_contract() {
+        // Mirrors what ui/src/lib/tauri.ts sends through invokeCommand.
+        let request: DispatchNotificationRequest = serde_json::from_value(json!({
+            "source": "agentTaskComplete",
+            "notificationId": "agent-42",
+            "workspaceLabel": "orca-lite",
+            "worktreeLabel": "orca/ws-1/feat-login",
+            "terminalTitle": "claude",
+            "agentLabel": "Claude",
+        }))
+        .expect("payload parses");
+
+        assert_eq!(request.source, NotificationSource::AgentTaskComplete);
+        assert_eq!(request.agent_label.as_deref(), Some("Claude"));
+        assert_eq!(request.notification_id.as_deref(), Some("agent-42"));
+    }
+
+    #[test]
+    fn dispatch_result_round_trips_across_the_ipc_boundary() {
+        let result =
+            DispatchNotificationResult::rejected(NotificationDispatchReason::PermissionRequired);
+
+        let encoded = serde_json::to_string(&result).expect("encode");
+        let decoded: DispatchNotificationResult = serde_json::from_str(&encoded).expect("decode");
+
+        assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn permission_status_round_trips_across_the_ipc_boundary() {
+        let status = NotificationPermissionStatusDto {
+            platform: NotificationPlatform::Macos,
+            supported: true,
+            authorization: NotificationAuthorization::Denied,
+            alerts_enabled: Some(false),
+            sounds_enabled: Some(true),
+            requested: true,
+            authoritative: true,
+            can_open_settings: true,
+        };
+
+        let encoded = serde_json::to_string(&status).expect("encode");
+        let decoded: NotificationPermissionStatusDto =
+            serde_json::from_str(&encoded).expect("decode");
+
+        assert_eq!(decoded, status);
+        assert!(decoded.is_blocked());
+    }
+
+    #[test]
+    fn permission_request_result_round_trips_across_the_ipc_boundary() {
+        let dto = NotificationPermissionRequestDto {
+            granted: false,
+            status: NotificationPermissionStatusDto::non_authoritative(
+                NotificationPlatform::Windows,
+                true,
+            ),
+            error: Some("authorization request timed out".into()),
+        };
+
+        let encoded = serde_json::to_string(&dto).expect("encode");
+        let decoded: NotificationPermissionRequestDto =
+            serde_json::from_str(&encoded).expect("decode");
+
+        assert_eq!(decoded, dto);
+    }
+
+    #[test]
+    fn probe_result_round_trips_across_the_ipc_boundary() {
+        let probe = NotificationProbeResult {
+            outcome: NotificationProbeOutcome::Submitted,
+            status: NotificationPermissionStatusDto::non_authoritative(
+                NotificationPlatform::Linux,
+                false,
+            ),
+            test_submitted: true,
+        };
+
+        let encoded = serde_json::to_string(&probe).expect("encode");
+        let decoded: NotificationProbeResult = serde_json::from_str(&encoded).expect("decode");
+
+        assert_eq!(decoded, probe);
+    }
+
+    #[test]
+    fn picked_audio_result_round_trips_including_cancellation() {
+        let cancelled: Option<PickedAudioFile> =
+            serde_json::from_str("null").expect("null decodes as cancellation");
+        assert!(cancelled.is_none());
+
+        let picked = Some(picked_audio_file(PathBuf::from("/tmp/ding.wav")));
+        let encoded = serde_json::to_string(&picked).expect("encode");
+        let decoded: Option<PickedAudioFile> = serde_json::from_str(&encoded).expect("decode");
+
+        assert_eq!(decoded, picked);
+    }
+
+    #[test]
+    fn picker_filters_only_offer_decodable_formats() {
+        // The dialog filter must not advertise formats rodio cannot decode.
+        for extension in SUPPORTED_AUDIO_EXTENSIONS {
+            assert!(
+                is_supported_audio_extension(std::path::Path::new(&format!("sound.{extension}"))),
+                "picker filter offers undecodable extension: {extension}"
+            );
+        }
+    }
+}

@@ -1,5 +1,5 @@
 use crate::ipc::*;
-use crate::terminal::PtyManager;
+use crate::terminal::TerminalService;
 use crate::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::sync::Arc;
@@ -24,12 +24,12 @@ fn setup_workspace() -> (TempDir, WorkspaceRegistry) {
 async fn tauri_mock_terminal_events_use_registered_workspace() {
     let (_repo, registry) = setup_workspace();
     let app = tauri::test::mock_builder()
-        .manage(Arc::new(PtyManager::new()))
+        .manage(Arc::new(TerminalService::default()))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
 
-    let pty_manager = app.state::<Arc<PtyManager>>();
+    let terminal_service = app.state::<Arc<TerminalService>>();
     let registry_state = app.state::<WorkspaceRegistry>();
     let (tx, mut rx_event) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(16);
     app.listen(TERMINAL_OUTPUT_EVENT, move |event: tauri::Event| {
@@ -40,7 +40,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
 
     let spawned = cmd_terminal_spawn(
         app.handle().clone(),
-        pty_manager.clone(),
+        terminal_service.clone(),
         registry_state,
         SpawnTerminalRequest {
             workspace_id: "workspace-test".into(),
@@ -53,7 +53,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
     .expect("spawn");
 
     cmd_terminal_write(
-        pty_manager.clone(),
+        terminal_service.clone(),
         spawned.session_id.clone(),
         "echo hello_orca_terminal\n".into(),
     )
@@ -72,25 +72,25 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
     .expect("terminal output timeout");
 
     cmd_terminal_resize(
-        pty_manager.clone(),
+        terminal_service.clone(),
         spawned.session_id.clone(),
         120,
         40,
     )
     .await
     .expect("resize");
-    let sessions = cmd_terminal_list(pty_manager.clone()).await.expect("list");
+    let sessions = cmd_terminal_list(terminal_service.clone()).await.expect("list");
     assert!(sessions
         .iter()
         .any(|session| session.session_id == spawned.session_id));
 
-    cmd_terminal_close(pty_manager.clone(), spawned.session_id.clone())
+    cmd_terminal_close(terminal_service.clone(), spawned.session_id.clone())
         .await
         .expect("close");
-    cmd_terminal_close(pty_manager.clone(), spawned.session_id.clone())
+    cmd_terminal_close(terminal_service.clone(), spawned.session_id.clone())
         .await
         .expect("idempotent close");
-    let sessions = cmd_terminal_list(pty_manager).await.expect("list after");
+    let sessions = cmd_terminal_list(terminal_service).await.expect("list after");
     assert!(!sessions
         .iter()
         .any(|session| session.session_id == spawned.session_id));
@@ -100,7 +100,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
 async fn tauri_mock_worktree_commands_use_identity_contract() {
     let (_repo, registry) = setup_workspace();
     let app = tauri::test::mock_builder()
-        .manage(Arc::new(PtyManager::new()))
+        .manage(Arc::new(TerminalService::default()))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -162,12 +162,12 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
 async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
     let (_repo, registry) = setup_workspace();
     let app = tauri::test::mock_builder()
-        .manage(Arc::new(PtyManager::new()))
+        .manage(Arc::new(TerminalService::default()))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
 
-    let pty_manager = app.state::<Arc<PtyManager>>();
+    let terminal_service = app.state::<Arc<TerminalService>>();
     let registry_state = app.state::<WorkspaceRegistry>();
     let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(32);
     let (lifecycle_tx, mut lifecycle_rx) =
@@ -186,7 +186,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
 
     let spawned = cmd_terminal_spawn(
         app.handle().clone(),
-        pty_manager.clone(),
+        terminal_service.clone(),
         registry_state,
         SpawnTerminalRequest {
             workspace_id: "workspace-test".into(),
@@ -206,7 +206,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
     assert_eq!(started.state, TerminalLifecycleState::Started);
 
     cmd_terminal_write(
-        pty_manager.clone(),
+        terminal_service.clone(),
         spawned.session_id.clone(),
         "printf '\\377\\376\\n'\n".into(),
     )
@@ -224,7 +224,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
     .await
     .expect("raw output timeout");
 
-    cmd_terminal_close(pty_manager, spawned.session_id.clone())
+    cmd_terminal_close(terminal_service, spawned.session_id.clone())
         .await
         .expect("close");
 
