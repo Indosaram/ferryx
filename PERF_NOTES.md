@@ -47,7 +47,7 @@ Terminal process ownership remains outside the renderer. `TerminalPane` allocate
 
 The optimized revision was verified with:
 
-- `bun --cwd ui test`: 8 test files, 25 tests passed.
+- `bun run --cwd ui test`: 16 test files, 50 tests passed in the 2026-08-21 frontend parity-fix verification run.
 - `bun run --cwd ui build`: TypeScript and Vite production build exited 0 with the optimized chunks listed above and no chunk-size warning.
 - `bun run --cwd ui test -- src/lib/terminalRenderer.test.ts`: 3 renderer lifecycle/lazy-loading tests passed.
 
