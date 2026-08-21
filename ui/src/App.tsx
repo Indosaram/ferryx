@@ -1,6 +1,7 @@
 import { FolderPlus, GitBranch, Plus, X } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
+import { CommandPalette } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
@@ -49,6 +50,22 @@ export function App() {
     [ensureTabForWorktree, reportRuntimeError],
   );
 
+  const handleSelectTerminalTab = useCallback(
+    (tabId: string) => {
+      const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
+      const session = tab ? state.sessions[tab.sessionId] : undefined;
+      const worktree = session ? state.worktrees.find((candidate) => candidate.path === session.cwd) : undefined;
+      if (!worktree || worktree.path === state.activeWorktreePath) {
+        activatePrimary(tabId);
+        return;
+      }
+      void ensureTabForWorktree(worktree)
+        .then(() => activatePrimary(tabId))
+        .catch(reportRuntimeError);
+    },
+    [activatePrimary, ensureTabForWorktree, reportRuntimeError, state.activeWorktreePath, state.layout.tabs, state.sessions, state.worktrees],
+  );
+
   const handleCreateWorktreeSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     const slug = newSlug.trim();
@@ -87,9 +104,9 @@ export function App() {
       if (tabs.length < 2) return;
       const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.id === state.layout.primaryTabId));
       const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
-      activatePrimary(tabs[nextIndex].id);
+      handleSelectTerminalTab(tabs[nextIndex].id);
     },
-    [activatePrimary, state.layout.primaryTabId, state.layout.tabs],
+    [handleSelectTerminalTab, state.layout.primaryTabId, state.layout.tabs],
   );
 
   const handleSplit = () => {
@@ -128,10 +145,7 @@ export function App() {
   useShortcuts(shortcutHandlers);
 
   return (
-    <div
-      className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
-      data-command-palette-open={isCommandPaletteOpen ? "true" : "false"}
-    >
+    <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Sidebar
         worktrees={state.worktrees}
         agents={agents}
@@ -141,6 +155,7 @@ export function App() {
           setCreateError(null);
           setIsCreateOpen(true);
         }}
+        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
       />
 
       <main className="flex h-full flex-1 flex-col overflow-hidden bg-card">
@@ -155,7 +170,7 @@ export function App() {
             <TabBar
               tabs={state.layout.tabs}
               activeTabId={state.layout.primaryTabId ?? ""}
-              onActivate={activatePrimary}
+              onActivate={handleSelectTerminalTab}
               onClose={handleCloseTab}
               onAdd={handleAddTerminalTab}
             />
@@ -167,6 +182,15 @@ export function App() {
           </div>
         )}
       </main>
+
+      <CommandPalette
+        open={isCommandPaletteOpen}
+        worktrees={state.worktrees}
+        tabs={state.layout.tabs}
+        onSelectWorktree={handleSelectWorktree}
+        onSelectTab={handleSelectTerminalTab}
+        onClose={() => setIsCommandPaletteOpen(false)}
+      />
 
       {runtimeError && activeWorktree ? (
         <div className="pointer-events-none fixed bottom-3 right-3 z-40 max-w-error rounded-md border border-destructive/30 bg-card/95 px-3 py-2 text-[11px] text-destructive shadow-lg">
