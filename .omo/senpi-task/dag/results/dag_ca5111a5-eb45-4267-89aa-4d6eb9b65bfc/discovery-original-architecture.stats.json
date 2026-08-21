@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_ca5111a5-eb45-4267-89aa-4d6eb9b65bfc","nodeId":"discovery-original-architecture","runStats":{"runtime_ms":569443,"turns":47,"tool_calls":76,"output_tokens":40066,"total_tokens":3467557,"generation_ms":473270,"tokens_per_second":85,"cost_usd":3.517307749999999,"cache_hit_rate_last":0.9855357890028712,"cache_hit_rate_run":0.9593046342061876}}

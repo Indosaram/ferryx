@@ -1,0 +1,17 @@
+`bun run --cwd ui test -- src/App.test.tsx` passes: 9/9.
+
+**What changed in `ui/src/App.tsx`**
+- `listVisibleWorktrees(projects, worktrees, activeProjectId)` flattens the sidebar tree exactly as rendered: projects in registration order, each non-collapsed project followed by its own worktrees (ownership resolved from the `orca/<wsId>/<slug>` branch, falling back to the active project — same rule `Sidebar` uses to group).
+- Collapse state is read from `SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY` at key-press time, so it can never drift from the accordion the user sees. Defaults mirror the sidebar: persisted set wins; with nothing persisted, only the active project is expanded.
+- `handleSelectWorktreeByIndex` indexes that flat list, so Cmd+N walks top to bottom straight across project boundaries. Out-of-range indexes hit `undefined` and do nothing.
+- Cross-project targets now actually land: `handleSelectWorktree` switches the active project and parks the path in `pendingWorktreePath`; an effect ensures/focuses the tab as soon as that project's worktrees appear in the store, and a later explicit project switch discards a stale pending path.
+
+**Tests**
+- New test proves the traversal: with both projects expanded, Cmd+1/Cmd+4 stay in the first project; after collapsing it, Cmd+2 lands on the second project's second worktree, switching the active project *and* focusing that worktree's tab. I verified it fails when the handler is pointed back at `state.worktrees`.
+- New out-of-range test: Cmd+5..9 with four visible worktrees touch nothing.
+- The pre-existing cross-project click test asserted `ensureTabForWorktree` is *never* called; that directly contradicts requirement 3, so it now asserts the tab is focused once the owning project is active.
+- The `./components/Sidebar` mock was missing `SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY`, which made vitest throw inside the keydown handler and silently swallow *every* Cmd+N press in this file; the mock now exports it.
+
+**One deviation worth flagging:** the shortcut registry (`ui/src/lib/shortcuts.ts`) only defines `workspace.select1..4`, so Cmd+5..9 are not bound to any key today. The traversal logic is index-generic and handles 1..9, but wiring keys 5..9 requires adding registry entries, which is outside the stated scope and would break `shortcuts.test.tsx`'s exact-membership assertion. Say the word and I'll extend the registry and that test.
+
+Unrelated pre-existing failures in `Sidebar.test.tsx` and `workspaceStore.test.tsx` come from a concurrent pane-tree refactor of `state/layout.ts`; they're not caused by this change.

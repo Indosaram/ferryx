@@ -469,7 +469,7 @@ export function NotificationSettings() {
               {auth}
             </span>
           </div>
-          {isNotDetermined ? (
+          {isNotDetermined || isDenied ? (
             <button
               type="button"
               onClick={handleRequestPermission}
@@ -482,7 +482,7 @@ export function NotificationSettings() {
             <button
               type="button"
               onClick={handleOpenSettings}
-              className="text-xs text-primary hover:underline flex items-center gap-1"
+              className="text-xs text-muted-foreground hover:text-foreground hover:underline flex items-center gap-1"
             >
               Open System Settings
               <ExternalLink className="size-3" />

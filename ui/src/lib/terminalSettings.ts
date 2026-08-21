@@ -1,3 +1,4 @@
+import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getTerminalPreferences, type TerminalPreferences, type TerminalThemeColors } from "./tauri";
@@ -22,6 +23,8 @@ export type EffectiveTerminalSettings = {
   macosOptionAsAltSource: TerminalSettingSource;
   fontSizeSource: TerminalSettingSource;
 };
+
+export type ResolvedTerminalSettings = EffectiveTerminalSettings;
 
 export const TERMINAL_SETTINGS_STORAGE_KEY = "orca.terminal.settings";
 export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
@@ -63,7 +66,7 @@ export const DEFAULT_TERMINAL_THEME: TerminalThemeColors = {
 };
 
 export const FALLBACK_PREFERENCES: TerminalPreferences = {
-  fontFamily: "monospace",
+  fontFamily: DEFAULT_TERMINAL_FONT_STACK,
   fontSize: 13,
   macosOptionAsAlt: false,
   cursorStyle: "block",
@@ -129,7 +132,7 @@ export function resolveTerminalSettings(
     : nativePreferences.fontSize ?? 13;
 
   return {
-    fontFamily: localFontFamily ?? (nativePreferences.fontFamily || "monospace"),
+    fontFamily: localFontFamily ?? (nativePreferences.fontFamily || DEFAULT_TERMINAL_FONT_STACK),
     macosOptionAsAlt: hasLocalOptionOverride ? local.macosOptionAsAlt! : nativePreferences.macosOptionAsAlt,
     fontSize: effectiveFontSize,
     scrollback: local.scrollback,

@@ -1,4 +1,4 @@
-export const DEFAULT_TERMINAL_FONT_STACK = '"Geist Mono", "JetBrains Mono", "MesloLGS NF", "Noto Sans KR", monospace';
+export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";

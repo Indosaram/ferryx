@@ -1,0 +1,36 @@
+Done. One helper batch dispatched, both workers completed, deliverables saved.
+
+## Dispatch note (one correction, no duplicate delegation)
+
+My first invocation was hard-rejected during argument validation:
+
+```
+Error: Security violation: Workspace /Users/indo/code/project/orca-lite is outside mount root /private/tmp/orca-parity-audit
+```
+
+Cause was mine, not the contract: the helper derives `--mount-root` from the process CWD, and I had `cd`'d into `/tmp/orca-parity-audit`, making the manifest's own `workspace` illegal. It failed *before* any scope, tab, or prompt existed — zero stdout, no `--json` envelope, no new lifecycle/task-state files. Since there was no live delegation to duplicate, re-running from `/Users/indo/code/project` was the first real dispatch, not a retry. Exactly one helper process ever sent work; no flags added beyond `--batch-stdin --json`.
+
+## Results
+
+**orca-parity-frontend** — scope `47061838-3361-4b7a-bb77-21e12b166962` — terminal **COMPLETED** — session **IDLE_RETAINED**
+1. Read plan Phases 2/6/7/8 + PERF_NOTES, enumerated `ui/src`; no repo writes.
+2. Shell/UX: core worktree/tab/split shell present, but sidebar controls are fixed/inert, split resize handle missing, semantic Tailwind tokens undefined + system-font divergence.
+3. Shortcuts: only handler in `ui/src` is `TabBar.tsx` Enter/Space close — terminal/tab shortcut families missing; editor/agent/browser families map to by-design gaps.
+4. Settings: original exposes ~11 panes; lite's Sidebar Settings button has no `onClick` and no settings component/route — inert affordance not gap-exempt.
+5. Plan conformance passes (listener-before-spawn, base64 + streaming TextDecoder, Session/Tab/Pane separation, invoke isolated to `lib/tauri.ts`, camelCase, code-based errors, lazy xterm/WebGL); deviations: `worktree_changed` lacks dirty/prune/branch kinds, `selectAgents` synthesizes every terminal tab as an ActiveAgent.
+
+**orca-parity-backend** — scope `e605dd95-4eca-4298-ac6c-94b70a119b22` — terminal **COMPLETED** — session **IDLE_RETAINED**
+1. Terminal invariants implemented (lifecycle convergence, idempotent close, natural-exit cleanup, enum signals, byte-safe base64); found a cross-layer last-tab/same-worktree lease conflict.
+2. Worktree safety fully present: canonical-path lease, second-owner rejection, close + natural-exit release, RAII spawn rollback, unconditional dirty rejection, `-d` vs explicit `-D`.
+3. IPC/security sound (registered-root validation, no raw shell); deviations: spawn DTO uses nested worktree identity instead of pinned `worktreeId`, and `worktree_changed` misses Phase 6.1 dirty/prune/branch kinds.
+4. Phase 8.3 blocking Git is addressed via `spawn_blocking`; PERF_NOTES **overstates** the Canvas-fallback claim (tests observe counters/disposal, not the active renderer).
+5. Flagged needs-runtime-proof: native macOS PTY Ctrl-C/orphan-reader, spawn-prompt timing, 10+ open/close leak run, E2E/security suite execution, bundle-size numbers, real GPU renderer behavior.
+
+## Where things live
+
+- Terminal stdout (verbatim, valid JSON, `ok:true`, exit 0): `/tmp/orca-parity-audit/helper-output.json`
+- Reports: `/tmp/orca-parity-audit/reports/orca-parity-{frontend,backend}.md`
+
+**Report-source caveat:** the terminal JSON carries status fields only — no message bodies. The richer content is in `~/.omo/bridge/task-state/{9142bb45…,e151ecca…}.json`, so I copied those structured per-item notes into the reports, as the task allowed. These are the workers' own item-level notes, not the verbatim 4-axis findings tables; those tables remain in the two retained conversations, which are `IDLE_RETAINED` and `resumable:true` if you want them pulled.
+
+Verification: exit 0, empty stderr, `jq -e` confirms `ok && terminal && all COMPLETED`, both workers `ready=true` before dispatch (`ready_ms` in `delegation-lifecycle/`), and label→scope mapping cross-checked against both goal text and `scope_id`. No repository files touched; writes confined to `/tmp/orca-parity-audit/**`.

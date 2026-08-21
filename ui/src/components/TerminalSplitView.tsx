@@ -263,12 +263,15 @@ function PaneLeafView({
   const [isDragOver, setIsDragOver] = useState(false);
   const [isHoveredTop, setIsHoveredTop] = useState(false);
 
+  const [dropIndicator, setDropIndicator] = useState<"left" | "right" | "top" | "bottom" | null>(null);
+
   const handleDragStart = (event: React.DragEvent) => {
     if (event.target instanceof Element && event.target.closest("button")) {
       event.preventDefault();
       return;
     }
     event.dataTransfer.setData("text/plain", `${tab.id}:${leafId}`);
+    event.dataTransfer.setData("application/x-orca-pane", `${tab.id}:${leafId}`);
     event.dataTransfer.effectAllowed = "move";
     setDraggedLeafId({ tabId: tab.id, leafId });
   };
@@ -276,13 +279,35 @@ function PaneLeafView({
   const handleDragEnd = () => {
     setDraggedLeafId(null);
     setIsDragOver(false);
+    setDropIndicator(null);
   };
 
   const handleDragOver = (event: React.DragEvent) => {
-    if (draggedLeafId && draggedLeafId.tabId === tab.id && draggedLeafId.leafId !== leafId) {
+    const types = event.dataTransfer?.types ? Array.from(event.dataTransfer.types) : [];
+    const isTabDrag = types.includes("application/x-orca-tab");
+    const isPaneDrag = Boolean(
+      (draggedLeafId && draggedLeafId.tabId === tab.id && draggedLeafId.leafId !== leafId) ||
+      types.includes("application/x-orca-pane")
+    );
+
+    if (isTabDrag || isPaneDrag) {
       event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
       setIsDragOver(true);
+
+      const rect = event.currentTarget.getBoundingClientRect();
+      const clientX = event.clientX || 0;
+      const clientY = event.clientY || 0;
+      const relX = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+      const relY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+
+      if (isTabDrag) {
+        if (relX < 0.25) setDropIndicator("left");
+        else if (relX > 0.75) setDropIndicator("right");
+        else if (relY < 0.25) setDropIndicator("top");
+        else if (relY > 0.75) setDropIndicator("bottom");
+        else setDropIndicator("right");
+      }
     }
   };
 
@@ -290,11 +315,25 @@ function PaneLeafView({
     const related = event.relatedTarget;
     if (related instanceof Node && event.currentTarget.contains(related)) return;
     setIsDragOver(false);
+    setDropIndicator(null);
   };
 
   const handleDrop = (event: React.DragEvent) => {
     event.preventDefault();
     setIsDragOver(false);
+    const dropEdge = dropIndicator;
+    setDropIndicator(null);
+
+    const types = event.dataTransfer?.types ? Array.from(event.dataTransfer.types) : [];
+    const isTabDrag = types.includes("application/x-orca-tab");
+
+    if (isTabDrag) {
+      const splitDirection: PaneDirection = (dropEdge === "top" || dropEdge === "bottom") ? "vertical" : "horizontal";
+      onSplitPane(tab.id, leafId, splitDirection);
+      setDraggedLeafId(null);
+      return;
+    }
+
     if (draggedLeafId && draggedLeafId.tabId === tab.id && draggedLeafId.leafId !== leafId) {
       onSwapPanes(tab.id, draggedLeafId.leafId, leafId);
     }
@@ -329,17 +368,13 @@ function PaneLeafView({
         draggable
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
-        className={`pointer-events-none absolute inset-x-0 top-0 z-30 flex h-6 cursor-grab items-center justify-between border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground backdrop-blur-md transition-opacity duration-150 active:cursor-grabbing select-none ${
+        className={`pointer-events-none absolute inset-x-0 top-0 z-30 flex h-6 cursor-grab items-center justify-end border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground backdrop-blur-md transition-opacity duration-150 active:cursor-grabbing select-none ${
           isHoveredTop ? "pointer-events-auto opacity-100" : "opacity-0"
         }`}
         data-testid="pane-toolbar"
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={() => setIsHoveredTop(false)}
       >
-        <div className="pointer-events-none flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[10px] font-medium text-muted-foreground/70">{tab.label}</span>
-        </div>
-
         <div className="flex items-center gap-0.5">
           <IconButton
             label="Split pane right"
@@ -379,9 +414,23 @@ function PaneLeafView({
         </div>
       </div>
 
+      {/* Visual Drop Preview Overlay when Dragging Tab or Pane into Split */}
+      {dropIndicator && (
+        <div
+          className={`pointer-events-none absolute z-40 bg-blue-500/20 border-2 border-blue-500 backdrop-blur-[1px] transition-all duration-100 ${
+            dropIndicator === "left"
+              ? "inset-y-0 left-0 w-1/2"
+              : dropIndicator === "right"
+              ? "inset-y-0 right-0 w-1/2"
+              : dropIndicator === "top"
+              ? "inset-x-0 top-0 h-1/2"
+              : "inset-x-0 bottom-0 h-1/2"
+          }`}
+        />
+      )}
+
       <div className="h-full w-full min-h-0 flex-1 overflow-hidden">
         <TerminalPane
-          key={`${leafId}:${session.id}`}
           session={session}
           active={isActive}
           onTitleChange={(title) => onTitleChange(tab.id, title, session.id)}

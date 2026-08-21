@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_76a2f4ca-c17d-4a6d-b948-c30aca745a68","nodeId":"local-gates","runStats":{"runtime_ms":166423,"turns":10,"tool_calls":11,"output_tokens":8266,"total_tokens":109023,"generation_ms":84985,"tokens_per_second":97,"cost_usd":0.360828,"cache_hit_rate_last":0.9689859918141466,"cache_hit_rate_run":0.8207965699653622}}

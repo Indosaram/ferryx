@@ -97,6 +97,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
 
     let mut cmd = CommandBuilder::new_default_prog();
     cmd.cwd(&cwd);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("PROMPT_EOL_MARK", "");
     let (session_id, mut broadcast_rx) = terminal_service
         .spawn_in_worktree(cmd, cols, rows, &worktree_manager, &cwd)
         .map_err(IpcError::from)?;

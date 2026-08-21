@@ -1,3 +1,4 @@
+import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -5,7 +6,13 @@ const native = vi.hoisted(() => ({
   getTerminalPreferences: vi.fn(),
 }));
 
-vi.mock("./tauri", () => ({ getTerminalPreferences: native.getTerminalPreferences }));
+vi.mock(import("./tauri"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    getTerminalPreferences: native.getTerminalPreferences,
+  };
+});
 
 import {
   DEFAULT_TERMINAL_SETTINGS,
@@ -93,7 +100,7 @@ describe("terminal settings", () => {
     });
 
     const fallback = resolveTerminalSettings(DEFAULT_TERMINAL_SETTINGS, {
-      fontFamily: "monospace",
+      fontFamily: DEFAULT_TERMINAL_FONT_STACK,
       fontSize: 13,
       macosOptionAsAlt: false,
       cursorStyle: "block",
@@ -103,7 +110,7 @@ describe("terminal settings", () => {
       sourcePath: "/bad/config",
     });
     expect(fallback).toMatchObject({
-      fontFamily: "monospace",
+      fontFamily: DEFAULT_TERMINAL_FONT_STACK,
       macosOptionAsAlt: false,
       fontFamilySource: "fallback",
       macosOptionAsAltSource: "fallback",
@@ -112,7 +119,7 @@ describe("terminal settings", () => {
 
   it("applies effective font, option-as-alt, font size, scrollback, and theme to live xterm options", () => {
     const terminal = {
-      options: { fontFamily: "monospace", macOptionIsMeta: false, fontSize: 13, scrollback: 10_000 },
+      options: { fontFamily: DEFAULT_TERMINAL_FONT_STACK, macOptionIsMeta: false, fontSize: 13, scrollback: 10_000 },
     };
     const settings = resolveTerminalSettings(DEFAULT_TERMINAL_SETTINGS, ghosttyPreferences);
     applyTerminalSettings(terminal, settings);

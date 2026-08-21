@@ -129,6 +129,7 @@ export function TabBar({
     setDropTarget(null);
     setDraggedTabId(tabId);
     event.dataTransfer.setData("text/plain", tabId);
+    event.dataTransfer.setData("application/x-orca-tab", tabId);
     event.dataTransfer.effectAllowed = "move";
   };
 

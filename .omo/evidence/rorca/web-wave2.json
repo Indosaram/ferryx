@@ -1,0 +1,9 @@
+{
+  "tasks": [
+    {
+      "label": "rorca-frontend-parity",
+      "workspace": "/Users/indo/code/project/orca-lite",
+      "task": "Work only in ui/** of this repository. Do not edit src-tauri/**, .omo/**, docs outside ui, generated native icons, or git state; never commit/stash/reset/checkout. Before code, read .omo/plans/rorca-ui-parity.md, .omo/evidence/rorca/visual-reference.md, .omo/evidence/rorca/completion-checklist.md, and existing native IPC contracts. Read current components/tests and original-dist assets. Implement the frontend rorca parity work test-first; capture each targeted RED before the production increment and GREEN after it. Requirements: (1) ui/index.html title/fav icon becomes rorca and uses src/assets/rorca-icon.svg; (2) rebuild compact original-Orca charcoal shell at 1280x850, replacing card/modal-heavy layout; (3) move split controls into each terminal pane and remove global WorkspaceHeader Split plus global Interrupt terminal; route registered modifier shortcuts in capture phase without swallowing ordinary xterm typing/Ctrl-C, preserving one-PTY mirror-split semantics; (4) make tabs/Workspace/Search functional; Add Project uses the native typed contract, Add Worktree uses real branch dropdown/combobox (not text input); (5) rebuild Settings into compact original-Orca left-nav/right-detail sections and fetch/apply Ghostty terminal preferences with local override precedence; (6) apply real data-tauri-drag-region only to background and no-drag to controls; (7) preserve existing worktree safety behavior. Add focused behavior tests for all specified surfaces, update existing tests rather than weakening them, then run bun run --cwd ui test, bun run --cwd ui build, and LSP diagnostics. Return exact RED/GREEN evidence, full test/build outputs, touched files, and any desktop-only verification still required. Do not claim pixel parity without real screenshots."
+    }
+  ]
+}

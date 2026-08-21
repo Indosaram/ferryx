@@ -15,15 +15,19 @@ const native = vi.hoisted(() => ({
   pickNotificationAudio: vi.fn(),
 }));
 
-vi.mock("../lib/tauri", () => ({
-  getTerminalPreferences: native.getTerminalPreferences,
-  getNotificationPermissionStatus: native.getNotificationPermissionStatus,
-  requestNotificationPermission: native.requestNotificationPermission,
-  probeNotificationDelivery: native.probeNotificationDelivery,
-  openNotificationSystemSettings: native.openNotificationSystemSettings,
-  playNotificationSound: native.playNotificationSound,
-  pickNotificationAudio: native.pickNotificationAudio,
-}));
+vi.mock(import("../lib/tauri"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    getTerminalPreferences: native.getTerminalPreferences,
+    getNotificationPermissionStatus: native.getNotificationPermissionStatus,
+    requestNotificationPermission: native.requestNotificationPermission,
+    probeNotificationDelivery: native.probeNotificationDelivery,
+    openNotificationSystemSettings: native.openNotificationSystemSettings,
+    playNotificationSound: native.playNotificationSound,
+    pickNotificationAudio: native.pickNotificationAudio,
+  };
+});
 
 afterEach(cleanup);
 beforeEach(() => {

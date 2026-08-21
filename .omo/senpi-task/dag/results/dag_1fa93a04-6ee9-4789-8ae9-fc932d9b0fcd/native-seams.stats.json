@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_1fa93a04-6ee9-4789-8ae9-fc932d9b0fcd","nodeId":"native-seams","runStats":{"runtime_ms":103910,"turns":12,"tool_calls":38,"output_tokens":9286,"total_tokens":769454,"generation_ms":47319,"tokens_per_second":196,"cost_usd":0,"cache_hit_rate_last":0.9197502426018683,"cache_hit_rate_run":0.8160406646951727}}

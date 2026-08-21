@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_de1fd99e-68d4-48f3-afd1-f3eefab7d8e8","cwd":"/Users/indo/code/project/orca-lite","at":"2026-08-21T05:12:42.255Z","nodes":[{"nodeId":"node1","requested":[],"resolved":[],"missing":[],"prompt":"Say 'dag gemini success'","effectivePrompt":"Say 'dag gemini success'"}]}

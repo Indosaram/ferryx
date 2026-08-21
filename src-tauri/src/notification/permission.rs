@@ -87,7 +87,16 @@ pub mod macos {
     }
 
     pub fn has_bundle_identity() -> bool {
-        NSBundle::mainBundle().bundleIdentifier().is_some()
+        // Only consider it a real bundled macOS app if the bundle identifier is present
+        // AND the bundle path is actually inside a .app wrapper directory.
+        if let Some(bundle_id) = NSBundle::mainBundle().bundleIdentifier() {
+            if bundle_id.to_string().is_empty() {
+                return false;
+            }
+            let path_str = NSBundle::mainBundle().bundlePath().to_string();
+            return path_str.ends_with(".app") || path_str.contains(".app/");
+        }
+        false
     }
 
     pub fn dev_fallback_status() -> NotificationPermissionStatusDto {

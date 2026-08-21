@@ -90,7 +90,7 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({ onSendKey }) => {
             label="Ctrl-C"
             highlight
             onClick={() => triggerKey("ctrl-c")}
-            className="font-bold text-red-400 border-red-900/50 bg-red-950/30"
+            className="font-bold text-destructive-foreground border-destructive/50 bg-destructive/20"
           />
         </div>
 
@@ -135,7 +135,7 @@ function KeyButton({
       title={title}
       className={`min-w-[38px] h-8 px-2 flex items-center justify-center rounded border text-xs font-mono font-medium transition-all active:scale-95 ${
         active
-          ? "bg-blue-600 border-blue-500 text-white shadow-sm"
+          ? "bg-primary border-primary text-primary-foreground shadow-sm"
           : highlight
           ? "border-border text-foreground bg-secondary hover:bg-secondary/80"
           : "bg-secondary/60 border-border text-foreground hover:bg-secondary hover:text-white"

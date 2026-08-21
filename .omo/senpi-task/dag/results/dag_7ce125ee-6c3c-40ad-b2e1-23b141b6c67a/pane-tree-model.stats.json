@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_7ce125ee-6c3c-40ad-b2e1-23b141b6c67a","nodeId":"pane-tree-model","runStats":{"runtime_ms":337397,"turns":18,"tool_calls":23,"output_tokens":13102,"total_tokens":353199,"generation_ms":121229,"tokens_per_second":108,"cost_usd":0.66152875,"cache_hit_rate_last":0.988538266231411,"cache_hit_rate_run":0.916150392388054}}

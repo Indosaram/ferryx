@@ -1,0 +1,36 @@
+I read this as a read-only fan-in verdict - I traced each requested contract and checked the preceding verifier records.
+
+## Overall: FAIL
+
+1. **Components do not call `invoke` directly — PASS**
+   - Authored UI search finds the Tauri core import and all direct IPC calls only in the wrapper: `ui/src/lib/tauri.ts:1,18,22,33,38,43,48`.
+   - Components and `ui/src/App.tsx` consume wrapper functions instead, e.g. `ui/src/App.tsx:7,56`.
+
+2. **Wrapper fields camelCase-match Rust worktree IPC — FAIL (first code violation)**
+   - Rust correctly exposes camelCase deserialization via `#[serde(rename_all = "camelCase")]`: `src-tauri/src/ipc/worktree.rs:7-15`.
+   - The wrapper sends camelCase `wsId` and `baseRef`: `ui/src/lib/tauri.ts:21-28`.
+   - However, Rust requires `path: PathBuf` in `CreateWorktreeRequest`: `src-tauri/src/ipc/worktree.rs:13`, while `createWorktree` neither accepts nor sends `path`: `ui/src/lib/tauri.ts:21-28`.
+   - Therefore the wrapper does not match the complete Rust worktree-create IPC contract.
+
+3. **UI structured errors branch by code, not prose — PASS in implementation**
+   - Unknown inputs are normalized without parsing message strings: `ui/src/lib/tauri.ts:66-84`.
+   - Worktree UI handling switches on `error.code`: `ui/src/App.tsx:200-210`.
+   - Note: the dedicated test imports a nonexistent module, `./ipcErrors`: `ui/src/lib/ipcErrors.test.ts:4`.
+
+4. **Safe branch deletion rejects unmerged branches; destructive deletion is separate — PASS**
+   - Default combined deletion checks `preview.merged` and returns `UnmergedBranch` before removing the worktree: `src-tauri/src/worktree/manager.rs:430-456`.
+   - Explicit destructive deletion is a separate method and uses forced `git branch -D`: `src-tauri/src/worktree/manager.rs:459-477`, `src-tauri/src/worktree/git.rs:284-292`.
+   - Coverage expresses both behaviors: `src-tauri/tests/worktree_safety.rs:63-107`.
+
+5. **Preceding command evidence passed — FAIL**
+   - Rust verifier record: `.omo/senpi-task/logs/st_01a01fe8.jsonl:8`
+     - `worktree_safety`: exit 101
+     - `e2e_agent_workflow`: exit 101
+     - clippy with `-D warnings`: exit 101
+     - only `git diff --check` passed
+   - Frontend verifier record: `.omo/senpi-task/logs/st_01a01fe9.jsonl:15`
+     - focused tests: exit 1 because `./ipcErrors` does not exist
+     - production build: exit 2 for the same missing module
+     - only `git diff --check` passed
+
+No files were edited.

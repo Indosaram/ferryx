@@ -48,7 +48,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
         </p>
 
         {error && (
-          <div className="p-3 mb-4 text-xs bg-red-950 border border-red-800 text-red-300 rounded">
+          <div className="p-3 mb-4 text-xs bg-destructive/15 border border-destructive text-destructive-foreground rounded">
             {error}
           </div>
         )}
@@ -60,7 +60,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
               value={code}
               onChange={(e) => setCode(e.target.value)}
               placeholder="6-digit PIN" maxLength={6} inputMode="numeric" pattern="[0-9]*"
-              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded font-mono text-sm text-foreground focus:outline-none focus:border-blue-500"
+              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded font-mono text-sm text-foreground focus:outline-none focus:border-ring"
               disabled={loading}
               autoFocus
             />
@@ -69,7 +69,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
           <button
             type="submit"
             disabled={loading || !code.trim()}
-            className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded text-sm font-medium transition-colors"
+            className="w-full py-2 px-4 bg-primary hover:bg-primary/90 disabled:opacity-50 text-primary-foreground rounded text-sm font-medium transition-colors"
           >
             {loading ? "Connecting..." : "Connect"}
           </button>

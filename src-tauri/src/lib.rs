@@ -37,6 +37,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     }
 
     builder
+        .setup(|_app| {
+            Ok(())
+        })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
         // so no broad JavaScript guest capability needs to be granted.
         .plugin(tauri_plugin_notification::init())

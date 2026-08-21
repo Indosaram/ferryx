@@ -1,0 +1,30 @@
+{
+  "categories": {
+    "quick": [
+      {
+        "model": "quotio/gpt-5.6-sol"
+      }
+    ],
+    "unspecified-low": [
+      {
+        "model": "quotio/gpt-5.6-sol"
+      }
+    ],
+    "small-impl": [
+      {
+        "model": "quotio/gpt-5.6-sol"
+      }
+    ],
+    "unspecified-high": [
+      {
+        "model": "quotio/gpt-5.6-sol",
+        "variant": "high"
+      }
+    ],
+    "writing": [
+      {
+        "model": "quotio/gpt-5.6-sol"
+      }
+    ]
+  }
+}

@@ -1,0 +1,103 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"I read this as a read-only visual QA audit of the rorca redesign — inspect reference images, sources, styles, assets, run the full test suite, and write a single evidence report."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Let me look for reference images and existing evidence docs."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let me read the actual current source. Let me check reference images availability and original dist."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Reference images are accessible. Let me analyze them programmatically and view them."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Let me view the key reference images."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Image inlining is blocked in this harness. I'll do programmatic pixel analysis instead, as prior evidence reports did."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"This latest clipboard is not an app screenshot (looks like a document/white content). Let me check which clipboard images actually depict the app."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The canonical reference is `clipboard-2026-08-21-113227-8076FA53.png` (3840×1506). Let me analyze it precisely and also check the latest app screenshots."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Confirmed: composite of two windows, seam at x=1919. Right half starts at x=1920. Let me measure the right (structurally comparable) half."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Rail is 264 device px. At 1.5× DPR that's 176 CSS px — but the plan locked 236px. Let me check whether DPR is actually 1.5, using text height / row heights."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Header y=3..40 (38px), separator y=41, tab strip y=42..76 (35px), separator y=77. If DPR=1.5: header=25.3, tab=23.3 — doesn't match 36/32. If DPR=1.0... rail 264px. Let me check whether the reference is actually near-1:1 (i.e. 264px rail, 38px header, 35px tab). Hmm 38/35 don't match 36/32 either. Let me check the left window for comparison and check the app screenshot references produced by the implementation."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Left window: rail 220px, header 35px, no tab strip visible at that x. The two windows are different sizes (different rail widths: 220 vs 264 — they're resizable). So the reference is not a fixed-geometry spec; the locked 236/36/32 spec came from the ORIG dist source constants. That matches the prior evidence report's conclusion.\n\nNow let me read the current implementation sources in bulk."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let me read TerminalSplitView, SettingsDialog, WorktreeList, WorkspaceHeader, App.tsx."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now SettingsDialog, WorkspaceHeader, App.tsx, and assets."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let's check the icon assets (crab-containing Orca), and run the tests in parallel."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Let me render the icon and run the tests."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Frontend tests: 37 files / 223 tests passed. Now build + cargo in parallel."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Clippy clean. Now let me examine remaining details: pane-tree per-tab layouts, native contract test, icon assets crab verification, App.tsx, and the dist-vs-current tab strip fix."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Native icons contain crab-red palette matching the SVG. But `ui/public/icon-512.png` is near-black — let me check that."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Web-facing PWA/favicon assets are essentially all-black. Let me look closer — maybe there's a small crab in the center."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"There is white content (16% non-black). It's a different (monochrome/orca-silhouette) design, not the crab SVG. Let me render both to compare visually via ASCII luminance map since inline images fail."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Confirmed: `src-tauri/icons/*` render the crab (pincers, claws, shell). `ui/public/*` PWA icons are a *different, older* asset — a whale/orca silhouette on black, not the crab. Let me verify what `ui/index.html` and the dist actually reference, and check the index-html test."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let me check App.tsx layout wiring (settings view mounting, leadingSpacer, sidebar collapse) and the per-tab layout state."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let me verify the specific criteria in test files (which tests assert the numeric geometry) and confirm the TabBar bg-card full-width fix."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let me verify the tab strip bg-card full-width claim in the current code, and check the sidebar single-divider test."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let me do a live DOM measurement to verify the actual rendered geometry, using jsdom-free approach — instead, measure the built CSS for the token values, and confirm computed spacing."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"2rem = 32px tab bar, 2.25rem = 36px titlebar. Both match spec. Now let me check the original dist for the reference constants to substantiate the \"original dist vs current\" comparison."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"All ORIG constants confirmed. Now let me check the original dist's Settings sections and the tab drop indicator / context menu styling for comparison."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Important delta: ORIG settings nav uses `bg-worktree-sidebar` (#2a2a2a) + `border-worktree-sidebar-border`; current uses `bg-card` (#171717) + `border-border`. Let me check the ORIG drop indicator and context menu styling too."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The ORIG dist has no directly comparable tab drop-indicator; that's a rorca addition. Let me check the ORIG tab active state treatment."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"ORIG context menu: `min-w-[13rem] rounded-[11px] ... p-1` with a translucent blurred popover. Current rorca uses `min-w-[13rem] rounded-md border-border bg-popover/95 p-1 ... backdrop-blur-md` — same width and padding, different radius (8px vs 11px) and surface token. Now let me verify the SettingsDialog nav palette and check whether there is a static terminal toolbar remnant."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"No `Interrupt` control remains; pane toolbar is hover-gated at h-6 (24px). Now let me capture the current app rendered geometry to make measurable claims. Check if a dev server / built app can be measured — but scope forbids OS input automation. Instead I'll verify via the existing final screenshots referenced in prior evidence."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Prior screenshots are from 13:39, while the code has changed since (commits at 17:22-18:01 for HMR/tab actions/sidebar collapse, icons at 15:03). Those screenshots are stale. Let me re-measure them and note staleness explicitly."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"These confirm the pre-remediation state (2px `#393939` rail edge, tab strip merged to `#0a0a0a`). Both were remediated in source. Let me verify the source fixes actually landed."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Both fixes landed: rail `aside` has no `border-r` (only the resize-handle span draws 1px), and the tab list no longer has `flex-1` so `bg-card` on the outer strip covers full width (with a separate `flex-1` spacer that is transparent over `bg-card`). Let me confirm the spacer sits inside the `bg-card` strip and doesn't leak.\n\nThe `<div className=\"flex-1\" />` at line ~370 is a child of the strip which has `bg-card`, so it shows `#171717`. Correct.\n\nLet me do a final check on remaining items: search/workspace buttons, project tree nesting depth, and Settings section count."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"All 4 required sections exist (plus 2 extras: Notifications, Remote Access). I have everything I need. Writing the report."}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"`ui/src/App.tsx` was already modified before I started (confirmed in the initial `git status`); I changed no source. Report written.\n\n## Result\n\n`.omo/evidence/rorca/comprehensive-visual-qa-report.md` — **27 PASS / 1 FAIL**.\n\n**The one real defect:** `ui/public/*.png` (favicons, apple-touch-icon, PWA 192/512) contain **zero crab-red pixels** — 0.0% share, dominant `#030305`/`#000000`. They're a stale monochrome whale/orca silhouette from 15:03, while the correct crab icons were regenerated into `src-tauri/icons/*` at 17:32. I verified this by pixel histogram *and* luminance render: the native set resolves visible pincers, legs, and the shell/wave band; the web set resolves a whale. The stale asset propagated into `ui/dist/icon-512.png` in my own build. Desktop app is unaffected (Tauri reads `src-tauri/icons/*`, in-app favicon is the correct SVG); the blast radius is browser tab fallback, iOS home screen, and PWA install.\n\n**Everything else verified green.** Sidebar 236px/nesting/independent chevrons/search+workspace; TabBar 32px/1px indicator/`bg-card`/drop indicator/context menu; no static toolbar, 24px hover edge handle, 1px split dividers inside 6px hit targets, per-tab `layoutsByTabId` isolation; Settings 280px nav + 896px centered column + all 4 sections as a full view with `aria-modal={false}`.\n\nBoth previously-reported defects are genuinely fixed in source, not just claimed — the `<aside>` no longer carries `border-r` (regression test asserts its absence), and `flex-1` is gone from the tab list so `bg-card` covers the full strip width.\n\n**Gates, all executed here:** Vitest 37 files / 223 tests; build tsc-clean at 1684 modules; `cargo test` 150 tests across 8 binaries; `cargo clippy --all-targets -- -D warnings` zero warnings.\n\n**Two things worth your attention beyond the FAIL:**\n\n1. The reference PNG is a **two-window composite** whose halves disagree with each other — 220px vs 264px rail, 35px vs 38px header. It cannot arbitrate exact geometry, only palette and ordering. The locked 236/36/32/280/896 numbers are graded against `[ORIG]` bundle constants, which I re-verified from `ui/original-dist/assets/**`. I did not launder that ambiguity into false precision.\n2. I could not take a live GUI capture (scope forbids OS input automation). The newest screenshots are 13:39 and predate three commits plus the icon regen. Current-code geometry claims rest on source constants and the compiled `ui/dist` CSS, not a rendered frame. A fresh 1280×850 capture is the one outstanding verification step, and §9 says so explicitly.\n\nRecorded but not graded as a defect: `[ORIG]`'s Settings nav is `bg-worktree-sidebar` (#2a2a2a); rorca uses `bg-card` (#171717). Both are semantic tokens, and the reference has no Settings view to arbitrate — that's a product call, not a bug."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}

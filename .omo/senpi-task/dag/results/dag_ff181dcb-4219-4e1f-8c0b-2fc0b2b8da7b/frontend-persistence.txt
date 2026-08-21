@@ -1,0 +1,63 @@
+An exploration of the relevant codebase areas for session persistence, auto-save, boot restore, and updater guard was completed.
+
+<results>
+<files>
+- /Users/indo/code/project/orca-lite/ui/src/lib/types.ts - Core domain type definitions: `TerminalTab`, `TerminalSession`, `TabPaneLayout`, `LayoutState`, `WorktreeIdentity`, `Worktree`. Needs `PersistedWorkspaceSession`, `PersistedWorkspace`, `PersistedLayout`, `PersistedTab`, `PersistedTerminalSession`.
+- /Users/indo/code/project/orca-lite/ui/src/lib/tauri.ts - IPC invoke wrappers (`invokeCommand`, `isTauri`). Target location for `saveSession`, `loadSession`, `clearSession` calling `cmd_session_save`, `cmd_session_load`, `cmd_session_clear`.
+- /Users/indo/code/project/orca-lite/ui/src/state/workspaceStore.ts - `WorkspaceState`, `useWorkspaceStore`, actions (`ADD_TAB_WITH_SESSION`, `SPLIT_PANE`, `SET_WORKTREES`, etc.), state reducer, and session/tab lifecycle management.
+- /Users/indo/code/project/orca-lite/ui/src/state/workspaceRuntime.ts - Runtime worktree polling and file watcher synchronization hook (`useWorkspaceRuntime`).
+- /Users/indo/code/project/orca-lite/ui/src/state/layout.ts - Pane tree layout reducer and builder helpers (`createLayoutState`, `layoutReducer`, `TabPaneLayout`).
+- /Users/indo/code/project/orca-lite/ui/src/App.tsx - Application entry component managing project list, active project ID, worktree activation, tab selection, and localStorage initialization. Needs mount-time restore flow and window close/updater guard.
+- /Users/indo/code/project/orca-lite/ui/src/App.test.tsx - Existing component tests for App rendering, project switching, worktrees, and mocked `tauri`/`workspaceStore` modules.
+- /Users/indo/code/project/orca-lite/ui/src/state/workspaceStore.test.tsx - Unit tests for workspace state store, tab management, and terminal session handling.
+- /Users/indo/code/project/orca-lite/ui/src/test/setup.ts - Vitest setup file configuring DOM polyfills (`ResizeObserver`, `PointerEvent`, `requestAnimationFrame`).
+</files>
+
+<answer>
+### 1. Data Schema & Types (`ui/src/lib/types.ts`)
+The existing state model in `workspaceStore.ts` and `layout.ts` uses:
+- `WorktreeIdentity = { wsId: string; slug: string }`
+- `TerminalTab = { id: string; label: string; sessionId: string }`
+- `TerminalSession = { id: string; cwd: string; workspaceId: string; worktree: WorktreeIdentity | null; backendSessionId: string | null; lifecycle: TerminalLifecycle; ownerId?: string | null }`
+- `TabPaneLayout = { root: PaneNode; activeLeafId: string | null; expandedLeafId: string | null; sessionIdsByLeafId: Record<string, string> }`
+- `LayoutState = { tabs: TerminalTab[]; primaryTabId?: string | null; secondaryTabId?: string | null; split?: SplitMode; nestedSplit?: NestedSplit | null; activeTabId?: string | null; layoutsByTabId?: Record<string, TabPaneLayout> }`
+
+The persistence schema to define:
+- `PersistedTerminalSession`: `id`, `cwd`, `workspaceId`, `worktree`
+- `PersistedTab`: `id`, `label`, `sessionId`
+- `PersistedLayout`: `tabs`, `activeTabId`, `primaryTabId`, `secondaryTabId`, `split`, `nestedSplit`, `layoutsByTabId`
+- `PersistedWorkspace`: `workspaceId`, `repoRoot`, `activeWorktreePath`, `layout`, `sessions` (mapped or array)
+- `PersistedWorkspaceSession`: `version: number`, `activeWorkspaceId: string`, `workspaces: PersistedWorkspace[]` (or record by ID), `timestamp?: number`
+
+### 2. IPC Command Wrappers (`ui/src/lib/tauri.ts`)
+Add frontend wrappers following existing conventions:
+- `saveSession(session: PersistedWorkspaceSession): Promise<void>` -> invokes `cmd_session_save` with payload `{ session }`
+- `loadSession(): Promise<PersistedWorkspaceSession | null>` -> invokes `cmd_session_load` (with fallback to `null` or localStorage when running in web/test mode or if command returns null)
+- `clearSession(): Promise<void>` -> invokes `cmd_session_clear`
+
+### 3. Serialization & Deserialization (`ui/src/lib/sessionPersistence.ts`)
+- `serializeWorkspaceSession(params)`: Extracts current project list, active project ID, `WorkspaceState` (sanitizing transient runtime fields like dynamic `backendSessionId`, unread badges, or dead session handles), and produces a validated `PersistedWorkspaceSession`.
+- `deserializeWorkspaceSession(raw: unknown)`: Validates format version, structure, required fields, and sanitizes/repairs broken or missing layout trees into valid `TabPaneLayout` structures.
+- Tests in `ui/src/lib/sessionPersistence.test.ts` covering round-trip serialization, missing fields, legacy/invalid JSON recovery.
+
+### 4. Debounced Auto-Save & State Restore (`workspaceStore.ts` & `workspaceRuntime.ts`)
+- In `workspaceStore.ts`: Support passing `initialState` or `initialSession` into `useWorkspaceStore`.
+- Debounced auto-save (500ms debounce using `setTimeout`/`clearTimeout` or an effect ref) triggered whenever `state` changes, flushing to `saveSession`.
+- Support manual flush `flushSessionSave()` before window unload or updater restart.
+
+### 5. Updater & Window Close Guard (`ui/src/lib/updater.ts` & `App.tsx`)
+- Implement an updater interface with mockable abstraction (`checkForUpdates`, `installUpdate`, `restartApp`).
+- Implement `registerWindowCloseGuard(onBeforeClose: () => Promise<void> | void)` listening to `beforeunload` or Tauri's window close event, ensuring in-flight persistence flushes before exit.
+
+### 6. App Restore on Boot (`App.tsx`)
+- On mount, check `loadSession()`. If valid session found:
+  1. Restore registered projects and active project ID.
+  2. Register project with backend via `registerProject`.
+  3. Rehydrate workspace store with tabs and layouts.
+  4. Respawn terminal sessions for all active leaves/tabs cleanly.
+</answer>
+
+<next_steps>
+Ready to proceed with implementing items 1-6 in `ui/src/` and verifying with `bun test`.
+</next_steps>
+</results>

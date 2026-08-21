@@ -1,0 +1,21 @@
+Done. Both files created, 48 tests passing.
+
+## What I built
+
+`ui/src/state/paneTree.ts` — a dependency-free pure module. Every operation returns a new tree, never mutates input, and uses structural sharing (untouched subtrees are returned by reference, and no-op calls return the original root identity). Beyond the required API I exported `clampRatio`, `MIN_PANE_RATIO`/`MAX_PANE_RATIO`, and the `PaneLeafNode`/`PaneSplitNode` member types.
+
+Design calls worth flagging:
+
+- **Ratios are clamped to 0.1–0.9** everywhere they enter (`splitLeaf`, `setRatioAtPath`), with non-finite input falling back to `0.5`. A stored ratio of 0 or 1 would render a zero-width pane the user can't grab to recover, so I refused to store one.
+- **`removeLeaf` returns `PaneNode | null`**, per spec — `null` means the last pane was closed. Callers must handle it; it is not an error path.
+- **`findSiblingLeafId` returns the *closest* sibling**, descending to the nearest enclosing split rather than the root. When the sibling is a split subtree it returns that subtree's first leaf. This is the focus-after-close behaviour.
+- **`swapLeaves` swaps leaf identity in place**, so geometry (direction, ratios) stays put and only content moves — the correct semantics for drag-and-drop.
+- **`createLeafNode()` id generation mirrors the existing `createId` helper** in `workspaceStore.ts` (`crypto.randomUUID` with a timestamp fallback), prefixed `pane:`.
+
+The 48 tests cover each function's happy path, nested/deep cases, missing-leaf no-ops, ratio clamping, immutability (via `structuredClone` snapshots), reference-sharing, and one integration sequence chaining split → swap → resize → remove.
+
+## Verification
+
+`bun run --cwd ui test -- src/state/paneTree.test.ts` → 48/48 pass. `npx tsc --noEmit` is clean project-wide under `strict` + `noUnusedLocals`/`noUnusedParameters`.
+
+One correction I want to be explicit about, since I reported it wrongly mid-task: I initially saw 2 failures in `Sidebar.test.tsx` and my first two attempts to attribute them were both invalid. `git stash push -u` with pathspecs silently stashed unrelated modified files, making the baseline look artificially green. Isolating properly (moving only my two files aside) gave 124 passing, and the full suite now gives 172 = 124 + 48 across three consecutive runs, with Sidebar at 16/16. The lone failure was my own concurrent `tsc`/stash commands mutating the working tree under a running suite — not a defect in my code or in Sidebar. The suite is green; nothing outstanding.

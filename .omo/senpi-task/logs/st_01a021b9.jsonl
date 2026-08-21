@@ -1,0 +1,5 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"child_error","payload":{"message":"429: {\"type\":\"GoUsageLimitError\",\"message\":\"Monthly usage limit reached. Resets in 15 days. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_01KG1GK8G737VN20V0BT7RK016/go\"}","stop_reason":"error"}}
+{"type":"retry_fallback_applied","payload":{"from":"opencode-go/kimi-k3","to":"anthropic/claude-opus-5","chain_key":"opencode-go/kimi-k3","reason":"hard-error"}}
+{"type":"assistant_message","payload":{"text":"OK"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}

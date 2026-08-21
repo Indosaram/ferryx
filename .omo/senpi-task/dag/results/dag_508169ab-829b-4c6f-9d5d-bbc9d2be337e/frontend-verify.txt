@@ -1,0 +1,35 @@
+I read this as reporting read-only frontend IPC verification - I inspected `ui/package.json` and ran the requested checks without editing files.
+
+## Result: FAIL
+
+First failure: `ui/src/lib/ipcErrors.test.ts` imports `./ipcErrors`, but that module does not exist.
+
+| Check | Exact command | Exit code | Result |
+|---|---|---:|---|
+| Focused Tauri and IPC error tests | `cd /Users/indo/code/project/orca-lite/ui && bun run test -- src/lib/tauri.test.ts src/lib/ipcErrors.test.ts` | 1 | **FAIL** |
+| Production build | `cd /Users/indo/code/project/orca-lite/ui && bun run build` | 2 | **FAIL** |
+| Diff whitespace validation | `cd /Users/indo/code/project/orca-lite && git diff --check` | 0 | **PASS** |
+
+Focused test details:
+
+- `src/lib/tauri.test.ts`: **PASS**, 3 tests passed.
+- `src/lib/ipcErrors.test.ts`: suite failed before collection:
+  ```text
+  Error: Failed to resolve import "./ipcErrors" from "src/lib/ipcErrors.test.ts". Does the file exist?
+  ```
+
+Production build failed during `tsc` with the same root issue:
+
+```text
+src/lib/ipcErrors.test.ts(4,38): error TS2307:
+Cannot find module './ipcErrors' or its corresponding type declarations.
+```
+
+`ui/package.json` defines:
+
+```json
+"build": "tsc && vite build",
+"test": "vitest run --maxWorkers=1"
+```
+
+No files were edited, no Web operations were invoked, and no commit or session-close operation was performed.

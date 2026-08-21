@@ -1,0 +1,6 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"child_error","payload":{"message":"429: {\"message\":\"Budget has been exceeded! Current cost: 2.334295, Max budget: 0.0\",\"type\":\"budget_exceeded\",\"param\":null,\"code\":\"429\"}","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"429: {\"message\":\"Budget has been exceeded! Current cost: 2.334295, Max budget: 0.0\",\"type\":\"budget_exceeded\",\"param\":null,\"code\":\"429\"}","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"429: {\"message\":\"Budget has been exceeded! Current cost: 2.334295, Max budget: 0.0\",\"type\":\"budget_exceeded\",\"param\":null,\"code\":\"429\"}","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"429: {\"message\":\"Budget has been exceeded! Current cost: 2.334295, Max budget: 0.0\",\"type\":\"budget_exceeded\",\"param\":null,\"code\":\"429\"}","stop_reason":"error"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"resident"}}

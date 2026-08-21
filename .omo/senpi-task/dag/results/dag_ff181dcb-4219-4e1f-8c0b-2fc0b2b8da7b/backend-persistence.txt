@@ -1,0 +1,126 @@
+<results>
+<files>
+- /Users/indo/code/project/orca-lite/SESSION_PERSISTENCE_AND_UPDATER_PLAN.md - Contains the canonical specification and TypeScript interface schemas for `PersistedWorkspaceSession`, `PersistedWorkspace`, `PersistedWorktree`, `PersistedLayout`, `PersistedTab`, and `PersistedTerminalSession`, as well as atomic write and crash recovery requirements (`session_state.json`, `.backup`, `.tmp`).
+- /Users/indo/code/project/orca-lite/SESSION_PERSISTENCE_IMPLEMENTATION_PLAN.md - Background context on the session lifecycle and persistence requirements.
+- /Users/indo/code/project/orca-lite/src-tauri/src/lib.rs - Root library file where `pub mod session;` must be declared and `cmd_session_save`, `cmd_session_load`, `cmd_session_clear` must be registered in `tauri::generate_handler![]`.
+- /Users/indo/code/project/orca-lite/src-tauri/src/ipc/mod.rs - IPC hub declaring submodules and re-exporting IPC command functions (`pub mod session; pub use session::*;`).
+- /Users/indo/code/project/orca-lite/src-tauri/src/ipc/error.rs - Error definitions (`IpcError`, `IpcErrorCode`) for mapping storage and serialization errors.
+- /Users/indo/code/project/orca-lite/src-tauri/src/ipc/preferences.rs - Example IPC module showing `run_blocking` async dispatch and path loading patterns.
+- /Users/indo/code/project/orca-lite/src-tauri/src/ipc/notifications.rs - Example IPC module showing `AppHandle<R>` usage for accessing Tauri v2 managers and paths.
+- /Users/indo/code/project/orca-lite/src-tauri/src/ipc/tests.rs - Existing mock app integration tests using `tauri::test::mock_builder()`.
+- /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml - Crate dependencies verifying `serde`, `serde_json`, `tempfile`, and `tauri` v2 with test feature.
+</files>
+
+<answer>
+### 1. Target Data Models (`src-tauri/src/session/mod.rs` or `src-tauri/src/session/model.rs`)
+All structs need `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]` with `#[serde(rename_all = "camelCase")]`:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedWorkspaceSession {
+    pub version: u32,
+    pub timestamp: u64,
+    pub active_workspace_id: String,
+    pub workspaces: HashMap<String, PersistedWorkspace>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedWorkspace {
+    pub workspace_id: String,
+    pub repo_root: String,
+    pub worktrees: Vec<PersistedWorktree>,
+    pub active_worktree_path: Option<String>,
+    pub layout: PersistedLayout,
+    pub terminal_sessions: HashMap<String, PersistedTerminalSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedWorktree {
+    pub path: String,
+    pub branch: String,
+    pub head: String,
+    pub is_main: bool,
+    pub is_locked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedLayout {
+    pub split_mode: SplitMode, // "none" | "horizontal" | "vertical"
+    pub primary_tab_id: Option<String>,
+    pub secondary_tab_id: Option<String>,
+    pub tabs: Vec<PersistedTab>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitMode {
+    None,
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedTab {
+    pub id: String,
+    pub session_id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    pub worktree_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedTerminalSession {
+    pub session_id: String,
+    pub worktree_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_scrollback: Option<String>,
+    pub created_at: u64,
+}
+```
+
+### 2. Storage Helpers & Atomic Write Strategy
+- **Functions**:
+  - `save_session_to_path(path: &Path, session: &PersistedWorkspaceSession) -> Result<(), SessionError>`
+  - `load_session_from_path(path: &Path) -> Result<Option<PersistedWorkspaceSession>, SessionError>`
+  - `clear_session_from_path(path: &Path) -> Result<(), SessionError>`
+- **Atomic Save**:
+  1. Ensure parent directories exist.
+  2. Write to a temporary file (`<path>.tmp.<pid>.<uuid>`).
+  3. Flush/sync to disk.
+  4. If target `<path>` exists, copy/rename to `<path>.backup`.
+  5. Atomically rename the temporary file to `<path>`.
+- **Corrupted File Fallback**:
+  - In `load_session_from_path`, if `<path>` exists but fails to parse as valid JSON, attempt reading `<path>.backup`. If both are missing, return `Ok(None)`.
+- **Clear**:
+  - Remove `<path>` and `<path>.backup` (and any leftover `.tmp` if present). Missing files should not error (`NotFound` ignored).
+
+### 3. Tauri IPC Commands (`src-tauri/src/ipc/session.rs`)
+- Resolve default storage file via `app.path().app_data_dir().map(|dir| dir.join("session_state.json"))`.
+- `cmd_session_save<R: Runtime>(app: AppHandle<R>, state: PersistedWorkspaceSession) -> Result<(), IpcError>`
+- `cmd_session_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<PersistedWorkspaceSession>, IpcError>`
+- `cmd_session_clear<R: Runtime>(app: AppHandle<R>) -> Result<(), IpcError>`
+
+### 4. Registration Plan
+1. Declare `pub mod session;` in `/Users/indo/code/project/orca-lite/src-tauri/src/lib.rs`.
+2. Add `pub mod session; pub use session::*;` in `/Users/indo/code/project/orca-lite/src-tauri/src/ipc/mod.rs`.
+3. Add `cmd_session_save`, `cmd_session_load`, `cmd_session_clear` to `generate_handler!` in `/Users/indo/code/project/orca-lite/src-tauri/src/lib.rs`.
+</answer>
+
+<next_steps>
+Ready to proceed with implementing:
+1. `src-tauri/src/session/mod.rs` (data models, storage functions, and unit tests).
+2. `src-tauri/src/ipc/session.rs` (Tauri IPC commands and mock app IPC unit tests).
+3. Registration in `src-tauri/src/ipc/mod.rs` and `src-tauri/src/lib.rs`.
+4. Verification via `cargo test --manifest-path src-tauri/Cargo.toml`.
+</next_steps>
+</results>

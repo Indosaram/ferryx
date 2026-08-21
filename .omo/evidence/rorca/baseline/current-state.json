@@ -1,0 +1,57 @@
+{
+  "id": "987a159a-2d25-4dc7-bdf3-9bb6a4bfa092",
+  "ok": true,
+  "result": {
+    "snapshot": {
+      "elementCount": 37,
+      "coordinateSpace": "window",
+      "window": {
+        "isOffscreen": false,
+        "height": 1495,
+        "y": 30,
+        "x": 1920,
+        "id": 273333,
+        "isMinimized": false,
+        "screenIndex": 0,
+        "platform": {
+          "layer": 0
+        },
+        "title": "Orca Lite",
+        "width": 1920
+      },
+      "id": "0250B5D6-E303-4E5B-BD6A-C0E8BB9E8E3F",
+      "app": {
+        "name": "orca-lite",
+        "bundleId": null,
+        "pid": 289
+      },
+      "treeText": "App=orca-lite (pid 289)\nWindow: \"Orca Lite\", App: orca-lite.\n\n0 standard window Orca Lite\n\t1 scroll area\n\t\t2 HTML content omo bridge\n\t\t\t3 container\n\t\t\t\t4 button Hide sidebar\n\t\t\t\t5 button Workspace\n\t\t\t\t6 button Search workspaces \u2318K\n\t\t\t\t7 container\n\t\t\t\t\t8 text Worktrees\n\t\t\t\t\t9 text 1\n\t\t\t\t\t10 button Add worktree\n\t\t\t\t\t11 text orca-lite\n\t\t\t\t\t12 button New worktree\n\t\t\t\t\t13 container\n\t\t\t\t\t\t14 button orca-lite main Status not checked orca-lite main\n\t\t\t\t\t\t15 button Refresh worktree status\n\t\t\t\t\t\t16 button (disabled) Delete worktree\n\t\t\t\t17 text Local runtime\n\t\t\t\t18 button Settings\n\t\t\t\t19 splitter Resize sidebar\n\t\t\t20 container\n\t\t\t\t21 container\n\t\t\t\t\t22 text orca-lite\n\t\t\t\t\t23 text main\n\t\t\t\t\t24 text orca-lite\n\t\t\t\t\t25 button Split terminal (horizontal)\n\t\t\t\t\t26 button Interrupt terminal\n\t\t\t\t27 button orca-lite Close orca-lite\n\t\t\t\t28 button New terminal\n\t\t\t\t29 container Terminal in /Users/indo/code/project/orca-lite\n\t\t\t\t\t30 text entry area (settable) Terminal input\n\t\t\t\t31 splitter Resize terminal panes\n\t\t\t\t32 container Terminal in /Users/indo/code/project/orca-lite\n\t\t\t\t\t33 text entry area (settable) Terminal input\n\t34 close button\n\t35 full screen button, Secondary Actions: zoom the window\n\t36 minimize button\n\nNo UI element is currently focused.",
+      "truncation": {
+        "maxDepth": 64,
+        "maxNodes": 1200,
+        "maxDepthReached": false,
+        "truncated": false
+      },
+      "focusedElementId": null
+    },
+    "screenshot": {
+      "format": "png",
+      "height": 1495,
+      "width": 1920,
+      "scale": 1,
+      "path": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/orca-computer-use/987a159a-2d25-4dc7-bdf3-9bb6a4bfa092-screenshot.png",
+      "dataOmitted": true,
+      "expiresAt": "2026-08-22T02:39:10.041Z"
+    },
+    "screenshotStatus": {
+      "state": "captured",
+      "metadata": {
+        "engine": "screenCaptureKit",
+        "windowId": 273333
+      }
+    }
+  },
+  "_meta": {
+    "runtimeId": "d73b750d-0f71-4bab-ad9f-1562bf61bd42"
+  }
+}

@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_7ce125ee-6c3c-40ad-b2e1-23b141b6c67a","nodeId":"sidebar-project-tree","runStats":{"runtime_ms":245802,"turns":22,"tool_calls":26,"output_tokens":15013,"total_tokens":638551,"generation_ms":139802,"tokens_per_second":107,"cost_usd":0.94584325,"cache_hit_rate_last":0.9472840927041726,"cache_hit_rate_run":0.9278167489391184}}

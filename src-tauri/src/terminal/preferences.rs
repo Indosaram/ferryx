@@ -234,15 +234,6 @@ fn normalize_color(color: &str) -> String {
     }
 }
 
-fn format_font_name_for_css(font: &str) -> String {
-    let unquoted = unquote(font).trim();
-    if unquoted.contains(' ') || unquoted.contains(',') {
-        format!("\"{}\"", unquoted)
-    } else {
-        unquoted.to_string()
-    }
-}
-
 pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, GhosttyConfigError> {
     let mut font_families: Vec<String> = Vec::new();
     let mut font_size: Option<f32> = None;
@@ -382,13 +373,11 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
     let font_family = if font_families.is_empty() {
         None
     } else {
-        Some(
-            font_families
-                .iter()
-                .map(|f| format_font_name_for_css(f))
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
+        let mut parts: Vec<String> = font_families.clone();
+        if !parts.iter().any(|p| p.eq_ignore_ascii_case("monospace")) {
+            parts.push("monospace".to_string());
+        }
+        Some(parts.join(", "))
     };
 
     Ok(GhosttyTerminalConfig {
@@ -509,10 +498,7 @@ mod tests {
     fn test_empty_font_family_resets_list() {
         let config_str = "font-family = \"MesloLGS NF\"\nfont-family =\nfont-family = \"Fira Code\"";
         let parsed = parse_ghostty_config(config_str).unwrap();
-        assert_eq!(
-            parsed.font_family.as_deref(),
-            Some("\"Fira Code\"")
-        );
+        assert_eq!(parsed.font_family.as_deref(), Some("Fira Code, monospace"));
     }
 
     #[test]

@@ -370,20 +370,47 @@ async fn handle_terminal_socket(
     };
 }
 
-async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let dist_path = PathBuf::from("ui/dist").join(path);
+fn resolve_dist_dir() -> PathBuf {
+    let candidates = [
+        PathBuf::from("ui/dist"),
+        PathBuf::from("../ui/dist"),
+        PathBuf::from("../../ui/dist"),
+    ];
+    for c in &candidates {
+        if c.exists() && c.is_dir() {
+            return c.clone();
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe;
+        for _ in 0..6 {
+            if let Some(parent) = cur.parent() {
+                let candidate = parent.join("ui/dist");
+                if candidate.exists() && candidate.is_dir() {
+                    return candidate;
+                }
+                cur = parent.to_path_buf();
+            }
+        }
+    }
+    PathBuf::from("ui/dist")
+}
 
-    if !path.is_empty() && dist_path.exists() && dist_path.is_file() {
-        if let Ok(bytes) = tokio::fs::read(&dist_path).await {
-            let mime = mime_guess::from_path(&dist_path).first_or_octet_stream();
+async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
+    let dist_dir = resolve_dist_dir();
+    let path = uri.path().trim_start_matches('/');
+    let file_path = dist_dir.join(path);
+
+    if !path.is_empty() && file_path.exists() && file_path.is_file() {
+        if let Ok(bytes) = tokio::fs::read(&file_path).await {
+            let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
             return ([(header::CONTENT_TYPE, mime.as_ref())], bytes).into_response();
         }
     }
 
-    // SPA fallback: serve ui/dist/index.html if exists, otherwise fallback to embedded
-    let index_file = PathBuf::from("ui/dist/index.html");
-    if index_file.exists() {
+    // SPA fallback: serve index.html from dist_dir
+    let index_file = dist_dir.join("index.html");
+    if index_file.exists() && index_file.is_file() {
         if let Ok(html) = tokio::fs::read_to_string(&index_file).await {
             return Html(html).into_response();
         }

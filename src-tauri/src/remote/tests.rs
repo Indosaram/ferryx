@@ -106,3 +106,33 @@ async fn reqwest_like_health(url: &str) -> bool {
     }
     false
 }
+
+
+#[tokio::test]
+async fn test_remote_server_serves_spa_index_html() {
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(terminal_service, crate::worktree::WorkspaceRegistry::new()));
+
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+
+    let (handle, addr) = start_remote_server(Arc::clone(&state)).await.expect("start server");
+
+    let parsed: std::net::SocketAddr = addr;
+    if let Ok(mut stream) = tokio::net::TcpStream::connect(parsed).await {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(req).await;
+        let mut buf = [0u8; 4096];
+        if let Ok(n) = stream.read(&mut buf).await {
+            let res = String::from_utf8_lossy(&buf[..n]);
+            assert!(res.contains("200 OK"));
+            assert!(res.contains("<!doctype html>") || res.contains("<html"));
+        }
+    }
+
+    handle.stop();
+}

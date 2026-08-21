@@ -103,7 +103,13 @@ export function App() {
             prunable: null,
           };
           try {
-            await ensureTabForWorktree(wt);
+            // Check if a tab for this worktree is already open to avoid redundant spawn / writer lock collision
+            const alreadyOpen = state.layout.tabs.some(
+              (t) => t.kind !== "browser" && state.sessions[t.sessionId]?.cwd === wt.path
+            );
+            if (!alreadyOpen) {
+              await ensureTabForWorktree(wt);
+            }
           } catch {
             // Safe fallback if worktree terminal is already open
           }

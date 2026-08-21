@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_ff181dcb-4219-4e1f-8c0b-2fc0b2b8da7b","nodeId":"frontend-persistence","runStats":{"runtime_ms":43255,"turns":10,"tool_calls":21,"output_tokens":2368,"total_tokens":213434,"generation_ms":5662,"cost_usd":0,"cache_hit_rate_last":0.8447665949920233,"cache_hit_rate_run":0.7118673779765571}}

@@ -1,6 +1,6 @@
 use crate::terminal::{session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal};
 use crate::worktree::manager::WriterLeaseGuard;
-use crate::worktree::WorktreeManager;
+use crate::worktree::{WorktreeError, WorktreeManager};
 use parking_lot::{Mutex, RwLock};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -62,9 +62,26 @@ impl PtyManager {
         worktree_path: &Path,
     ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
         let session_id = Uuid::new_v4().to_string();
-        let lease = worktree_manager
-            .acquire_writer_lease(worktree_path, &session_id)
-            .map_err(|error| PtyError::Other(error.to_string()))?;
+        let lease = match worktree_manager.acquire_writer_lease(worktree_path, &session_id) {
+            Ok(guard) => guard,
+            Err(WorktreeError::WriterAlreadyActive { path, owner_id }) => {
+                // If the previous owner session has already ended or is not active in this PtyManager,
+                // automatically reclaim the lease.
+                if self.get_session(&owner_id).is_none() {
+                    let _ = worktree_manager.release_writer(&path, &owner_id);
+                    worktree_manager
+                        .acquire_writer_lease(worktree_path, &session_id)
+                        .map_err(|error| PtyError::Other(error.to_string()))?
+                } else {
+                    return Err(PtyError::Other(format!(
+                        "Worktree '{}' already has active writer '{}'",
+                        path.display(),
+                        owner_id
+                    )));
+                }
+            }
+            Err(error) => return Err(PtyError::Other(error.to_string())),
+        };
         let rx = self.spawn_with_id_and_lease(
             session_id.clone(),
             cmd,
