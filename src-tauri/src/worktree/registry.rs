@@ -55,6 +55,14 @@ impl WorkspaceRegistry {
         self.workspaces.read().contains_key(workspace_id)
     }
 
+    pub fn list(&self) -> Vec<(String, WorktreeManager)> {
+        self.workspaces
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     pub fn manager(&self, workspace_id: &str) -> Result<WorktreeManager, WorktreeError> {
         let workspace_id = Self::validate_workspace_id(workspace_id)?;
         self.workspaces

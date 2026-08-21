@@ -1,0 +1,147 @@
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  SlidersHorizontal,
+} from "lucide-react";
+import React, { useState } from "react";
+
+type MobileKeyDockProps = {
+  onSendKey: (key: string) => void;
+};
+
+export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({ onSendKey }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [ctrlLatched, setCtrlLatched] = useState(false);
+  const [altLatched, setAltLatched] = useState(false);
+
+  const triggerKey = (action: string) => {
+    // Haptic vibration if supported
+    if ("vibrate" in navigator) {
+      try {
+        navigator.vibrate(15);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (action === "ctrl") {
+      setCtrlLatched(!ctrlLatched);
+      return;
+    }
+    if (action === "alt") {
+      setAltLatched(!altLatched);
+      return;
+    }
+
+    let finalAction = action;
+    if (ctrlLatched) {
+      finalAction = `ctrl-${action}`;
+      setCtrlLatched(false);
+    } else if (altLatched) {
+      finalAction = `alt-${action}`;
+      setAltLatched(false);
+    }
+
+    onSendKey(finalAction);
+  };
+
+  return (
+    <div className="w-full bg-[#12141a] border-t border-[#262833] select-none touch-manipulation z-30">
+      {/* Expanded utility row */}
+      {isExpanded && (
+        <div className="flex gap-1.5 px-2 pt-2 pb-1 overflow-x-auto no-scrollbar text-xs font-mono">
+          <KeyButton label="~" onClick={() => triggerKey("~")} />
+          <KeyButton label="`" onClick={() => triggerKey("`")} />
+          <KeyButton label="|" onClick={() => triggerKey("|")} />
+          <KeyButton label="/" onClick={() => triggerKey("/")} />
+          <KeyButton label="\" onClick={() => triggerKey("\\")} />
+          <KeyButton label="-" onClick={() => triggerKey("-")} />
+          <KeyButton label="_" onClick={() => triggerKey("_")} />
+          <KeyButton label="=" onClick={() => triggerKey("=")} />
+          <KeyButton label="PgUp" onClick={() => triggerKey("pageup")} />
+          <KeyButton label="PgDn" onClick={() => triggerKey("pagedown")} />
+          <KeyButton label="Home" onClick={() => triggerKey("home")} />
+          <KeyButton label="End" onClick={() => triggerKey("end")} />
+          <KeyButton label="Ctrl-Z" onClick={() => triggerKey("ctrl-z")} />
+          <KeyButton label="Ctrl-D" onClick={() => triggerKey("ctrl-d")} />
+        </div>
+      )}
+
+      {/* Primary essential row */}
+      <div className="flex items-center justify-between gap-1 px-2 py-1.5 overflow-x-auto no-scrollbar">
+        <div className="flex items-center gap-1.5">
+          <KeyButton
+            label="Ctrl"
+            active={ctrlLatched}
+            onClick={() => triggerKey("ctrl")}
+            className="font-semibold"
+          />
+          <KeyButton
+            label="Alt"
+            active={altLatched}
+            onClick={() => triggerKey("alt")}
+            className="font-semibold"
+          />
+          <KeyButton label="Esc" onClick={() => triggerKey("esc")} />
+          <KeyButton label="Tab" onClick={() => triggerKey("tab")} />
+          <KeyButton
+            label="Ctrl-C"
+            highlight
+            onClick={() => triggerKey("ctrl-c")}
+            className="font-bold text-red-400 border-red-900/50 bg-red-950/30"
+          />
+        </div>
+
+        <div className="flex items-center gap-1">
+          <KeyButton icon={<ArrowLeft size={14} />} onClick={() => triggerKey("left")} />
+          <KeyButton icon={<ArrowUp size={14} />} onClick={() => triggerKey("up")} />
+          <KeyButton icon={<ArrowDown size={14} />} onClick={() => triggerKey("down")} />
+          <KeyButton icon={<ArrowRight size={14} />} onClick={() => triggerKey("right")} />
+          <KeyButton
+            icon={<SlidersHorizontal size={13} />}
+            active={isExpanded}
+            onClick={() => setIsExpanded(!isExpanded)}
+            title="More keys"
+          />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+function KeyButton({
+  label,
+  icon,
+  active,
+  highlight,
+  onClick,
+  className = "",
+  title,
+}: {
+  label?: string;
+  icon?: React.ReactNode;
+  active?: boolean;
+  highlight?: boolean;
+  onClick: () => void;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={`min-w-[38px] h-8 px-2 flex items-center justify-center rounded border text-xs font-mono font-medium transition-all active:scale-95 ${
+        active
+          ? "bg-blue-600 border-blue-500 text-white shadow-sm"
+          : highlight
+          ? "border-[#3b4252] text-foreground bg-[#1e222d] hover:bg-[#252b38]"
+          : "bg-[#1a1d26] border-[#2c3140] text-[#c9d1d9] hover:bg-[#222734] hover:text-white"
+      } ${className}`}
+    >
+      {icon || label}
+    </button>
+  );
+}

@@ -19,9 +19,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let pty_manager = Arc::new(PtyManager::new());
     let output_hub = Arc::new(TerminalOutputHub::default());
     let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty_manager), Arc::clone(&output_hub)));
-    let remote_state = Arc::new(RemoteGatewayState::new(Arc::clone(&terminal_service)));
-    let remote_manager = Arc::new(RemoteGatewayManager::new(Arc::clone(&remote_state)));
     let workspace_registry = WorkspaceRegistry::new();
+    let remote_state = Arc::new(RemoteGatewayState::new(Arc::clone(&terminal_service), workspace_registry.clone()));
+    let remote_manager = Arc::new(RemoteGatewayManager::new(Arc::clone(&remote_state)));
     // Lazily initialized: a machine with no audio output device must still launch.
     let notification_audio = Arc::new(NotificationAudioPlayer::new());
     let browser_manager = Arc::new(browser::BrowserManager::new());

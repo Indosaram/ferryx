@@ -1,3 +1,4 @@
+use crate::worktree::{Worktree, WorktreeIdentity};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5,9 +6,41 @@ use serde::{Deserialize, Serialize};
 pub struct RemoteTerminalSession {
     pub session_id: String,
     pub title: Option<String>,
-    pub project_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub worktree_label: Option<String>,
     pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProjectInfo {
+    pub workspace_id: String,
+    pub repo_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceState {
+    pub projects: Vec<RemoteProjectInfo>,
+    pub active_workspace_id: String,
+    pub worktrees: Vec<Worktree>,
+    pub sessions: Vec<RemoteTerminalSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteCreateWorktreeRequest {
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
+    pub base_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDeleteWorktreeRequest {
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
+    pub delete_branch: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,4 +56,11 @@ pub enum ClientControlMessage {
 pub enum ServerControlMessage {
     Pong,
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEventMessage {
+    pub event: String,
+    pub payload: serde_json::Value,
 }

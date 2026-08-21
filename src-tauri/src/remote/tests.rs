@@ -73,7 +73,7 @@ fn test_auth_manager_pairing_and_revocation() {
 #[tokio::test]
 async fn test_remote_server_health_and_lifecycle() {
     let terminal_service = Arc::new(TerminalService::default());
-    let state = Arc::new(RemoteGatewayState::new(terminal_service));
+    let state = Arc::new(RemoteGatewayState::new(terminal_service, crate::worktree::WorkspaceRegistry::new()));
 
     *state.config.write() = RemoteGatewayConfig {
         mode: RemoteNetworkMode::Tailscale,
