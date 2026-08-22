@@ -1,8 +1,17 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/** @type {import('tailwindcss').Config} */
+const opaque = (token) => `rgb(var(--${token}-rgb) / <alpha-value>)`;
+const translucent = (token) => `rgb(var(--${token}-rgb) / calc(var(--${token}-alpha) * <alpha-value>))`;
+
 export default {
   darkMode: ["class"],
   content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
+    path.resolve(__dirname, "./src/**/*.{astro,html,js,jsx,md,mdx,ts,tsx}"),
+    path.resolve(__dirname, "../ui/src/**/*.{js,ts,jsx,tsx}"),
   ],
   theme: {
     extend: {
@@ -40,6 +49,40 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        terminal: opaque("terminal"),
+        sidebar: opaque("sidebar"),
+        "sidebar-foreground": opaque("sidebar-foreground"),
+        "sidebar-primary": opaque("sidebar-primary"),
+        "sidebar-primary-foreground": opaque("sidebar-primary-foreground"),
+        "sidebar-accent": opaque("sidebar-accent"),
+        "sidebar-accent-foreground": opaque("sidebar-accent-foreground"),
+        "sidebar-border": translucent("sidebar-border"),
+        "sidebar-ring": opaque("sidebar-ring"),
+        "worktree-sidebar": opaque("worktree-sidebar"),
+        "worktree-sidebar-foreground": opaque("worktree-sidebar-foreground"),
+        "worktree-sidebar-accent": opaque("worktree-sidebar-accent"),
+        "worktree-sidebar-accent-foreground": opaque("worktree-sidebar-accent-foreground"),
+        "worktree-sidebar-border": translucent("worktree-sidebar-border"),
+        "worktree-sidebar-ring": opaque("worktree-sidebar-ring"),
+        status: {
+          working: opaque("status-working"),
+          warning: opaque("status-warning"),
+          success: opaque("status-success"),
+          idle: opaque("status-idle"),
+        },
+      },
+      spacing: {
+        sidebar: "14.75rem",
+        titlebar: "2.25rem",
+        tabbar: "2rem",
+      },
+      minWidth: {
+        tab: "8rem",
+      },
+      maxWidth: {
+        tab: "14rem",
+        agent: "12rem",
+        error: "28rem",
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -67,4 +110,4 @@ export default {
     },
   },
   plugins: [],
-}
+};

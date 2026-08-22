@@ -24,6 +24,53 @@
     --input: 240 3.7% 15.9%;
     --ring: 240 4.9% 83.9%;
     --radius: 0.5rem;
+
+    /* Desktop UI Tokens for LiveFerryxDemo */
+    --border-rgb: 255 255 255;
+    --border-alpha: 0.0706;
+    --input-rgb: 255 255 255;
+    --input-alpha: 0.149;
+    --ring-rgb: 115 115 115;
+    --sidebar: #171717;
+    --sidebar-rgb: 23 23 23;
+    --sidebar-foreground: #fafafa;
+    --sidebar-foreground-rgb: 250 250 250;
+    --sidebar-primary: #1447e6;
+    --sidebar-primary-rgb: 20 71 230;
+    --sidebar-primary-foreground: #fafafa;
+    --sidebar-primary-foreground-rgb: 250 250 250;
+    --sidebar-accent: #262626;
+    --sidebar-accent-rgb: 38 38 38;
+    --sidebar-accent-foreground: #fafafa;
+    --sidebar-accent-foreground-rgb: 250 250 250;
+    --sidebar-border: #ffffff12;
+    --sidebar-border-rgb: 255 255 255;
+    --sidebar-border-alpha: 0.0706;
+    --sidebar-ring: #525252;
+    --sidebar-ring-rgb: 82 82 82;
+    --worktree-sidebar: #2a2a2a;
+    --worktree-sidebar-rgb: 42 42 42;
+    --worktree-sidebar-foreground: #fafafa;
+    --worktree-sidebar-foreground-rgb: 250 250 250;
+    --worktree-sidebar-accent: #353535;
+    --worktree-sidebar-accent-rgb: 53 53 53;
+    --worktree-sidebar-accent-foreground: #fafafa;
+    --worktree-sidebar-accent-foreground-rgb: 250 250 250;
+    --worktree-sidebar-border: #ffffff12;
+    --worktree-sidebar-border-rgb: 255 255 255;
+    --worktree-sidebar-border-alpha: 0.0706;
+    --worktree-sidebar-ring: #737373;
+    --worktree-sidebar-ring-rgb: 115 115 115;
+    --terminal: #0a0a0a;
+    --terminal-rgb: 10 10 10;
+    --status-working: #60a5fa;
+    --status-working-rgb: 96 165 250;
+    --status-warning: #fbbf24;
+    --status-warning-rgb: 251 191 36;
+    --status-success: #86efac;
+    --status-success-rgb: 134 239 172;
+    --status-idle: #737373;
+    --status-idle-rgb: 115 115 115;
   }
 }
 

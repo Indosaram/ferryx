@@ -8,7 +8,7 @@ export function Features() {
       icon: <Cpu className="h-6 w-6 text-zinc-200" />,
       badge: "Performance",
       title: "Native Rust PTY Daemon",
-      description: "Direct OS-level pseudoterminal allocation with sub-millisecond I/O latency. Keeps processes and persistent sessions alive across window reloads.",
+      description: "Direct OS-level pseudoterminal allocation with minimal I/O latency. Keeps processes and persistent sessions alive across window reloads.",
     },
     {
       icon: <Bot className="h-6 w-6 text-zinc-200" />,
@@ -32,7 +32,7 @@ export function Features() {
       icon: <Zap className="h-6 w-6 text-zinc-200" />,
       badge: "Architecture",
       title: "Zero Electron Overhead",
-      description: "Built on Tauri v2 and native Webview2/WebKit engines. Instant startup in under 150ms and lightweight base memory usage.",
+      description: "Built on Tauri v2 and native Webview2/WebKit engines. Instant startup and lightweight base memory usage.",
     },
     {
       icon: <ShieldCheck className="h-6 w-6 text-zinc-200" />,

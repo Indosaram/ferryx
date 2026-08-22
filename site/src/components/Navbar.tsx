@@ -3,6 +3,8 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import ferryxIcon from "@/assets/ferryx-icon.png";
 
+const iconSrc = typeof ferryxIcon === 'object' && ferryxIcon !== null && 'src' in ferryxIcon ? (ferryxIcon as { src: string }).src : String(ferryxIcon);
+
 export function Navbar() {
   return (
     <header className="sticky top-0 z-50 w-full border-b border-zinc-800/80 bg-zinc-950/70 backdrop-blur-md">
@@ -10,7 +12,7 @@ export function Navbar() {
         <div className="flex items-center space-x-3">
           <a href="#" className="flex items-center space-x-2.5 group">
             <img
-              src={ferryxIcon}
+              src={iconSrc}
               alt="Ferryx Logo"
               className="h-8 w-8 rounded-lg transition-transform group-hover:scale-105"
             />
@@ -24,23 +26,20 @@ export function Navbar() {
         </div>
 
         <nav className="hidden md:flex items-center space-x-6 text-sm font-medium text-zinc-400">
+          <a href="/docs/introduction/" className="hover:text-zinc-100 transition-colors">
+            Docs
+          </a>
           <a href="#features" className="hover:text-zinc-100 transition-colors">
             Features
           </a>
           <a href="#architecture" className="hover:text-zinc-100 transition-colors">
             Architecture
           </a>
-          <a href="#benchmarks" className="hover:text-zinc-100 transition-colors">
-            Benchmarks
-          </a>
-          <a href="#shortcuts" className="hover:text-zinc-100 transition-colors">
-            Shortcuts
-          </a>
         </nav>
 
         <div className="flex items-center space-x-3">
           <a
-            href="https://github.com/stablyai/orca"
+            href="https://github.com/ferryx/ferryx"
             target="_blank"
             rel="noreferrer"
             className="text-zinc-400 hover:text-zinc-100 transition-colors"

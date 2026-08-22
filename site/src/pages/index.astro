@@ -1,0 +1,53 @@
+---
+import '../index.css';
+import { Navbar } from '../components/Navbar';
+import { Hero } from '../components/Hero';
+import { Features } from '../components/Features';
+import { Benchmarks } from '../components/Benchmarks';
+import { CTA } from '../components/CTA';
+import { Footer } from '../components/Footer';
+import LiveFerryxDemo from '../components/LiveFerryxDemo';
+---
+
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="alternate icon" type="image/png" href="/icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ferryx — Ultra-Lightweight Rust Native AI Workspace & Launcher</title>
+    <meta
+      name="description"
+      content="Parallel agentic development with instant startup, native Rust PTY host daemon, embedded browser split-tabs, and zero Electron overhead."
+    />
+    <meta property="og:title" content="Ferryx — Ultra-Lightweight Rust Native AI Workspace" />
+    <meta
+      property="og:description"
+      content="Parallel agentic development. Zero Bloat. Native Rust daemon & multi-agent workspace."
+    />
+    <meta property="og:image" content="/icon.png" />
+    <meta name="theme-color" content="#09090b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="bg-zinc-950 text-zinc-100 antialiased selection:bg-zinc-800 selection:text-white min-h-screen">
+    <div class="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col selection:bg-zinc-800 selection:text-white">
+      <Navbar client:load />
+      <main class="flex-1">
+        <Hero />
+        <div class="relative z-10 -mt-[560px] mx-auto mb-0 max-w-5xl px-4 sm:px-6">
+          <LiveFerryxDemo client:only="react" />
+        </div>
+        <Features client:load />
+        <Benchmarks client:load />
+        <CTA client:load />
+      </main>
+      <Footer client:load />
+    </div>
+  </body>
+</html>
