@@ -8,7 +8,11 @@ This repository hosts the unified Ferryx public web presence and documentation e
 - **Documentation Engine**: [@astrojs/starlight](https://starlight.astro.build/)
 - **Interactive Components**: [@astrojs/react](https://docs.astro.build/en/guides/integrations-guide/react/) (React 18)
 - **Styling**: Tailwind CSS with desktop token bridging (`../ui/src`)
-- **Port**: Default `5173` for dev server (`bun run dev`)
+- **Port**: `14173` for the local dev server (`bun run dev`)
+
+## Deployment
+
+GitHub Pages injects the production base path in Actions. Local development keeps the site at `http://localhost:14173/`.
 
 ## Route Structure
 

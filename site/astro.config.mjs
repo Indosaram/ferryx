@@ -6,8 +6,12 @@ import react from '@astrojs/react';
 import tailwind from '@astrojs/tailwind';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const baseUrl = process.env.BASE_URL
+  ? `${process.env.BASE_URL.replace(/\/$/, '')}/`
+  : undefined;
 
 export default defineConfig({
+  ...(baseUrl ? { base: baseUrl } : {}),
   server: { port: 14173 },
   integrations: [
     starlight({
