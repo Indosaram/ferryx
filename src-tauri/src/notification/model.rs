@@ -378,7 +378,7 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
             (title, body)
         }
         NotificationSource::Test => (
-            "rorca notifications are working".to_string(),
+            "Ferryx notifications are working".to_string(),
             "Test notification".to_string(),
         ),
     };

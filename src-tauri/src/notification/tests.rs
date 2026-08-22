@@ -135,7 +135,7 @@ fn terminal_bell_without_any_label_still_has_a_body() {
 fn test_notification_has_fixed_content() {
     let content = format_notification(&request(NotificationSource::Test));
 
-    assert_eq!(content.title, "rorca notifications are working");
+    assert_eq!(content.title, "Ferryx notifications are working");
     assert_eq!(content.body, "Test notification");
 }
 

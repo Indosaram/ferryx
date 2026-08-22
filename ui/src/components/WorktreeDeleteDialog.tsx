@@ -209,7 +209,7 @@ function requireIdentity(worktree: Worktree) {
   if (identity) return identity;
   throw {
     code: "INVALID_NAMESPACE",
-    message: "Only Orca-managed worktrees can be deleted from this UI.",
+    message: "Only Ferryx-managed worktrees can be deleted from this UI.",
     details: { path: worktree.path },
   } satisfies StructuredIpcError;
 }

@@ -7,7 +7,7 @@ export function emitEvent(event: string, payload: unknown) { listeners.get(event
 
 const worktrees: Worktree[] = [
   { path: '.', head: 'a1b2c3d', branch: 'main', bare: false, detached: false, locked: null, prunable: null },
-  { path: '../orca-lite-feature-live-demo', head: 'd4e5f6a', branch: 'feature/live-demo', bare: false, detached: false, locked: null, prunable: null },
+  { path: '../ferryx-feature-live-demo', head: 'd4e5f6a', branch: 'feature/live-demo', bare: false, detached: false, locked: null, prunable: null },
 ];
 const sessions = new Map<string, { cwd: string; line: string }>();
 const browsers = new Map<string, BrowserState>();
@@ -31,7 +31,7 @@ function shell(session: { cwd: string; line: string }, command: string) {
   const [name, ...rest] = command.trim().split(/\s+/); const arg = rest.join(' ');
   if (name === 'cd' && arg) { session.cwd = arg; return ''; }
   if (name === 'ls') return 'README.md  package.json  src  ui  site';
-  if (name === 'pwd') return `/Users/indo/code/project/orca-lite/${session.cwd === '.' ? '' : session.cwd}`;
+  if (name === 'pwd') return `/workspace/ferryx/${session.cwd === '.' ? '' : session.cwd}`;
   if (name === 'git' && rest[0] === 'status') return 'On branch main\nnothing to commit, working tree clean';
   if (name === 'git' && rest[0] === 'branch') return '* main\n  feature/live-demo';
   if (name === 'git' && rest[0] === 'log') return 'a1b2c3d (HEAD -> main) Live demo\n98f7e6d Initial commit';

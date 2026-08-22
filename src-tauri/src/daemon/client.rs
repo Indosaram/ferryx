@@ -42,7 +42,7 @@ impl DaemonClient {
         UnixStream::connect(&socket_path).await.map_err(|e| {
             IpcError::new(
                 IpcErrorCode::InternalError,
-                format!("Failed to connect to rorca daemon: {e}"),
+                format!("Failed to connect to Ferryx daemon: {e}"),
             )
         })
     }

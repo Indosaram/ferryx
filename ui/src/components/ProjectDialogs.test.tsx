@@ -68,7 +68,7 @@ describe("AddProjectDialog Tauri flow", () => {
     render(<AddProjectDialog onClose={onClose} onRegistered={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("/Users/dev/orca-project")).toBeInTheDocument());
-    expect(screen.getByText("Add this folder as a separate Orca project.")).toBeInTheDocument();
+    expect(screen.getByText("Add this folder as a separate Ferryx project.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add Project" })).toBeInTheDocument();
   });
 

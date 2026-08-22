@@ -203,7 +203,7 @@ function GeneralSettings() {
       <SettingsHeading
         icon={<MonitorCog />}
         title="General"
-        description="Desktop shell preferences that follow the compact original Orca layout."
+        description="Desktop shell preferences that follow the compact Ferryx desktop layout."
       />
       <h2 id="settings-general-heading" className="mb-3 flex items-center gap-2 text-[12px] font-semibold">
         <Brush className="size-3.5 text-muted-foreground" />

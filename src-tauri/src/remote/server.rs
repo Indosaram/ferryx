@@ -421,11 +421,11 @@ async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
 
 const EMBEDDED_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"/><title>rorca Remote</title></head>
+<head><meta charset="utf-8"/><title>Ferryx Remote</title></head>
 <body style="background:#09090b;color:#fafafa;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
   <div style="text-align:center;">
-    <h2>🦀 rorca Remote Server Active</h2>
-    <p style="color:#a1a1aa;font-size:14px;">Building UI bundle or connect via rorca App...</p>
+    <h2>Ferryx Remote Server Active</h2>
+    <p style="color:#a1a1aa;font-size:14px;">Building the UI bundle or connect through the Ferryx desktop app.</p>
   </div>
 </body>
 </html>"#;

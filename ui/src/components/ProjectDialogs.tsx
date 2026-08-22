@@ -131,7 +131,7 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
           </div>
           <div className="space-y-3 p-3">
             <p className="text-xs text-muted-foreground">
-              Add this folder as a separate Orca project.
+              Add this folder as a separate Ferryx project.
             </p>
             <div className="rounded-md border border-border/70 bg-muted/35 px-3 py-2 text-xs">
               <div className="break-all font-mono text-muted-foreground">{selectedPath}</div>

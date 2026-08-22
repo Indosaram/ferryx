@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(backend.count(), 1);
         assert_eq!(
             backend.first_title().as_deref(),
-            Some("rorca notifications are working")
+            Some("Ferryx notifications are working")
         );
     }
 
