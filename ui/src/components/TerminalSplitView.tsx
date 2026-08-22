@@ -835,11 +835,17 @@ function PaneResizeDivider({ direction, ratio, onRatioChange, ariaLabel = "Resiz
       aria-valuenow={Math.round(ratio * 100)}
       data-divider-hit-target="true"
       onPointerDown={handlePointerDown}
-      className={`no-drag relative z-20 flex shrink-0 touch-none items-center justify-center ${
-        isHorizontal ? "w-1.5 cursor-col-resize hover:bg-primary/20" : "h-1.5 cursor-row-resize hover:bg-primary/20"
+      className={`no-drag relative z-20 shrink-0 touch-none ${
+        isHorizontal ? "w-px cursor-col-resize" : "h-px cursor-row-resize"
       }`}
+      style={{ backgroundColor: "var(--terminal-divider)" }}
     >
-      <span data-testid="split-divider-line" className={isHorizontal ? "h-full w-px bg-border/80" : "h-px w-full bg-border/80"} />
+      <span
+        data-divider-hit-area="true"
+        className={`absolute z-10 ${
+          isHorizontal ? "-inset-x-1 inset-y-0 cursor-col-resize" : "-inset-y-1 inset-x-0 cursor-row-resize"
+        }`}
+      />
     </div>
   );
 }

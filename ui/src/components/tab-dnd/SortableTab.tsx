@@ -81,7 +81,7 @@ export function SortableTab({
       style={style}
       className={cn(
         "no-drag group relative flex min-w-tab max-w-tab cursor-pointer touch-none items-center gap-1.5 border-r border-border px-2 text-[12px] transition-colors outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
-        active ? "bg-terminal text-foreground" : "bg-card text-muted-foreground hover:bg-accent/45 hover:text-foreground",
+        active ? "bg-accent text-foreground" : "bg-card text-muted-foreground hover:bg-accent/45 hover:text-foreground",
         sortable.isDragging && "z-40 opacity-30",
       )}
     >

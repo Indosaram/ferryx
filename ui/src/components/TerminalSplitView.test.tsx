@@ -141,6 +141,64 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(screen.getAllByRole("separator", { name: "Resize terminal panes" })).toHaveLength(2);
   });
 
+  it("uses one-pixel gray split lines without consuming visible pane spacing", () => {
+    const primary = tab("tab-1", "session-1");
+    const layout: LayoutState = {
+      tabs: [primary],
+      activeTabId: "tab-1",
+      layoutsByTabId: {
+        "tab-1": {
+          root: {
+            type: "split",
+            direction: "horizontal",
+            first: { type: "leaf", leafId: "leaf-left" },
+            second: {
+              type: "split",
+              direction: "vertical",
+              first: { type: "leaf", leafId: "leaf-right-top" },
+              second: { type: "leaf", leafId: "leaf-right-bottom" },
+              ratio: 0.5,
+            },
+            ratio: 0.5,
+          },
+          activeLeafId: "leaf-left",
+          expandedLeafId: null,
+          sessionIdsByLeafId: {
+            "leaf-left": "session-1",
+            "leaf-right-top": "session-2",
+            "leaf-right-bottom": "session-3",
+          },
+        },
+      },
+    };
+
+    render(
+      <TerminalSplitView
+        layout={layout}
+        sessions={{
+          "session-1": session("session-1", "backend-1"),
+          "session-2": session("session-2", "backend-2"),
+          "session-3": session("session-3", "backend-3"),
+        }}
+      />,
+    );
+
+    const dividers = screen.getAllByRole("separator", { name: "Resize terminal panes" });
+    const verticalLine = dividers.find((divider) => divider.getAttribute("aria-orientation") === "vertical");
+    const horizontalLine = dividers.find((divider) => divider.getAttribute("aria-orientation") === "horizontal");
+
+    expect(verticalLine).toHaveClass("w-px");
+    expect(verticalLine).toHaveStyle({ backgroundColor: "var(--terminal-divider)" });
+    expect(verticalLine).not.toHaveClass("bg-border/80");
+    expect(verticalLine).not.toHaveClass("w-1.5");
+    expect(horizontalLine).toHaveClass("h-px");
+    expect(horizontalLine).toHaveStyle({ backgroundColor: "var(--terminal-divider)" });
+    expect(horizontalLine).not.toHaveClass("bg-border/80");
+    expect(horizontalLine).not.toHaveClass("h-1.5");
+    expect(verticalLine?.querySelector('[data-divider-hit-area="true"]')).toHaveClass("-inset-x-1");
+    expect(horizontalLine?.querySelector('[data-divider-hit-area="true"]')).toHaveClass("-inset-y-1");
+  });
+
   it("dispatches terminal-pane split actions from pane toolbar buttons", () => {
     const onSplitPane = vi.fn();
     render(

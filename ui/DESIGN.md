@@ -13,8 +13,10 @@ utilities. Components reference the **Tailwind semantic name**, never a hex valu
 | Token | Utility | Use |
 |---|---|---|
 | `--background` `#23262d` | `bg-background` | App shell behind panes |
-| `--card` `#171717` | `bg-card` | Titlebars, tab strips, dialogs |
-| `--terminal` `#0a0a0a` | `bg-terminal` | Terminal viewport |
+| `--card` `#171717` | `bg-card` | Titlebars, inactive tabs, tab strips, dialogs |
+| `--accent` `#404040` | `bg-accent` | Active tab and interactive hover surfaces |
+| `--terminal` `#282c34` | `bg-terminal` | Terminal viewport only; never application chrome |
+| `--terminal-divider` `#5c6068` | `var(--terminal-divider)` | Opaque 1px separator between split terminal panes |
 | `--worktree-sidebar` `#2a2a2a` | `bg-worktree-sidebar` | Sidebar surface (the project tree lives here) |
 | `--worktree-sidebar-accent` `#353535` | `bg-worktree-sidebar-accent` | Selected / active row fill |
 | `--popover` `#171717` | `bg-popover` | Floating surfaces |
@@ -66,6 +68,16 @@ Reusable, already shipped — compose these; do not hand-roll equivalents.
 - `ui/SectionHeader` — `h-8` section title with optional count pill and trailing actions.
 - `ui/StatusDot` — maps `AgentState` to a status glyph; `working` pulses, `motion-reduce` safe.
 - `lib/cn` — `twMerge(clsx(...))` for conditional classes. All conditional styling goes through it.
+
+### Tab chrome states
+- The tab strip and inactive tabs use `bg-card`.
+- The active tab uses `bg-accent text-foreground`, so it follows light/dark appearance settings.
+- `bg-terminal` is reserved for the terminal viewport and its pixel-filling wrappers. A tab must never inherit the terminal theme background.
+
+### Terminal split separators
+- Horizontal and vertical terminal splits use the opaque `--terminal-divider` color directly on a line exactly 1px thick.
+- The visible line remains 1px; a separate transparent hit area extends 4px around it for resizing.
+- Do not reuse translucent application `border` tokens here: their built-in alpha makes a 1px line disappear against terminal backgrounds.
 
 ## 3. Sidebar information architecture (this feature)
 
