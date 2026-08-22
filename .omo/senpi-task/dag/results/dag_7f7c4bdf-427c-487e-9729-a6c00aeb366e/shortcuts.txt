@@ -1,0 +1,123 @@
+### Outcome Summary
+
+The P1 keyboard-shortcut parity gaps have been closed and verified end-to-end:
+1. **`Cmd+]` / `Cmd+[`** (`terminal.focusNext` / `terminal.focusPrevious`): Cycles pane focus forward/backward across split panes in the active tab.
+2. **`Cmd+F`** (`terminal.search`): Integrates `@xterm/addon-search` into `terminalHostManager` and mounts a search overlay on the focused terminal pane with incremental search, next/prev navigation (Enter/Shift+Enter or arrow buttons), match indicator, and Escape / close dismissal with terminal refocusing.
+3. **`Cmd+,`** (`settings.toggle`): Toggles the Settings dialog from anywhere in the shell.
+
+---
+
+### Failing-First Verification
+
+#### 1. Shortcuts Registry & Routing (`src/lib/shortcuts.test.tsx`)
+**RED Excerpt:**
+```
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/shortcuts.test.tsx (27 tests | 5 failed)
+   × shortcut registry > contains the required frontend actions with platform-aware Mod labels
+     → expected [ 'tab.newTerminal', …(17) ] to deeply equal [ 'tab.newTerminal', …(21) ]
+   × shortcut registry > routes focus next terminal pane when xterm is focused
+   × shortcut registry > routes focus previous terminal pane when xterm is focused
+   × shortcut registry > routes find in terminal when xterm is focused
+   × shortcut registry > routes toggle settings when xterm is focused
+```
+
+**GREEN Excerpt:**
+```
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/shortcuts.test.tsx (27 tests) 37ms
+
+ Test Files  1 passed (1)
+      Tests  27 passed (27)
+```
+
+#### 2. TerminalHostManager SearchAddon (`src/lib/terminalHostManager.test.ts`)
+**RED Excerpt:**
+```
+ ❯ src/lib/terminalHostManager.test.ts (4 tests | 1 failed)
+   × terminalHostManager > integrates search addon into terminal instance and disposes it on destroy
+     → expected undefined to be defined
+```
+
+**GREEN Excerpt:**
+```
+ ✓ src/lib/terminalHostManager.test.ts (4 tests) 70ms
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+```
+
+#### 3. Terminal Search Overlay Component (`src/components/TerminalSearchOverlay.test.tsx`)
+**RED Excerpt:**
+```
+ FAIL  src/components/TerminalSearchOverlay.test.tsx [ src/components/TerminalSearchOverlay.test.tsx ]
+Error: Failed to resolve import "./TerminalSearchOverlay" from "src/components/TerminalSearchOverlay.test.tsx". Does the file exist?
+```
+
+**GREEN Excerpt:**
+```
+ ✓ src/components/TerminalSearchOverlay.test.tsx (4 tests) 50ms
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+```
+
+#### 4. End-to-End App Wiring (`src/App.test.tsx`)
+**RED Excerpt:**
+```
+ ❯ src/App.test.tsx (16 tests | 3 failed)
+   × App project workspace flow > toggles the settings dialog with Cmd+,
+     → Unable to find an element by: [data-testid="settings-dialog"]
+   × App project workspace flow > activates in-terminal search on active pane with Cmd+F
+     → expect(element).toHaveAttribute("data-search-leaf-id", "leaf-1")
+   × App project workspace flow > moves pane focus next and previous with Cmd+] and Cmd+[
+     → expected "spy" to be called with arguments: [ 'tab-1', 'leaf-2' ]
+```
+
+**GREEN Excerpt:**
+```
+ ✓ src/App.test.tsx (16 tests) 308ms
+
+ Test Files  1 passed (1)
+      Tests  16 passed (16)
+```
+
+---
+
+### Full Suite & Typecheck
+
+- `cd ui && bun run test` -> **45 test files passed, 292 tests passed** (Exit code: 0)
+- `cd ui && bunx tsc --noEmit` -> **0 errors** (Exit code: 0)
+
+---
+
+### Files Changed
+
+- `ui/package.json`: Added `@xterm/addon-search` dependency
+- `ui/src/lib/shortcuts.ts`: Registered `terminal.focusNext`, `terminal.focusPrevious`, `terminal.search`, and `settings.toggle` with modifier parsing and labels
+- `ui/src/lib/shortcuts.test.tsx`: Added unit tests for new shortcuts and platform labels
+- `ui/src/lib/terminalRenderer.ts`: Loaded `@xterm/addon-search` in `loadTerminalAssets`
+- `ui/src/lib/terminalHostManager.ts`: Bound `searchAddon` to each terminal instance, tracked on `TerminalInstance`, and cleaned up on `destroy`
+- `ui/src/lib/terminalHostManager.test.ts`: Added test for `searchAddon` lifecycle
+- `ui/src/components/TerminalSearchOverlay.tsx`: Search overlay with query input, next/prev match buttons, match status, and Esc/close handling
+- `ui/src/components/TerminalSearchOverlay.test.tsx`: Unit tests for search overlay interactions
+- `ui/src/components/TerminalPane.tsx`: Conditional search overlay rendering for the active pane
+- `ui/src/components/TerminalSplitView.tsx`: Passed `searchLeafId` and `onCloseSearch` to target pane leaves
+- `ui/src/components/TerminalSplitView.test.tsx`: Added test verifying search leaf propagation
+- `ui/src/App.tsx`: Wired `shortcutHandlers` for `terminal.focusNext`, `terminal.focusPrevious`, `terminal.search`, and `settings.toggle`
+- `ui/src/App.test.tsx`: Added end-to-end unit tests for Cmd+], Cmd+[, Cmd+F, and Cmd+, shortcuts
+
+---
+
+### Commands Run
+
+1. `cd ui && bun add @xterm/addon-search` (exit code: 0)
+2. `cd ui && bunx vitest run src/lib/shortcuts.test.tsx` (exit code: 1 [RED] -> exit code: 0 [GREEN])
+3. `cd ui && bunx vitest run src/lib/terminalHostManager.test.ts` (exit code: 1 [RED] -> exit code: 0 [GREEN])
+4. `cd ui && bunx vitest run src/components/TerminalSearchOverlay.test.tsx` (exit code: 1 [RED] -> exit code: 0 [GREEN])
+5. `cd ui && bunx vitest run src/components/TerminalSplitView.test.tsx` (exit code: 0)
+6. `cd ui && bunx vitest run src/App.test.tsx` (exit code: 1 [RED] -> exit code: 0 [GREEN])
+7. `cd ui && bunx tsc --noEmit` (exit code: 0)
+8. `cd ui && bun run test` (exit code: 0, 292 passing)

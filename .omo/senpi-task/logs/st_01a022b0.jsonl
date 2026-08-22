@@ -11,3 +11,5 @@
 {"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
 {"type":"assistant_message","payload":{"text":"I read this as finalizing the prompt-to-artifact audit — writing `.omo/evidence/rorca/completion-audit.md` and returning its path.\n\n.omo/evidence/rorca/completion-audit.md"}}
 {"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"new"}}

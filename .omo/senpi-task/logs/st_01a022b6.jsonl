@@ -16,3 +16,5 @@
 {"type":"tool_execution","payload":{"tool":"write","is_error":false}}
 {"type":"assistant_message","payload":{"text":".omo/evidence/rorca/interaction-source-audit.md"}}
 {"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"new"}}

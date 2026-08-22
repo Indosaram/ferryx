@@ -1,0 +1,59 @@
+### Overview
+Added the three missing P2 settings sections (**Appearance**, **Quick Commands**, and **Browser**) to `SettingsDialog`, updated branding references from `rorca` to `Ferryx`, and added the design token brand divergence comment to `ui/src/index.css`.
+
+### Storage Keys
+Local `ferryx`-prefixed storage keys were used as the shared constants module does not exist yet:
+- Appearance: `ferryx.settings.appearance`
+- Quick Commands: `ferryx.settings.quickCommands`
+- Browser: `ferryx.settings.browser`
+
+---
+
+### RED Excerpt
+```text
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > is a full-view original-Orca-style nav/detail surface
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Appearance"
+
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > displays Ferryx branding in footer and general settings without rorca references
+TestingLibraryElementError: Unable to find an element with the text: Ferryx · local desktop.
+
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Appearance section, renders controls, and persists changes to localStorage
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Appearance"
+
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Quick Commands section, toggles enablement, adds a command, and persists to localStorage
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Quick Commands"
+
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Browser section, changes search engine and zoom, and persists to localStorage
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Browser"
+
+ Test Files  1 failed (1)
+      Tests  5 failed | 7 passed (12)
+```
+
+---
+
+### GREEN Excerpt
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/components/SettingsDialog.test.tsx (12 tests) 445ms
+
+ Test Files  1 passed (1)
+      Tests  12 passed (12)
+   Start at  09:50:46
+   Duration  1.88s (transform 80ms, setup 133ms, collect 560ms, tests 445ms, environment 310ms, prepare 41ms)
+```
+
+---
+
+### Files Changed
+- `ui/src/components/SettingsDialog.tsx`: Added `AppearanceSettings`, `QuickCommandsSettings`, and `BrowserSettings` sections with full localStorage persistence and restore controls; added nav buttons for all three sections; replaced `rorca` footer and General palette description with `Ferryx`.
+- `ui/src/components/SettingsDialog.test.tsx`: Added test cases for nav buttons, branding, and all three sections verifying rendering, user interactions, localStorage persistence, reloads, and resets.
+- `ui/src/index.css`: Added one-line comment documenting intentional Ferryx brand divergence for `--background: #23262d`.
+
+---
+
+### Commands Run & Exit Codes
+- `cd /Users/indo/code/project/orca-lite/ui && bunx vitest run src/components/SettingsDialog.test.tsx` (Exit code: 1 [RED], then 0 [GREEN])
+- `cd /Users/indo/code/project/orca-lite/ui && bunx vitest run` (Exit code: 1 — Note: pre-existing failures in `shortcuts.test.tsx` handled in a separate lane)
+- `cd /Users/indo/code/project/orca-lite/ui && bunx tsc --noEmit` (Exit code: 2 — Note: pre-existing error in `terminalHostManager.test.ts` handled in a parallel lane; diagnostics on `SettingsDialog.tsx` and `SettingsDialog.test.tsx` are 0 errors)

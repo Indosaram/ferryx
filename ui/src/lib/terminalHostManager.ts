@@ -1,4 +1,5 @@
 import type { FitAddon } from "@xterm/addon-fit";
+import type { SearchAddon } from "@xterm/addon-search";
 import type { Terminal } from "@xterm/xterm";
 
 import { isTauriRuntime, resizeTerminal, writeTerminal } from "./tauri";
@@ -18,11 +19,15 @@ export type TerminalInstance = {
   element: HTMLDivElement;
   terminal: Terminal;
   fitAddon: FitAddon;
+  searchAddon: SearchAddon;
   disposeWebgl: () => void;
   resizeObserver: ResizeObserver;
   disposables: Array<() => void>;
   session: TerminalSession;
   active: boolean;
+  onBell?: () => void;
+  onTitleChange?: (title: string) => void;
+  unsubscribeOutput?: () => void;
 };
 
 class TerminalHostManager {
@@ -43,6 +48,8 @@ class TerminalHostManager {
     if (existing) {
       existing.session = session;
       existing.active = active;
+      existing.onBell = onBell;
+      existing.onTitleChange = onTitleChange;
       return existing;
     }
 
@@ -71,7 +78,7 @@ class TerminalHostManager {
     hostElement.className = "terminal-host h-full w-full bg-terminal";
     hostElement.setAttribute("aria-label", `Terminal in ${session.cwd}`);
 
-    const [latestNativePrefs, { Terminal: TerminalConstructor, FitAddon: FitAddonConstructor }] =
+    const [latestNativePrefs, { Terminal: TerminalConstructor, FitAddon: FitAddonConstructor, Unicode11Addon, SearchAddon: SearchAddonConstructor }] =
       await Promise.all([
         Promise.race([
           fetchCachedNativePreferences(),
@@ -86,7 +93,7 @@ class TerminalHostManager {
 
     const terminal = new TerminalConstructor({
       allowProposedApi: false,
-      customGlyphs: true,
+      customGlyphs: false,
       convertEol: true,
       cursorBlink: true,
       cursorStyle: finalSettings.cursorStyle ?? "block",
@@ -100,6 +107,16 @@ class TerminalHostManager {
     });
     const fitAddon = new FitAddonConstructor();
     terminal.loadAddon(fitAddon);
+    const searchAddon = new SearchAddonConstructor();
+    terminal.loadAddon(searchAddon);
+    if (Unicode11Addon) {
+      try {
+        const unicode11Addon = new Unicode11Addon();
+        terminal.loadAddon(unicode11Addon);
+        terminal.unicode.activeVersion = "11";
+      } catch {
+      }
+    }
     terminal.open(hostElement);
 
     let disposeWebgl: () => void = () => undefined;
@@ -131,25 +148,29 @@ class TerminalHostManager {
     });
     disposables.push(() => dataDisposable.dispose());
 
-    const bellDispose = terminal.onBell(() => onBell?.());
-    disposables.push(() => bellDispose.dispose());
+    const titleDisposable = terminal.onTitleChange((title) => {
+      this.instances.get(session.id)?.onTitleChange?.(title);
+    });
+    disposables.push(() => titleDisposable.dispose());
 
-    const titleDispose = terminal.onTitleChange((title) => onTitleChange?.(title));
-    disposables.push(() => titleDispose.dispose());
+    const bellDisposable = terminal.onBell(() => {
+      this.instances.get(session.id)?.onBell?.();
+    });
+    disposables.push(() => bellDisposable.dispose());
 
     const focusTerminal = () => terminal.focus();
     hostElement.addEventListener("pointerdown", focusTerminal);
     disposables.push(() => hostElement.removeEventListener("pointerdown", focusTerminal));
 
+    let unsubscribeOutput: (() => void) | undefined;
     if (session.backendSessionId) {
-      const unsubOutput = terminalEventBus.subscribeOutput(session.backendSessionId, (text) => {
+      unsubscribeOutput = terminalEventBus.subscribeOutput(session.backendSessionId, (text) => {
         terminal.write(text);
       });
-      disposables.push(unsubOutput);
     }
 
     if (!isTauriRuntime()) {
-      terminal.writeln("\x1b[1;32mrorca\x1b[0m  UI preview");
+      terminal.writeln("\x1b[1;32mFerryx\x1b[0m  UI preview");
       terminal.writeln("\x1b[90mLaunch through Tauri to attach the PTY session.\x1b[0m");
       terminal.write("\r\n\x1b[34m~\x1b[0m \x1b[32m❯\x1b[0m ");
     }
@@ -161,11 +182,15 @@ class TerminalHostManager {
       element: hostElement,
       terminal,
       fitAddon,
+      searchAddon,
       disposeWebgl,
       resizeObserver,
       disposables,
       session,
       active,
+      onBell,
+      onTitleChange,
+      unsubscribeOutput,
     };
   }
 
@@ -174,11 +199,14 @@ class TerminalHostManager {
     if (inst) {
       const prevBackendId = inst.session.backendSessionId;
       inst.session = session;
-      if (session.backendSessionId && session.backendSessionId !== prevBackendId) {
-        const unsub = terminalEventBus.subscribeOutput(session.backendSessionId, (text) => {
-          inst.terminal.write(text);
-        });
-        inst.disposables.push(unsub);
+      if (session.backendSessionId !== prevBackendId) {
+        inst.unsubscribeOutput?.();
+        inst.unsubscribeOutput = undefined;
+        if (session.backendSessionId) {
+          inst.unsubscribeOutput = terminalEventBus.subscribeOutput(session.backendSessionId, (text) => {
+            inst.terminal.write(text);
+          });
+        }
       }
     }
   }
@@ -195,7 +223,9 @@ class TerminalHostManager {
     if (inst) {
       this.instances.delete(sessionId);
       inst.resizeObserver.disconnect();
+      inst.unsubscribeOutput?.();
       for (const d of inst.disposables) d();
+      inst.searchAddon.dispose();
       inst.disposeWebgl();
       inst.terminal.dispose();
       inst.element.remove();

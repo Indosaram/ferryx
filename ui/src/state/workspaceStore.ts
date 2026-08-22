@@ -3,8 +3,9 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 import { activityStateToAgentState, summarizeActivities, type ActivitySummary, type TerminalActivity } from "../lib/activity";
 import { classifyTerminalTitleActivity, formatTabLabelFromTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
+import { terminalHostManager } from "../lib/terminalHostManager";
 import { worktreeIdentity } from "../lib/types";
 import type {
   ActiveAgent,
@@ -18,8 +19,8 @@ import type {
   Worktree,
   WorktreeIdentity,
 } from "../lib/types";
-import { createLayoutState, layoutReducer } from "./layout";
-import type { PaneDirection } from "./paneTree";
+import { createLayoutState, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
+import { collectLeafIds, type PaneDirection } from "./paneTree";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
 
@@ -36,10 +37,17 @@ export type WorkspaceState = {
 
 export type WorkspaceServices = {
   ensureTerminalEvents: () => Promise<void>;
-  spawnTerminal: (request: { workspaceId: string; worktree: WorktreeIdentity | null }) => Promise<string>;
+  spawnTerminal: (request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null }) => Promise<string>;
+  getTerminalCwd: (sessionId: string) => Promise<string | null>;
   closeTerminal: (sessionId: string) => Promise<void>;
   waitForTerminalExit: (sessionId: string, timeoutMs: number) => Promise<void>;
 };
+
+export type SplitPaneOptions = {
+  position?: "first" | "second";
+};
+
+export type TabSplitEdge = "left" | "right" | "top" | "bottom";
 
 type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
@@ -61,8 +69,25 @@ type WorkspaceAction =
       tabId: string;
       targetLeafId?: string;
       direction: PaneDirection;
+      position?: "first" | "second";
       newLeafId: string;
       session: TerminalSession;
+    }
+  | { type: "MOVE_TAB_TO_GROUP"; sourceTabId: string; targetGroupId: string; targetIndex?: number }
+  | {
+      type: "MOVE_TAB_TO_SPLIT";
+      sourceTabId: string;
+      targetGroupId: string;
+      direction: PaneDirection;
+      position?: "first" | "second";
+    }
+  | {
+      type: "DETACH_PANE_TO_TAB";
+      sourceTabId: string;
+      leafId: string;
+      newTab: TerminalTab;
+      targetGroupId?: string;
+      targetIndex?: number;
     }
   | {
       type: "CLOSE_PANE";
@@ -71,6 +96,7 @@ type WorkspaceAction =
     }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
   | { type: "SET_PANE_RATIO"; tabId: string; path: string; ratio: number }
+  | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
@@ -88,6 +114,7 @@ type UseWorkspaceStoreOptions = {
 const defaultServices: WorkspaceServices = {
   ensureTerminalEvents,
   spawnTerminal,
+  getTerminalCwd,
   closeTerminal,
   waitForTerminalExit,
 };
@@ -137,12 +164,14 @@ export function useWorkspaceStore({
       const backendSessionId = await services.spawnTerminal({
         workspaceId,
         worktree: worktreeIdentity(worktree),
+        cwd: worktree.path,
       });
       const sessionId = createId("session");
       const tabId = createId("tab");
       const session: TerminalSession = {
         id: sessionId,
         cwd: worktree.path,
+        worktreePath: worktree.path,
         workspaceId,
         worktree: worktreeIdentity(worktree),
         backendSessionId,
@@ -175,7 +204,7 @@ export function useWorkspaceStore({
     async (worktree: Worktree) => {
       const snapshot = stateRef.current;
       const existing = snapshot.layout.tabs.find(
-        (tab) => tab.kind !== "browser" && snapshot.sessions[tab.sessionId]?.cwd === worktree.path,
+        (tab) => tab.kind !== "browser" && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
       );
       dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
       if (existing) {
@@ -188,26 +217,97 @@ export function useWorkspaceStore({
   );
 
   const splitPane = useCallback(
-    async (tabId: string, targetLeafId: string, direction: PaneDirection) => {
+    async (
+      tabId: string,
+      targetLeafId: string,
+      direction: PaneDirection,
+      options: SplitPaneOptions = {},
+    ) => {
       const snapshot = stateRef.current;
-      const tab = snapshot.layout.tabs.find((candidate) => candidate.id === tabId);
-      if (!tab || tab.kind === "browser") return;
-      const tabLayout = snapshot.layout.layoutsByTabId?.[tabId];
-      const targetSessionId = tabLayout?.sessionIdsByLeafId[targetLeafId] ?? tab.sessionId;
-      const targetSession = snapshot.sessions[targetSessionId];
-      if (!targetSession) return;
-      const worktree = snapshot.worktrees.find((candidate) => candidate.path === targetSession.cwd) ?? getActiveWorktree(snapshot);
-      if (!worktree) return;
+      const targetTab = snapshot.layout.tabs.find((candidate) => candidate.id === tabId);
+      if (!targetTab || targetTab.kind === "browser") return;
+      const targetLayout = snapshot.layout.layoutsByTabId?.[targetTab.id];
+      if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) return;
 
+      const sourceLocalSessionId = targetLayout.sessionIdsByLeafId[targetLeafId] ?? targetTab.sessionId;
+      const sourceSession = snapshot.sessions[sourceLocalSessionId];
+      if (!sourceSession) return;
+
+      await services.ensureTerminalEvents();
+      let inheritedCwd = sourceSession.cwd;
+      if (sourceSession.backendSessionId) {
+        try {
+          inheritedCwd = (await services.getTerminalCwd(sourceSession.backendSessionId)) ?? sourceSession.cwd;
+        } catch {
+          inheritedCwd = sourceSession.cwd;
+        }
+      }
+
+      const backendSessionId = await services.spawnTerminal({
+        workspaceId,
+        worktree: sourceSession.worktree,
+        cwd: inheritedCwd,
+      });
+      const localSessionId = createId("session");
       const newLeafId = createId("leaf");
+      const session: TerminalSession = {
+        id: localSessionId,
+        cwd: inheritedCwd,
+        worktreePath: sessionWorktreePath(sourceSession),
+        workspaceId: sourceSession.workspaceId || workspaceId,
+        worktree: sourceSession.worktree,
+        backendSessionId,
+        lifecycle: "working",
+      };
+
       dispatch({
         type: "SPLIT_PANE",
-        tabId,
+        tabId: targetTab.id,
         targetLeafId,
         direction,
+        position: options.position,
         newLeafId,
-        session: targetSession,
+        session,
       });
+
+      if (!stateRef.current.sessions[localSessionId]) {
+        terminalEventBus.clearSession(backendSessionId);
+        await services.closeTerminal(backendSessionId).catch(() => undefined);
+      }
+    },
+    [dispatch, services, workspaceId],
+  );
+
+  const moveTabToGroup = useCallback(
+    (sourceTabId: string, targetGroupId: string, targetIndex?: number) => {
+      dispatch({ type: "MOVE_TAB_TO_GROUP", sourceTabId, targetGroupId, targetIndex });
+    },
+    [dispatch],
+  );
+
+  const moveTabToSplit = useCallback(
+    (sourceTabId: string, targetGroupId: string, direction: PaneDirection, position: "first" | "second" = "second") => {
+      dispatch({ type: "MOVE_TAB_TO_SPLIT", sourceTabId, targetGroupId, direction, position });
+    },
+    [dispatch],
+  );
+
+  const detachPaneToTab = useCallback(
+    (sourceTabId: string, leafId: string, targetGroupId?: string, targetIndex?: number) => {
+      const snapshot = stateRef.current;
+      const sourceTab = snapshot.layout.tabs.find((tab) => tab.id === sourceTabId);
+      const sourceLayout = snapshot.layout.layoutsByTabId[sourceTabId];
+      if (!sourceTab || sourceTab.kind === "browser" || !sourceLayout || collectLeafIds(sourceLayout.root).length <= 1) return null;
+      const sessionId = sourceLayout.sessionIdsByLeafId[leafId];
+      if (!sessionId || !snapshot.sessions[sessionId]) return null;
+      const newTabId = createId("tab");
+      const newTab: TerminalTab = {
+        id: newTabId,
+        label: sourceTab.label,
+        sessionId,
+      };
+      dispatch({ type: "DETACH_PANE_TO_TAB", sourceTabId, leafId, newTab, targetGroupId, targetIndex });
+      return stateRef.current.layout.tabs.some((tab) => tab.id === newTabId) ? newTabId : null;
     },
     [dispatch],
   );
@@ -226,22 +326,34 @@ export function useWorkspaceStore({
 
       const closingSession = snapshot.sessions[closingTab.sessionId];
       const disposableSessions = getDisposableSessionsForTab(snapshot, tabId);
+      const tabSessionIds = getTabSessionIds(snapshot, tabId);
 
       if (snapshot.layout.tabs.length === 1) {
+        const closingWorktreePath = sessionWorktreePath(closingSession);
         const worktree =
-          (closingSession && snapshot.worktrees.find((candidate) => candidate.path === closingSession.cwd)) ??
+          (closingWorktreePath && snapshot.worktrees.find((candidate) => candidate.path === closingWorktreePath)) ??
           getActiveWorktree(snapshot);
         if (!worktree) return;
 
         await Promise.all(
           disposableSessions.map((session) => closeBackendSessionAndWait(session, services)),
         );
+        for (const sessionId of tabSessionIds) {
+          if (!isSessionReferencedOutsideTab(snapshot, sessionId, tabId)) {
+            terminalHostManager.destroy(sessionId);
+          }
+        }
         const replacement = await createSpawnedTab(worktree, closingTab.label);
         dispatch({ type: "CLOSE_TAB", tabId, replacement });
         return;
       }
 
       dispatch({ type: "CLOSE_TAB", tabId });
+      for (const sessionId of tabSessionIds) {
+        if (!isSessionReferencedOutsideTab(snapshot, sessionId, tabId)) {
+          terminalHostManager.destroy(sessionId);
+        }
+      }
       await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services)));
     },
     [createSpawnedTab, dispatch, services],
@@ -261,6 +373,7 @@ export function useWorkspaceStore({
       const closingSession = closingSessionId ? snapshot.sessions[closingSessionId] : undefined;
       dispatch({ type: "CLOSE_PANE", tabId, leafId });
       if (closingSessionId && !isSessionReferenced(stateRef.current, closingSessionId)) {
+        terminalHostManager.destroy(closingSessionId);
         await closeBackendSession(closingSession, services);
       }
     },
@@ -276,17 +389,19 @@ export function useWorkspaceStore({
 
   const closeOtherTabs = useCallback(
     async (tabId: string) => {
-      const tabIds = stateRef.current.layout.tabs
-        .filter((tab) => tab.id !== tabId && !tab.pinned)
-        .map((tab) => tab.id);
-      await closeTabs(tabIds);
+      const snapshot = stateRef.current;
+      const group = getGroupForTab(snapshot.layout, tabId);
+      const tabs = group ? getTabsForGroup(snapshot.layout, group.id) : [];
+      await closeTabs(tabs.filter((tab) => tab.id !== tabId && !tab.pinned).map((tab) => tab.id));
     },
     [closeTabs],
   );
 
   const closeTabsToRight = useCallback(
     async (tabId: string) => {
-      const tabs = stateRef.current.layout.tabs;
+      const snapshot = stateRef.current;
+      const group = getGroupForTab(snapshot.layout, tabId);
+      const tabs = group ? getTabsForGroup(snapshot.layout, group.id) : [];
       const index = tabs.findIndex((tab) => tab.id === tabId);
       if (index < 0) return;
       await closeTabs(tabs.slice(index + 1).filter((tab) => !tab.pinned).map((tab) => tab.id));
@@ -296,7 +411,9 @@ export function useWorkspaceStore({
 
   const closeTabsToLeft = useCallback(
     async (tabId: string) => {
-      const tabs = stateRef.current.layout.tabs;
+      const snapshot = stateRef.current;
+      const group = getGroupForTab(snapshot.layout, tabId);
+      const tabs = group ? getTabsForGroup(snapshot.layout, group.id) : [];
       const index = tabs.findIndex((tab) => tab.id === tabId);
       if (index < 0) return;
       await closeTabs(tabs.slice(0, index).filter((tab) => !tab.pinned).map((tab) => tab.id));
@@ -308,8 +425,11 @@ export function useWorkspaceStore({
     async (worktrees: Worktree[]) => {
       const snapshot = stateRef.current;
       const validWorktreePaths = new Set(worktrees.map((worktree) => worktree.path));
-      const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(session.cwd));
+      const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(sessionWorktreePath(session)));
       dispatch({ type: "SET_WORKTREES", worktrees });
+      for (const session of staleSessions) {
+        terminalHostManager.destroy(session.id);
+      }
       await Promise.allSettled(staleSessions.map((session) => closeBackendSession(session, services)));
     },
     [dispatch, services],
@@ -331,6 +451,10 @@ export function useWorkspaceStore({
   const focusPane = useCallback((tabId: string, leafId: string) => dispatch({ type: "FOCUS_PANE", tabId, leafId }), [dispatch]);
   const setPaneRatio = useCallback(
     (tabId: string, path: string, ratio: number) => dispatch({ type: "SET_PANE_RATIO", tabId, path, ratio }),
+    [dispatch],
+  );
+  const setTabGroupRatio = useCallback(
+    (path: string, ratio: number) => dispatch({ type: "SET_TAB_GROUP_RATIO", path, ratio }),
     [dispatch],
   );
   const swapPanes = useCallback(
@@ -440,6 +564,9 @@ export function useWorkspaceStore({
     closeTabsToRight,
     closeTabsToLeft,
     splitPane,
+    moveTabToGroup,
+    moveTabToSplit,
+    detachPaneToTab,
     closePane,
     activateTab,
     reorderTab,
@@ -447,6 +574,7 @@ export function useWorkspaceStore({
     setTabPinned,
     focusPane,
     setPaneRatio,
+    setTabGroupRatio,
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
@@ -463,7 +591,8 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
     if (tab.kind === "browser") return [];
     const session = state.sessions[tab.sessionId];
     if (!session) return [];
-    const worktree = state.worktrees.find((candidate) => candidate.path === session.cwd);
+    const worktreePath = sessionWorktreePath(session);
+    const worktree = state.worktrees.find((candidate) => candidate.path === worktreePath);
     const activity = state.activityBySessionId?.[session.id];
     const parsed = activity ? parseAgentTitle(activity.title) : null;
     return [
@@ -472,10 +601,10 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
         name: parsed?.isAgent ? parsed.name : tab.label,
         task: parsed?.isAgent
           ? parsed.task
-          : worktree?.branch?.replace(/^refs\/heads\//, "") ?? session.cwd,
+          : worktree?.branch?.replace(/^refs\/heads\//, "") ?? worktreePath,
         state: activity ? activityStateToAgentState(activity.state) : session.lifecycle,
         worktree: session.worktree,
-        worktreePath: worktree?.path ?? session.cwd,
+        worktreePath,
         sessionId: session.backendSessionId ?? session.id,
       },
     ];
@@ -511,10 +640,11 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
     for (const sessionId of sessionIds) {
       const session = state.sessions[sessionId];
       if (!session) continue;
-      worktreePaths.add(session.cwd);
-      const bucket = sessionIdsByWorktree.get(session.cwd) ?? new Set<string>();
+      const worktreePath = sessionWorktreePath(session);
+      worktreePaths.add(worktreePath);
+      const bucket = sessionIdsByWorktree.get(worktreePath) ?? new Set<string>();
       bucket.add(sessionId);
-      sessionIdsByWorktree.set(session.cwd, bucket);
+      sessionIdsByWorktree.set(worktreePath, bucket);
     }
     if (state.unreadTabIds[tab.id]) {
       for (const path of worktreePaths) unreadTabsByWorktree.add(path);
@@ -559,14 +689,15 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
     case "SET_WORKTREES": {
       const validWorktreePaths = new Set(action.worktrees.map((worktree) => worktree.path));
       const sessions = Object.fromEntries(
-        Object.entries(state.sessions).filter(([, session]) => validWorktreePaths.has(session.cwd)),
+        Object.entries(state.sessions).filter(([, session]) => validWorktreePaths.has(sessionWorktreePath(session))),
       );
       const activityBySessionId = Object.fromEntries(
         Object.entries(state.activityBySessionId ?? {}).filter(([sessionId]) => Boolean(sessions[sessionId])),
       );
       let layout = state.layout;
       for (const tab of state.layout.tabs) {
-        if (tab.kind !== "browser" && !sessions[tab.sessionId]) {
+        const hasRetainedSession = [...getTabSessionIds(state, tab.id)].some((sessionId) => Boolean(sessions[sessionId]));
+        if (tab.kind !== "browser" && !hasRetainedSession) {
           layout = layoutReducer(layout, { type: "CLOSE_TAB", tabId: tab.id });
         }
       }
@@ -654,6 +785,7 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
         tabId: action.tabId,
         targetLeafId: action.targetLeafId,
         direction: action.direction,
+        position: action.position,
         newLeafId: action.newLeafId,
         sessionId: action.session.id,
       });
@@ -663,6 +795,25 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
         sessions: { ...state.sessions, [action.session.id]: action.session },
         layout,
       };
+    }
+    case "MOVE_TAB_TO_GROUP": {
+      const layout = layoutReducer(state.layout, action);
+      if (layout === state.layout) return state;
+      const unreadTabIds = { ...state.unreadTabIds };
+      delete unreadTabIds[action.sourceTabId];
+      return { ...state, layout, unreadTabIds };
+    }
+    case "MOVE_TAB_TO_SPLIT": {
+      const layout = layoutReducer(state.layout, action);
+      if (layout === state.layout) return state;
+      const unreadTabIds = { ...state.unreadTabIds };
+      delete unreadTabIds[action.sourceTabId];
+      return { ...state, layout, unreadTabIds };
+    }
+    case "DETACH_PANE_TO_TAB": {
+      const layout = layoutReducer(state.layout, action);
+      if (layout === state.layout) return state;
+      return { ...state, layout };
     }
     case "CLOSE_PANE": {
       const tab = state.layout.tabs.find((candidate) => candidate.id === action.tabId);
@@ -746,6 +897,10 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       const layout = layoutReducer(state.layout, { type: "SET_PANE_RATIO", tabId: action.tabId, path: action.path, ratio: action.ratio });
       return layout === state.layout ? state : { ...state, layout };
     }
+    case "SET_TAB_GROUP_RATIO": {
+      const layout = layoutReducer(state.layout, { type: "SET_TAB_GROUP_RATIO", path: action.path, ratio: action.ratio });
+      return layout === state.layout ? state : { ...state, layout };
+    }
     case "SWAP_PANES": {
       const layout = layoutReducer(state.layout, { type: "SWAP_PANES", tabId: action.tabId, sourceLeafId: action.sourceLeafId, targetLeafId: action.targetLeafId });
       return layout === state.layout ? state : { ...state, layout };
@@ -773,10 +928,7 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
     }
     case "SESSION_TITLE_ACTIVITY": {
       const parsed = parseAgentTitle(action.title);
-      let classified = classifyTerminalTitleActivity(action.title);
-      if (!classified && parsed?.isAgent) {
-        classified = parsed.state === "working" ? "working" : parsed.state === "exited" ? "done" : "waiting";
-      }
+      const classified = classifyTerminalTitleActivity(action.title);
 
       if (!classified) {
         if (!state.activityBySessionId?.[action.sessionId]) return state;
@@ -820,7 +972,7 @@ function applySessionActivity(
   };
 
   if (activity.state === "done" && previous?.state !== "done" && tabId !== state.layout.activeTabId) {
-    const worktreePath = state.sessions[sessionId]?.cwd ?? getTabWorktreePath(state, tabId);
+    const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,
       unreadTabIds: { ...state.unreadTabIds, [tabId]: true },
@@ -866,9 +1018,13 @@ function getDisposableSessionsForTab(state: WorkspaceState, tabId: string): Term
   return result;
 }
 
+function sessionWorktreePath(session: TerminalSession | undefined): string {
+  return session?.worktreePath ?? session?.cwd ?? "";
+}
+
 function getTabWorktreePath(state: WorkspaceState, tabId: string): string | null {
   for (const sessionId of getTabSessionIds(state, tabId)) {
-    const path = state.sessions[sessionId]?.cwd;
+    const path = sessionWorktreePath(state.sessions[sessionId]);
     if (path) return path;
   }
   return null;
@@ -932,7 +1088,9 @@ function nextTabLabel(worktree: Worktree, tabs: WorkspaceTab[], sessions: Record
       : branch && branch !== "orca-lite"
         ? branch
         : "main";
-  const count = tabs.filter((tab) => tab.kind !== "browser" && sessions[tab.sessionId]?.cwd === worktree.path).length + 1;
+  const count = tabs.filter(
+    (tab) => tab.kind !== "browser" && sessionWorktreePath(sessions[tab.sessionId]) === worktree.path,
+  ).length + 1;
   return count === 1 ? base : `${base} (${count})`;
 }
 

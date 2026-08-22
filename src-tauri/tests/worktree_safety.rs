@@ -103,22 +103,51 @@ fn explicit_destructive_delete_removes_clean_unmerged_branch() {
 }
 
 #[tokio::test]
-async fn pty_writer_lease_releases_on_close_and_natural_exit() {
+async fn same_worktree_supports_multiple_interactive_pty_sessions() {
     let (_repo, manager) = setup_test_repo();
-    let wt = create_worktree(&manager, "pty-lease");
+    let wt = create_worktree(&manager, "multi-pty");
+    let canonical = fs::canonicalize(&wt).expect("canonical worktree");
+    let pty = PtyManager::new();
+
+    let mut first_shell = CommandBuilder::new("/bin/sh");
+    first_shell.cwd(&wt);
+    let (first_id, _first_rx) = pty
+        .spawn_in_worktree(first_shell, 80, 24, &manager, &wt)
+        .expect("spawn first terminal");
+
+    let mut second_shell = CommandBuilder::new("/bin/sh");
+    second_shell.cwd(&wt);
+    let (second_id, _second_rx) = pty
+        .spawn_in_worktree(second_shell, 80, 24, &manager, &wt)
+        .expect("spawn second terminal in same worktree");
+
+    assert_ne!(first_id, second_id);
+    assert_eq!(pty.session_count(), 2);
+    assert_eq!(manager.writer_owner(&wt).expect("writer owner"), None);
+    assert_eq!(pty.get_session(&first_id).and_then(|session| session.worktree_path()), Some(canonical.clone()));
+    assert_eq!(pty.get_session(&second_id).and_then(|session| session.worktree_path()), Some(canonical));
+
+    pty.close_session(&first_id).await.expect("close first terminal");
+    assert!(pty.has_session(&second_id), "closing one split PTY must not close its sibling");
+    pty.close_session(&second_id).await.expect("close second terminal");
+    assert_eq!(pty.session_count(), 0);
+}
+
+#[tokio::test]
+async fn pty_worktree_ownership_clears_on_close_and_natural_exit() {
+    let (_repo, manager) = setup_test_repo();
+    let wt = create_worktree(&manager, "pty-ownership");
     let pty = PtyManager::new();
 
     let mut shell = CommandBuilder::new("/bin/sh");
     shell.cwd(&wt);
     let (session_id, _rx) = pty
         .spawn_in_worktree(shell, 80, 24, &manager, &wt)
-        .expect("spawn writer terminal");
-    assert_eq!(
-        manager.writer_owner(&wt).expect("writer owner"),
-        Some(session_id.clone())
-    );
-    pty.close_session(&session_id).await.expect("close terminal");
+        .expect("spawn terminal");
+    assert!(pty.get_session(&session_id).and_then(|session| session.worktree_path()).is_some());
     assert_eq!(manager.writer_owner(&wt).expect("writer owner"), None);
+    pty.close_session(&session_id).await.expect("close terminal");
+    assert!(!pty.has_session(&session_id));
 
     let mut one_shot = CommandBuilder::new("/bin/sh");
     one_shot.arg("-c");
@@ -127,10 +156,6 @@ async fn pty_writer_lease_releases_on_close_and_natural_exit() {
     let (natural_id, mut output) = pty
         .spawn_in_worktree(one_shot, 80, 24, &manager, &wt)
         .expect("spawn one-shot terminal");
-    assert_eq!(
-        manager.writer_owner(&wt).expect("writer owner"),
-        Some(natural_id.clone())
-    );
 
     tokio::time::timeout(Duration::from_secs(5), async {
         while output.recv().await.is_some() {}
@@ -142,7 +167,7 @@ async fn pty_writer_lease_releases_on_close_and_natural_exit() {
 }
 
 #[test]
-fn pty_spawn_failure_rolls_back_writer_lease() {
+fn pty_spawn_failure_does_not_claim_exclusive_writer() {
     let (_repo, manager) = setup_test_repo();
     let wt = create_worktree(&manager, "pty-spawn-failure");
     let pty = PtyManager::new();
@@ -157,7 +182,7 @@ fn pty_spawn_failure_rolls_back_writer_lease() {
 }
 
 #[tokio::test]
-async fn five_concurrent_worktree_terminal_lifecycles_release_all_leases() {
+async fn five_concurrent_worktree_terminal_lifecycles_remain_isolated() {
     let (_repo, manager) = setup_test_repo();
     let pty = PtyManager::new();
     let worktrees = (0..5)
@@ -171,11 +196,8 @@ async fn five_concurrent_worktree_terminal_lifecycles_release_all_leases() {
         shell.cwd(worktree);
         let (session_id, receiver) = pty
             .spawn_in_worktree(shell, 80, 24, &manager, worktree)
-            .expect("spawn writer terminal");
-        assert_eq!(
-            manager.writer_owner(worktree).expect("writer owner"),
-            Some(session_id.clone())
-        );
+            .expect("spawn terminal");
+        assert_eq!(manager.writer_owner(worktree).expect("writer owner"), None);
         session_ids.push(session_id);
         receivers.push(receiver);
     }

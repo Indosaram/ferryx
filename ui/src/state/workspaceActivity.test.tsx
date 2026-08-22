@@ -31,6 +31,7 @@ function services(): WorkspaceServices {
   return {
     ensureTerminalEvents: vi.fn(async () => undefined),
     spawnTerminal: vi.fn(async () => `backend-${++session}`),
+    getTerminalCwd: vi.fn(async () => worktree.path),
     closeTerminal: vi.fn(async () => undefined),
     waitForTerminalExit: vi.fn(async () => undefined),
   };

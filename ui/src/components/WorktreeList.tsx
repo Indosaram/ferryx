@@ -1,6 +1,7 @@
 import { GitBranch, LockKeyhole, RefreshCcw, Trash2 } from "lucide-react";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
+import { branchName, workspaceName } from "../lib/branchFilter";
 import { cn } from "../lib/cn";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
@@ -19,22 +20,6 @@ type WorktreeListProps = {
   onDelete: (worktree: Worktree) => void;
   label?: string;
 };
-
-function branchName(worktree: Worktree) {
-  return worktree.branch?.replace(/^refs\/heads\//, "") ?? "detached HEAD";
-}
-
-function workspaceName(worktree: Worktree) {
-  const parts = branchName(worktree).split("/");
-  if (parts[0] === "orca" && parts.length > 2) {
-    return parts.slice(2).join("/");
-  }
-  const branch = branchName(worktree);
-  if (branch && branch !== "detached HEAD" && branch !== "orca-lite") {
-    return branch;
-  }
-  return "main";
-}
 
 /** The repository root worktree is the one that is not an `orca/<ws>/<slug>` worktree branch. */
 function isPrimaryWorktree(worktree: Worktree) {

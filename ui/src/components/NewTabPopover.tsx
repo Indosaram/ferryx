@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { TerminalSquare, Globe, ArrowRight } from "lucide-react";
-import { isMacShortcutPlatform } from "../lib/shortcuts";
+import { isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
 
 interface NewTabPopoverProps {
   open: boolean;
@@ -125,7 +125,7 @@ export function NewTabPopover({
             <span className="font-medium">New Terminal</span>
           </div>
           <span className="text-[11px] font-mono text-muted-foreground">
-            {isMac ? "⌘T" : "Ctrl+T"}
+            {shortcutLabel("tab.newTerminal", isMac)}
           </span>
         </button>
 
@@ -142,7 +142,7 @@ export function NewTabPopover({
             <span className="font-medium">New Browser Tab</span>
           </div>
           <span className="text-[11px] font-mono text-muted-foreground">
-            {isMac ? "⌘⇧B" : "Ctrl+Shift+B"}
+            {shortcutLabel("tab.newBrowser", isMac)}
           </span>
         </button>
       </div>

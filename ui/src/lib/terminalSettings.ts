@@ -1,6 +1,7 @@
 import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { getMigratedItem, TERMINAL_SETTINGS_STORAGE_KEY } from "./storageKeys";
 import { getTerminalPreferences, type TerminalPreferences, type TerminalThemeColors } from "./tauri";
 
 export type TerminalSettings = {
@@ -26,7 +27,7 @@ export type EffectiveTerminalSettings = {
 
 export type ResolvedTerminalSettings = EffectiveTerminalSettings;
 
-export const TERMINAL_SETTINGS_STORAGE_KEY = "orca.terminal.settings";
+export { TERMINAL_SETTINGS_STORAGE_KEY };
 export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fontFamily: null,
   macosOptionAsAlt: null,
@@ -87,10 +88,10 @@ type TerminalOptionsTarget = {
   };
 };
 
-export function loadTerminalSettings(storage: Pick<Storage, "getItem"> | null = browserStorage()): TerminalSettings {
+export function loadTerminalSettings(storage: Pick<Storage, "getItem" | "setItem"> | null = browserStorage()): TerminalSettings {
   if (!storage) return DEFAULT_TERMINAL_SETTINGS;
   try {
-    const raw = storage.getItem(TERMINAL_SETTINGS_STORAGE_KEY);
+    const raw = getMigratedItem(TERMINAL_SETTINGS_STORAGE_KEY, storage);
     if (!raw) return DEFAULT_TERMINAL_SETTINGS;
     return normalizeTerminalSettings(JSON.parse(raw) as Partial<TerminalSettings>);
   } catch {
@@ -185,7 +186,15 @@ export function resetTerminalPreferencesCache() {
 
 export async function fetchCachedNativePreferences(force = false): Promise<TerminalPreferences> {
   if (!globalPreferencesPromise || force) {
-    globalPreferencesPromise = getTerminalPreferences().catch(() => FALLBACK_PREFERENCES);
+    try {
+      const promise = getTerminalPreferences();
+      globalPreferencesPromise =
+        promise && typeof promise.catch === "function"
+          ? promise.catch(() => FALLBACK_PREFERENCES)
+          : Promise.resolve(FALLBACK_PREFERENCES);
+    } catch {
+      globalPreferencesPromise = Promise.resolve(FALLBACK_PREFERENCES);
+    }
   }
   return globalPreferencesPromise;
 }

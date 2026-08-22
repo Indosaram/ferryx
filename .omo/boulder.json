@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "active_work_id": "ferryx-landing-and-readme",
+  "works": {
+    "ferryx-landing-and-readme": {
+      "work_id": "ferryx-landing-and-readme",
+      "active_plan": ".omo/plans/ferryx-landing-and-readme.md",
+      "plan_name": "ferryx-landing-and-readme",
+      "session_ids": ["senpi:default"],
+      "status": "completed",
+      "worktree_path": null
+    }
+  }
+}

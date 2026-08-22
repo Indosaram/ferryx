@@ -1,6 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  ACTIVE_PROJECT_STORAGE_KEY,
+  PROJECTS_STORAGE_KEY,
+  SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
+  SIDEBAR_OPEN_STORAGE_KEY,
+} from "./lib/storageKeys";
+
 const native = vi.hoisted(() => ({
   createWorktree: vi.fn(),
   getWorktreeStatus: vi.fn(),
@@ -10,6 +17,12 @@ const native = vi.hoisted(() => ({
   saveSession: vi.fn().mockResolvedValue(undefined),
   loadSession: vi.fn().mockResolvedValue(null),
   clearSession: vi.fn().mockResolvedValue(undefined),
+  listTerminalSessions: vi.fn().mockResolvedValue([]),
+  spawnTerminal: vi.fn().mockResolvedValue("mock-spawn-id"),
+  onNewTerminalTabMenu: vi.fn(),
+  onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
+  onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
+  menuHandler: null as null | (() => void),
 }));
 
 const workspace = vi.hoisted(() => ({
@@ -25,6 +38,7 @@ const workspace = vi.hoisted(() => ({
   openTab: vi.fn(),
   refreshWorktrees: vi.fn(),
   syncWorktrees: vi.fn(),
+  restoreWorkspace: vi.fn(),
   storeState: {
     activeWorktreePath: "/repo/main",
     layout: {
@@ -56,6 +70,8 @@ const workspace = vi.hoisted(() => ({
 
 vi.mock("./lib/tauri", () => ({
   DEFAULT_WORKSPACE_ID: "default",
+  DEFAULT_TERMINAL_FONT_STACK: "monospace",
+  getTerminalPreferences: () => Promise.resolve({}),
   createWorktree: native.createWorktree,
   getWorktreeStatus: native.getWorktreeStatus,
   listProjectBranches: native.listProjectBranches,
@@ -64,6 +80,11 @@ vi.mock("./lib/tauri", () => ({
   saveSession: native.saveSession,
   loadSession: native.loadSession,
   clearSession: native.clearSession,
+  listTerminalSessions: native.listTerminalSessions,
+  spawnTerminal: native.spawnTerminal,
+  onNewTerminalTabMenu: native.onNewTerminalTabMenu,
+  onTerminalLifecycle: native.onTerminalLifecycle,
+  onTerminalOutput: native.onTerminalOutput,
   toIpcError: (error: unknown) => error,
 }));
 
@@ -81,6 +102,7 @@ vi.mock("./state/workspaceStore", () => ({
     ensureTabForWorktree: workspace.ensureTabForWorktree,
     openTab: workspace.openTab,
     syncWorktrees: workspace.syncWorktrees,
+    restoreWorkspace: workspace.restoreWorkspace,
   }),
 }));
 
@@ -93,7 +115,7 @@ vi.mock("./state/workspaceRuntime", () => ({
 }));
 
 vi.mock("./components/Sidebar", () => ({
-  SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY: "rorca.sidebar.collapsedProjects",
+  SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY: "ferryx.sidebar.collapsedProjects",
   Sidebar: ({
     open = true,
     onAddProject,
@@ -150,8 +172,19 @@ vi.mock("./components/Sidebar", () => ({
 }));
 
 vi.mock("./components/CommandPalette", () => ({ CommandPalette: () => null }));
-vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: () => null }));
-vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: () => null }));
+vi.mock("./components/SettingsDialog", () => ({
+  SettingsDialog: ({ open, onClose }: { open: boolean; onClose: () => void }) =>
+    open ? (
+      <div data-testid="settings-dialog">
+        <button onClick={onClose}>Close settings</button>
+      </div>
+    ) : null,
+}));
+vi.mock("./components/TerminalSplitView", () => ({
+  TerminalSplitView: ({ searchLeafId }: { searchLeafId?: string | null }) => (
+    <div data-testid="terminal-split-view" data-search-leaf-id={searchLeafId ?? ""} />
+  ),
+}));
 vi.mock("./components/WorktreeDeleteDialog", () => ({ WorktreeDeleteDialog: () => null }));
 
 import { App } from "./App";
@@ -165,17 +198,43 @@ describe("App project workspace flow", () => {
     native.getWorktreeStatus.mockReset();
     native.listProjectBranches.mockReset();
     native.registerProject.mockReset();
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
     native.signalTerminal.mockReset();
+    native.listTerminalSessions.mockReset();
+    native.listTerminalSessions.mockResolvedValue([]);
+    native.onNewTerminalTabMenu.mockReset();
+    native.menuHandler = null;
+    native.onNewTerminalTabMenu.mockImplementation(async (handler: () => void) => {
+      native.menuHandler = handler;
+      return () => {
+        if (native.menuHandler === handler) native.menuHandler = null;
+      };
+    });
+    workspace.openTab.mockReset();
+    workspace.openTab.mockResolvedValue("tab-new");
     workspace.activatePrimary.mockReset();
     workspace.ensureTabForWorktree.mockReset();
     workspace.ensureTabForWorktree.mockResolvedValue(undefined);
     workspace.refreshWorktrees.mockReset();
   });
 
-  it("re-registers the active persisted project before refreshing its worktrees", async () => {
-    const project = { workspaceId: "rorca", repoRoot: "/repos/rorca" };
+  it("routes the native Cmd+T menu accelerator through the normal new-terminal callback", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(native.onNewTerminalTabMenu).toHaveBeenCalledOnce());
+    expect(native.menuHandler).toBeTypeOf("function");
+    native.menuHandler?.();
+
+    await waitFor(() =>
+      expect(workspace.openTab).toHaveBeenCalledWith(expect.objectContaining({ path: "/repo/main" })),
+    );
+  });
+
+  it("migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10)", async () => {
+    const project = { workspaceId: "migrated-proj", repoRoot: "/repos/migrated" };
     localStorage.setItem("rorca.projects", JSON.stringify([project]));
     localStorage.setItem("rorca.active-project", project.workspaceId);
+    localStorage.setItem("orca.sidebar.open", "false");
     native.registerProject.mockResolvedValue(project);
 
     render(<App />);
@@ -186,7 +245,27 @@ describe("App project workspace flow", () => {
         repoPath: project.repoRoot,
       }),
     );
-    await waitFor(() => expect(workspace.refreshWorktrees).toHaveBeenCalledOnce());
+
+    expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(JSON.stringify([project]));
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(project.workspaceId);
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
+  });
+
+  it("re-registers the active persisted project before refreshing its worktrees", async () => {
+    const project = { workspaceId: "rorca", repoRoot: "/repos/rorca" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([project]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, project.workspaceId);
+    native.registerProject.mockResolvedValue(project);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(native.registerProject).toHaveBeenCalledWith({
+        workspaceId: project.workspaceId,
+        repoPath: project.repoRoot,
+      }),
+    );
+    await waitFor(() => expect(workspace.refreshWorktrees).toHaveBeenCalled());
   });
 
   it("opens a registered project's real branch-dropdown worktree flow", async () => {
@@ -214,8 +293,8 @@ describe("App project workspace flow", () => {
       { workspaceId: "alpha", repoRoot: "/repos/alpha" },
       { workspaceId: "beta", repoRoot: "/repos/beta" },
     ];
-    localStorage.setItem("rorca.projects", JSON.stringify(projects));
-    localStorage.setItem("rorca.active-project", "alpha");
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
     native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
       workspaceId,
       repoRoot: `/repos/${workspaceId}`,
@@ -228,7 +307,7 @@ describe("App project workspace flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Project beta" }));
 
     await waitFor(() => expect(screen.getByText("Active project beta")).toBeInTheDocument());
-    expect(localStorage.getItem("rorca.active-project")).toBe("beta");
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("beta");
     // Switching projects re-registers the newly selected project so its worktrees load.
     await waitFor(() =>
       expect(native.registerProject).toHaveBeenCalledWith({ workspaceId: "beta", repoPath: "/repos/beta" }),
@@ -240,8 +319,8 @@ describe("App project workspace flow", () => {
       { workspaceId: "alpha", repoRoot: "/repos/alpha" },
       { workspaceId: "beta", repoRoot: "/repos/beta" },
     ];
-    localStorage.setItem("rorca.projects", JSON.stringify(projects));
-    localStorage.setItem("rorca.active-project", "alpha");
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
     native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
       workspaceId,
       repoRoot: `/repos/${workspaceId}`,
@@ -270,8 +349,8 @@ describe("App project workspace flow", () => {
 
   it("activates a worktree directly when it belongs to the active project", async () => {
     const project = { workspaceId: "alpha", repoRoot: "/repos/alpha" };
-    localStorage.setItem("rorca.projects", JSON.stringify([project]));
-    localStorage.setItem("rorca.active-project", "alpha");
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([project]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
     native.registerProject.mockResolvedValue(project);
 
     render(<App />);
@@ -288,10 +367,10 @@ describe("App project workspace flow", () => {
       { workspaceId: "alpha", repoRoot: "/repos/alpha" },
       { workspaceId: "beta", repoRoot: "/repos/beta" },
     ];
-    localStorage.setItem("rorca.projects", JSON.stringify(projects));
-    localStorage.setItem("rorca.active-project", "alpha");
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
     // Both projects expanded in the sidebar accordion.
-    localStorage.setItem("rorca.sidebar.collapsedProjects", JSON.stringify([]));
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
     native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
       workspaceId,
       repoRoot: `/repos/${workspaceId}`,
@@ -318,7 +397,7 @@ describe("App project workspace flow", () => {
 
       // Collapsing "alpha" removes its four worktrees from the tree, so "beta"'s worktrees move up
       // to positions 1 and 2 and the same keys now cross into the other project.
-      localStorage.setItem("rorca.sidebar.collapsedProjects", JSON.stringify(["alpha"]));
+      localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify(["alpha"]));
       render(<App />);
 
       fireEvent.keyDown(window, { key: "2", metaKey: true });
@@ -332,8 +411,8 @@ describe("App project workspace flow", () => {
   });
 
   it("keeps out-of-range Cmd+N presses a no-op", async () => {
-    localStorage.setItem("rorca.projects", JSON.stringify([{ workspaceId: "default", repoRoot: "." }]));
-    localStorage.setItem("rorca.active-project", "default");
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "." }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
     render(<App />);
 
@@ -405,17 +484,17 @@ describe("App project workspace flow", () => {
     fireEvent.keyDown(window, { key: "b", metaKey: true });
     expect(screen.queryByTestId("mock-sidebar")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
-    expect(localStorage.getItem("orca.sidebar.open")).toBe("false");
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
 
     // Toggle on via Show sidebar button in header
     fireEvent.click(screen.getByRole("button", { name: "Show sidebar" }));
     expect(screen.getByTestId("mock-sidebar")).toBeInTheDocument();
-    expect(localStorage.getItem("orca.sidebar.open")).toBe("true");
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("true");
 
     // Toggle off via Hide sidebar button in sidebar
     fireEvent.click(screen.getByRole("button", { name: "Hide sidebar" }));
     expect(screen.queryByTestId("mock-sidebar")).not.toBeInTheDocument();
-    expect(localStorage.getItem("orca.sidebar.open")).toBe("false");
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
 
     unmount();
 
@@ -423,5 +502,212 @@ describe("App project workspace flow", () => {
     render(<App />);
     expect(screen.queryByTestId("mock-sidebar")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
+  });
+
+  it("re-spawns dead terminal sessions when restoring after app restart", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    native.listTerminalSessions.mockResolvedValue([]);
+    native.spawnTerminal.mockResolvedValue("new-spawned-session-id");
+
+    const savedSession = {
+      version: 1,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: ".",
+          worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [{ id: "tab-1", sessionId: "dead-sess-1", label: "main", worktreePath: "/repo/main" }],
+          },
+          terminalSessions: {
+            "dead-sess-1": {
+              sessionId: "dead-sess-1",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+    native.loadSession.mockResolvedValue(savedSession as any);
+
+    render(<App />);
+
+    await waitFor(() => expect(native.spawnTerminal).toHaveBeenCalled());
+    expect(workspace.restoreWorkspace).toHaveBeenCalled();
+  });
+
+  it("preserves live backend sessions when restoring during dev/HMR", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    native.listTerminalSessions.mockResolvedValue([{ sessionId: "live-sess-1", worktreePath: "/repo/main" }]);
+    native.spawnTerminal.mockClear();
+
+    const savedSession = {
+      version: 1,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: ".",
+          worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [{ id: "tab-1", sessionId: "live-sess-1", label: "main", worktreePath: "/repo/main" }],
+          },
+          terminalSessions: {
+            "live-sess-1": {
+              sessionId: "live-sess-1",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+    native.loadSession.mockResolvedValue(savedSession as any);
+
+    render(<App />);
+
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+  });
+
+  it("re-spawns only dead sessions when restoring with mixed live and dead sessions across split panes", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    native.listTerminalSessions.mockResolvedValue([{ sessionId: "live-sess-1", worktreePath: "/repo/main" }]);
+    native.spawnTerminal.mockClear();
+    native.spawnTerminal.mockResolvedValue("respawned-sess-2");
+
+    const savedSession = {
+      version: 1,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: ".",
+          worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "horizontal" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [{ id: "tab-1", sessionId: "live-sess-1", label: "main", worktreePath: "/repo/main" }],
+            layoutsByTabId: {
+              "tab-1": {
+                root: {
+                  type: "split",
+                  direction: "horizontal",
+                  first: { type: "leaf", leafId: "leaf-1" },
+                  second: { type: "leaf", leafId: "leaf-2" },
+                  ratio: 0.5,
+                },
+                activeLeafId: "leaf-1",
+                sessionIdsByLeafId: {
+                  "leaf-1": "live-sess-1",
+                  "leaf-2": "dead-sess-2",
+                },
+              },
+            },
+          },
+          terminalSessions: {
+            "live-sess-1": {
+              sessionId: "live-sess-1",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+            "dead-sess-2": {
+              sessionId: "dead-sess-2",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+    native.loadSession.mockResolvedValue(savedSession as any);
+
+    render(<App />);
+
+    await waitFor(() => expect(native.spawnTerminal).toHaveBeenCalledTimes(1));
+    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "default",
+    }));
+  });
+
+  it("toggles the settings dialog with Cmd+,", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    render(<App />);
+
+    expect(screen.queryByTestId("settings-dialog")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: ",", metaKey: true });
+    expect(screen.getByTestId("settings-dialog")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: ",", metaKey: true });
+    expect(screen.queryByTestId("settings-dialog")).not.toBeInTheDocument();
+  });
+
+  it("activates in-terminal search on active pane with Cmd+F", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    render(<App />);
+
+    expect(screen.getByTestId("terminal-split-view")).toHaveAttribute("data-search-leaf-id", "");
+
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    expect(screen.getByTestId("terminal-split-view")).toHaveAttribute("data-search-leaf-id", "leaf-1");
+  });
+
+  it("moves pane focus next and previous with Cmd+] and Cmd+[", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    // Configure storeState with a split layout of two leaves
+    const prevLayout = workspace.storeState.layout;
+    workspace.storeState.layout = {
+      ...prevLayout,
+      layoutsByTabId: {
+        "tab-1": {
+          root: {
+            type: "split",
+            direction: "horizontal",
+            first: { type: "leaf", leafId: "leaf-1" },
+            second: { type: "leaf", leafId: "leaf-2" },
+            ratio: 0.5,
+          },
+          activeLeafId: "leaf-1",
+          expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-2": "sess-2" },
+        },
+      },
+    } as any;
+
+    render(<App />);
+
+    workspace.focusPane.mockClear();
+    fireEvent.keyDown(window, { key: "]", metaKey: true });
+    expect(workspace.focusPane).toHaveBeenCalledWith("tab-1", "leaf-2");
+
+    workspace.focusPane.mockClear();
+    fireEvent.keyDown(window, { key: "[", metaKey: true });
+    expect(workspace.focusPane).toHaveBeenCalledWith("tab-1", "leaf-2");
+
+    // Restore storeState
+    workspace.storeState.layout = prevLayout;
   });
 });

@@ -7,13 +7,109 @@ pub mod session;
 pub mod terminal;
 pub mod worktree;
 
-use ipc::*;
 use crate::ipc::remote::RemoteGatewayManager;
+use ipc::*;
+use notification::audio::NotificationAudioPlayer;
 use remote::RemoteGatewayState;
 use std::sync::Arc;
+use tauri::{Emitter, Manager};
 use terminal::{PtyManager, TerminalOutputHub, TerminalService};
 use worktree::WorkspaceRegistry;
-use notification::audio::NotificationAudioPlayer;
+
+#[cfg(desktop)]
+fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+
+    let app_menu = SubmenuBuilder::new(app, "Ferryx")
+        .about(Some(tauri::menu::AboutMetadata {
+            name: Some("Ferryx".to_string()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            ..Default::default()
+        }))
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    let new_terminal = MenuItemBuilder::with_id("tab.newTerminal", "New Terminal Tab")
+        .accelerator("CmdOrCtrl+T")
+        .build(app)?;
+    let close_tab = MenuItemBuilder::with_id("tab.close", "Close Tab")
+        .accelerator("CmdOrCtrl+W")
+        .build(app)?;
+
+    let file_menu = SubmenuBuilder::new(app, "File")
+        .item(&new_terminal)
+        .separator()
+        .item(&close_tab)
+        .build()?;
+
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let toggle_sidebar = MenuItemBuilder::with_id("sidebar.left.toggle", "Toggle Sidebar")
+        .accelerator("CmdOrCtrl+B")
+        .build(app)?;
+    let command_palette = MenuItemBuilder::with_id("commandPalette.open", "Command Palette...")
+        .accelerator("CmdOrCtrl+K")
+        .build(app)?;
+
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&toggle_sidebar)
+        .item(&command_palette)
+        .separator()
+        .fullscreen()
+        .build()?;
+
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .item(&PredefinedMenuItem::maximize(app, None)?)
+        .separator()
+        .close_window()
+        .build()?;
+
+    let menu = Menu::default(app.handle())?;
+    menu.append(&app_menu)?;
+    menu.append(&file_menu)?;
+    menu.append(&edit_menu)?;
+    menu.append(&view_menu)?;
+    menu.append(&window_menu)?;
+    app.set_menu(menu)?;
+
+    app.on_menu_event(|app, event| {
+        let event_id = event.id().as_ref();
+        if let Some(window) = app.get_webview_window("main") {
+            match event_id {
+                "tab.newTerminal" => {
+                    let _ = window.emit("menu_new_terminal_tab", ());
+                }
+                "tab.close" => {
+                    let _ = window.emit("menu_close_tab", ());
+                }
+                "sidebar.left.toggle" => {
+                    let _ = window.emit("menu_toggle_sidebar", ());
+                }
+                "commandPalette.open" => {
+                    let _ = window.emit("menu_command_palette", ());
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}
 
 #[allow(dependency_on_unit_never_type_fallback)]
 pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
@@ -38,7 +134,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     }
 
     builder
-        .setup(|_app| {
+        .setup(|app| {
+            #[cfg(desktop)]
+            install_app_menu(app)?;
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
@@ -54,6 +152,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(browser_manager)
         .invoke_handler(tauri::generate_handler![
             cmd_terminal_spawn,
+            cmd_terminal_get_cwd,
             cmd_terminal_write,
             cmd_terminal_resize,
             cmd_terminal_signal,

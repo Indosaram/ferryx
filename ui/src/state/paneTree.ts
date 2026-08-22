@@ -38,16 +38,29 @@ export function splitLeaf(
   position: "first" | "second" = "second",
   ratio = 0.5,
 ): PaneNode {
-  return mapLeaf(root, targetLeafId, (leaf) => {
-    const newLeaf = createLeafNode(newLeafId);
-    return {
-      type: "split",
-      direction,
-      first: position === "first" ? newLeaf : leaf,
-      second: position === "first" ? leaf : newLeaf,
-      ratio: clampRatio(ratio),
-    };
-  });
+  return splitLeafWithSubtree(root, targetLeafId, createLeafNode(newLeafId), direction, position, ratio);
+}
+
+/**
+ * Replaces `targetLeafId` with a split containing the existing target leaf and an
+ * arbitrary pane subtree. This is the pane-tree equivalent of Orca moving a whole
+ * tab (including any terminal panes owned by that tab) into a newly-created split group.
+ */
+export function splitLeafWithSubtree(
+  root: PaneNode,
+  targetLeafId: string,
+  subtree: PaneNode,
+  direction: PaneDirection,
+  position: "first" | "second" = "second",
+  ratio = 0.5,
+): PaneNode {
+  return mapLeaf(root, targetLeafId, (leaf) => ({
+    type: "split",
+    direction,
+    first: position === "first" ? subtree : leaf,
+    second: position === "first" ? leaf : subtree,
+    ratio: clampRatio(ratio),
+  }));
 }
 
 /**

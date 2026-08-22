@@ -1,0 +1,118 @@
+> I read this as fixing defects F3, F4, F5 in the terminal host layer plus updating the non-Tauri preview branding string to Ferryx - inspect source, write failing tests first, implement minimal fixes, verify green, and typecheck clean.
+
+### Summary of Changes
+
+1. **Remove Duplicate Direct Registrations (F3)** (`ui/src/lib/terminalHostManager.ts`):
+   - Removed direct closure fallback registrations for `onBell` and `onTitleChange`.
+   - `terminal.onTitleChange` and `terminal.onBell` now delegate solely to `this.instances.get(session.id)?.onTitleChange?.(title)` and `this.instances.get(session.id)?.onBell?.()`, ensuring only the latest handler fires and stale closures never execute.
+2. **Terminal Host Destroy on Tab and Pane Close (F4)** (`ui/src/state/workspaceStore.ts`):
+   - Invokes `terminalHostManager.destroy(sessionId)` on tab close (both single-tab replacement and multi-tab paths) as well as unshared pane close paths.
+3. **Unsubscribe Previous Output Subscription on Backend ID Change (F5)** (`ui/src/lib/terminalHostManager.ts`):
+   - Maintained `unsubscribeOutput` disposable on `TerminalInstance`.
+   - In `updateSession`, when `backendSessionId` changes, `inst.unsubscribeOutput?.()` is invoked prior to establishing a new output subscription.
+   - In `destroy`, `inst.unsubscribeOutput?.()` is cleaned up.
+4. **PaneResizeDivider Cleanup on Unmount** (`ui/src/components/TerminalSplitView.tsx`):
+   - Added `useEffect` cleanup hook to `PaneResizeDivider` holding a `cleanupRef` that removes `pointermove`, `pointerup`, and `pointercancel` window listeners and clears `document.body.style.cursor` on unmount mid-drag.
+5. **Preview Branding Banner** (`ui/src/lib/terminalHostManager.ts`):
+   - Changed non-Tauri preview banner output from `rorca` to `Ferryx`.
+
+---
+
+### Verification: RED Excerpts
+
+#### 1. `terminalHostManager.test.ts` (Branding, Event Delegation, Output Unsubscription)
+Command: `cd /Users/indo/code/project/orca-lite/ui && bun x vitest run src/lib/terminalHostManager.test.ts` (Exit code: 1)
+```text
+ FAIL  src/lib/terminalHostManager.test.ts > terminalHostManager > renders Ferryx branding in non-Tauri preview banner
+AssertionError: expected '\u001b[1;32mrorca\u001b[0m  UI previe…' to contain 'Ferryx'
+- Expected
++ Received
+- Ferryx
++ \u001b[1;32mrorca\u001b[0m  UI preview
+
+ FAIL  src/lib/terminalHostManager.test.ts > terminalHostManager > fires onBell and onTitleChange exactly once and does not fire stale initial closures when cleared
+AssertionError: expected "spy" to be called 1 times, but got 2 times
+ ❯ src/lib/terminalHostManager.test.ts:184:21
+
+ FAIL  src/lib/terminalHostManager.test.ts > terminalHostManager > unsubscribes previous backendSessionId output subscription when backendSessionId changes in updateSession
+AssertionError: expected [ 'old after update' ] to not include 'old after update'
+ ❯ src/lib/terminalHostManager.test.ts:208:38
+```
+
+#### 2. `TerminalSplitView.pointerDrag.test.tsx` (Divider Cleanup on Unmount Mid-Drag)
+Command: `cd /Users/indo/code/project/orca-lite/ui && bun x vitest run src/components/TerminalSplitView.pointerDrag.test.tsx` (Exit code: 1)
+```text
+ FAIL  src/components/TerminalSplitView.pointerDrag.test.tsx > TerminalSplitView pointer tab drag > cleans up window listeners and body cursor when PaneResizeDivider unmounts mid-drag
+AssertionError: expected 'col-resize' to be '' // Object.is equality
+- Expected
++ Received
++ col-resize
+ ❯ src/components/TerminalSplitView.pointerDrag.test.tsx:236:40
+```
+
+---
+
+### Verification: GREEN Excerpts
+
+#### 1. `terminalHostManager.test.ts`
+Command: `cd /Users/indo/code/project/orca-lite/ui && bun x vitest run src/lib/terminalHostManager.test.ts` (Exit code: 0)
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/terminalHostManager.test.ts (3 tests) 63ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+```
+
+#### 2. `TerminalSplitView.pointerDrag.test.tsx` & `TerminalSplitView.test.tsx`
+Command: `cd /Users/indo/code/project/orca-lite/ui && bun x vitest run src/components/TerminalSplitView.pointerDrag.test.tsx src/components/TerminalSplitView.test.tsx` (Exit code: 0)
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/components/TerminalSplitView.test.tsx (9 tests) 109ms
+ ✓ src/components/TerminalSplitView.pointerDrag.test.tsx (4 tests) 78ms
+
+ Test Files  2 passed (2)
+      Tests  13 passed (13)
+```
+
+#### 3. `workspaceStore.test.tsx`
+Command: `cd /Users/indo/code/project/orca-lite/ui && bun x vitest run src/state/workspaceStore.test.tsx` (Exit code: 0)
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/state/workspaceStore.test.tsx (18 tests) 37ms
+
+ Test Files  1 passed (1)
+      Tests  18 passed (18)
+```
+
+#### 4. Full Scope Suite & Typecheck
+Command: `cd /Users/indo/code/project/orca-lite/ui && bun x vitest run src/lib/terminalHostManager.test.ts src/state/workspaceStore.test.tsx src/components/TerminalSplitView.pointerDrag.test.tsx src/components/TerminalSplitView.test.tsx src/components/TerminalPane.test.tsx` (Exit code: 0)
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/components/TerminalSplitView.test.tsx (9 tests) 111ms
+ ✓ src/components/TerminalSplitView.pointerDrag.test.tsx (4 tests) 74ms
+ ✓ src/lib/terminalHostManager.test.ts (3 tests) 67ms
+ ✓ src/state/workspaceStore.test.tsx (18 tests) 30ms
+ ✓ src/components/TerminalPane.test.tsx (1 test) 29ms
+
+ Test Files  5 passed (5)
+      Tests  35 passed (35)
+```
+
+Command: `cd /Users/indo/code/project/orca-lite/ui && bunx tsc --noEmit` (Exit code: 0)
+Clean typecheck (0 errors).
+
+---
+
+### Files Changed
+
+- `ui/src/lib/terminalHostManager.ts`
+- `ui/src/lib/terminalHostManager.test.ts`
+- `ui/src/state/workspaceStore.ts`
+- `ui/src/state/workspaceStore.test.tsx`
+- `ui/src/components/TerminalSplitView.tsx`
+- `ui/src/components/TerminalSplitView.pointerDrag.test.tsx`

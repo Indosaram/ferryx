@@ -184,10 +184,22 @@ export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) 
   });
 }
 
-export async function spawnTerminal(request: { workspaceId: string; worktree: WorktreeIdentity | null }) {
+export async function spawnTerminal(request: {
+  workspaceId: string;
+  worktree: WorktreeIdentity | null;
+  cwd?: string | null;
+}) {
   if (!isTauri()) return `preview:${request.workspaceId}:${request.worktree?.slug ?? "root"}:${crypto.randomUUID()}`;
-  const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", { request });
+  const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", {
+    request: { ...request, cwd: request.cwd ?? null },
+  });
   return response.sessionId;
+}
+
+export async function getTerminalCwd(sessionId: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  const response = await invokeCommand<{ cwd: string }>("cmd_terminal_get_cwd", { sessionId });
+  return response.cwd || null;
 }
 
 export async function writeTerminal(request: { sessionId: string; data: string }) {
@@ -227,6 +239,11 @@ export async function onTerminalOutput(handler: (payload: TerminalOutputPayload)
 export async function onTerminalLifecycle(handler: (payload: TerminalLifecyclePayload) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<TerminalLifecyclePayload>("terminal_lifecycle", (event) => handler(event.payload));
+}
+
+export async function onNewTerminalTabMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<void>("menu_new_terminal_tab", () => handler());
 }
 
 export async function onWorktreeChanged(handler: (payload: WorktreeChangedPayload) => void): Promise<UnlistenFn> {
@@ -409,4 +426,3 @@ export async function clearSession(): Promise<void> {
   if (!isTauri()) return;
   return invokeCommand<void>('cmd_session_clear');
 }
-

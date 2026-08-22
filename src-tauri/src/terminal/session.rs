@@ -1,5 +1,4 @@
 use crate::terminal::PtyError;
-use crate::worktree::manager::WriterLeaseGuard;
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -35,7 +34,13 @@ pub(crate) struct PtySessionConfig {
     pub cols: u16,
     pub rows: u16,
     pub tx: mpsc::Sender<Vec<u8>>,
-    pub writer_lease: Option<WriterLeaseGuard>,
+    /// Canonical worktree/repository root that owns this interactive terminal.
+    ///
+    /// Interactive terminals are intentionally *not* exclusive worktree writers: Orca
+    /// allows several PTYs in the same worktree.  Keeping the ownership path directly on
+    /// the PTY session preserves session listing and CWD validation without abusing the
+    /// exclusive writer lease used by agent/destructive-operation safety.
+    pub worktree_path: Option<PathBuf>,
 }
 
 pub struct PtySession {
@@ -45,7 +50,7 @@ pub struct PtySession {
     child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
-    writer_lease: Arc<Mutex<Option<WriterLeaseGuard>>>,
+    worktree_path: Option<PathBuf>,
     reader_finished: Arc<AtomicBool>,
     reaped: Arc<AtomicBool>,
     state: Arc<Mutex<PtySessionState>>,
@@ -89,7 +94,7 @@ impl PtySession {
             child: Arc::new(Mutex::new(Some(config.child))),
             reader_task: Arc::new(Mutex::new(Some(reader_task))),
             output_tx,
-            writer_lease: Arc::new(Mutex::new(config.writer_lease)),
+            worktree_path: config.worktree_path,
             reader_finished,
             reaped: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(PtySessionState::Starting)),
@@ -143,18 +148,8 @@ impl PtySession {
             .and_then(|child| child.process_id())
     }
 
-    pub fn writer_worktree(&self) -> Option<PathBuf> {
-        self.writer_lease
-            .lock()
-            .as_ref()
-            .map(|lease| lease.canonical_path().to_path_buf())
-    }
-
-    pub fn writer_owner_id(&self) -> Option<String> {
-        self.writer_lease
-            .lock()
-            .as_ref()
-            .map(|lease| lease.owner_id().to_string())
+    pub fn worktree_path(&self) -> Option<PathBuf> {
+        self.worktree_path.clone()
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<(), PtyError> {
@@ -312,10 +307,6 @@ impl PtySession {
         self.master.lock().take();
     }
 
-    pub(crate) fn release_writer_lease(&self) {
-        self.writer_lease.lock().take();
-    }
-
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
         self.reader_task.lock().take()
     }
@@ -326,7 +317,6 @@ impl Drop for PtySession {
         self.writer.lock().take();
         self.master.lock().take();
         self.output_tx.lock().take();
-        self.writer_lease.lock().take();
         if let Some(handle) = self.reader_task.lock().take() {
             handle.abort();
         }

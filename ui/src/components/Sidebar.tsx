@@ -13,6 +13,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
 import { isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
+import {
+  getMigratedItem,
+  SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
+  SIDEBAR_WIDTH_STORAGE_KEY,
+} from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
@@ -20,8 +25,7 @@ import { SectionHeader } from "./ui/SectionHeader";
 import { StatusDot } from "./ui/StatusDot";
 import { WorktreeList } from "./WorktreeList";
 
-export const SIDEBAR_WIDTH_STORAGE_KEY = "orca.sidebar.width";
-export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedProjects";
+export { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, SIDEBAR_WIDTH_STORAGE_KEY };
 const DEFAULT_SIDEBAR_WIDTH = 236;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 420;
@@ -388,7 +392,7 @@ function seedCollapsedProjects(
 /** Returns `null` when the accordion has never been persisted, so callers can apply defaults. */
 function loadCollapsedProjects(): Set<string> | null {
   try {
-    const raw = window.localStorage.getItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY);
+    const raw = getMigratedItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return null;
@@ -408,7 +412,8 @@ function persistCollapsedProjects(collapsed: Set<string>) {
 
 function loadSidebarWidth() {
   try {
-    const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+    const raw = getMigratedItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    const stored = Number(raw);
     return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : DEFAULT_SIDEBAR_WIDTH;
   } catch {
     return DEFAULT_SIDEBAR_WIDTH;

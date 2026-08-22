@@ -13,7 +13,30 @@ const native = vi.hoisted(() => ({
   openNotificationSystemSettings: vi.fn(),
   playNotificationSound: vi.fn(),
   pickNotificationAudio: vi.fn(),
+  listRemoteDevices: vi.fn(),
+  revokeRemoteDevice: vi.fn(),
+  getTailscaleStatus: vi.fn(),
 }));
+
+const browserNative = vi.hoisted(() => ({
+  setBrowserZoom: vi.fn(),
+  focusBrowser: vi.fn(),
+  getBrowserState: vi.fn(),
+  listBrowsers: vi.fn(),
+  openExternalUrl: vi.fn(),
+}));
+
+vi.mock(import("../lib/browserTauri"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    setBrowserZoom: browserNative.setBrowserZoom,
+    focusBrowser: browserNative.focusBrowser,
+    getBrowserState: browserNative.getBrowserState,
+    listBrowsers: browserNative.listBrowsers,
+    openExternalUrl: browserNative.openExternalUrl,
+  };
+});
 
 vi.mock(import("../lib/tauri"), async (importOriginal) => {
   const actual = await importOriginal();
@@ -26,6 +49,9 @@ vi.mock(import("../lib/tauri"), async (importOriginal) => {
     openNotificationSystemSettings: native.openNotificationSystemSettings,
     playNotificationSound: native.playNotificationSound,
     pickNotificationAudio: native.pickNotificationAudio,
+    listRemoteDevices: native.listRemoteDevices,
+    revokeRemoteDevice: native.revokeRemoteDevice,
+    getTailscaleStatus: native.getTailscaleStatus,
   };
 });
 
@@ -73,6 +99,49 @@ beforeEach(() => {
     extension: "mp3",
     sizeBytes: 1024,
   });
+  native.listRemoteDevices.mockReset();
+  native.listRemoteDevices.mockResolvedValue([
+    {
+      id: "device-1",
+      name: "iPhone 15 Pro",
+      permission: "control",
+      createdAt: 1700000000000,
+      lastSeenAt: 1700000500000,
+      revoked: false,
+    },
+    {
+      id: "device-2",
+      name: "Pixel 8",
+      permission: "view",
+      createdAt: 1690000000000,
+      lastSeenAt: 1690000500000,
+      revoked: false,
+    },
+  ]);
+  native.revokeRemoteDevice.mockReset();
+  native.revokeRemoteDevice.mockResolvedValue(true);
+  native.getTailscaleStatus.mockReset();
+  native.getTailscaleStatus.mockResolvedValue({
+    installed: true,
+    running: true,
+    tailnetName: "orca-mesh",
+    selfDns: "orca-host.tailscale.net",
+    serveActive: true,
+  });
+  browserNative.setBrowserZoom.mockReset();
+  browserNative.setBrowserZoom.mockResolvedValue(1.25);
+  browserNative.listBrowsers.mockReset();
+  browserNative.listBrowsers.mockResolvedValue([
+    {
+      browserId: "b-1",
+      webviewLabel: "webview-1",
+      url: "http://localhost:3000",
+      title: "Local App",
+      visible: true,
+    },
+  ]);
+  browserNative.focusBrowser.mockReset();
+  browserNative.focusBrowser.mockResolvedValue(undefined);
 });
 
 describe("SettingsDialog", () => {
@@ -83,10 +152,13 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-nav")).toHaveClass("w-[280px]");
     expect(screen.getByRole("button", { name: "Back to app" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "General" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Notifications" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Appearance" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Terminal" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Keyboard Shortcuts" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Quick Commands" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Browser" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Notifications" })).toBeInTheDocument();
   });
 
   it("fetches Ghostty preferences and shows the effective terminal value/source", async () => {
@@ -176,7 +248,7 @@ describe("SettingsDialog", () => {
       fireEvent.change(soundSelect, { target: { value: "custom" } });
     }
 
-    const pickButton = screen.getByRole("button", { name: /choose|browse|pick|custom/i });
+    const pickButton = screen.getByRole("button", { name: /choose|\bbrowse\b|pick|custom/i });
     fireEvent.click(pickButton);
 
     await waitFor(() => expect(native.pickNotificationAudio).toHaveBeenCalled());
@@ -184,6 +256,159 @@ describe("SettingsDialog", () => {
       expect(
         screen.queryByText(/bell\.mp3/i) || screen.queryByDisplayValue(/bell\.mp3|\/custom\/bell\.mp3/i)
       ).toBeInTheDocument();
+    });
+  });
+
+  it("displays Ferryx branding in footer and general settings without rorca references", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+
+    expect(screen.getByText("Ferryx · local desktop")).toBeInTheDocument();
+    expect(screen.queryByText(/rorca · local desktop/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Ferryx uses the native charcoal desktop palette\./i)).toBeInTheDocument();
+    expect(screen.queryByText(/rorca uses the native charcoal desktop palette\./i)).not.toBeInTheDocument();
+  });
+
+  it("navigates to Appearance section, renders controls, and persists changes to localStorage", () => {
+    const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+
+    expect(screen.getByRole("region", { name: "Appearance" })).toBeInTheDocument();
+    const themeSelect = screen.getByLabelText("Theme mode") as HTMLSelectElement;
+    const accentSelect = screen.getByLabelText("Accent color") as HTMLSelectElement;
+    const densitySelect = screen.getByLabelText("Interface density") as HTMLSelectElement;
+
+    expect(themeSelect.value).toBe("charcoal");
+    expect(accentSelect.value).toBe("default");
+    expect(densitySelect.value).toBe("compact");
+
+    fireEvent.change(themeSelect, { target: { value: "dark" } });
+    fireEvent.change(accentSelect, { target: { value: "emerald" } });
+    fireEvent.change(densitySelect, { target: { value: "comfortable" } });
+
+    const stored = JSON.parse(localStorage.getItem("ferryx.settings.appearance")!);
+    expect(stored).toEqual({
+      theme: "dark",
+      accentColor: "emerald",
+      density: "comfortable",
+    });
+
+    unmount();
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    expect((screen.getByLabelText("Theme mode") as HTMLSelectElement).value).toBe("dark");
+    expect((screen.getByLabelText("Accent color") as HTMLSelectElement).value).toBe("emerald");
+    expect((screen.getByLabelText("Interface density") as HTMLSelectElement).value).toBe("comfortable");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset to defaults" }));
+    expect((screen.getByLabelText("Theme mode") as HTMLSelectElement).value).toBe("charcoal");
+    expect((screen.getByLabelText("Accent color") as HTMLSelectElement).value).toBe("default");
+    expect((screen.getByLabelText("Interface density") as HTMLSelectElement).value).toBe("compact");
+    expect(localStorage.getItem("ferryx.settings.appearance")).toBeNull();
+  });
+
+  it("navigates to Quick Commands section, toggles enablement, adds a command, and persists to localStorage", () => {
+    const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Quick Commands" }));
+
+    expect(screen.getByRole("region", { name: "Quick Commands" })).toBeInTheDocument();
+    const enableToggle = screen.getByLabelText("Enable quick commands") as HTMLInputElement;
+    expect(enableToggle.checked).toBe(true);
+
+    const labelInput = screen.getByLabelText("Command label");
+    const cmdInput = screen.getByLabelText("Command string");
+    fireEvent.change(labelInput, { target: { value: "Build Project" } });
+    fireEvent.change(cmdInput, { target: { value: "cargo build --release" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add command" }));
+
+    expect(screen.getByText("Build Project")).toBeInTheDocument();
+    expect(screen.getByText("cargo build --release")).toBeInTheDocument();
+
+    const stored = JSON.parse(localStorage.getItem("ferryx.settings.quickCommands")!);
+    expect(stored.enabled).toBe(true);
+    expect(stored.commands.some((c: { label: string; command: string }) => c.label === "Build Project" && c.command === "cargo build --release")).toBe(true);
+
+    unmount();
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Quick Commands" }));
+    expect(screen.getByText("Build Project")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete command Build Project" }));
+    expect(screen.queryByText("Build Project")).not.toBeInTheDocument();
+    const updatedStored = JSON.parse(localStorage.getItem("ferryx.settings.quickCommands")!);
+    expect(updatedStored.commands.some((c: { label: string }) => c.label === "Build Project")).toBe(false);
+  });
+
+  it("navigates to Browser section, changes search engine and zoom, and persists to localStorage", () => {
+    const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Browser" }));
+
+    expect(screen.getByRole("region", { name: "Browser" })).toBeInTheDocument();
+    const searchSelect = screen.getByLabelText("Default search engine") as HTMLSelectElement;
+    const zoomSelect = screen.getByLabelText("Default zoom level") as HTMLSelectElement;
+    const restoreToggle = screen.getByLabelText("Restore tabs on launch") as HTMLInputElement;
+
+    expect(searchSelect.value).toBe("duckduckgo");
+    expect(zoomSelect.value).toBe("100");
+    expect(restoreToggle.checked).toBe(false);
+
+    fireEvent.change(searchSelect, { target: { value: "google" } });
+    fireEvent.change(zoomSelect, { target: { value: "125" } });
+    fireEvent.click(restoreToggle);
+
+    const stored = JSON.parse(localStorage.getItem("ferryx.settings.browser")!);
+    expect(stored).toEqual({
+      searchEngine: "google",
+      defaultZoom: 125,
+      restoreTabsOnLaunch: true,
+    });
+
+    unmount();
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Browser" }));
+    expect((screen.getByLabelText("Default search engine") as HTMLSelectElement).value).toBe("google");
+    expect((screen.getByLabelText("Default zoom level") as HTMLSelectElement).value).toBe("125");
+    expect((screen.getByLabelText("Restore tabs on launch") as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset to defaults" }));
+    expect((screen.getByLabelText("Default search engine") as HTMLSelectElement).value).toBe("duckduckgo");
+    expect((screen.getByLabelText("Default zoom level") as HTMLSelectElement).value).toBe("100");
+    expect((screen.getByLabelText("Restore tabs on launch") as HTMLInputElement).checked).toBe(false);
+    expect(localStorage.getItem("ferryx.settings.browser")).toBeNull();
+  });
+
+  it("navigates to Remote Access section, renders paired devices and Tailscale status, and revokes device on confirmation", async () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+
+    await waitFor(() => expect(native.listRemoteDevices).toHaveBeenCalled());
+    await waitFor(() => expect(native.getTailscaleStatus).toHaveBeenCalled());
+
+    expect(screen.getByText("iPhone 15 Pro")).toBeInTheDocument();
+    expect(screen.getByText("Pixel 8")).toBeInTheDocument();
+    expect(screen.getByText(/orca-mesh/i)).toBeInTheDocument();
+
+    const revokeBtn = screen.getByRole("button", { name: "Revoke device iPhone 15 Pro" });
+    fireEvent.click(revokeBtn);
+
+    const confirmBtn = screen.getByRole("button", { name: "Confirm revoke iPhone 15 Pro" });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(native.revokeRemoteDevice).toHaveBeenCalledWith("device-1");
+    });
+  });
+
+  it("navigates to Browser section and applies zoom to active browsers using setBrowserZoom", async () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Browser" }));
+
+    await waitFor(() => expect(browserNative.listBrowsers).toHaveBeenCalled());
+
+    const zoomSelect = screen.getByLabelText("Default zoom level") as HTMLSelectElement;
+    fireEvent.change(zoomSelect, { target: { value: "125" } });
+
+    await waitFor(() => {
+      expect(browserNative.setBrowserZoom).toHaveBeenCalledWith("b-1", 1.25);
     });
   });
 });

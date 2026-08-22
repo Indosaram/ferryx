@@ -183,4 +183,41 @@ describe("WorktreeList actions", () => {
     fireEvent.click(screen.getByRole("button", { name: /create the first worktree/i }));
     expect(onCreate).toHaveBeenCalledOnce();
   });
+
+  it("normalizes ferryx and rorca branch names to main (F11)", () => {
+    const ferryxWorktree: Worktree = {
+      path: "/repo/ferryx",
+      head: "def456",
+      branch: "refs/heads/ferryx",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const rorcaWorktree: Worktree = {
+      path: "/repo/rorca",
+      head: "ghi789",
+      branch: "refs/heads/rorca",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[ferryxWorktree, rorcaWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRefreshStatus={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const mainLabels = screen.getAllByText("main");
+    expect(mainLabels).toHaveLength(2);
+  });
 });

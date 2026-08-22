@@ -38,7 +38,7 @@ export const RemoteSessionList: React.FC<RemoteSessionListProps> = ({
               Desktop Workspace
             </h2>
             <p className="text-[11px] text-[#8b949e]">
-              Connected to rorca native engine
+              Connected to Ferryx native engine
             </p>
           </div>
         </div>
@@ -71,7 +71,7 @@ export const RemoteSessionList: React.FC<RemoteSessionListProps> = ({
             <div className="space-y-1">
               <p className="text-sm font-medium text-[#c9d1d9]">No active terminals</p>
               <p className="text-xs text-[#8b949e]">
-                Open a terminal in your desktop rorca app to attach.
+                Open a terminal in your desktop Ferryx app to attach.
               </p>
             </div>
           </div>

@@ -1,0 +1,21 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"> I read this as fixing the runtime bug in AddProjectDialog where opening the native folder picker repeatedly or upon rejection silently closed the dialog - refactoring the picker effect to use stable refs, firing exactly once per mount, surfacing picker rejection errors via the manual form fallback, and updating unit tests.\n\n### Changes Made\n1. **`ui/src/components/ProjectDialogs.tsx`**:\n   - Maintained stable callback references (`onClose`, `onRegistered`, `projects`) using `useRef` updated on every render.\n   - Constrained folder picker invocation to run once per mount guarded with `pickerOpenedRef` and dependencies `[isTauri]`.\n   - On picker rejection: logged error to `console.error`, populated readable `error` state, and fell back to the manual form instead of closing the dialog.\n   - Maintained user-cancel behavior (closing on `null`/`undefined`) and confirmation dialog registration flow.\n\n2. **`ui/src/components/ProjectDialogs.test.tsx`**:\n   - Added test verifying rejected picker keeps the dialog mounted with the manual form and displays the rejection error.\n   - Added test verifying parent re-renders with changing `onClose` reference identity do not trigger duplicate `open()` calls.\n\n### Verification Results\n- `bun run --cwd ui test src/components/ProjectDialogs.test.tsx`:\n  ```\n  ✓ src/components/ProjectDialogs.test.tsx (9 tests) 143ms\n  Test Files  1 passed (1)\n       Tests  9 passed (9)\n  ```\n- `bun run --cwd ui build`:\n  ```\n  $ tsc && vite build\n  vite v6.4.3 building for production...\n  ✓ 1693 modules transformed.\n  ✓ built in 3.69s (Exit Code: 0)\n  ```\n*(Note: pre-existing test failures in unedited files `workspaceStore.test.tsx`, `workspaceStore.tabDrop.test.tsx`, and `TerminalSplitView.tabDropFallback.test.tsx` were left untouched per instructions).*\n\n### Changed Files\n- `ui/src/components/ProjectDialogs.tsx`\n- `ui/src/components/ProjectDialogs.test.tsx`\n\n### Deviations\nNone."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}

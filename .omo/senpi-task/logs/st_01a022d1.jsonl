@@ -105,3 +105,5 @@
 {"type":"child_error","payload":{"message":"429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"},\"request_id\":\"req_011CeFN5UNJRtE2ScCfrCJ9k\"} (retry-after-ms: 13458000)","stop_reason":"error"}}
 {"type":"retry_fallback_exhausted","payload":{"chain_key":"opencode-go/kimi-k3","last_error":"429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"},\"request_id\":\"req_011CeFN5UNJRtE2ScCfrCJ9k\"} (retry-after-ms: 13458000)"}}
 {"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"new"}}

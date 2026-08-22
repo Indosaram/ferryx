@@ -16,10 +16,11 @@ const worktree: Worktree = {
 };
 
 describe("registered project workspace scope", () => {
-  it("spawns terminal sessions with the selected registered workspace id", async () => {
+  it("spawns terminal sessions with the selected registered workspace id and worktree-root cwd", async () => {
     const services: WorkspaceServices = {
       ensureTerminalEvents: vi.fn(async () => undefined),
       spawnTerminal: vi.fn(async () => "backend-1"),
+      getTerminalCwd: vi.fn(async () => worktree.path),
       closeTerminal: vi.fn(async () => undefined),
       waitForTerminalExit: vi.fn(async () => undefined),
     };
@@ -34,6 +35,7 @@ describe("registered project workspace scope", () => {
     expect(services.spawnTerminal).toHaveBeenCalledWith({
       workspaceId: "project-a",
       worktree: { wsId: "project-a", slug: "main" },
+      cwd: "/repo/main",
     });
     expect(Object.values(result.current.state.sessions)[0]).toMatchObject({ workspaceId: "project-a" });
   });

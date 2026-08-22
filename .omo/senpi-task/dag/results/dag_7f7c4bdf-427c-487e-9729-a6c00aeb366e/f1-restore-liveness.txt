@@ -1,0 +1,103 @@
+> I read this as fixing audit defect F1 where restored terminal tabs attach to dead PTY sessions on app restart - inspect current codebase, add failing tests (RED), implement liveness check / respawn fix, verify tests pass (GREEN), typecheck clean.
+
+### Summary of Changes
+
+1. **Session Persistence Liveness Support (`ui/src/lib/sessionPersistence.ts`)**:
+   - Updated `deserializeWorkspaceState` to accept an optional `liveBackendSessionIds` parameter (`Iterable<string> | null`).
+   - When `liveBackendSessionIds` is provided, any restored session whose `backendSessionId` is not in the live set receives `backendSessionId: null`, signaling that its backend PTY is dead.
+
+2. **Transport Wiring & Respawn on Restore (`ui/src/App.tsx`)**:
+   - Wired `defaultTauriTransport.listSessions()` from `ui/src/lib/terminalTransport/tauriTransport.ts` into the startup restore flow.
+   - Restores workspace tabs immediately with dead sessions marked as `backendSessionId: null`.
+   - Iterates through dead sessions (`!sess.backendSessionId`) and respawns them via `spawnTerminal({ workspaceId, worktree })`, updates `backendSessionId` to the newly spawned session, and updates the workspace store. Live sessions during dev/HMR are preserved without redundant respawns.
+
+3. **Transport & Component Tests (`ui/src/lib/sessionPersistence.test.ts`, `ui/src/lib/terminalTransport/terminalTransport.test.ts`, `ui/src/App.test.tsx`)**:
+   - Added unit test asserting `deserializeWorkspaceState` nulls `backendSessionId` when not present in live backend sessions.
+   - Added unit test asserting `TauriTerminalTransport.listSessions()` queries `listTerminalSessions()` and maps the session summaries.
+   - Added integration tests for `App.tsx` verifying:
+     - Dead terminal sessions are respawned on app restart.
+     - Live backend sessions are preserved without respawning on dev/HMR.
+     - Split pane layouts with mixed live and dead sessions respawn only the dead sessions.
+
+---
+
+### RED Test Output
+
+From running `bun test src/lib/sessionPersistence.test.ts` before the fix:
+
+```
+bun test v1.4.0 (34cbb9a40)
+
+src/lib/sessionPersistence.test.ts:
+(pass) sessionPersistence serialization and tab-group support > serializes workspace state including nested pane trees and active tab metadata [0.39ms]
+(pass) sessionPersistence serialization and tab-group support > round-trips Orca-style split tab groups so moved tab handles survive app restart [0.32ms]
+133 |     const liveBackendSessionIds = new Set(["sess-1"]);
+134 |     const restored = deserializeWorkspaceState("default", serialized, liveBackendSessionIds);
+135 | 
+136 |     expect(restored).not.toBeNull();
+137 |     expect(restored!.sessions["sess-1"].backendSessionId).toBe("sess-1");
+138 |     expect(restored!.sessions["sess-2"].backendSessionId).toBeNull();
+                                                                ^
+error: expect(received).toBeNull()
+
+Received: "sess-2"
+
+      at <anonymous> (/Users/indo/code/project/orca-lite/ui/src/lib/sessionPersistence.test.ts:138:59)
+(fail) sessionPersistence serialization and tab-group support > nulls backendSessionId for sessions not present in live backend sessions set on restore [1.59ms]
+
+ 2 pass
+ 1 fail
+ 21 expect() calls
+Ran 3 tests across 1 file. [15.00ms]
+```
+
+From running vitest on `src/App.test.tsx` before fixing the restore handler:
+
+```
+ FAIL  src/App.test.tsx > App project workspace flow > re-spawns dead terminal sessions when restoring after app restart
+AssertionError: expected "spy" to be called at least once
+
+ ❯ src/App.test.tsx:499:54
+    497|     render(<App />);
+    498| 
+    499|     await waitFor(() => expect(native.spawnTerminal).toHaveBeenCalled());
+```
+
+---
+
+### GREEN Test Output
+
+From running vitest on the affected test files:
+
+```
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/App.test.tsx (13 tests) 294ms
+ ✓ src/lib/sessionPersistence.test.ts (3 tests) 3ms
+ ✓ src/lib/terminalTransport/terminalTransport.test.ts (3 tests) 2ms
+
+ Test Files  3 passed (3)
+      Tests  19 passed (19)
+   Start at  09:45:06
+   Duration  2.09s (transform 101ms, setup 186ms, collect 575ms, tests 299ms, environment 499ms, prepare 75ms)
+```
+
+---
+
+### Files Changed
+
+- `ui/src/App.tsx`
+- `ui/src/App.test.tsx`
+- `ui/src/lib/sessionPersistence.ts`
+- `ui/src/lib/sessionPersistence.test.ts`
+- `ui/src/lib/terminalTransport/terminalTransport.test.ts`
+
+---
+
+### Commands Run & Exit Codes
+
+- `cd /Users/indo/code/project/orca-lite/ui && bun test src/lib/sessionPersistence.test.ts` (Exit Code: `1` [RED], then `0` [GREEN])
+- `cd /Users/indo/code/project/orca-lite/ui && bunx vitest run src/lib/terminalTransport/terminalTransport.test.ts` (Exit Code: `0`)
+- `cd /Users/indo/code/project/orca-lite/ui && bunx vitest run src/App.test.tsx` (Exit Code: `0`)
+- `cd /Users/indo/code/project/orca-lite/ui && bunx vitest run src/lib/sessionPersistence.test.ts src/lib/terminalTransport/terminalTransport.test.ts src/App.test.tsx` (Exit Code: `0`)
+- LSP diagnostics on all changed files: 0 errors/warnings.

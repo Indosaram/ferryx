@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { getMigratedItem, NOTIFICATION_SETTINGS_STORAGE_KEY } from "./storageKeys";
+
 export interface NotificationSettings {
   enabled: boolean;
   agentTaskComplete: boolean;
@@ -9,7 +11,7 @@ export interface NotificationSettings {
   customSoundVolume: number;
 }
 
-export const NOTIFICATION_SETTINGS_STORAGE_KEY = "rorca:settings:notifications:v1";
+export { NOTIFICATION_SETTINGS_STORAGE_KEY };
 export const NOTIFICATION_SETTINGS_EVENT = "rorca:notifications:settings-changed";
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
@@ -26,7 +28,7 @@ export function loadNotificationSettings(): NotificationSettings {
     return { ...DEFAULT_NOTIFICATION_SETTINGS };
   }
   try {
-    const raw = localStorage.getItem(NOTIFICATION_SETTINGS_STORAGE_KEY);
+    const raw = getMigratedItem(NOTIFICATION_SETTINGS_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_NOTIFICATION_SETTINGS };
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return { ...DEFAULT_NOTIFICATION_SETTINGS };

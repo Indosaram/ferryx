@@ -84,6 +84,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         SpawnTerminalRequest {
             workspace_id: "workspace-a".into(),
             worktree: Some(identity.clone()),
+            cwd: None,
             cols: Some(80),
             rows: Some(24),
         },
@@ -95,8 +96,17 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .state::<Arc<PtyManager>>()
         .get_session(&spawned.session_id)
         .expect("session");
-    assert_eq!(session.writer_worktree(), Some(canonical_created.clone()));
-    assert_eq!(session.writer_owner_id(), Some(spawned.session_id.clone()));
+    assert_eq!(session.worktree_path(), Some(canonical_created.clone()));
+    let (worktree_manager, _) = registry
+        .resolve_terminal_target("workspace-a", Some(&identity))
+        .expect("resolve worktree manager");
+    assert_eq!(
+        worktree_manager
+            .writer_owner(&canonical_created)
+            .expect("writer owner query"),
+        None,
+        "interactive terminals must not consume the exclusive writer lease"
+    );
 
     cmd_terminal_close(app.state::<Arc<TerminalService>>(), spawned.session_id)
         .await

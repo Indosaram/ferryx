@@ -5,8 +5,12 @@ import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
 import { TerminalSplitView } from "./TerminalSplitView";
 
 vi.mock("./TerminalPane", () => ({
-  TerminalPane: ({ session }: { session: TerminalSession }) => (
-    <div data-testid="terminal-pane" data-backend-session-id={session.backendSessionId ?? session.id} />
+  TerminalPane: ({ session, searchOpen }: { session: TerminalSession; searchOpen?: boolean }) => (
+    <div
+      data-testid="terminal-pane"
+      data-backend-session-id={session.backendSessionId ?? session.id}
+      data-search-open={String(Boolean(searchOpen))}
+    />
   ),
 }));
 
@@ -20,6 +24,7 @@ function session(id: string, backendSessionId: string): TerminalSession {
   return {
     id,
     cwd: "/repo",
+    worktreePath: "/repo",
     workspaceId: "ws-main",
     worktree: { wsId: "ws-main", slug: "main" },
     backendSessionId,
@@ -42,35 +47,59 @@ function singleTabLayout(tabId = "tab-1", sessionId = "session-1", leafId = "lea
   };
 }
 
-describe("TerminalSplitView with per-tab tree splits and drag handles", () => {
-  it("renders a single pane with move handle and split controls", () => {
-    const layout = singleTabLayout();
-    const sessions = { "session-1": session("session-1", "backend-1") };
+function splitLayout(): LayoutState {
+  const primary = tab("tab-1", "session-1");
+  return {
+    tabs: [primary],
+    activeTabId: "tab-1",
+    layoutsByTabId: {
+      "tab-1": {
+        root: {
+          type: "split",
+          direction: "horizontal",
+          first: { type: "leaf", leafId: "leaf-1" },
+          second: { type: "leaf", leafId: "leaf-2" },
+          ratio: 0.5,
+        },
+        activeLeafId: "leaf-1",
+        expandedLeafId: null,
+        sessionIdsByLeafId: { "leaf-1": "session-1", "leaf-2": "session-2" },
+      },
+    },
+  };
+}
 
-    render(<TerminalSplitView layout={layout} sessions={sessions} />);
+function splitSessions() {
+  return {
+    "session-1": session("session-1", "backend-1"),
+    "session-2": session("session-2", "backend-2"),
+  };
+}
 
+describe("TerminalSplitView group and pane rendering", () => {
+  it("renders a single tab group with a pane move handle and split controls", () => {
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
+
+    expect(screen.getByTestId("tab-group-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("tab-strip")).toBeInTheDocument();
     expect(screen.getByTestId("pane-leaf")).toBeInTheDocument();
     expect(screen.getByTestId("pane-toolbar")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Split pane right" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Split pane down" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close split view" })).not.toBeInTheDocument();
-    expect(screen.getByTestId("pane-toolbar")).toHaveClass("z-30");
-    expect(screen.getByTestId("pane-toolbar-hotspot")).toHaveClass("z-20");
   });
 
-  it("keeps the tab bar usable when all tabs have been closed", () => {
+  it("keeps an empty tab bar usable when all tabs have been closed", () => {
     const onAddTab = vi.fn();
     const layout: LayoutState = { tabs: [], activeTabId: null, layoutsByTabId: {} };
-
     render(<TerminalSplitView layout={layout} sessions={{}} onAddTab={onAddTab} />);
 
-    expect(screen.getByTestId("tab-strip")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
     fireEvent.click(screen.getByRole("button", { name: /New Terminal/i }));
     expect(onAddTab).toHaveBeenCalledOnce();
   });
 
-  it("renders a nested horizontal and vertical split tree with resize dividers", () => {
+  it("renders a nested terminal-pane tree inside one tab group with resize dividers", () => {
     const primary = tab("tab-1", "session-1");
     const layout: LayoutState = {
       tabs: [primary],
@@ -107,27 +136,28 @@ describe("TerminalSplitView with per-tab tree splits and drag handles", () => {
     };
 
     render(<TerminalSplitView layout={layout} sessions={sessions} />);
-
     expect(screen.getAllByTestId("pane-leaf")).toHaveLength(3);
     expect(screen.getAllByTestId("pane-toolbar")).toHaveLength(3);
     expect(screen.getAllByRole("separator", { name: "Resize terminal panes" })).toHaveLength(2);
   });
 
-  it("dispatches split actions from pane toolbar buttons", () => {
-    const layout = singleTabLayout();
-    const sessions = { "session-1": session("session-1", "backend-1") };
+  it("dispatches terminal-pane split actions from pane toolbar buttons", () => {
     const onSplitPane = vi.fn();
-
-    render(<TerminalSplitView layout={layout} sessions={sessions} onSplitPane={onSplitPane} />);
+    render(
+      <TerminalSplitView
+        layout={singleTabLayout()}
+        sessions={{ "session-1": session("session-1", "backend-1") }}
+        onSplitPane={onSplitPane}
+      />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Split pane right" }));
     expect(onSplitPane).toHaveBeenCalledWith("tab-1", "leaf-1", "horizontal");
-
     fireEvent.click(screen.getByRole("button", { name: "Split pane down" }));
     expect(onSplitPane).toHaveBeenCalledWith("tab-1", "leaf-1", "vertical");
   });
 
-  it("routes a tab context-menu split to that tab's own focused leaf", () => {
+  it("routes a tab context-menu split to that tab's own focused terminal leaf", () => {
     const layout: LayoutState = {
       tabs: [tab("tab-1", "session-1"), tab("tab-2", "session-2")],
       activeTabId: "tab-1",
@@ -152,124 +182,48 @@ describe("TerminalSplitView with per-tab tree splits and drag handles", () => {
         },
       },
     };
-    const sessions = {
-      "session-1": session("session-1", "backend-1"),
-      "session-2": session("session-2", "backend-2"),
-    };
     const onSplitPane = vi.fn();
-
-    render(<TerminalSplitView layout={layout} sessions={sessions} onSplitPane={onSplitPane} />);
+    render(<TerminalSplitView layout={layout} sessions={splitSessions()} onSplitPane={onSplitPane} />);
 
     fireEvent.contextMenu(screen.getByText("tab-2"));
     fireEvent.click(screen.getByRole("menuitem", { name: /Split terminal right/i }));
     expect(onSplitPane).toHaveBeenCalledWith("tab-2", "leaf-b-bottom", "horizontal");
   });
 
-  it("does not start pane dragging from toolbar controls", () => {
-    const primary = tab("tab-1", "session-1");
-    const layout: LayoutState = {
-      tabs: [primary],
-      activeTabId: "tab-1",
-      layoutsByTabId: {
-        "tab-1": {
-          root: {
-            type: "split",
-            direction: "horizontal",
-            first: { type: "leaf", leafId: "leaf-1" },
-            second: { type: "leaf", leafId: "leaf-2" },
-            ratio: 0.5,
-          },
-          activeLeafId: "leaf-1",
-          expandedLeafId: null,
-          sessionIdsByLeafId: { "leaf-1": "session-1", "leaf-2": "session-2" },
-        },
-      },
-    };
-    const sessions = {
-      "session-1": session("session-1", "backend-1"),
-      "session-2": session("session-2", "backend-2"),
-    };
-    const onSwapPanes = vi.fn();
+  it("exposes pane drags through dnd-kit metadata and keeps toolbar controls as non-native drags", () => {
+    render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} />);
 
-    render(<TerminalSplitView layout={layout} sessions={sessions} onSwapPanes={onSwapPanes} />);
-
-    fireEvent.dragStart(screen.getAllByRole("button", { name: "Split pane right" })[0], {
-      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
-    });
-    const panes = screen.getAllByTestId("pane-leaf");
-    fireEvent.dragOver(panes[1], { dataTransfer: { dropEffect: "" } });
-    fireEvent.drop(panes[1]);
-    expect(onSwapPanes).not.toHaveBeenCalled();
+    for (const pane of screen.getAllByTestId("pane-leaf")) {
+      expect(pane).toHaveAttribute("data-dnd-type", "pane-leaf");
+      expect(pane).not.toHaveAttribute("draggable", "true");
+    }
+    for (const toolbar of screen.getAllByTestId("pane-toolbar")) {
+      expect(toolbar).toHaveAttribute("data-dnd-type", "pane");
+      expect(toolbar).not.toHaveAttribute("draggable", "true");
+    }
+    expect(screen.getAllByRole("button", { name: "Split pane right" })[0]).not.toHaveAttribute("draggable", "true");
   });
 
-  it("handles drag-and-drop swap between panes", () => {
-    const primary = tab("tab-1", "session-1");
-    const layout: LayoutState = {
-      tabs: [primary],
-      activeTabId: "tab-1",
-      layoutsByTabId: {
-        "tab-1": {
-          root: {
-            type: "split",
-            direction: "horizontal",
-            first: { type: "leaf", leafId: "leaf-1" },
-            second: { type: "leaf", leafId: "leaf-2" },
-            ratio: 0.5,
-          },
-          activeLeafId: "leaf-1",
-          expandedLeafId: null,
-          sessionIdsByLeafId: { "leaf-1": "session-1", "leaf-2": "session-2" },
-        },
-      },
-    };
-    const sessions = {
-      "session-1": session("session-1", "backend-1"),
-      "session-2": session("session-2", "backend-2"),
-    };
-    const onSwapPanes = vi.fn();
+  it("renders dnd-kit group body and all four edge split drop zones", () => {
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
 
-    render(<TerminalSplitView layout={layout} sessions={sessions} onSwapPanes={onSwapPanes} />);
-
-    const toolbars = screen.getAllByTestId("pane-toolbar");
-    const panes = screen.getAllByTestId("pane-leaf");
-
-    fireEvent.dragStart(toolbars[0], {
-      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
-    });
-    fireEvent.dragOver(panes[1], { dataTransfer: { dropEffect: "" } });
-    fireEvent.drop(panes[1]);
-
-    expect(onSwapPanes).toHaveBeenCalledWith("tab-1", "leaf-1", "leaf-2");
+    expect(document.querySelector('[data-dnd-type="group-body"]')).toBeInTheDocument();
+    const edges = screen.getAllByTestId("tab-group-edge-drop-zone");
+    expect(edges).toHaveLength(4);
+    expect(new Set(edges.map((edge) => edge.getAttribute("data-drop-edge")))).toEqual(
+      new Set(["left", "right", "top", "bottom"]),
+    );
   });
 
-  it("falls back to an even ratio when a resize container is smaller than two minimum panes", () => {
-    const primary = tab("tab-1", "session-1");
-    const layout: LayoutState = {
-      tabs: [primary],
-      activeTabId: "tab-1",
-      layoutsByTabId: {
-        "tab-1": {
-          root: {
-            type: "split",
-            direction: "horizontal",
-            first: { type: "leaf", leafId: "leaf-1" },
-            second: { type: "leaf", leafId: "leaf-2" },
-            ratio: 0.8,
-          },
-          activeLeafId: "leaf-1",
-          expandedLeafId: null,
-          sessionIdsByLeafId: { "leaf-1": "session-1", "leaf-2": "session-2" },
-        },
-      },
-    };
-    const sessions = {
-      "session-1": session("session-1", "backend-1"),
-      "session-2": session("session-2", "backend-2"),
-    };
+  it("falls back to an even ratio when a terminal-pane resize container is too small", () => {
     const onSetRatio = vi.fn();
+    const layout = splitLayout();
+    layout.layoutsByTabId["tab-1"].root = {
+      ...layout.layoutsByTabId["tab-1"].root,
+      ratio: 0.8,
+    } as typeof layout.layoutsByTabId["tab-1"]["root"];
 
-    render(<TerminalSplitView layout={layout} sessions={sessions} onSetRatio={onSetRatio} />);
-
+    render(<TerminalSplitView layout={layout} sessions={splitSessions()} onSetRatio={onSetRatio} />);
     const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
     const parent = divider.parentElement as HTMLElement;
     vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
@@ -288,5 +242,15 @@ describe("TerminalSplitView with per-tab tree splits and drag handles", () => {
     fireEvent.pointerMove(window, { clientX: 110, clientY: 20 });
     fireEvent.pointerUp(window);
     expect(onSetRatio).toHaveBeenCalledWith("tab-1", "", 0.5);
+  });
+
+  it("passes searchOpen true only to the pane matching searchLeafId", () => {
+    const layout = singleTabLayout("tab-1", "session-1", "leaf-1");
+    const sessions = { "session-1": session("session-1", "backend-1") };
+
+    const { rerender } = render(<TerminalSplitView layout={layout} sessions={sessions} searchLeafId="leaf-other" />);
+    expect(screen.getByTestId("terminal-pane")).toHaveAttribute("data-search-open", "false");
+    rerender(<TerminalSplitView layout={layout} sessions={sessions} searchLeafId="leaf-1" />);
+    expect(screen.getByTestId("terminal-pane")).toHaveAttribute("data-search-open", "true");
   });
 });

@@ -9,15 +9,19 @@ import {
 } from "./terminalRendererMetrics";
 
 export async function loadTerminalAssets() {
-  const [xtermModule, fitModule] = await Promise.all([
+  const [xtermModule, fitModule, unicode11Module, searchModule] = await Promise.all([
     import("@xterm/xterm"),
     import("@xterm/addon-fit"),
+    import("@xterm/addon-unicode11"),
+    import("@xterm/addon-search"),
     import("@xterm/xterm/css/xterm.css"),
   ]);
 
   return {
     Terminal: xtermModule.Terminal,
     FitAddon: fitModule.FitAddon,
+    Unicode11Addon: unicode11Module.Unicode11Addon,
+    SearchAddon: searchModule.SearchAddon,
   };
 }
 

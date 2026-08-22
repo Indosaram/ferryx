@@ -11,6 +11,39 @@ const DONE_RE = /\b(done|completed?|finished|idle)\b/i;
 const DONE_GLYPH_RE = /^[◇*](?:\s|$)/u;
 const WORKING_RE = /\b(working|thinking|running|executing|processing)\b/i;
 
+const SHELL_ONLY_RE = /^(?:-?(?:zsh|bash|fish|sh|csh|tcsh|dash|ksh|login|tmux|screen))$/i;
+
+export interface KnownAgent {
+  pattern: RegExp;
+  type: string;
+  name: string;
+}
+
+export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
+  { pattern: /\b(?:agy|antigravity)\b/i, type: "antigravity", name: "Antigravity" },
+  { pattern: /\bomo\b/i, type: "omo", name: "OMO" },
+  { pattern: /\b(?:claude code|claude)\b/i, type: "claude", name: "Claude Code" },
+  { pattern: /\bcodex\b/i, type: "codex", name: "Codex" },
+  { pattern: /\bopencode\b/i, type: "opencode", name: "OpenCode" },
+  { pattern: /\b(?:omp|oh-my-pi)\b/i, type: "omp", name: "OMP" },
+  { pattern: /\bpi\b/i, type: "pi", name: "Pi" },
+  { pattern: /\baider\b/i, type: "aider", name: "Aider" },
+  { pattern: /\bcursor\b/i, type: "cursor", name: "Cursor" },
+  { pattern: /\bgemini\b/i, type: "gemini", name: "Gemini CLI" },
+  { pattern: /\bgrok\b/i, type: "grok", name: "Grok" },
+  { pattern: /\bdevin\b/i, type: "devin", name: "Devin" },
+  { pattern: /\bdroid\b/i, type: "droid", name: "Droid" },
+  { pattern: /\bhermes\b/i, type: "hermes", name: "Hermes" },
+  { pattern: /\bkimi\b/i, type: "kimi", name: "Kimi" },
+  { pattern: /\bgoose\b/i, type: "goose", name: "Goose" },
+  { pattern: /\bcline\b/i, type: "cline", name: "Cline" },
+  { pattern: /\bcodebuff\b/i, type: "codebuff", name: "Codebuff" },
+  { pattern: /\brovo\b/i, type: "rovo", name: "Rovo" },
+  { pattern: /\bopenclaw\b/i, type: "openclaw", name: "OpenClaw" },
+  { pattern: /\bcopilot\b/i, type: "copilot", name: "GitHub Copilot" },
+  { pattern: /\bmimo\b/i, type: "mimo", name: "Mimo" },
+];
+
 export type ParsedAgentInfo = {
   isAgent: boolean;
   agentType: string;
@@ -22,18 +55,17 @@ export type ParsedAgentInfo = {
 
 export function normalizeTerminalTitle(rawTitle: string): string {
   if (!rawTitle) return "";
-  return rawTitle.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHARS_RE, "").trim();
+  return rawTitle
+    .replace(/^\u001b\][0-9];|\u0007$/g, "")
+    .replace(ANSI_ESCAPE_RE, "")
+    .replace(CONTROL_CHARS_RE, "")
+    .trim();
 }
 
 export function containsAgentSpinnerGlyph(rawTitle: string): boolean {
   return AGENT_SPINNER_RE.test(normalizeTerminalTitle(rawTitle));
 }
 
-/**
- * Classifies the activity encoded in a terminal OSC title. Attention and completion keywords
- * intentionally outrank spinner glyphs because several agents leave their spinner prefix in the
- * title while presenting a permission prompt or final completion state.
- */
 export function classifyTerminalTitleActivity(rawTitle: string): TerminalActivityState | null {
   const normalized = normalizeTerminalTitle(rawTitle);
   if (!normalized) return null;
@@ -41,15 +73,25 @@ export function classifyTerminalTitleActivity(rawTitle: string): TerminalActivit
   if (normalized.includes("✋") || WAITING_RE.test(normalized)) return "waiting";
   if (DONE_RE.test(normalized) || DONE_GLYPH_RE.test(normalized)) return "done";
   if (containsAgentSpinnerGlyph(normalized) || WORKING_RE.test(normalized)) return "working";
+
+  const cleaned = stripLeadingActivityGlyphs(normalized);
+
+  if (SHELL_ONLY_RE.test(cleaned)) {
+    return null;
+  }
+
+  // An agent-name-only title carries no activity signal: the agent is present
+  // but idle, so it must NOT be classified as working (Orca parity).
   return null;
 }
 
-function resolveParsedAgentState(normalized: string, fallback: AgentState = "waiting"): AgentState {
+function resolveParsedAgentState(normalized: string): AgentState {
   const activity = classifyTerminalTitleActivity(normalized);
-  return activity ? activityStateToAgentState(activity) : fallback;
+  // No signal means idle: report neutral "starting" so no indicator spins.
+  return activity ? activityStateToAgentState(activity) : "starting";
 }
 
-function stripLeadingActivityGlyphs(title: string) {
+export function stripLeadingActivityGlyphs(title: string): string {
   return title.replace(LEADING_ACTIVITY_GLYPHS_RE, "").trim();
 }
 
@@ -57,77 +99,45 @@ export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {
   const normalized = normalizeTerminalTitle(rawTitle);
   if (!normalized) return null;
 
-  const lower = normalized.toLowerCase();
+  const withoutSpinner = stripLeadingActivityGlyphs(normalized);
 
-  const isOmo = /\bomo\b/i.test(lower);
-  if (isOmo) {
-    const withoutSpinner = stripLeadingActivityGlyphs(normalized);
-    const taskMatch = /^omo\s*[:\-–—|]?\s*(.*)$/i.exec(withoutSpinner);
-    const task = taskMatch && taskMatch[1]?.trim() ? taskMatch[1].trim() : withoutSpinner;
-
-    return {
-      isAgent: true,
-      agentType: "omo",
-      name: "OMO",
-      task: task || "OMO Agent",
-      state: resolveParsedAgentState(normalized),
-      displayTitle: normalized,
-    };
-  }
-
-  if (
-    normalized.startsWith("✳ ") ||
-    normalized === "✳" ||
-    /\bclaude\b/i.test(lower) ||
-    lower.includes("claude code")
-  ) {
-    const withoutSpinner = stripLeadingActivityGlyphs(normalized);
+  if (normalized === "✳" || (normalized.startsWith("✳ ") && !withoutSpinner)) {
     return {
       isAgent: true,
       agentType: "claude",
       name: "Claude Code",
-      task: withoutSpinner || "Claude Code",
+      task: "Claude Code",
       state: resolveParsedAgentState(normalized),
       displayTitle: normalized,
     };
   }
 
-  if (/\bcodex\b/i.test(lower)) {
-    const withoutSpinner = stripLeadingActivityGlyphs(normalized);
-    return {
-      isAgent: true,
-      agentType: "codex",
-      name: "Codex",
-      task: withoutSpinner || "Codex",
-      state: resolveParsedAgentState(normalized),
-      displayTitle: normalized,
-    };
-  }
+  for (const agent of KNOWN_AGENT_MATCHERS) {
+    const taskPattern = new RegExp(`^(?:${agent.pattern.source})\\s*[:\\-–—|]?\\s*(.*)$`, "i");
+    const taskMatch = taskPattern.exec(withoutSpinner);
+    if (taskMatch) {
+      const extractedTask = taskMatch[1]?.trim() ? taskMatch[1].trim() : withoutSpinner;
 
-  const knownAgents: Array<{ pattern: RegExp; type: string; name: string }> = [
-    { pattern: /\bopencode\b/i, type: "opencode", name: "OpenCode" },
-    { pattern: /\b(omp|oh-my-pi)\b/i, type: "omp", name: "OMP" },
-    { pattern: /\bpi\b/i, type: "pi", name: "Pi" },
-    { pattern: /\baider\b/i, type: "aider", name: "Aider" },
-    { pattern: /\bcursor\b/i, type: "cursor", name: "Cursor" },
-    { pattern: /\bgemini\b/i, type: "gemini", name: "Gemini CLI" },
-    { pattern: /\bgrok\b/i, type: "grok", name: "Grok" },
-    { pattern: /\bdevin\b/i, type: "devin", name: "Devin" },
-    { pattern: /\bdroid\b/i, type: "droid", name: "Droid" },
-  ];
-
-  for (const agent of knownAgents) {
-    if (agent.pattern.test(lower)) {
-      const withoutSpinner = stripLeadingActivityGlyphs(normalized);
       return {
         isAgent: true,
         agentType: agent.type,
         name: agent.name,
-        task: withoutSpinner || agent.name,
+        task: extractedTask || agent.name,
         state: resolveParsedAgentState(normalized),
         displayTitle: normalized,
       };
     }
+  }
+
+  if (containsAgentSpinnerGlyph(normalized) && withoutSpinner) {
+    return {
+      isAgent: true,
+      agentType: "generic",
+      name: withoutSpinner.split(/\s+/)[0] || "Agent",
+      task: withoutSpinner,
+      state: resolveParsedAgentState(normalized),
+      displayTitle: normalized,
+    };
   }
 
   return {
@@ -135,7 +145,7 @@ export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {
     agentType: "terminal",
     name: normalized,
     task: normalized,
-    state: "working",
+    state: resolveParsedAgentState(normalized),
     displayTitle: normalized,
   };
 }

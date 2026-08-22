@@ -4,22 +4,39 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { AddProjectDialog, AddWorktreeDialog } from "./components/ProjectDialogs";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { Sidebar, SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY } from "./components/Sidebar";
+import { Sidebar } from "./components/Sidebar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { IconButton } from "./components/ui/IconButton";
-import { serializeWorkspaceState } from "./lib/sessionPersistence";
+import { deserializeWorkspaceState, serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
-import { DEFAULT_WORKSPACE_ID, getWorktreeStatus, loadSession, registerProject, saveSession, type RegisteredProject } from "./lib/tauri";
-import { worktreeIdentity, type DirtyState, type Worktree } from "./lib/types";
+import {
+  ACTIVE_PROJECT_STORAGE_KEY,
+  getMigratedItem,
+  PROJECTS_STORAGE_KEY,
+  SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
+  SIDEBAR_OPEN_STORAGE_KEY,
+} from "./lib/storageKeys";
+import {
+  DEFAULT_WORKSPACE_ID,
+  getWorktreeStatus,
+  loadSession,
+  onNewTerminalTabMenu,
+  registerProject,
+  saveSession,
+  spawnTerminal,
+  type RegisteredProject,
+} from "./lib/tauri";
+import { ensureTerminalEvents } from "./lib/terminalEvents";
+import { useTerminalSettings } from "./lib/terminalSettings";
+import { defaultTauriTransport } from "./lib/terminalTransport/tauriTransport";
+import { worktreeIdentity, type DirtyState, type WorkspaceTab, type Worktree } from "./lib/types";
 import { registerWindowCloseGuard } from "./lib/updater";
-import type { PaneDirection } from "./state/paneTree";
+import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore } from "./state/workspaceStore";
 
-const PROJECTS_STORAGE_KEY = "rorca.projects";
-const ACTIVE_PROJECT_STORAGE_KEY = "rorca.active-project";
-export const SIDEBAR_OPEN_STORAGE_KEY = "orca.sidebar.open";
+export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: "." };
 
 export function App() {
@@ -46,6 +63,9 @@ export function App() {
     closeTabsToRight,
     closeTabsToLeft,
     splitPane,
+    moveTabToGroup,
+    moveTabToSplit,
+    detachPaneToTab,
     closePane,
     activateTab,
     reorderTab,
@@ -53,8 +73,10 @@ export function App() {
     setTabPinned,
     focusPane,
     setPaneRatio,
+    setTabGroupRatio,
     swapPanes,
     syncWorktrees,
+    restoreWorkspace,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
   const { runtimeError, refreshWorktrees, reportRuntimeError } = useWorkspaceRuntime({
     workspaceId: activeProject.workspaceId,
@@ -72,86 +94,115 @@ export function App() {
       .catch(reportRuntimeError);
   }, [activeProject.repoRoot, activeProject.workspaceId, refreshWorktrees, reportRuntimeError]);
 
-  // Initial session restore on startup
+  // Initial session restore on startup & HMR recovery.
   useEffect(() => {
     let cancelled = false;
     async function restore() {
       try {
         const session = await loadSession();
         if (cancelled || !session) return;
-        const ws = session.workspaces?.[activeProject.workspaceId];
-        if (!ws || !ws.layout?.tabs?.length) return;
 
-        for (const tab of ws.layout.tabs) {
-          if (cancelled) return;
-          const found = ws.worktrees?.find((candidate: any) => candidate.path === tab.worktreePath);
-          const wt: Worktree = found ? {
-            path: found.path,
-            head: found.head,
-            branch: found.branch,
-            bare: false,
-            detached: false,
-            locked: found.isLocked ? "locked" : null,
-            prunable: null,
-          } : {
-            path: tab.worktreePath || ws.repoRoot,
-            head: "",
-            branch: tab.label,
-            bare: false,
-            detached: false,
-            locked: null,
-            prunable: null,
-          };
-          try {
-            // Check if a tab for this worktree is already open to avoid redundant spawn / writer lock collision
-            const alreadyOpen = state.layout.tabs.some(
-              (t) => t.kind !== "browser" && state.sessions[t.sessionId]?.cwd === wt.path
-            );
-            if (!alreadyOpen) {
-              await ensureTabForWorktree(wt);
+        const liveSessions = await defaultTauriTransport.listSessions().catch(() => []);
+        const liveBackendIds = new Set(liveSessions.map((candidate) => candidate.sessionId));
+        const restoredState = deserializeWorkspaceState(activeProject.workspaceId, session, liveBackendIds);
+
+        if (restoredState && restoredState.layout.tabs.length > 0) {
+          restoreWorkspace(restoredState);
+
+          // A persisted local session can outlive its native PTY. Respawn only the dead
+          // native side while preserving the local session/leaf ownership graph.
+          const deadSessions = Object.values(restoredState.sessions).filter((candidate) => !candidate.backendSessionId);
+          if (deadSessions.length > 0) {
+            let hasSpawned = false;
+            await ensureTerminalEvents().catch(() => undefined);
+            for (const restoredSession of deadSessions) {
+              if (cancelled) return;
+              try {
+                const worktreePath = restoredSession.worktreePath ?? restoredSession.cwd;
+                const foundWorktree = restoredState.worktrees.find((worktree) => worktree.path === worktreePath);
+                const backendSessionId = await spawnTerminal({
+                  workspaceId: activeProject.workspaceId,
+                  worktree: foundWorktree ? worktreeIdentity(foundWorktree) : null,
+                  cwd: restoredSession.cwd,
+                });
+                restoredSession.backendSessionId = backendSessionId;
+                restoredSession.lifecycle = "working";
+                hasSpawned = true;
+              } catch (error) {
+                console.warn("Failed to respawn terminal session on restore:", error);
+              }
             }
+
+            if (hasSpawned && !cancelled) restoreWorkspace({ ...restoredState });
+          }
+          // Typed v2 restoration already reconstructed every tab. Do not run the legacy
+          // per-worktree fallback as well or it can create duplicate terminal tabs.
+          return;
+        }
+
+        // Legacy best-effort fallback for sessions that cannot be deserialized as a
+        // workspace state. Browser records are skipped because they require explicit v2
+        // browser metadata and should never be guessed from terminal fields.
+        const workspace = session.workspaces?.[activeProject.workspaceId];
+        if (!workspace || !workspace.layout?.tabs?.length) return;
+        for (const persistedTab of workspace.layout.tabs) {
+          if (cancelled) return;
+          if (persistedTab.kind === "browser") continue;
+          const legacyWorktreePath = persistedTab.worktreePath || workspace.repoRoot;
+          const found = workspace.worktrees?.find((candidate) => candidate.path === legacyWorktreePath);
+          const worktree: Worktree = found
+            ? {
+                path: found.path,
+                head: found.head,
+                branch: found.branch,
+                bare: false,
+                detached: false,
+                locked: found.isLocked ? "locked" : null,
+                prunable: null,
+              }
+            : {
+                path: legacyWorktreePath,
+                head: "",
+                branch: persistedTab.label,
+                bare: false,
+                detached: false,
+                locked: null,
+                prunable: null,
+              };
+          try {
+            const alreadyOpen = state.layout.tabs.some((tab) => {
+              if (tab.kind === "browser") return false;
+              const localSession = state.sessions[tab.sessionId];
+              return (localSession?.worktreePath ?? localSession?.cwd) === worktree.path;
+            });
+            if (!alreadyOpen) await ensureTabForWorktree(worktree);
           } catch {
-            // Safe fallback if worktree terminal is already open
+            // Safe fallback if the terminal for this worktree is already open.
           }
         }
       } catch (error) {
         console.warn("Session restore on boot skipped:", error);
       }
     }
-    const timer = setTimeout(() => {
-      void restore();
-    }, 150);
+    void restore();
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
-  }, [activeProject.workspaceId, ensureTabForWorktree]);
+  }, [activeProject.workspaceId, ensureTabForWorktree, restoreWorkspace, state.layout.tabs, state.sessions]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
-      const session = serializeWorkspaceState(
-        activeProject.workspaceId,
-        activeProject.repoRoot,
-        state,
-      );
+      const session = serializeWorkspaceState(activeProject.workspaceId, activeProject.repoRoot, state);
       await saveSession(session);
     });
     return unregister;
   }, [activeProject.repoRoot, activeProject.workspaceId, state]);
 
-  // Debounced auto-save on workspace state changes (500ms)
   useEffect(() => {
-    // Do not save if tabs are empty (prevents overwriting session on unmounted / empty initial render)
     if (state.worktrees.length === 0 || state.layout.tabs.length === 0) return;
     const timer = setTimeout(() => {
-      const session = serializeWorkspaceState(
-        activeProject.workspaceId,
-        activeProject.repoRoot,
-        state,
-      );
-      void Promise.resolve(saveSession(session)).catch((error) =>
-        console.error("Failed to auto-save session:", error),
-      );
+      const session = serializeWorkspaceState(activeProject.workspaceId, activeProject.repoRoot, state);
+      void Promise.resolve(saveSession(session)).catch((error) => console.error("Failed to auto-save session:", error));
     }, 500);
     return () => clearTimeout(timer);
   }, [activeProject.repoRoot, activeProject.workspaceId, state]);
@@ -160,11 +211,10 @@ export function App() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
-  // A worktree picked from another project can only be activated once that project's worktrees
-  // have loaded into the store, so the request is parked here until the path shows up.
   const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
 
   const toggleSidebar = useCallback(() => {
@@ -187,7 +237,6 @@ export function App() {
       persistActiveProjectId(project.workspaceId);
       setWorktreeStatuses({});
       setDeleteTarget(null);
-      // Any selection parked for the previous project is abandoned by this switch.
       setPendingWorktreePath(null);
     },
     [activeProject.workspaceId],
@@ -206,8 +255,6 @@ export function App() {
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
-      // A worktree selected from another project's tree must switch the active project first,
-      // because the workspace store only ever holds the active project's worktrees.
       const ownerId = worktreeIdentity(worktree)?.wsId;
       const owner = ownerId ? projects.find((project) => project.workspaceId === ownerId) : undefined;
       if (owner && owner.workspaceId !== activeProject.workspaceId) {
@@ -237,7 +284,10 @@ export function App() {
         return;
       }
       const session = state.sessions[tab.sessionId];
-      const worktree = session ? state.worktrees.find((candidate) => candidate.path === session.cwd) : undefined;
+      const sessionWorktreePath = session?.worktreePath ?? session?.cwd;
+      const worktree = sessionWorktreePath
+        ? state.worktrees.find((candidate) => candidate.path === sessionWorktreePath)
+        : undefined;
       if (!worktree || worktree.path === state.activeWorktreePath) {
         activateTab(tabId);
         return;
@@ -266,6 +316,19 @@ export function App() {
     if (!activeWorktree) return;
     void openTab(activeWorktree).catch(reportRuntimeError);
   }, [activeWorktree, openTab, reportRuntimeError]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void onNewTerminalTabMenu(handleAddTerminalTab).then((dispose) => {
+      if (cancelled) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleAddTerminalTab]);
 
   const handleCloseTab = useCallback(
     (tabId: string) => {
@@ -297,13 +360,19 @@ export function App() {
 
   const handleCycleTab = useCallback(
     (offset: number) => {
-      const tabs = state.layout.tabs;
+      const focusedGroup = state.layout.focusedGroupId
+        ? state.layout.tabGroups?.[state.layout.focusedGroupId]
+        : undefined;
+      const tabById = new Map(state.layout.tabs.map((tab) => [tab.id, tab]));
+      const tabs: WorkspaceTab[] = focusedGroup
+        ? focusedGroup.tabIds.map((tabId) => tabById.get(tabId)).filter((tab): tab is WorkspaceTab => Boolean(tab))
+        : state.layout.tabs;
       if (tabs.length < 2) return;
       const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.id === state.layout.activeTabId));
       const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
       handleSelectTerminalTab(tabs[nextIndex].id);
     },
-    [handleSelectTerminalTab, state.layout.activeTabId, state.layout.tabs],
+    [handleSelectTerminalTab, state.layout.activeTabId, state.layout.focusedGroupId, state.layout.tabGroups, state.layout.tabs],
   );
 
   const handleSplitActive = useCallback(
@@ -326,9 +395,30 @@ export function App() {
     void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
   }, [closePane, reportRuntimeError, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs]);
 
-  // Cmd+1..9 walks the sidebar tree top to bottom: every expanded project contributes its
-  // worktrees in order, so the numbering matches exactly what the user can see. The accordion
-  // state lives in the sidebar and is read at press time so it can never go stale here.
+  const handleCyclePaneFocus = useCallback(
+    (offset: number) => {
+      const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+      if (!activeTab || activeTab.kind === "browser") return;
+      const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+      if (!activeLayout) return;
+      const leafIds = collectLeafIds(activeLayout.root);
+      if (leafIds.length < 2) return;
+      const activeLeafId = activeLayout.activeLeafId ?? leafIds[0];
+      const currentIndex = Math.max(0, leafIds.indexOf(activeLeafId));
+      const nextIndex = (currentIndex + offset + leafIds.length) % leafIds.length;
+      focusPane(activeTab.id, leafIds[nextIndex]);
+    },
+    [focusPane, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs],
+  );
+
+  const handleOpenTerminalSearch = useCallback(() => {
+    const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+    if (!activeTab || activeTab.kind === "browser") return;
+    const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+    const leafId = activeLayout?.activeLeafId ?? (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : "leaf-default");
+    setSearchLeafId(leafId);
+  }, [state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs]);
+
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
       const visible = listVisibleWorktrees(projects, state.worktrees, activeProject.workspaceId);
@@ -338,12 +428,31 @@ export function App() {
     [activeProject.workspaceId, handleSelectWorktree, projects, state.worktrees],
   );
 
+  const { settings: terminalSettings, updateSettings: updateTerminalSettings } = useTerminalSettings();
+
+  const handleZoomIn = useCallback(() => {
+    const nextSize = Math.min(36, terminalSettings.fontSize + 1);
+    updateTerminalSettings({ fontSize: nextSize });
+  }, [terminalSettings.fontSize, updateTerminalSettings]);
+
+  const handleZoomOut = useCallback(() => {
+    const nextSize = Math.max(10, terminalSettings.fontSize - 1);
+    updateTerminalSettings({ fontSize: nextSize });
+  }, [terminalSettings.fontSize, updateTerminalSettings]);
+
+  const handleZoomReset = useCallback(() => {
+    updateTerminalSettings({ fontSize: null });
+  }, [updateTerminalSettings]);
+
   const handleSelectTerminalTabByIndex = useCallback(
     (index: number) => {
-      const target = state.layout.tabs[index];
-      if (target) handleSelectTerminalTab(target.id);
+      const focusedGroup = state.layout.focusedGroupId
+        ? state.layout.tabGroups?.[state.layout.focusedGroupId]
+        : undefined;
+      const tabId = focusedGroup?.tabIds[index] ?? state.layout.tabs[index]?.id;
+      if (tabId) handleSelectTerminalTab(tabId);
     },
-    [handleSelectTerminalTab, state.layout.tabs],
+    [handleSelectTerminalTab, state.layout.focusedGroupId, state.layout.tabGroups, state.layout.tabs],
   );
 
   const shortcutHandlers = useMemo(
@@ -359,25 +468,47 @@ export function App() {
       "tab.select2": () => handleSelectTerminalTabByIndex(1),
       "tab.select3": () => handleSelectTerminalTabByIndex(2),
       "tab.select4": () => handleSelectTerminalTabByIndex(3),
+      "tab.select5": () => handleSelectTerminalTabByIndex(4),
+      "tab.select6": () => handleSelectTerminalTabByIndex(5),
+      "tab.select7": () => handleSelectTerminalTabByIndex(6),
+      "tab.select8": () => handleSelectTerminalTabByIndex(7),
+      "tab.select9": () => handleSelectTerminalTabByIndex(8),
       "workspace.select1": () => handleSelectWorktreeByIndex(0),
       "workspace.select2": () => handleSelectWorktreeByIndex(1),
       "workspace.select3": () => handleSelectWorktreeByIndex(2),
       "workspace.select4": () => handleSelectWorktreeByIndex(3),
+      "workspace.select5": () => handleSelectWorktreeByIndex(4),
+      "workspace.select6": () => handleSelectWorktreeByIndex(5),
+      "workspace.select7": () => handleSelectWorktreeByIndex(6),
+      "workspace.select8": () => handleSelectWorktreeByIndex(7),
+      "workspace.select9": () => handleSelectWorktreeByIndex(8),
       "terminal.splitRight": () => handleSplitActive("horizontal"),
       "terminal.splitDown": () => handleSplitActive("vertical"),
       "terminal.unsplit": handleUnsplitActive,
+      "terminal.focusNext": () => handleCyclePaneFocus(1),
+      "terminal.focusPrevious": () => handleCyclePaneFocus(-1),
+      "terminal.search": handleOpenTerminalSearch,
       "sidebar.left.toggle": toggleSidebar,
       "commandPalette.open": () => setIsCommandPaletteOpen(true),
+      "settings.toggle": () => setIsSettingsOpen((current) => !current),
+      "zoom.in": handleZoomIn,
+      "zoom.out": handleZoomOut,
+      "zoom.reset": handleZoomReset,
     }),
     [
       createBrowserTab,
       handleAddTerminalTab,
       handleCloseTab,
+      handleCyclePaneFocus,
       handleCycleTab,
+      handleOpenTerminalSearch,
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
       handleUnsplitActive,
+      handleZoomIn,
+      handleZoomOut,
+      handleZoomReset,
       reportRuntimeError,
       state.layout.activeTabId,
       toggleSidebar,
@@ -428,25 +559,31 @@ export function App() {
             sessions={state.sessions}
             unreadTabIds={state.unreadTabIds}
             activityByTabId={tabActivity}
+            onTitleChange={(tabId, title, sessionId) => updateSessionTitleActivity(tabId, title, sessionId)}
             onActivateTab={handleSelectTerminalTab}
             onCloseTab={handleCloseTab}
             onCloseOtherTabs={handleCloseOtherTabs}
             onCloseTabsToRight={handleCloseTabsToRight}
             onCloseTabsToLeft={handleCloseTabsToLeft}
             onReorderTab={reorderTab}
+            onMoveTabToGroup={moveTabToGroup}
+            onMoveTabToSplit={moveTabToSplit}
+            onDetachPaneToTab={detachPaneToTab}
             onRenameTab={renameTab}
             onToggleTabPin={setTabPinned}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={(url) => void createBrowserTab(url ?? "http://localhost:3000").catch(reportRuntimeError)}
             onNavigateBrowserTab={(tabId, url) => void navigateBrowserTab(tabId, url).catch(reportRuntimeError)}
             onReloadBrowserTab={(tabId) => void reloadBrowserTab(tabId).catch(reportRuntimeError)}
-            onSplitPane={(tabId: string, leafId: string, direction: PaneDirection) => splitPane(tabId, leafId, direction).catch(reportRuntimeError)}
-            onClosePane={(tabId: string, leafId: string) => closePane(tabId, leafId).catch(reportRuntimeError)}
+            onSplitPane={(tabId, leafId, direction, options) => splitPane(tabId, leafId, direction, options).catch(reportRuntimeError)}
+            onClosePane={(tabId, leafId) => closePane(tabId, leafId).catch(reportRuntimeError)}
             onSetRatio={setPaneRatio}
+            onSetGroupRatio={setTabGroupRatio}
             onSwapPanes={swapPanes}
             onFocusPane={focusPane}
-            onTitleChange={updateSessionTitleActivity}
-            leadingSpacer={isSidebarOpen ? 0 : (isMacShortcutPlatform() ? 108 : 36)}
+            searchLeafId={searchLeafId}
+            onCloseSearch={() => setSearchLeafId(null)}
+            leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
           />
         ) : (
           <div className="flex h-full flex-1 items-center justify-center bg-[#23262d] text-xs text-muted-foreground">
@@ -465,7 +602,11 @@ export function App() {
       />
       <SettingsDialog open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
       {isAddProjectOpen ? (
-        <AddProjectDialog onClose={() => setIsAddProjectOpen(false)} onRegistered={handleRegisteredProject} />
+        <AddProjectDialog
+          projects={projects}
+          onClose={() => setIsAddProjectOpen(false)}
+          onRegistered={handleRegisteredProject}
+        />
       ) : null}
       {isCreateOpen ? (
         <AddWorktreeDialog
@@ -502,10 +643,6 @@ export function App() {
   );
 }
 
-/**
- * Flattens the sidebar tree into the worktree order the user actually sees: projects in order,
- * each expanded project followed by its own worktrees. Collapsed projects contribute nothing.
- */
 function listVisibleWorktrees(
   projects: RegisteredProject[],
   worktrees: Worktree[],
@@ -518,8 +655,6 @@ function listVisibleWorktrees(
   for (const project of projects) {
     if (collapsed.has(project.workspaceId)) continue;
     for (const worktree of worktrees) {
-      // Worktrees name their owning project in the `orca/<wsId>/<slug>` branch; anything else
-      // belongs to the active project, the only one whose worktrees the store holds.
       const ownerId = worktreeIdentity(worktree)?.wsId;
       const owner = ownerId && known.has(ownerId) ? ownerId : activeProjectId;
       if (owner === project.workspaceId) visible.push(worktree);
@@ -529,16 +664,12 @@ function listVisibleWorktrees(
   return visible;
 }
 
-/** Mirrors the sidebar accordion defaults: persisted state wins, otherwise only the active project is expanded. */
 function loadCollapsedProjectIds(projects: RegisteredProject[], activeProjectId: string): Set<string> {
   try {
-    const raw = window.localStorage.getItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY);
+    const raw = getMigratedItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY);
     const parsed: unknown = raw ? JSON.parse(raw) : null;
     if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
-    // Nothing persisted yet: the sidebar starts with only the active project expanded.
-    return new Set(
-      projects.filter((project) => project.workspaceId !== activeProjectId).map((project) => project.workspaceId),
-    );
+    return new Set(projects.filter((project) => project.workspaceId !== activeProjectId).map((project) => project.workspaceId));
   } catch {
     return new Set<string>();
   }
@@ -546,7 +677,7 @@ function loadCollapsedProjectIds(projects: RegisteredProject[], activeProjectId:
 
 function loadProjects(): RegisteredProject[] {
   try {
-    const raw = window.localStorage.getItem(PROJECTS_STORAGE_KEY);
+    const raw = getMigratedItem(PROJECTS_STORAGE_KEY);
     if (!raw) return [DEFAULT_PROJECT];
     const parsed = JSON.parse(raw) as RegisteredProject[];
     if (!Array.isArray(parsed)) return [DEFAULT_PROJECT];
@@ -569,7 +700,7 @@ function persistProjects(projects: RegisteredProject[]) {
 
 function loadActiveProjectId() {
   try {
-    return window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || DEFAULT_WORKSPACE_ID;
+    return getMigratedItem(ACTIVE_PROJECT_STORAGE_KEY) || DEFAULT_WORKSPACE_ID;
   } catch {
     return DEFAULT_WORKSPACE_ID;
   }
@@ -585,7 +716,7 @@ function persistActiveProjectId(workspaceId: string) {
 
 function loadSidebarOpen() {
   try {
-    const raw = window.localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY);
+    const raw = getMigratedItem(SIDEBAR_OPEN_STORAGE_KEY);
     return raw !== null ? raw !== "false" : true;
   } catch {
     return true;

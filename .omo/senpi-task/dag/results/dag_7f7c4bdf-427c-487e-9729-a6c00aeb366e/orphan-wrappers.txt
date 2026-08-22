@@ -1,0 +1,57 @@
+### Intent & Deliverable Summary
+Connected all seven orphaned IPC wrappers (`listRemoteDevices`, `revokeRemoteDevice`, `getTailscaleStatus`, `setBrowserZoom`, `focusBrowser`, `getBrowserState`, `listBrowsers`) to frontend UI components and added test coverage.
+
+---
+
+### Wrapper UI Wiring
+
+| Wrapper | UI Surface | Interaction / Behavior |
+|---|---|---|
+| `listRemoteDevices` | `SettingsDialog.tsx` (`RemoteAccessSettings`) | Queries and renders paired remote devices (name, permissions, last seen timestamp, revocation status) on load, gateway toggle, and revocation. |
+| `revokeRemoteDevice` | `SettingsDialog.tsx` (`RemoteAccessSettings`) | Per-device Revoke button with inline confirmation step ("Confirm Revoke" / "Cancel") calling `revokeRemoteDevice(deviceId)`. |
+| `getTailscaleStatus` | `SettingsDialog.tsx` (`RemoteAccessSettings`) | Displays live Tailscale status line (Running with tailnet name, Disconnected, or Not Installed, along with Self-DNS). |
+| `setBrowserZoom` | `SettingsDialog.tsx` (`BrowserSettings`) & `BrowserToolbar.tsx` | Invoked on changing default zoom level in Browser Settings across active browsers, and via Zoom In / Zoom Out toolbar buttons in `BrowserToolbar`. |
+| `focusBrowser` | `SettingsDialog.tsx` (`BrowserSettings`) & `BrowserToolbar.tsx` | Focus button per active browser session in Settings and "Focus webview" target button in `BrowserToolbar`. |
+| `getBrowserState` | `BrowserToolbar.tsx` | "Sync browser state" button on `BrowserToolbar` querying live webview state and syncing current URL. |
+| `listBrowsers` | `SettingsDialog.tsx` (`BrowserSettings`) | Lists active browser sessions in Browser Settings and discovers active webviews to apply zoom updates. |
+
+---
+
+### Verification & Test Run
+
+#### RED Stage Excerpt
+```
+FAIL src/components/BrowserToolbar.test.tsx > BrowserToolbar > handles zoom controls and calls setBrowserZoom
+TestingLibraryElementError: Unable to find a label with the text of: Zoom in
+
+FAIL src/components/BrowserToolbar.test.tsx > BrowserToolbar > calls focusBrowser on focus button click
+TestingLibraryElementError: Unable to find a label with the text of: Focus webview
+
+FAIL src/components/BrowserToolbar.test.tsx > BrowserToolbar > fetches browser state via getBrowserState during state sync / reload
+TestingLibraryElementError: Unable to find a label with the text of: Sync browser state
+
+FAIL src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Remote Access section, renders paired devices and Tailscale status, and revokes device on confirmation
+AssertionError: expected "spy" to be called at least once (native.listRemoteDevices)
+
+FAIL src/components/SettingsDialog.test.tsx > SettingsDialog > navigates to Browser section and applies zoom to active browsers using setBrowserZoom
+AssertionError: expected "spy" to be called at least once (browserNative.listBrowsers)
+```
+
+#### GREEN Stage
+```bash
+$ cd ui && bunx vitest run src/components/SettingsDialog.test.tsx src/components/BrowserToolbar.test.tsx
+ ✓ src/components/SettingsDialog.test.tsx (14 tests) 507ms
+ ✓ src/components/BrowserToolbar.test.tsx (6 tests) 49ms
+
+ Test Files  2 passed (2)
+      Tests  20 passed (20)
+```
+Exit code: `0`
+
+---
+
+### Files Modified
+- `ui/src/components/SettingsDialog.tsx`
+- `ui/src/components/SettingsDialog.test.tsx`
+- `ui/src/components/BrowserToolbar.tsx`
+- `ui/src/components/BrowserToolbar.test.tsx`

@@ -1,6 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Bot, GitBranch, PanelLeft, Radio } from "lucide-react";
 
+import { branchName, displayWorkspaceTitle } from "../lib/branchFilter";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import type { ActiveAgent, Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
@@ -13,22 +14,6 @@ type WorkspaceHeaderProps = {
   onToggleSidebar?: () => void;
   isMac?: boolean;
 };
-
-function branchName(worktree: Worktree) {
-  return worktree.branch?.replace(/^refs\/heads\//, "") ?? "detached HEAD";
-}
-
-function displayWorkspaceTitle(worktree: Worktree) {
-  const parts = branchName(worktree).split("/");
-  if (parts[0] === "orca" && parts.length > 2) {
-    return parts.slice(2).join("/");
-  }
-  const branch = branchName(worktree);
-  if (branch && branch !== "detached HEAD" && branch !== "ferryx" && branch !== "rorca" && branch !== "orca-lite") {
-    return branch;
-  }
-  return "main";
-}
 
 export function WorkspaceHeader({
   worktree,

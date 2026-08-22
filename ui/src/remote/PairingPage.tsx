@@ -44,7 +44,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
       <div className="w-full max-w-sm bg-card border border-border rounded-lg p-6 shadow-xl">
         <h2 className="text-xl font-bold text-foreground mb-2">Pair Device</h2>
         <p className="text-xs text-muted-foreground mb-6">
-          Enter the 6-digit PIN from your rorca Desktop settings (valid for 1 minute).
+          Enter the 6-digit PIN from your Ferryx Desktop settings (valid for 1 minute).
         </p>
 
         {error && (

@@ -1,4 +1,4 @@
-import type { PaneNode } from "../state/paneTree";
+import type { PaneDirection, PaneNode } from "../state/paneTree";
 
 export type WorktreeIdentity = {
   wsId: string;
@@ -52,10 +52,15 @@ export type TerminalSessionSummary = {
 export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed";
 
 export type TerminalSession = {
+  /** Frontend-local stable identity used by pane leaves and terminal renderer ownership. */
   id: string;
+  /** Best known process CWD. It may be nested below the worktree root after `cd`. */
   cwd: string;
+  /** Stable worktree/repository root. Optional only for v1/test-state compatibility. */
+  worktreePath?: string;
   workspaceId: string;
   worktree: WorktreeIdentity | null;
+  /** Native PTY identity. This is intentionally distinct from `id`. */
   backendSessionId: string | null;
   lifecycle: TerminalLifecycle;
   ownerId?: string | null;
@@ -65,6 +70,7 @@ export type TerminalTab = {
   kind?: "terminal";
   id: string;
   label: string;
+  /** Compatibility primary session; every real pane leaf is authoritative in TabPaneLayout. */
   sessionId: string;
   pinned?: boolean;
 };
@@ -141,8 +147,9 @@ export type NestedSplit = {
 };
 
 /**
- * The split arrangement of a single tab. Every tab owns an independent pane tree,
- * so splitting one tab never disturbs the panes of another.
+ * The split arrangement inside a single terminal tab. This is intentionally separate
+ * from TabGroupLayoutNode: Orca keeps terminal panes inside a tab and split tab groups
+ * as two different layout layers.
  */
 export type TabPaneLayout = {
   root: PaneNode;
@@ -150,9 +157,25 @@ export type TabPaneLayout = {
   activeLeafId: string | null;
   /** Leaf temporarily zoomed to fill the tab, or `null` when every pane is visible. */
   expandedLeafId: string | null;
-  /** Terminal session rendered by each leaf of `root`. */
+  /** Frontend-local terminal session rendered by each leaf of `root`. */
   sessionIdsByLeafId: Record<string, string>;
 };
+
+export type TabGroup = {
+  id: string;
+  tabIds: string[];
+  activeTabId: string | null;
+};
+
+export type TabGroupLayoutNode =
+  | { type: "group"; groupId: string }
+  | {
+      type: "split";
+      direction: PaneDirection;
+      first: TabGroupLayoutNode;
+      second: TabGroupLayoutNode;
+      ratio: number;
+    };
 
 export type LayoutState = {
   tabs: WorkspaceTab[];
@@ -160,8 +183,15 @@ export type LayoutState = {
   secondaryTabId?: string | null;
   split?: SplitMode;
   nestedSplit?: NestedSplit | null;
+  /** Active tab in the currently focused tab group. */
   activeTabId: string | null;
+  /** Terminal-pane tree owned independently by each tab. */
   layoutsByTabId: Record<string, TabPaneLayout>;
+  /** Orca-style tab groups. Optional only for backwards-compatible persisted/test state. */
+  tabGroups?: Record<string, TabGroup>;
+  /** Split tree whose leaves are tab groups, not terminal panes. */
+  tabGroupLayout?: TabGroupLayoutNode | null;
+  focusedGroupId?: string | null;
 };
 
 export type AgentState = "starting" | "working" | "waiting" | "exited" | "failed";
@@ -271,15 +301,50 @@ export interface PersistedWorktree {
   isLocked: boolean;
 }
 
+/** Version-2 terminal tab payload. All IDs in pane mappings are frontend-local session IDs. */
+export interface PersistedTerminalTabState {
+  primarySessionId: string;
+  paneTree: PaneNode;
+  sessionIdsByLeafId: Record<string, string>;
+  activeLeafId: string | null;
+  expandedLeafId: string | null;
+}
+
+export interface PersistedBrowserTabState {
+  browserId: string;
+  url: string;
+  title?: string | null;
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+}
+
+/**
+ * Version-2 tab record. Legacy v1 fields remain optional so persisted sessions can be
+ * migrated in place without unsafe casts or a second DTO hierarchy.
+ */
 export interface PersistedTab {
   id: string;
-  sessionId: string;
   label: string;
+  kind?: "terminal" | "browser";
+  pinned?: boolean;
+  terminal?: PersistedTerminalTabState;
+  browser?: PersistedBrowserTabState;
   customTitle?: string;
-  worktreePath: string;
+
+  // v1 compatibility fields
+  sessionId?: string;
+  worktreePath?: string;
   paneTree?: PaneNode;
   sessionIdsByLeafId?: Record<string, string>;
   activeLeafId?: string | null;
+  expandedLeafId?: string | null;
+}
+
+export interface PersistedTabGroup {
+  id: string;
+  tabIds: string[];
+  activeTabId: string | null;
 }
 
 export interface PersistedLayout {
@@ -288,10 +353,18 @@ export interface PersistedLayout {
   secondaryTabId: string | null;
   activeTabId: string | null;
   tabs: PersistedTab[];
+  tabGroups?: PersistedTabGroup[];
+  tabGroupLayout?: TabGroupLayoutNode | null;
+  focusedGroupId?: string | null;
 }
 
 export interface PersistedTerminalSession {
-  sessionId: string;
+  /** v2 stable frontend identity; map key remains authoritative. */
+  localSessionId?: string;
+  /** v2 native PTY identity. `null` means it must be respawned on restore. */
+  backendSessionId?: string | null;
+  /** v1 compatibility field (v1 accidentally stored the local id here). */
+  sessionId?: string;
   worktreePath: string;
   cwd: string;
   lastCommand?: string;

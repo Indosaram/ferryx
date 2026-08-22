@@ -3,10 +3,13 @@ import { PairingPage } from "./PairingPage";
 import { RemoteSessionItem, RemoteSessionList } from "./RemoteSessionList";
 import { RemoteTerminal } from "./RemoteTerminal";
 
-const TOKEN_KEY = "rorca_remote_token";
+const TOKEN_KEY = "ferryx_remote_token";
+const LEGACY_TOKEN_KEY = "rorca_remote_token";
 
 export const RemoteApp: React.FC = () => {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
+  const [token, setToken] = useState<string | null>(
+    () => localStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(LEGACY_TOKEN_KEY)
+  );
   const [sessions, setSessions] = useState<RemoteSessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
@@ -36,6 +39,7 @@ export const RemoteApp: React.FC = () => {
 
   const handlePaired = (newToken: string) => {
     localStorage.setItem(TOKEN_KEY, newToken);
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
     setToken(newToken);
   };
 
@@ -45,6 +49,7 @@ export const RemoteApp: React.FC = () => {
       const res = await fetch(`/api/v1/sessions?token=${encodeURIComponent(token)}`);
       if (!res.ok) {
         localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(LEGACY_TOKEN_KEY);
         setToken(null);
         return;
       }
@@ -82,11 +87,12 @@ export const RemoteApp: React.FC = () => {
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col">
       <header className="px-4 py-3 bg-neutral-900 border-b border-neutral-800 flex justify-between items-center">
         <h1 className="text-base font-bold flex items-center gap-2">
-          🦀 rorca Remote
+          🦀 Ferryx Remote
         </h1>
         <button
           onClick={() => {
             localStorage.removeItem(TOKEN_KEY);
+            localStorage.removeItem(LEGACY_TOKEN_KEY);
             setToken(null);
           }}
           className="text-xs text-neutral-500 hover:text-neutral-300"

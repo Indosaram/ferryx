@@ -40,18 +40,6 @@ function getTab(label: string): HTMLElement {
   return screen.getByText(label).closest('[role="tab"]') as HTMLElement;
 }
 
-function createDataTransfer() {
-  let payload = "";
-  return {
-    setData: vi.fn((_type: string, value: string) => {
-      payload = value;
-    }),
-    getData: vi.fn(() => payload),
-    effectAllowed: "",
-    dropEffect: "",
-  };
-}
-
 describe("TabBar", () => {
   it("routes activate, close, and new-tab actions through real callbacks", () => {
     const onActivate = vi.fn();
@@ -59,6 +47,7 @@ describe("TabBar", () => {
     const onAdd = vi.fn();
     render(
       <TabBar
+        groupId="group-a"
         tabs={[terminalTab("tab-a", "main"), terminalTab("tab-b", "feature")]}
         activeTabId="tab-a"
         onActivate={onActivate}
@@ -82,6 +71,7 @@ describe("TabBar", () => {
     const onActivate = vi.fn();
     render(
       <TabBar
+        groupId="group-a"
         tabs={[terminalTab("tab-a", "main"), terminalTab("tab-b", "feature")]}
         activeTabId="tab-a"
         onActivate={onActivate}
@@ -129,39 +119,36 @@ describe("TabBar", () => {
     expect(screen.getByText("browser").previousElementSibling?.tagName.toLowerCase()).toBe("svg");
   });
 
-  it("opens context menu with wired Orca-parity actions", () => {
-    const onCloseOthers = vi.fn();
-    const onCloseToRight = vi.fn();
+  it("keeps whole-tab split actions separate from terminal-pane split actions", () => {
     const onSplitRight = vi.fn();
-    const onRenameTab = vi.fn();
-    const onTogglePin = vi.fn();
-
+    const onMoveTabToSplit = vi.fn();
     render(
       <TabBar
+        groupId="group-a"
         tabs={[terminalTab("tab-a", "main"), terminalTab("tab-b", "feature"), terminalTab("tab-c", "docs")]}
         activeTabId="tab-a"
         onActivate={vi.fn()}
         onClose={vi.fn()}
-        onCloseOthers={onCloseOthers}
-        onCloseToRight={onCloseToRight}
+        onCloseOthers={vi.fn()}
+        onCloseToRight={vi.fn()}
         onSplitRight={onSplitRight}
-        onRenameTab={onRenameTab}
-        onTogglePin={onTogglePin}
+        onMoveTabToSplit={onMoveTabToSplit}
+        onRenameTab={vi.fn()}
+        onTogglePin={vi.fn()}
         onAdd={vi.fn()}
       />,
     );
 
     fireEvent.contextMenu(getTab("main"), { clientX: 100, clientY: 100 });
-
-    expect(screen.getByRole("menu", { name: "Tab context menu" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Move Tab to Split Left" })).toBeEnabled();
     expect(screen.getByRole("menuitem", { name: /Split terminal right/i })).toBeEnabled();
     expect(screen.getByRole("menuitem", { name: /Split terminal down/i })).toBeDisabled();
-    expect(screen.getByRole("menuitem", { name: /Pin Tab/i })).toBeEnabled();
-    expect(screen.getByRole("menuitem", { name: /Change Title/i })).toBeEnabled();
-    expect(screen.getByRole("menuitem", { name: /Close Others/i })).toBeEnabled();
-    expect(screen.getByRole("menuitem", { name: /Close Tabs To The Right/i })).toBeEnabled();
-    expect(screen.getByRole("menuitem", { name: /Close Tabs To The Left/i })).toBeDisabled();
 
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move Tab to Split Left" }));
+    expect(onMoveTabToSplit).toHaveBeenCalledWith("tab-a", "left");
+    expect(onSplitRight).not.toHaveBeenCalled();
+
+    fireEvent.contextMenu(getTab("main"));
     fireEvent.click(screen.getByRole("menuitem", { name: /Split terminal right/i }));
     expect(onSplitRight).toHaveBeenCalledWith("tab-a");
   });
@@ -232,53 +219,24 @@ describe("TabBar", () => {
     expect(onRenameTab).toHaveBeenCalledWith("tab-a", "custom title");
   });
 
-  it("uses left/right drop edges to compute the actual tab insertion index", () => {
-    const onReorderTabs = vi.fn();
+  it("exposes dnd-kit sortable metadata scoped to its tab group instead of global DOM hit testing", () => {
+    render(
+      <TabBar
+        groupId="group-a"
+        tabs={[terminalTab("tab-a", "main"), terminalTab("tab-b", "feature"), terminalTab("tab-c", "docs")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
 
-    const rectSpy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
-      const text = this.textContent || "";
-      if (text.includes("main")) return { left: 0, right: 100, width: 100, top: 0, bottom: 32, height: 32, x: 0, y: 0, toJSON: () => ({}) };
-      if (text.includes("feature")) return { left: 100, right: 200, width: 100, top: 0, bottom: 32, height: 32, x: 100, y: 0, toJSON: () => ({}) };
-      if (text.includes("docs")) return { left: 200, right: 300, width: 100, top: 0, bottom: 32, height: 32, x: 200, y: 0, toJSON: () => ({}) };
-      return { left: 0, right: 0, width: 0, top: 0, bottom: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) };
-    });
-
-    try {
-      render(
-        <TabBar
-          tabs={[terminalTab("tab-a", "main"), terminalTab("tab-b", "feature"), terminalTab("tab-c", "docs")]}
-          activeTabId="tab-a"
-          onActivate={vi.fn()}
-          onClose={vi.fn()}
-          onReorderTabs={onReorderTabs}
-          onAdd={vi.fn()}
-        />,
-      );
-
-      let transfer = createDataTransfer();
-      fireEvent.dragStart(getTab("main"), { dataTransfer: transfer });
-      fireEvent.dragOver(getTab("feature"), { clientX: 180, dataTransfer: transfer });
-      expect(getTab("feature").className).toContain("after:bg-blue-500");
-      fireEvent.drop(getTab("feature"), { clientX: 180, dataTransfer: transfer });
-      expect(onReorderTabs).toHaveBeenCalledWith("tab-a", 1);
-
-      onReorderTabs.mockClear();
-      transfer = createDataTransfer();
-      fireEvent.dragStart(getTab("main"), { dataTransfer: transfer });
-      fireEvent.dragOver(getTab("feature"), { clientX: 120, dataTransfer: transfer });
-      expect(getTab("feature").className).toContain("before:bg-blue-500");
-      fireEvent.drop(getTab("feature"), { clientX: 120, dataTransfer: transfer });
-      expect(onReorderTabs).not.toHaveBeenCalled();
-
-      transfer = createDataTransfer();
-      fireEvent.dragStart(getTab("docs"), { dataTransfer: transfer });
-      fireEvent.dragOver(getTab("main"), { clientX: 80, dataTransfer: transfer });
-      expect(getTab("main").className).toContain("after:bg-blue-500");
-      fireEvent.drop(getTab("main"), { clientX: 80, dataTransfer: transfer });
-      expect(onReorderTabs).toHaveBeenCalledWith("tab-c", 1);
-    } finally {
-      rectSpy.mockRestore();
-    }
+    expect(getTab("main")).toHaveAttribute("data-dnd-type", "tab");
+    expect(getTab("main")).toHaveAttribute("data-tab-group-id", "group-a");
+    expect(getTab("main")).toHaveAttribute("data-tab-index", "0");
+    expect(getTab("feature")).toHaveAttribute("data-tab-index", "1");
+    expect(getTab("docs")).toHaveAttribute("data-tab-index", "2");
+    expect(getTab("main")).toHaveAttribute("draggable", "false");
   });
 
   it("forwards typed URLs from the new-tab popover and keeps popovers out of window dragging", () => {
@@ -308,8 +266,9 @@ describe("TabBar", () => {
     expect(nativeWindow.startDragging).not.toHaveBeenCalled();
   });
 
-  it("disables terminal split actions for browser tabs", () => {
+  it("disables terminal split for browser tabs while preserving whole-tab split", () => {
     const onSplitRight = vi.fn();
+    const onMoveTabToSplit = vi.fn();
     render(
       <TabBar
         tabs={[{ id: "browser", kind: "browser", label: "Browser", browserId: "browser-1", url: "https://example.com" }]}
@@ -317,17 +276,20 @@ describe("TabBar", () => {
         onActivate={vi.fn()}
         onClose={vi.fn()}
         onSplitRight={onSplitRight}
+        onMoveTabToSplit={onMoveTabToSplit}
         onAdd={vi.fn()}
       />,
     );
 
     fireEvent.contextMenu(getTab("Browser"));
     expect(screen.getByRole("menuitem", { name: /Split terminal right/i })).toBeDisabled();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Split terminal right/i }));
+    expect(screen.getByRole("menuitem", { name: "Move Tab to Split Right" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move Tab to Split Right" }));
+    expect(onMoveTabToSplit).toHaveBeenCalledWith("browser", "right");
     expect(onSplitRight).not.toHaveBeenCalled();
   });
 
-  it("marks tab strip as Tauri drag region and starts native drag only on background", () => {
+  it("keeps Tauri window dragging on strip background without making tabs native drag regions", () => {
     render(
       <TabBar
         tabs={[terminalTab("tab-a", "main")]}
@@ -339,9 +301,10 @@ describe("TabBar", () => {
     );
 
     const tabStrip = screen.getByTestId("tab-strip");
-    expect(tabStrip).toHaveAttribute("data-tauri-drag-region");
-    expect(tabStrip).toHaveClass("drag-region");
+    expect(tabStrip).not.toHaveAttribute("data-tauri-drag-region");
+    expect(tabStrip).not.toHaveClass("drag-region");
     expect(getTab("main")).toHaveClass("no-drag");
+    expect(getTab("main")).toHaveAttribute("draggable", "false");
 
     fireEvent.pointerDown(tabStrip, { button: 0 });
     expect(nativeWindow.startDragging).toHaveBeenCalledOnce();

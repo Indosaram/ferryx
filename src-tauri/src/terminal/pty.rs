@@ -1,6 +1,5 @@
 use crate::terminal::{session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal};
-use crate::worktree::manager::WriterLeaseGuard;
-use crate::worktree::{WorktreeError, WorktreeManager};
+use crate::worktree::WorktreeManager;
 use parking_lot::{Mutex, RwLock};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -40,7 +39,7 @@ impl PtyManager {
         rows: u16,
     ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
         let session_id = Uuid::new_v4().to_string();
-        let rx = self.spawn_with_id(session_id.clone(), cmd, cols, rows)?;
+        let rx = self.spawn_with_id_and_worktree(session_id.clone(), cmd, cols, rows, None)?;
         Ok((session_id, rx))
     }
 
@@ -53,6 +52,11 @@ impl PtyManager {
         self.spawn(cmd, cols, rows)
     }
 
+    /// Spawn an interactive terminal owned by `worktree_path`.
+    ///
+    /// Interactive PTYs are deliberately multi-session.  The worktree writer lease is an
+    /// exclusive mutation/agent guard and must not be used to serialize terminal panes:
+    /// Orca-style split panes require two or more live PTYs in the same worktree.
     pub fn spawn_in_worktree(
         &self,
         cmd: CommandBuilder,
@@ -62,32 +66,15 @@ impl PtyManager {
         worktree_path: &Path,
     ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
         let session_id = Uuid::new_v4().to_string();
-        let lease = match worktree_manager.acquire_writer_lease(worktree_path, &session_id) {
-            Ok(guard) => guard,
-            Err(WorktreeError::WriterAlreadyActive { path, owner_id }) => {
-                // If the previous owner session has already ended or is not active in this PtyManager,
-                // automatically reclaim the lease.
-                if self.get_session(&owner_id).is_none() {
-                    let _ = worktree_manager.release_writer(&path, &owner_id);
-                    worktree_manager
-                        .acquire_writer_lease(worktree_path, &session_id)
-                        .map_err(|error| PtyError::Other(error.to_string()))?
-                } else {
-                    return Err(PtyError::Other(format!(
-                        "Worktree '{}' already has active writer '{}'",
-                        path.display(),
-                        owner_id
-                    )));
-                }
-            }
-            Err(error) => return Err(PtyError::Other(error.to_string())),
-        };
-        let rx = self.spawn_with_id_and_lease(
+        let canonical_worktree = worktree_manager
+            .canonical_allowed_path(worktree_path)
+            .map_err(|error| PtyError::Other(error.to_string()))?;
+        let rx = self.spawn_with_id_and_worktree(
             session_id.clone(),
             cmd,
             cols,
             rows,
-            Some(lease),
+            Some(canonical_worktree),
         )?;
         Ok((session_id, rx))
     }
@@ -99,16 +86,16 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
-        self.spawn_with_id_and_lease(session_id.into(), cmd, cols, rows, None)
+        self.spawn_with_id_and_worktree(session_id.into(), cmd, cols, rows, None)
     }
 
-    fn spawn_with_id_and_lease(
+    fn spawn_with_id_and_worktree(
         &self,
         session_id: String,
         cmd: CommandBuilder,
         cols: u16,
         rows: u16,
-        writer_lease: Option<WriterLeaseGuard>,
+        worktree_path: Option<std::path::PathBuf>,
     ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
         if self.has_session(&session_id) {
             return Err(PtyError::Other(format!(
@@ -157,7 +144,7 @@ impl PtyManager {
             cols,
             rows,
             tx,
-            writer_lease,
+            worktree_path,
         }));
 
         self.sessions
@@ -178,7 +165,6 @@ impl PtyManager {
 
                 match session.state() {
                     PtySessionState::Exited { .. } | PtySessionState::Failed { .. } => {
-                        session.release_writer_lease();
                         session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
@@ -211,7 +197,6 @@ impl PtyManager {
                     Err(error) => {
                         session.mark_failed(error.to_string());
                         session.close_io();
-                        session.release_writer_lease();
                         session.close_output();
                         manager.remove_from_registry(&session_id);
                         break;
@@ -233,7 +218,6 @@ impl PtyManager {
 
         session.close_io();
         let _ = Self::join_reader_bounded(&session).await;
-        session.release_writer_lease();
         session.mark_exited(Some(code));
         session.close_output();
         self.remove_from_registry(session_id);
@@ -268,7 +252,6 @@ impl PtyManager {
                 session.state(),
                 PtySessionState::Exited { .. } | PtySessionState::Failed { .. }
             ) {
-                session.release_writer_lease();
                 session.close_output();
                 self.remove_from_registry(session_id);
                 return Ok(());
@@ -332,8 +315,6 @@ impl PtyManager {
                 }
             }
         }
-
-        session.release_writer_lease();
 
         if let Some(error) = first_error {
             session.mark_failed(error.to_string());

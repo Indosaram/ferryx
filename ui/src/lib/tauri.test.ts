@@ -5,8 +5,12 @@ const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
 }));
 
+const events = vi.hoisted(() => ({
+  listen: vi.fn(),
+}));
+
 vi.mock("@tauri-apps/api/core", () => core);
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => events);
 
 import {
   createWorktree,
@@ -16,6 +20,7 @@ import {
   getWorktreeStatus,
   listProjectBranches,
   listTerminalSessions,
+  onNewTerminalTabMenu,
   listWorktrees,
   previewWorktreeDelete,
   registerProject,
@@ -27,6 +32,7 @@ import {
 describe("Tauri IPC wrapper contract", () => {
   beforeEach(() => {
     core.invoke.mockReset();
+    events.listen.mockReset();
     core.isTauri.mockReturnValue(true);
   });
 
@@ -69,7 +75,7 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_preferences", undefined);
   });
 
-  it("spawns terminals with only workspace and worktree identities", async () => {
+  it("spawns terminals with workspace/worktree identity and an optional cwd slot", async () => {
     core.invoke.mockResolvedValue({ sessionId: "backend-session-1" });
 
     await expect(
@@ -77,9 +83,12 @@ describe("Tauri IPC wrapper contract", () => {
     ).resolves.toBe("backend-session-1");
 
     expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_spawn", {
-      request: { workspaceId: "workspace-main", worktree: { wsId: "ws-main", slug: "main" } },
+      request: {
+        workspaceId: "workspace-main",
+        worktree: { wsId: "ws-main", slug: "main" },
+        cwd: null,
+      },
     });
-    expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("cwd");
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
   });
 
@@ -146,6 +155,24 @@ describe("Tauri IPC wrapper contract", () => {
       signal: "interrupt",
     });
     expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_terminal_list", undefined);
+  });
+
+  it("bridges the native Cmd+T menu event into the frontend callback", async () => {
+    const unlisten = vi.fn();
+    let listener: ((event: { payload: void }) => void) | null = null;
+    events.listen.mockImplementation(async (eventName: string, callback: (event: { payload: void }) => void) => {
+      expect(eventName).toBe("menu_new_terminal_tab");
+      listener = callback;
+      return unlisten;
+    });
+    const handler = vi.fn();
+
+    await expect(onNewTerminalTabMenu(handler)).resolves.toBe(unlisten);
+    expect(listener).toBeTypeOf("function");
+    if (typeof listener === "function") {
+      (listener as (event: { payload: void }) => void)({ payload: undefined });
+    }
+    expect(handler).toHaveBeenCalledOnce();
   });
 
   it("normalizes rejected command invocations at the wrapper boundary", async () => {

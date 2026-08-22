@@ -1,10 +1,10 @@
-// rorca Remote Service Worker - Offline asset cache
-const CACHE_NAME = 'rorca-remote-v1';
+// Ferryx Remote Service Worker - Offline asset cache
+const CACHE_NAME = 'ferryx-remote-v1';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
-  '/src/assets/rorca-icon.svg'
+  '/ferryx-icon.png'
 ];
 
 self.addEventListener('install', (event) => {

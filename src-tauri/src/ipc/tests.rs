@@ -45,6 +45,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
         SpawnTerminalRequest {
             workspace_id: "workspace-test".into(),
             worktree: None,
+            cwd: None,
             cols: Some(80),
             rows: Some(24),
         },
@@ -191,6 +192,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
         SpawnTerminalRequest {
             workspace_id: "workspace-test".into(),
             worktree: None,
+            cwd: None,
             cols: Some(80),
             rows: Some(24),
         },

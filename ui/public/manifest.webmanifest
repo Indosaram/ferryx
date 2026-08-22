@@ -1,6 +1,6 @@
 {
-  "name": "rorca Remote",
-  "short_name": "rorca",
+  "name": "Ferryx Remote",
+  "short_name": "Ferryx",
   "description": "Ultra-lightweight workspace & AI agent launcher remote client",
   "start_url": "/",
   "display": "standalone",
@@ -9,10 +9,20 @@
   "orientation": "any",
   "icons": [
     {
-      "src": "/src/assets/rorca-icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/ferryx-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
     }
   ]
 }

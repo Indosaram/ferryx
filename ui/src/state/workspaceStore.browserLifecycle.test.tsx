@@ -15,6 +15,7 @@ vi.mock("../lib/browserTauri", () => browserMocks);
 const services: WorkspaceServices = {
   ensureTerminalEvents: vi.fn(async () => undefined),
   spawnTerminal: vi.fn(async () => "backend-unused"),
+  getTerminalCwd: vi.fn(async () => null),
   closeTerminal: vi.fn(async () => undefined),
   waitForTerminalExit: vi.fn(async () => undefined),
 };

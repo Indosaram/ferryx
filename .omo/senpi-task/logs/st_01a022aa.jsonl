@@ -43,3 +43,5 @@
 {"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
 {"type":"assistant_message","payload":{"text":"> I read this as implementation - implement numeric keyboard navigation (Cmd+1..4 for workspace index, Ctrl+1..4 for terminal tab index) in the UI workspace with RED-to-GREEN tests.\n\n### Changed Files\n- `ui/src/lib/shortcuts.ts`\n- `ui/src/lib/shortcuts.test.tsx`\n- `ui/src/App.tsx`\n- `ui/src/App.test.tsx`\n\n### GREEN Test Output\n```text\n$ vitest run --maxWorkers=1 src/lib/shortcuts.test.tsx src/App.test.tsx\n\n RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui\n\n ✓ src/App.test.tsx (3 tests) 104ms\n ✓ src/lib/shortcuts.test.tsx (21 tests) 70ms\n\n Test Files  2 passed (2)\n      Tests  24 passed (24)\n   Start at  13:55:33\n   Duration  2.17s (transform 113ms, setup 258ms, collect 686ms, tests 174ms, environment 526ms, prepare 200ms)\n```"}}
 {"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"new"}}

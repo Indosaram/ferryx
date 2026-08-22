@@ -30,3 +30,5 @@
 {"type":"revived","payload":{"run_epoch":2}}
 {"type":"assistant_message","payload":{"text":"> I read this as a request to edit files and run tests directly in an environment without file-editing tools - indicate tool limitation as requested.\n\nNO_FILE_EDIT_TOOL"}}
 {"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"new"}}

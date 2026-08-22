@@ -23,3 +23,5 @@
 {"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
 {"type":"assistant_message","payload":{"text":"Changed files:\n- `ui/src/components/Sidebar.tsx`\n- `ui/src/components/Sidebar.test.tsx`\n- `ui/src/components/TabBar.test.tsx`\n\n```\n RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui\n\n ✓ src/components/Sidebar.test.tsx (5 tests) 202ms\n ✓ src/components/TabBar.test.tsx (3 tests) 83ms\n\n Test Files  2 passed (2)\n      Tests  8 passed (8)\n   Start at  13:53:41\n   Duration  2.40s (transform 104ms, setup 229ms, collect 977ms, tests 284ms, environment 466ms, prepare 74ms)\n```"}}
 {"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"new"}}
