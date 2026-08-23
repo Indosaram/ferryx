@@ -71,7 +71,7 @@ bun run --cwd site dev
 Run the checks that currently gate the UI, documentation site, and Rust backend:
 
 ```bash
-bun run ui:test
+bun run --cwd ui test
 bun run --cwd site build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
