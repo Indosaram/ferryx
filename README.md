@@ -66,35 +66,15 @@ Launch the local Astro and Starlight documentation server on port 14173:
 bun run --cwd site dev
 ```
 
-## Available Scripts
+## Validate Changes
 
-### Root Workspace
+Run the checks that currently gate the UI, documentation site, and Rust backend:
 
-| Command | Description |
-| --- | --- |
-| `bun install --cwd ui` | Install frontend dependencies |
-| `bun install --cwd site` | Install documentation site dependencies |
-| `bun run dev` | Run Tauri desktop app in development mode (`cargo tauri dev`) |
-| `bun run build` | Build release desktop package (`cargo tauri build`) |
-| `bun run ui:dev` | Start UI Vite development server |
-| `bun run ui:test` | Run UI Vitest test suite |
-| `bun run ui:build` | Typecheck and build production UI bundle |
-
-### Site and Documentation
-
-| Command | Description |
-| --- | --- |
-| `bun run --cwd site dev` | Start local documentation server at http://localhost:14173/ |
-| `bun run --cwd site build` | Build production static documentation for GitHub Pages |
-| `bun run --cwd site preview` | Preview production documentation build locally |
-
-### Rust Backend
-
-| Command | Description |
-| --- | --- |
-| `cargo check --manifest-path src-tauri/Cargo.toml` | Typecheck Rust backend targets |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | Run Rust unit and integration tests |
-| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` | Run Rust linter gates |
+```bash
+bun run ui:test
+bun run --cwd site build
+cargo check --manifest-path src-tauri/Cargo.toml
+```
 
 ## Architecture
 
@@ -112,17 +92,7 @@ ferryx/
 
 ## Contributing
 
-Contributions are welcome. Follow these steps when preparing changes:
-
-1. Create a feature branch from `main`.
-2. Keep edits focused and make sure existing test gates pass:
-   ```bash
-   bun run ui:test
-   bun run ui:build
-   bun run --cwd site build
-   cargo check --manifest-path src-tauri/Cargo.toml
-   ```
-3. Open a pull request with a concise description of your changes.
+Contributions are welcome. Create a focused branch from `main`, run the validation commands above, and open a pull request that explains the user-visible result.
 
 ## License
 
