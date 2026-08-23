@@ -26,19 +26,19 @@ export function CTA() {
 
           <div className="mt-8 max-w-md mx-auto">
             <CopySnippet
-              code="git clone https://github.com/ferryx/ferryx && cd ferryx && bun dev"
+              code="git clone https://github.com/Indosaram/ferryx.git && cd ferryx && cd src-tauri && cargo tauri dev"
               className="text-left"
             />
           </div>
 
           <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
-            <a href="https://github.com/ferryx/ferryx/releases" target="_blank" rel="noreferrer">
+            <a href="https://github.com/Indosaram/ferryx/releases" target="_blank" rel="noreferrer">
               <Button size="lg" className="w-full sm:w-auto bg-zinc-100 text-zinc-900 hover:bg-zinc-200 font-semibold px-8">
                 <Download className="mr-2 h-4 w-4" />
                 Download Alpha Release
               </Button>
             </a>
-            <a href="https://github.com/ferryx/ferryx" target="_blank" rel="noreferrer">
+            <a href="https://github.com/Indosaram/ferryx" target="_blank" rel="noreferrer">
               <Button variant="outline" size="lg" className="w-full sm:w-auto border-zinc-800 hover:bg-zinc-900 text-zinc-300">
                 <Github className="mr-2 h-4 w-4" />
                 GitHub Repository

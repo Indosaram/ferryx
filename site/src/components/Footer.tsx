@@ -16,21 +16,13 @@ export function Footer() {
 
         <div className="flex items-center space-x-6">
           <a
-            href="https://github.com/ferryx/ferryx"
+            href="https://github.com/Indosaram/ferryx"
             target="_blank"
             rel="noreferrer"
             className="hover:text-zinc-300 transition-colors flex items-center gap-1"
           >
             <Github className="h-3.5 w-3.5" />
             GitHub
-          </a>
-          <a
-            href="https://github.com/ferryx/ferryx/blob/main/LICENSE"
-            target="_blank"
-            rel="noreferrer"
-            className="hover:text-zinc-300 transition-colors"
-          >
-            License
           </a>
           <a
             href="#features"

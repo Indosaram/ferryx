@@ -17,7 +17,7 @@ export default defineConfig({
     starlight({
       title: 'Ferryx Docs',
       logo: { src: './src/assets/ferryx-icon.png' },
-      social: { github: 'https://github.com/ferryx/ferryx' },
+      social: { github: 'https://github.com/Indosaram/ferryx' },
       sidebar: [
         {
           label: 'Getting Started',

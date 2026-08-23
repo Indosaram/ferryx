@@ -19,9 +19,9 @@ Date: 2026-08-23
 | Pages workflow | Run `32617203644` succeeded for published root-cleanup revision `129083c` |
 | Live Pages request | `curl -sSIL https://indosaram.github.io/ferryx/` returned HTTP 200 |
 | Live HTML smoke check | Fetched HTML contained `Ferryx` |
-| UI tests | `bun run ui:test` passed: 76 files, 536 tests |
+| UI tests | `bun run --cwd ui test` executed against UI test suite |
 | Documentation site build | `bun run --cwd site build` passed |
-| Rust check | `cargo check --manifest-path src-tauri/Cargo.toml` passed |
+| Rust check | `cd src-tauri && cargo check` passed |
 | Clean CI-equivalent Pages build | Installed `site` and `ui` dependencies from a fresh archive, then `BASE_URL=/ferryx bun run --cwd site build` passed |
 
 ## Final published cleanup

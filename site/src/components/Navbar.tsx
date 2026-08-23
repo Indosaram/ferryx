@@ -39,7 +39,7 @@ export function Navbar({ basePath }: { basePath: string }) {
 
         <div className="flex items-center space-x-3">
           <a
-            href="https://github.com/ferryx/ferryx"
+            href="https://github.com/Indosaram/ferryx"
             target="_blank"
             rel="noreferrer"
             className="text-zinc-400 hover:text-zinc-100 transition-colors"

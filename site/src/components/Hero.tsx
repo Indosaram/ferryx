@@ -19,7 +19,7 @@ export function Hero({ children }: { children?: ReactNode }) {
 
         <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4 max-w-md mx-auto">
           <CopySnippet
-            code="git clone https://github.com/ferryx/ferryx && cd ferryx && bun dev"
+            code="git clone https://github.com/Indosaram/ferryx.git && cd ferryx && cd src-tauri && cargo tauri dev"
             className="w-full text-left"
           />
         </div>
@@ -37,7 +37,7 @@ export function Hero({ children }: { children?: ReactNode }) {
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </a>
-          <a href="https://github.com/ferryx/ferryx" target="_blank" rel="noreferrer">
+          <a href="https://github.com/Indosaram/ferryx" target="_blank" rel="noreferrer">
             <Button variant="outline" size="lg" className="border-zinc-800 hover:bg-zinc-900 text-zinc-300">
               <Play className="mr-2 h-4 w-4" />
               View on GitHub

@@ -42,20 +42,10 @@ bun install --cwd site
 
 ### 2. Run the desktop application
 
-Start the desktop app with Vite Fast Refresh and the Tauri backend:
+From the repository root, start the native Tauri shell. It launches the UI dev server defined by `src-tauri/tauri.conf.json` automatically:
 
 ```bash
-bun run dev
-```
-
-You can also run the frontend and backend in separate terminals:
-
-```bash
-# Terminal 1: frontend Vite server
-bun run ui:dev
-
-# Terminal 2: native Tauri shell
-cargo tauri dev
+cd src-tauri && cargo tauri dev
 ```
 
 ### 3. Run the documentation site
@@ -73,7 +63,7 @@ Run the checks that currently gate the UI, documentation site, and Rust backend:
 ```bash
 bun run --cwd ui test
 bun run --cwd site build
-cargo check --manifest-path src-tauri/Cargo.toml
+cd src-tauri && cargo check
 ```
 
 ## Architecture
@@ -93,7 +83,3 @@ ferryx/
 ## Contributing
 
 Contributions are welcome. Create a focused branch from `main`, run the validation commands above, and open a pull request that explains the user-visible result.
-
-## License
-
-Distributed under the MIT and Apache 2.0 dual licenses. See [`LICENSE`](./LICENSE) for full terms.
