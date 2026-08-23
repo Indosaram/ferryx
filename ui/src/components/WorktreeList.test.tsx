@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { Worktree } from "../lib/types";
+import type { ActiveAgent, Worktree } from "../lib/types";
 import { WorktreeList } from "./WorktreeList";
 
 const worktree: Worktree = {
@@ -27,9 +29,8 @@ const rootWorktree: Worktree = {
 afterEach(cleanup);
 
 describe("WorktreeList actions", () => {
-  it("refreshes and renders worktree dirty status without selecting the card", () => {
+  it("renders worktree dirty status without a manual refresh control", () => {
     const onSelect = vi.fn();
-    const onRefreshStatus = vi.fn();
     render(
       <WorktreeList
         worktrees={[worktree]}
@@ -38,14 +39,12 @@ describe("WorktreeList actions", () => {
         statuses={{ [worktree.path]: { isDirty: true, files: [{ statusCode: "M", path: "src/main.ts" }] } }}
         onSelect={onSelect}
         onCreate={vi.fn()}
-        onRefreshStatus={onRefreshStatus}
         onDelete={vi.fn()}
       />,
     );
 
     expect(screen.getByText("Dirty · 1 file")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh worktree status" }));
-    expect(onRefreshStatus).toHaveBeenCalledWith(worktree);
+    expect(screen.queryByRole("button", { name: /refresh worktree status/i })).not.toBeInTheDocument();
     expect(onSelect).not.toHaveBeenCalled();
   });
 
@@ -71,7 +70,6 @@ describe("WorktreeList actions", () => {
         }}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
-        onRefreshStatus={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -102,7 +100,6 @@ describe("WorktreeList actions", () => {
         activityByWorktreePath={{ [worktree.path]: activity }}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
-        onRefreshStatus={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -117,7 +114,6 @@ describe("WorktreeList actions", () => {
         activityByWorktreePath={{ [worktree.path]: activity }}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
-        onRefreshStatus={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -134,7 +130,6 @@ describe("WorktreeList actions", () => {
         statuses={{}}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
-        onRefreshStatus={vi.fn()}
         onDelete={onDelete}
       />,
     );
@@ -152,7 +147,6 @@ describe("WorktreeList actions", () => {
         statuses={{}}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
-        onRefreshStatus={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -175,7 +169,6 @@ describe("WorktreeList actions", () => {
         statuses={{}}
         onSelect={vi.fn()}
         onCreate={onCreate}
-        onRefreshStatus={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -212,12 +205,48 @@ describe("WorktreeList actions", () => {
         statuses={{}}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
-        onRefreshStatus={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
 
     const mainLabels = screen.getAllByText("main");
     expect(mainLabels).toHaveLength(2);
+  });
+
+  it("indexes active agents by path with Map lookup instead of agents.find linear scan (F-shell-02)", () => {
+    const sourcePath = resolve(__dirname, "WorktreeList.tsx");
+    const source = readFileSync(sourcePath, "utf-8");
+
+    // When: checking WorktreeList implementation
+    // Then: it must not perform linear search agents.find inside render loop
+    expect(source).not.toContain("agents.find");
+    expect(source).toContain("agentsByPath");
+  });
+
+  it("renders active agent info mapped to corresponding worktree correctly", () => {
+    const activeAgent: ActiveAgent = {
+      id: "agent-1",
+      name: "Coder",
+      task: "Fix perf regressions",
+      worktreePath: worktree.path,
+      state: "working",
+      worktree: null,
+      sessionId: "sess-1",
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[worktree]}
+        activePath=""
+        agents={[activeAgent]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Coder")).toBeInTheDocument();
+    expect(screen.getByText("Fix perf regressions")).toBeInTheDocument();
   });
 });

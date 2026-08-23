@@ -2,17 +2,15 @@ import {
   ChevronRight,
   FolderGit2,
   FolderPlus,
-  LayoutDashboard,
   PanelLeftClose,
   Plus,
-  Search,
   Settings2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
-import { isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
+import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
   getMigratedItem,
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
@@ -21,7 +19,6 @@ import {
 import type { RegisteredProject } from "../lib/tauri";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
-import { SectionHeader } from "./ui/SectionHeader";
 import { StatusDot } from "./ui/StatusDot";
 import { WorktreeList } from "./WorktreeList";
 
@@ -44,10 +41,9 @@ type SidebarProps = {
   onSelectProject?: (project: RegisteredProject) => void;
   onAddProject?: () => void;
   onSelectWorktree: (worktree: Worktree) => void;
-  onCreateWorktree: () => void;
-  onRefreshWorktreeStatus?: (worktree: Worktree) => void;
+  onCreateWorktree: (project?: RegisteredProject) => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
-  onOpenCommandPalette: () => void;
+  onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
@@ -68,9 +64,7 @@ export function Sidebar({
   onAddProject = () => undefined,
   onSelectWorktree,
   onCreateWorktree,
-  onRefreshWorktreeStatus = () => undefined,
   onDeleteWorktree = () => undefined,
-  onOpenCommandPalette,
   onOpenSettings,
   onToggle,
   onHide,
@@ -90,13 +84,20 @@ export function Sidebar({
     // (nothing persisted) falls back to "everything but the active project starts collapsed".
     return stored ?? seedCollapsedProjects(new Set<string>(), projects, activeProjectId);
   });
-  const knownProjectsRef = useRef<Set<string>>(new Set(projects.map((project) => project.workspaceId)));
+  const knownProjectsRef = useRef<Set<string> | null>(null);
+  if (knownProjectsRef.current === null) {
+    knownProjectsRef.current = new Set(projects.map((project) => project.workspaceId));
+  }
 
   useEffect(() => {
+    if (knownProjectsRef.current === null) {
+      knownProjectsRef.current = new Set(projects.map((project) => project.workspaceId));
+    }
     // Projects registered after mount inherit the same default as the initial seed.
-    const unseen = projects.filter((project) => !knownProjectsRef.current.has(project.workspaceId));
+    const known = knownProjectsRef.current;
+    const unseen = projects.filter((project) => !known.has(project.workspaceId));
     if (unseen.length === 0) return;
-    for (const project of unseen) knownProjectsRef.current.add(project.workspaceId);
+    for (const project of unseen) known.add(project.workspaceId);
     setCollapsedProjects((current) => seedCollapsedProjects(current, unseen, activeProjectId));
   }, [activeProjectId, projects]);
 
@@ -142,11 +143,6 @@ export function Sidebar({
     };
   }, []);
 
-  const focusWorktrees = () => {
-    worktreeRegionRef.current?.focus();
-    worktreeRegionRef.current?.scrollIntoView?.({ block: "start" });
-  };
-
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     dragRef.current = { startX: event.clientX, startWidth: widthRef.current };
@@ -176,47 +172,13 @@ export function Sidebar({
         >
           <PanelLeftClose className="size-3.5" />
         </IconButton>
-      </div>
-
-      <div className="space-y-1 px-2 pb-1">
-        <button
-          type="button"
-          onClick={focusWorktrees}
-          className="flex h-7 w-full items-center gap-2 rounded-md bg-worktree-sidebar-accent px-2 text-left text-[13px] font-medium tracking-tight text-worktree-sidebar-accent-foreground"
-        >
-          <LayoutDashboard className="size-3.5" />
-          <span className="flex-1">Workspace</span>
-        </button>
-        <button
-          type="button"
-          onClick={onOpenCommandPalette}
-          className="group relative flex h-7 w-full items-center rounded-md border border-worktree-sidebar-border/70 bg-worktree-sidebar-foreground/5 pl-7 pr-1.5 text-left text-[12px] font-medium tracking-tight text-worktree-sidebar-foreground/45 transition-colors hover:border-worktree-sidebar-border hover:bg-worktree-sidebar-foreground/8"
-        >
-          <Search className="pointer-events-none absolute left-2 top-1/2 size-3 -translate-y-1/2 text-worktree-sidebar-foreground/30" />
-          Search workspaces
-          <kbd className="ml-auto rounded border border-worktree-sidebar-border/80 bg-worktree-sidebar-foreground/8 px-1 py-px text-[9px] text-worktree-sidebar-foreground/55">
-            {shortcutLabel("commandPalette.open")}
-          </kbd>
-        </button>
+        <IconButton label="Add project" className="no-drag" size="sm" onClick={onAddProject}>
+          <Plus className="size-3.5" />
+        </IconButton>
       </div>
 
       <div ref={worktreeRegionRef} tabIndex={-1} data-testid="worktree-region" className="flex min-h-0 flex-1 flex-col outline-none">
-        <SectionHeader
-          title="Projects"
-          count={projects.length}
-          actions={
-            <>
-              <IconButton label="Add worktree" size="sm" onClick={onCreateWorktree}>
-                <FolderPlus className="size-3.5" />
-              </IconButton>
-              <IconButton label="Add project" size="sm" onClick={onAddProject}>
-                <Plus className="size-3.5" />
-              </IconButton>
-            </>
-          }
-        />
-
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 scrollbar-sleek">
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pt-2 pb-2 scrollbar-sleek">
           {projects.length === 0 ? (
             <p className="px-2 py-3 text-[11px] leading-relaxed text-muted-foreground">
               No projects registered yet.
@@ -242,7 +204,7 @@ export function Sidebar({
               <div key={project.workspaceId} className="pb-0.5">
                 <div
                   className={cn(
-                    "flex h-7 w-full items-center gap-0.5 rounded-md pr-1.5 transition-colors",
+                    "group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 transition-colors",
                     active
                       ? "bg-worktree-sidebar-accent font-medium text-worktree-sidebar-accent-foreground"
                       : "text-worktree-sidebar-foreground/65 hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground",
@@ -288,6 +250,14 @@ export function Sidebar({
                       </span>
                     ) : null}
                   </button>
+                  <IconButton
+                    label={`Add worktree to ${project.workspaceId}`}
+                    size="sm"
+                    className="size-5 opacity-55 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+                    onClick={() => onCreateWorktree(project)}
+                  >
+                    <FolderPlus className="size-3" />
+                  </IconButton>
                 </div>
 
                 {expanded ? (
@@ -300,8 +270,7 @@ export function Sidebar({
                       unreadWorktreePaths={unreadWorktreePaths}
                       activityByWorktreePath={activityByWorktreePath}
                       onSelect={onSelectWorktree}
-                      onCreate={onCreateWorktree}
-                      onRefreshStatus={onRefreshWorktreeStatus}
+                      onCreate={() => onCreateWorktree(project)}
                       onDelete={onDeleteWorktree}
                       label={`${project.workspaceId} worktrees`}
                     />

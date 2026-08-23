@@ -1,0 +1,280 @@
+I read this as Research/Evaluation - comprehensive test coverage, quality, flakiness, build config, CI workflows, and developer tooling review across the repository.
+
+# Repository Review Report: Test Coverage, Quality, Build Configuration & Developer Tooling
+
+## Executive Summary
+
+A comprehensive audit was performed across **Rust backend crates** (`src-tauri/`), **React/TypeScript frontend application** (`ui/`), **documentation site** (`site/`), and **automation workflows** (`.github/`).
+
+### Key Metrics
+| Domain | Test Count | Test Status | Suite Execution Time | Key Concern |
+|---|---|---|---|---|
+| **Rust Backend (lib)** | 138 unit tests | **1 FAILED**, 137 passed | 0.84s | Failing daemon stream framing test; silent passes with `if let Ok` |
+| **Rust Backend (tests/)** | 42 integration tests | 42 passed (7 binaries) | 2.56s | Hardcoded `/bin/sh` shell dependencies; socket path contention |
+| **Frontend (Vitest)** | 493 tests (70 files) | 493 passed | 31.42s | Forced sequential execution (`--maxWorkers=1`), source code string grep tests, mock over-isolation in `App.test.tsx` |
+| **Build & Bundling** | 3 workspaces | Builds cleanly | UI: 1.52s, Site: 3.35s | 805 KB unoptimized icon bundled into client chunk; Vite polling watcher CPU waste; missing Cargo release profiles |
+| **CI / Automation** | 1 workflow | Passing | N/A | **Zero CI coverage for Rust tests, frontend tests, linting, typechecking, or Tauri binary builds** |
+
+---
+
+## 1. Test Coverage & Quality
+
+### 1.1 Rust Backend (`src-tauri/src/` & `src-tauri/tests/`)
+
+#### Failing Test in Current Repository State
+- **File**: `src-tauri/src/daemon/server.rs:444`
+- **Failure**: `daemon::server::tests::test_pump_stream_compact_framing_and_exit` panicked at line 444:
+  ```
+  assertion failed: line.contains(r#""sessionId":"test-session-123""#)
+  ```
+- **Root Cause**: `DaemonStreamMessage` (`src-tauri/src/daemon/protocol.rs:109-125`) uses `#[serde(tag = "type", rename_all = "camelCase")]`. In Serde, `rename_all` on an enum only transforms the variant tag names (e.g. `"output"`, `"lagged"`, `"exit"`), but does **not** rename struct fields inside variants unless `#[serde(rename_all = "camelCase")]` is added to each variant or struct. The payload on the wire actually serializes as `"session_id":"test-session-123"`, causing the test assertion looking for `"sessionId"` to fail.
+
+#### Coverage Gaps
+1. **Daemon Launchd Agent** (`src-tauri/src/daemon/launchd.rs`):
+   - `generate_launchd_plist`, `install_launchd_agent`, `uninstall_launchd_agent`, and `get_launchd_plist_path` have **zero unit or integration tests**.
+2. **Browser Cookies Engine** (`src-tauri/src/browser/cookies.rs`):
+   - Netscape format parsing, JSON cookie parsing, cookie header synthesis, and cookie file import error paths have **zero unit tests**.
+3. **Dead Code Warnings**:
+   - `WriterLeaseGuard` (`src-tauri/src/worktree/manager.rs:57-85`) and `acquire_writer_lease` (`src-tauri/src/worktree/manager.rs:268`) are unreferenced dead code emitting warnings on every `cargo test` / `cargo check` run.
+4. **Clippy Diagnostic Warnings**:
+   - `src-tauri/src/lib.rs:217`: `clippy::items_after_test_module` (`run()` defined after `mod tests`).
+   - `src-tauri/src/ipc/terminal.rs:462`: `clippy::needless_return`.
+   - `src-tauri/src/remote/server.rs:101`: `clippy::while_let_loop`.
+
+#### Assertion Rigor & Mocking Fidelity
+- **High-Quality Domain Testing**: `src-tauri/src/notification/tests.rs` (466 lines) and `src-tauri/tests/worktree_safety.rs` (8 comprehensive concurrency/safety tests) demonstrate high rigor with property bounds, sanitization character checks, and atomic state transitions.
+- **Weak Mocking Fidelity in Remote Tests**: `src-tauri/src/remote/tests.rs:105-125` (`reqwest_like_health`) uses raw byte writes to TCP sockets (`GET /api/v1/health HTTP/1.1\r\n...`) rather than real HTTP client abstractions.
+
+---
+
+### 1.2 Frontend Vitest Tests (`ui/src/**/*.test.tsx?`)
+
+#### Strengths
+- **Comprehensive State Coverage**: `ui/src/state/paneTree.test.ts` (48 tests), `ui/src/state/workspaceStore.test.tsx` (21 tests), and `ui/src/lib/shortcuts.test.tsx` (47 tests) thoroughly cover complex pane splitting, tab reordering, tree transformations, and keyboard shortcut binding combinations.
+- **Realistic Event Simulation**: `ui/src/lib/terminalHostManager.output.test.ts` and `ui/src/lib/terminalEvents.bus.test.ts` verify event broadcasting, backpressure, and unsubscription order.
+
+#### Weaknesses & Mock Over-Isolation
+- **Mock Over-Isolation in `ui/src/App.test.tsx`** (1,348 lines):
+  - Lines `120-220`: Over 80% of App's subtree is mocked out with synthetic HTML stubs (`Sidebar`, `TabBar`, `TerminalSplitView`, `SettingsDialog`, `ProjectDialogs`, `CommandPalette`, `BrowserPane`).
+  - `workspaceStore` and `useWorkspaceRuntime` are mocked with mock object spies.
+  - The test suite tests whether `App` calls specific mocked functions rather than verifying end-to-end component rendering and real user workflows.
+
+---
+
+## 2. Test Anti-Patterns & Flakiness Risks
+
+### 2.1 Timing Sleeps & Polling Delays
+| File & Line | Anti-Pattern | Impact / Risk |
+|---|---|---|
+| `ui/src/lib/settingsRuntime.test.ts:117` | `await new Promise((resolve) => setTimeout(resolve, 10));` | Brittle timing sleep waiting for `settingsRuntimeBridge` event loop tick. Fails if execution environment is throttled. |
+| `src-tauri/tests/daemon_persistence_contract.rs:23` | `tokio::time::sleep(Duration::from_millis(100)).await;` | Hardcoded 100ms sleep waiting for daemon Unix domain socket listener to bind. |
+| `src-tauri/src/terminal/tests.rs:9` | `tokio::time::sleep(Duration::from_millis(20)).await;` inside polling loop | Polling loop instead of event-driven synchronization for session termination. |
+| `src-tauri/src/terminal/tests.rs:147` | `_ = tokio::time::sleep(Duration::from_millis(50)) => {}` inside `tokio::select!` | Polling delay injected into concurrent stream reader test. |
+
+### 2.2 Hollow Tests / Silent Pass Patterns (`if let Ok`)
+In several integration and network tests, assertions are enclosed within `if let Ok(...)` blocks without an `else { panic!(...) }` or direct `.expect(...)`:
+- **`src-tauri/tests/daemon_persistence_contract.rs:26`**:
+  ```rust
+  if let Ok(stream) = UnixStream::connect(&socket_path).await {
+      // 1. Handshake assertions...
+      // 2. Ping assertions...
+  }
+  // If connection fails, the test exits cleanly and PASSES with zero assertions executed!
+  ```
+- **`src-tauri/src/remote/tests.rs:145`**:
+  ```rust
+  if let Ok(mut stream) = tokio::net::TcpStream::connect(parsed).await {
+      // assertions on 200 OK and HTML...
+  }
+  // If connection fails, test passes silently.
+  ```
+
+### 2.3 Brittle DOM Selectors & Tailwind Utility Class Pinning
+Multiple test files assert against exact Tailwind styling classes and internal pixel dimensions rather than accessible roles and user-facing behavior:
+- `ui/src/components/SettingsDialog.test.tsx:212`: `expect(screen.getByTestId("settings-nav")).toHaveClass("w-[280px]")`
+- `ui/src/components/TerminalSplitView.test.tsx:193-202`: `expect(verticalLine).toHaveClass("w-px")`, `.not.toHaveClass("bg-border/80")`, `.not.toHaveClass("w-1.5")`, `expect(verticalLine?.querySelector('[data-divider-hit-area="true"]')).toHaveClass("-inset-x-1")`
+- `ui/src/components/tab-dnd/SplitEdgeDropZone.test.tsx:50-51`: `expect(groupEdge).toHaveClass("inset-y-0", "left-0", "w-[20%]")`
+- `ui/src/components/Sidebar.test.tsx:342-343`: `expect(sidebar).not.toHaveClass("border-r")`
+- `ui/src/components/TabBar.appearance.test.tsx:33-35`: `expect(activeTab).toHaveClass("bg-accent", "text-foreground")`
+
+### 2.4 Source-Code Grepping Contract Tests
+A pattern exists where test files read source code as text via `readFileSync` or `include_str!` and perform regex/substring assertions on source code rather than testing behavioral execution:
+- `ui/src/workspaceThemeContract.test.ts:10-38`: Reads `./App.tsx`, `./index.css`, `./settings-runtime.css` and tests exact CSS rule text.
+- `ui/src/appearanceThemeContract.test.ts:10-45`: Reads `./main.tsx` to assert that `installSettingsRuntimeBridge();` is imported.
+- `ui/src/devRuntimeContract.test.ts:10-32`: Reads `package.json`, `tauri.conf.json`, `ui/vite.config.ts` as strings.
+- `ui/src/index-html.test.ts:8-25`: Reads `index.html` and `src/main.tsx` as text.
+- `src-tauri/src/ipc/agents.rs:81`: `let src = include_str!("agents.rs"); assert!(!src.contains("Command::new(\"which\")"));`
+
+### 2.5 Redundant JSDOM Re-initialization & Vitest Single-Worker Bottleneck
+- `ui/src/App.test.tsx:4-18`, `ui/src/state/workspaceStore.test.tsx:4-11`, and `ui/src/state/workspaceStore.hmrRetention.test.tsx:4-11` manually construct `new JSDOM(...)` and rebind `globalThis.window/document`, despite `vitest.config.ts:6` already specifying `environment: "jsdom"`.
+- `ui/vitest.config.ts:10` sets `fileParallelism: false`, and `ui/package.json:6` sets `"test": "vitest run --maxWorkers=1"`. This causes Vitest to run all 70 test files in serial, taking ~31.4s instead of 4-6s under multi-core parallel execution.
+
+---
+
+## 3. Build & Bundling Configuration
+
+### 3.1 Frontend (`ui/vite.config.ts`, `ui/package.json`, `site/astro.config.mjs`)
+
+#### Asset Bloat (805 KB PNG Bundled in Assets)
+- In `ui/index.html:11`:
+  ```html
+  <link rel="icon" type="image/png" href="/src/assets/ferryx-icon.png" />
+  ```
+  Because Vite parses `<link href="/src/assets/...">`, it treats `ferryx-icon.png` (805.82 KB) as an asset dependency and bundles it into `ui/dist/assets/ferryx-icon-OXRkkUvz.png`, even though `public/favicon-32x32.png` and `public/ferryx-icon.png` are already present in `ui/public/`.
+
+#### Vite Watch Polling CPU Overhead
+- `ui/vite.config.ts:24-28`:
+  ```ts
+  watch: {
+    usePolling: true,
+    interval: 100,
+    ignored: ["**/src-tauri/**", "**/target/**", "**/.git/**"],
+  }
+  ```
+  `usePolling: true` with a 100ms interval continuously polls the filesystem, leading to increased battery and CPU usage during development compared to native event notifications (`fsevents` on macOS / `inotify` on Linux).
+
+#### Chunk Sizing & Code Splitting
+- Current `bun run build` bundle sizes:
+  - `xterm-BqvuqXEL.js`: **332.63 kB** (gzip: 84.18 kB)
+  - `App-B67Y0zS6.js`: **260.50 kB** (gzip: 74.74 kB)
+  - `index-BPBul2C_.js`: **169.04 kB** (gzip: 54.70 kB)
+  - `addon-webgl-BrQ0bpT6.js`: **111.96 kB** (gzip: 30.52 kB)
+- `vite.config.ts` currently lacks `build.rollupOptions.output.manualChunks` configuration, which prevents splitting large vendor packages (`@xterm/xterm`, `@dnd-kit/*`, `lucide-react`) into independently cacheable vendor chunks.
+
+---
+
+### 3.2 Backend (`src-tauri/Cargo.toml`, `tauri.conf.json`)
+
+#### Missing Production Optimization Profiles
+- `src-tauri/Cargo.toml` has no `[profile.release]` configuration. For a production desktop distribution:
+  ```toml
+  [profile.release]
+  opt-level = 3
+  lto = "thin"
+  codegen-units = 1
+  panic = "abort"
+  strip = true
+  ```
+  Adding these settings reduces binary footprint and improves runtime execution speed.
+
+#### Crate Dependency Audit
+- `rodio` in `Cargo.toml:30-37`:
+  ```toml
+  rodio = { version = "0.22", default-features = false, features = [
+      "playback",
+      "wav",
+      "mp3",
+      "flac",
+      "vorbis",
+      "mp4",
+  ] }
+  ```
+  Enabling `flac`, `vorbis`, and `mp4` decoders pulls in additional decoding dependencies when system/app notifications primarily rely on `wav` and `mp3`.
+
+---
+
+## 4. CI/CD & Developer Tooling
+
+### 4.1 GitHub Workflows (`.github/workflows/`)
+- Current status: **Only `.github/workflows/deploy-pages.yml` exists.**
+- **Missing CI Pipelines**:
+  1. **No Rust CI**: No workflow executes `cargo test`, `cargo clippy --all-targets`, or `cargo fmt --check`.
+  2. **No Frontend CI**: No workflow executes `bun run test` (Vitest) or `bun run build` (`tsc && vite build`).
+  3. **No Multi-Platform Build Matrix**: No CI job builds or validates desktop release binaries across macOS (ARM64/x86_64), Linux (Ubuntu), or Windows.
+  4. **No Release Automation**: No automated semantic release or Tauri updater signature generation workflow exists.
+
+### 4.2 Linting, Formatting & Workspace Tooling
+- **No ESLint / Biome Config**: Neither root nor `ui/` nor `site/` has a linter configuration file.
+- **No Prettier Config**: Formatting is unpinned across TypeScript/CSS/JSON files.
+- **Missing Root Workspace Definition**: Root `package.json` does not declare Bun workspaces (`"workspaces": ["ui", "site"]`), requiring manual directory switching.
+- **No Pre-Commit Hooks**: No Git hooks or tools (such as Lefthook or simple `.githooks/`) to prevent committing broken tests, dead code, or clippy warnings.
+
+---
+
+## 5. Categorized Findings & Concrete Citations
+
+### 🔴 Critical (Must Fix Immediately)
+1. **Failing Rust Unit Test**:
+   - **Citation**: `src-tauri/src/daemon/server.rs:444` & `src-tauri/src/daemon/protocol.rs:109-125`
+   - **Issue**: `test_pump_stream_compact_framing_and_exit` panics on `assertion failed: line.contains(r#""sessionId":"test-session-123""#)`.
+   - **Fix**: Update `DaemonStreamMessage` variants with `#[serde(rename_all = "camelCase")]` or update the test assertion to match the wire contract.
+2. **Missing CI Verification Pipeline**:
+   - **Citation**: `.github/workflows/deploy-pages.yml:1-45`
+   - **Issue**: PRs and commits are not tested or typechecked in CI.
+   - **Fix**: Add `.github/workflows/ci.yml` running `cargo test`, `cargo clippy`, `cargo fmt --check`, `bun test`, and `bun run build`.
+
+---
+
+### 🟡 High Priority (Reliability & Flakiness)
+3. **Silent Test Pass on Connection Failures (`if let Ok`)**:
+   - **Citation**: `src-tauri/tests/daemon_persistence_contract.rs:26`, `src-tauri/src/remote/tests.rs:145`
+   - **Issue**: If connection fails or socket is not ready, tests exit with 0 assertions executed and report green.
+   - **Fix**: Replace `if let Ok(stream) = ...` with `.expect("failed to connect to daemon/server")`.
+4. **Arbitrary Test Sleeps**:
+   - **Citation**: `ui/src/lib/settingsRuntime.test.ts:117`, `src-tauri/tests/daemon_persistence_contract.rs:23`
+   - **Issue**: Fixed sleeps (`setTimeout(10ms)`, `sleep(100ms)`) lead to race conditions under CI load.
+   - **Fix**: Use condition-based synchronization (e.g. `vi.waitFor`, atomic flags, or channel handshake signals).
+5. **Dead Code Warnings in Worktree Manager**:
+   - **Citation**: `src-tauri/src/worktree/manager.rs:57-85`, `src-tauri/src/worktree/manager.rs:268`
+   - **Issue**: `WriterLeaseGuard` and `acquire_writer_lease` are unused, generating compiler warnings.
+   - **Fix**: Either wire the lease guard into PTY spawn lifecycle or remove/feature-gate unused code.
+
+---
+
+### 🔵 Medium Priority (Maintainability & Performance)
+6. **Vitest Single-Worker Execution Bottleneck**:
+   - **Citation**: `ui/vitest.config.ts:10`, `ui/package.json:6`
+   - **Issue**: `fileParallelism: false` and `--maxWorkers=1` stretch UI test execution to 31+ seconds.
+   - **Fix**: Resolve any state leakage in test setup so tests can run with default multi-core concurrency.
+7. **Asset Bloat via HTML Favicon Link**:
+   - **Citation**: `ui/index.html:11`
+   - **Issue**: Bundles 805 KB uncompressed PNG into `dist/assets/`.
+   - **Fix**: Change icon link to `/favicon-32x32.png` or `public/ferryx-icon.png`.
+8. **Brittle Tailwind Class Assertions**:
+   - **Citation**: `ui/src/components/SettingsDialog.test.tsx:212`, `ui/src/components/TerminalSplitView.test.tsx:193-202`
+   - **Issue**: Assertions fail on benign CSS refactors (`w-[280px]`, `w-px`, `inset-y-0`).
+   - **Fix**: Assert on accessible roles, labels, data-state attributes, and behavioral interactions.
+9. **Source-Code String Grepping Tests**:
+   - **Citation**: `ui/src/workspaceThemeContract.test.ts`, `ui/src/appearanceThemeContract.test.ts`, `src-tauri/src/ipc/agents.rs:81`
+   - **Issue**: Reads source code via `readFileSync` / `include_str!` to verify string tokens.
+   - **Fix**: Replace with runtime DOM/behavior assertions or AST-based linters.
+10. **Clippy Diagnostic Cleanup**:
+    - **Citation**: `src-tauri/src/lib.rs:217`, `src-tauri/src/ipc/terminal.rs:462`, `src-tauri/src/remote/server.rs:101`
+    - **Issue**: Items defined after test module, needless return, while-let loop warnings.
+    - **Fix**: Move `pub fn run()` above test module, simplify returns and loops.
+
+---
+
+### ⚪ Low Priority (Enhancements & Ergonomics)
+11. **Vite Watch Polling**:
+    - **Citation**: `ui/vite.config.ts:24-28`
+    - **Issue**: Continuous 100ms filesystem polling.
+    - **Fix**: Remove `usePolling: true` or gate it behind an environment variable (`CHOKIDAR_USEPOLLING`).
+12. **Missing Production Release Profiles in Cargo.toml**:
+    - **Citation**: `src-tauri/Cargo.toml:1-49`
+    - **Fix**: Add `[profile.release]` with `lto = "thin"`, `codegen-units = 1`, `strip = true`.
+13. **Monorepo Workspace Harmonization**:
+    - **Citation**: `package.json:1-12`
+    - **Fix**: Add `"workspaces": ["ui", "site"]` and top-level `"test": "cargo test --manifest-path src-tauri/Cargo.toml && bun run --cwd ui test"`.
+
+---
+
+## Actionable Next Steps
+
+```
+[Immediate Fixes]
+├── 1. Fix `DaemonStreamMessage` serde field naming in `src-tauri/src/daemon/protocol.rs`
+├── 2. Replace `if let Ok` with `.expect()` in `tests/daemon_persistence_contract.rs` and `src/remote/tests.rs`
+├── 3. Clean up dead code (`WriterLeaseGuard`) in `src-tauri/src/worktree/manager.rs`
+└── 4. Correct icon link in `ui/index.html` to prevent bundling 805 KB asset
+
+[CI/CD & Tooling]
+├── 1. Add `.github/workflows/ci.yml` (cargo test, clippy, fmt, bun test, tsc, build)
+├── 2. Add Biome or ESLint + Prettier config to root and `ui/`
+└── 3. Configure `[profile.release]` in `src-tauri/Cargo.toml`
+
+[Test Architecture]
+├── 1. Refactor `ui/src/App.test.tsx` to reduce mock over-isolation
+├── 2. Replace static file-reading contract tests with behavioral tests
+└── 3. Enable multi-worker Vitest execution after isolating shared DOM state
+```

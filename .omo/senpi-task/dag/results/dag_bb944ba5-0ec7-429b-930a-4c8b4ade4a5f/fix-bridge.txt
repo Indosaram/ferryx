@@ -1,0 +1,37 @@
+> I read this as Verification check - deliver the completed P-bridge fix, RED/GREEN test logs, and evidence markdown.
+
+### Deliverable Status: Complete
+
+#### 1. Files Changed (Scope Adhered)
+- `ui/src/lib/settingsRuntimeBridge.ts`: Removed global subtree `MutationObserver` on `document.documentElement`; exported `_resetSettingsRuntimeBridgeForTest` for isolated test cycles.
+- `ui/src/lib/settingsRuntime.test.ts`: Added regression tests verifying no subtree `MutationObserver` on `document.documentElement` after bridge installation, and verified change event handling for appearance settings.
+- `docs/frontend-perf/fix-P-bridge.md`: Written with RED output, GREEN output, changed lines, and risk analysis.
+
+#### 2. Test Execution & Evidence
+
+**RED Test Output (prior to removing observer):**
+```
+ FAIL  src/lib/settingsRuntime.test.ts > settings runtime contracts > installSettingsRuntimeBridge > does not attach a document-wide subtree MutationObserver on documentElement
+AssertionError: expected "observe" to not be called with arguments: [ <html …(5)>…(2)</html>, …(1) ]
+
+Received: 
+  1st observe call:
+  [
+    <html>...</html>,
+    { "childList": true, "subtree": true }
+  ]
+```
+
+**GREEN Test Output (after observer removal):**
+```
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/settingsRuntime.test.ts (6 tests) 23ms
+
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+   Start at  23:41:07
+   Duration  548ms
+```
+
+Evidence is saved at `/Users/indo/code/project/orca-lite/docs/frontend-perf/fix-P-bridge.md`. No git commits were created.

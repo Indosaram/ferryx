@@ -1,9 +1,13 @@
-import type {
-  LayoutState,
-  TabGroup,
-  TabGroupLayoutNode,
-  TabPaneLayout,
-  WorkspaceTab,
+import {
+  createBrowserPaneContent,
+  createTerminalPaneContent,
+  type BrowserPaneState,
+  type LayoutState,
+  type PaneContent,
+  type TabGroup,
+  type TabGroupLayoutNode,
+  type TabPaneLayout,
+  type WorkspaceTab,
 } from "../lib/types";
 import {
   clampRatio,
@@ -70,12 +74,14 @@ export function createLayoutState(tabs: WorkspaceTab[] = [], activeTabId?: strin
   const layoutsByTabId: Record<string, TabPaneLayout> = {};
   for (const tab of tabs) {
     const leafId = "leaf-init";
-    const sessionId = tab.kind === "browser" ? "" : tab.sessionId;
+    const content = defaultContentForTab(tab);
+    const sessionId = content.kind === "terminal" ? content.sessionId : "";
     layoutsByTabId[tab.id] = {
       root: createLeafNode(leafId),
       activeLeafId: leafId,
       expandedLeafId: null,
       sessionIdsByLeafId: { [leafId]: sessionId },
+      contentsByLeafId: { [leafId]: content },
     };
   }
 
@@ -123,13 +129,14 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const layoutsByTabId = { ...state.layoutsByTabId };
       if (!layoutsByTabId[action.tab.id]) {
         const leafId = createLayoutId("leaf");
-        const defaultSessionId = action.tab.kind === "browser" ? "" : action.tab.sessionId;
-        const sessionId = action.sessionId ?? defaultSessionId;
+        const content = defaultContentForTab(action.tab, action.sessionId);
+        const sessionId = content.kind === "terminal" ? content.sessionId : "";
         layoutsByTabId[action.tab.id] = {
           root: createLeafNode(leafId),
           activeLeafId: leafId,
           expandedLeafId: null,
           sessionIdsByLeafId: { [leafId]: sessionId },
+          contentsByLeafId: { [leafId]: content },
         };
       }
       return normalizeLayoutInternal(
@@ -153,12 +160,14 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       if (tabs.length === 0 && action.replacementTab) {
         tabs = [action.replacementTab];
         const leafId = "leaf-replacement";
-        const defaultSessionId = action.replacementTab.kind === "browser" ? "" : action.replacementTab.sessionId;
+        const content = defaultContentForTab(action.replacementTab);
+        const defaultSessionId = content.kind === "terminal" ? content.sessionId : "";
         layoutsByTabId[action.replacementTab.id] = {
           root: createLeafNode(leafId),
           activeLeafId: leafId,
           expandedLeafId: null,
           sessionIdsByLeafId: { [leafId]: defaultSessionId },
+          contentsByLeafId: { [leafId]: content },
         };
       }
 
@@ -235,6 +244,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const newLeafId = action.newLeafId ?? createLayoutId("leaf");
       if (existingLeafIds.includes(newLeafId)) return state;
       const newRoot = splitLeaf(tabLayout.root, targetLeafId, newLeafId, action.direction, action.position, action.ratio);
+      const newContent = createTerminalPaneContent(action.sessionId);
       return normalizeLayoutInternal(
         {
           ...state,
@@ -246,6 +256,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
               activeLeafId: newLeafId,
               expandedLeafId: null,
               sessionIdsByLeafId: { ...tabLayout.sessionIdsByLeafId, [newLeafId]: action.sessionId },
+              contentsByLeafId: { ...(tabLayout.contentsByLeafId ?? {}), [newLeafId]: newContent },
             },
           },
         },
@@ -379,12 +390,15 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       if (leafIds.length <= 1 || !leafIds.includes(action.leafId)) return state;
       const movedSessionId = sourceLayout.sessionIdsByLeafId[action.leafId];
       if (!movedSessionId || action.newTab.kind === "browser") return state;
+      const movedContent = sourceLayout.contentsByLeafId?.[action.leafId] ?? createTerminalPaneContent(movedSessionId);
 
       const nextRoot = removeLeaf(sourceLayout.root, action.leafId);
       if (!nextRoot) return state;
       const fallbackLeafId = findSiblingLeafId(sourceLayout.root, action.leafId) ?? findFirstLeafId(nextRoot);
       const nextSessionIdsByLeafId = { ...sourceLayout.sessionIdsByLeafId };
       delete nextSessionIdsByLeafId[action.leafId];
+      const nextContentsByLeafId = { ...(sourceLayout.contentsByLeafId ?? {}) };
+      delete nextContentsByLeafId[action.leafId];
       const nextPrimarySessionId =
         sourceTab.sessionId === movedSessionId
           ? nextSessionIdsByLeafId[fallbackLeafId] ?? Object.values(nextSessionIdsByLeafId)[0] ?? sourceTab.sessionId
@@ -423,12 +437,14 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
               activeLeafId: sourceLayout.activeLeafId === action.leafId ? fallbackLeafId : sourceLayout.activeLeafId,
               expandedLeafId: sourceLayout.expandedLeafId === action.leafId ? null : sourceLayout.expandedLeafId,
               sessionIdsByLeafId: nextSessionIdsByLeafId,
+              contentsByLeafId: nextContentsByLeafId,
             },
             [newTab.id]: {
               root: createLeafNode(action.leafId),
               activeLeafId: action.leafId,
               expandedLeafId: null,
               sessionIdsByLeafId: { [action.leafId]: movedSessionId },
+              contentsByLeafId: { [action.leafId]: movedContent },
             },
           },
         },
@@ -451,6 +467,8 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       if (!newRoot) return layoutReducer(state, { type: "CLOSE_TAB", tabId: action.tabId });
       const newSessionIds = { ...tabLayout.sessionIdsByLeafId };
       delete newSessionIds[action.leafId];
+      const newContents = { ...(tabLayout.contentsByLeafId ?? {}) };
+      delete newContents[action.leafId];
       return normalizeLayoutInternal(
         {
           ...state,
@@ -465,6 +483,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
                   : tabLayout.activeLeafId,
               expandedLeafId: tabLayout.expandedLeafId === action.leafId ? null : tabLayout.expandedLeafId,
               sessionIdsByLeafId: newSessionIds,
+              contentsByLeafId: newContents,
             },
           },
         },
@@ -563,6 +582,72 @@ export function normalizeLayout(state: LayoutState): LayoutState {
   return normalizeLayoutInternal(state, false);
 }
 
+export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent {
+  if (raw && typeof raw === "object" && "kind" in raw) {
+    const item = raw as {
+      kind: string;
+      sessionId?: string;
+      browser?: BrowserPaneState;
+      browserId?: string;
+      url?: string;
+      title?: string | null;
+      loading?: boolean;
+      canGoBack?: boolean;
+      canGoForward?: boolean;
+      profileId?: string;
+      worktreePath?: string;
+      worktreeLabel?: string;
+    };
+    if (item.kind === "terminal") {
+      return createTerminalPaneContent(item.sessionId ?? fallbackSessionId);
+    }
+    if (item.kind === "browser") {
+      const browserState: BrowserPaneState = item.browser
+        ? {
+            browserId: item.browser.browserId ?? item.browserId ?? "",
+            url: item.browser.url ?? item.url ?? "about:blank",
+            title: item.browser.title ?? item.title ?? null,
+            loading: item.browser.loading ?? item.loading ?? false,
+            canGoBack: item.browser.canGoBack ?? item.canGoBack ?? false,
+            canGoForward: item.browser.canGoForward ?? item.canGoForward ?? false,
+            profileId: item.browser.profileId ?? item.profileId,
+            worktreePath: item.browser.worktreePath ?? item.worktreePath,
+            worktreeLabel: item.browser.worktreeLabel ?? item.worktreeLabel,
+          }
+        : {
+            browserId: item.browserId ?? "",
+            url: item.url ?? "about:blank",
+            title: item.title ?? null,
+            loading: item.loading ?? false,
+            canGoBack: item.canGoBack ?? false,
+            canGoForward: item.canGoForward ?? false,
+            profileId: item.profileId,
+            worktreePath: item.worktreePath,
+            worktreeLabel: item.worktreeLabel,
+          };
+      return createBrowserPaneContent(browserState);
+    }
+  }
+  return createTerminalPaneContent(fallbackSessionId);
+}
+
+export function defaultContentForTab(tab: WorkspaceTab, sessionIdOverride?: string): PaneContent {
+  if (tab.kind === "browser") {
+    return createBrowserPaneContent({
+      browserId: tab.browserId,
+      url: tab.url,
+      title: tab.title,
+      loading: tab.loading,
+      canGoBack: tab.canGoBack,
+      canGoForward: tab.canGoForward,
+      profileId: tab.profileId,
+      worktreePath: tab.worktreePath,
+      worktreeLabel: tab.worktreeLabel,
+    });
+  }
+  return createTerminalPaneContent(sessionIdOverride ?? tab.sessionId);
+}
+
 function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutState {
   if (!force && isNormalizedLayoutState(state)) return state;
 
@@ -598,12 +683,51 @@ function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutStat
       const leaves = collectLeafIds(existing.root);
       const activeLeafId = leaves.includes(existing.activeLeafId ?? "") ? existing.activeLeafId : leaves[0] ?? null;
       const expandedLeafId = leaves.includes(existing.expandedLeafId ?? "") ? existing.expandedLeafId : null;
-      const defaultSessionId = tab.kind === "browser" ? "" : tab.sessionId;
-      const existingSessionKeys = Object.keys(existing.sessionIdsByLeafId);
-      const mappingIsExact =
+      const defaultContent = defaultContentForTab(tab);
+
+      const contentsByLeafId: Record<string, PaneContent> = {};
+      const sessionIdsByLeafId: Record<string, string> = {};
+
+      for (const leafId of leaves) {
+        if (existing.contentsByLeafId && Object.prototype.hasOwnProperty.call(existing.contentsByLeafId, leafId)) {
+          const content = toPaneContent(
+            existing.contentsByLeafId[leafId],
+            existing.sessionIdsByLeafId?.[leafId] ?? (tab.kind === "browser" ? "" : tab.sessionId),
+          );
+          contentsByLeafId[leafId] = content;
+          sessionIdsByLeafId[leafId] = content.kind === "terminal" ? content.sessionId : "";
+        } else if (existing.sessionIdsByLeafId && Object.prototype.hasOwnProperty.call(existing.sessionIdsByLeafId, leafId)) {
+          if (tab.kind === "browser") {
+            contentsByLeafId[leafId] = defaultContent;
+            sessionIdsByLeafId[leafId] = "";
+          } else {
+            const sessionId = existing.sessionIdsByLeafId[leafId] ?? tab.sessionId;
+            const content = createTerminalPaneContent(sessionId);
+            contentsByLeafId[leafId] = content;
+            sessionIdsByLeafId[leafId] = sessionId;
+          }
+        } else {
+          contentsByLeafId[leafId] = defaultContent;
+          sessionIdsByLeafId[leafId] = defaultContent.kind === "terminal" ? defaultContent.sessionId : "";
+        }
+      }
+
+      const existingSessionKeys = Object.keys(existing.sessionIdsByLeafId ?? {});
+      const sessionMappingIsExact =
         existingSessionKeys.length === leaves.length &&
         leaves.every((leafId) => Object.prototype.hasOwnProperty.call(existing.sessionIdsByLeafId, leafId));
-      if (activeLeafId === existing.activeLeafId && expandedLeafId === existing.expandedLeafId && mappingIsExact) {
+
+      const existingContentKeys = Object.keys(existing.contentsByLeafId ?? {});
+      const contentMappingIsExact =
+        existingContentKeys.length === leaves.length &&
+        leaves.every((leafId) => Object.prototype.hasOwnProperty.call(existing.contentsByLeafId ?? {}, leafId));
+
+      if (
+        activeLeafId === existing.activeLeafId &&
+        expandedLeafId === existing.expandedLeafId &&
+        sessionMappingIsExact &&
+        contentMappingIsExact
+      ) {
         nextLayoutsByTabId[tab.id] = existing;
       } else {
         paneLayoutsChanged = true;
@@ -611,20 +735,21 @@ function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutStat
           ...existing,
           activeLeafId,
           expandedLeafId,
-          sessionIdsByLeafId: Object.fromEntries(
-            leaves.map((leafId) => [leafId, existing.sessionIdsByLeafId[leafId] ?? defaultSessionId]),
-          ),
+          sessionIdsByLeafId,
+          contentsByLeafId,
         };
       }
     } else {
       paneLayoutsChanged = true;
       const leafId = createLayoutId("leaf-default");
-      const defaultSessionId = tab.kind === "browser" ? "" : tab.sessionId;
+      const content = defaultContentForTab(tab);
+      const defaultSessionId = content.kind === "terminal" ? content.sessionId : "";
       nextLayoutsByTabId[tab.id] = {
         root: createLeafNode(leafId),
         activeLeafId: leafId,
         expandedLeafId: null,
         sessionIdsByLeafId: { [leafId]: defaultSessionId },
+        contentsByLeafId: { [leafId]: content },
       };
     }
   }
@@ -725,7 +850,13 @@ function isNormalizedLayoutState(state: LayoutState): boolean {
     }
   }
   if (assigned.size !== valid.size) return false;
-  return state.tabs.every((tab) => Boolean(state.layoutsByTabId[tab.id]));
+  return state.tabs.every((tab) => {
+    const layout = state.layoutsByTabId[tab.id];
+    if (!layout) return false;
+    if (!layout.contentsByLeafId) return false;
+    const leaves = collectLeafIds(layout.root);
+    return leaves.every((leafId) => Object.prototype.hasOwnProperty.call(layout.contentsByLeafId, leafId));
+  });
 }
 
 function findGroupContainingTab(groups: Record<string, TabGroup>, tabId: string): TabGroup | null {

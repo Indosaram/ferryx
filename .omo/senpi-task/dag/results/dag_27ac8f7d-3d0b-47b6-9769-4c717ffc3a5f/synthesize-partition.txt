@@ -1,0 +1,170 @@
+## Bottom line
+
+Six producer lanes are the smallest complete partition. File ownership is disjoint; after the Rust contract lane, daemon lifecycle, Tauri bridging, and UI transport can proceed with the handoff DTOs frozen. Overall effort: **Large**.
+
+## Action plan
+
+1. **Lane 1 — Rust replay and protocol contract**
+   - **Depends on:** none.
+   - **Owns:**
+     - `src-tauri/src/daemon/protocol.rs`
+     - `src-tauri/src/terminal/mod.rs`
+     - `src-tauri/src/terminal/output_hub.rs`
+     - `src-tauri/src/terminal/service.rs`
+     - new `src-tauri/src/terminal/process.rs`
+   - **Produces:**
+     - Protocol v2 with daemon epoch, `RegisterWorkspace`, `DescribeSession`, idempotent `Spawn { clientRequestId, cwd }`, sequence-aware `Attach`, lifecycle, and replay-gap frames.
+     - Monotonic per-session `u64` output sequences and bounded chunk history.
+     - Atomic subscriber-first attachment snapshots with exact start/end sequence boundaries.
+     - `TerminalService::attach_sequenced`; preserve the existing raw attachment API for the daemon-owned remote gateway.
+     - Shared process-CWD resolution moved out of GUI IPC.
+   - **Handoff contract:**
+     - UDS uses native `u64` sequences.
+     - Tauri-facing adapters must serialize sequences as decimal strings.
+     - `register_workspace(workspace_id, canonical_repo_root)` must precede spawn.
+     - A repeated `clientRequestId` identifies one backend session.
+   - **RED first:** add an output-hub test asserting overflow reports the exact available range and that an attachment ending at sequence `N` receives live output first at `N+1`, with no duplicate or missing chunk. Current code has byte-only chunks and cannot satisfy or compile against this contract.
+
+2. **Lane 2 — Daemon control, streaming, and remote ownership**
+   - **Depends on:** Lane 1.
+   - **Owns:**
+     - `src-tauri/src/daemon/server.rs`
+     - `src-tauri/src/daemon/client.rs`
+   - **Produces:**
+     - Separate persistent control connection and one dedicated UDS connection per attachment.
+     - External-process-only `connect_or_spawn`; no embedded `DaemonServer` fallback.
+     - Workspace registration, validated nested CWD spawn, describe/list metadata, idempotent spawn cache, daemon epoch, lifecycle streaming, and replay-gap recovery.
+     - Daemon-owned remote gateway configuration/control so Tauri does not need a second terminal service.
+     - Injectable runtime/socket paths for isolated tests.
+     - A readiness signal emitted after lock acquisition, socket bind, and permission setup.
+   - **Handoff contract:**
+     - `DaemonClient` exposes typed methods for register, spawn, list, describe, attach, write, resize, signal, close, and existing remote-control operations.
+     - `attach_terminal` returns initial history and a stream receiver without occupying the control mutex.
+     - Protocol mismatch and daemon startup failure are terminal errors; neither may fall back to an in-process PTY.
+   - **RED first:** add a client/server test that opens two attachments, writes through the still-usable control connection, and retries one spawn request ID twice while observing one session. Current attach consumes its connection and the protocol has no idempotency.
+
+3. **Lane 3 — Headless executable and OS lifecycle**
+   - **Depends on:** Lane 2.
+   - **May run in parallel with:** Lanes 4 and 5.
+   - **Owns:**
+     - `src-tauri/src/main.rs`
+     - `src-tauri/src/daemon/launchd.rs`
+     - `src-tauri/tests/daemon_persistence_contract.rs`
+   - **Produces:**
+     - `ferryx --daemon` headless entrypoint.
+     - macOS launchd bootstrap/bootout/kickstart with checked command failures.
+     - Safe detached-process fallback where launchd is unavailable.
+     - Process-level persistence contract: start daemon, register a temporary repository, spawn shell, disconnect the first client, reconnect, verify history/live input, then close and verify process-group exit.
+     - Readiness and exit are awaited through exact signals with bounded timeouts; no fixed sleeps or timing polling.
+   - **Handoff contract:**
+     - Normal invocation remains the Tauri GUI.
+     - `--daemon` must never initialize a window or Tauri terminal state.
+     - GUI exit does not issue daemon shutdown.
+   - **RED first:** change the existing daemon integration test to spawn `CARGO_BIN_EXE_ferryx --daemon` and await its readiness signal. Current `main.rs:4-5` ignores `--daemon` and starts the GUI path.
+
+4. **Lane 4 — Tauri daemon bridge and direct-backend removal**
+   - **Depends on:** Lane 2 and Lane 1 DTOs.
+   - **May run in parallel with:** Lanes 3 and 5.
+   - **Owns:**
+     - `src-tauri/src/ipc/terminal.rs`
+     - `src-tauri/src/ipc/project.rs`
+     - `src-tauri/src/ipc/remote.rs`
+     - `src-tauri/src/lib.rs`
+     - `src-tauri/src/ipc/tests.rs`
+   - **Produces:**
+     - Managed `DaemonClient`; removal of GUI-managed `PtyManager`, `TerminalOutputHub`, and `TerminalService`.
+     - Project registration mirrored into the daemon before terminal spawn.
+     - Spawn/list/describe/attach/write/resize/signal/close routed exclusively through the daemon.
+     - One active Rust attachment pump per backend session; reattach aborts the prior pump to prevent duplicate Tauri events.
+     - Remote commands proxied to the daemon-owned gateway.
+     - Existing GUI-owned layout/session JSON persistence remains in `ipc/session.rs`; no disk-path migration is introduced.
+   - **Handoff contract to Lane 5:**
+     - `cmd_terminal_list -> { daemonEpoch, sessions }`.
+     - `cmd_terminal_attach { sessionId, afterSequence? } -> { attachmentId, sessionId, daemonEpoch, history, historyStartSequence, historyEndSequence, replayGap }`.
+     - History and output data remain base64 strings.
+     - Sequence fields are decimal strings.
+     - `terminal_output -> { attachmentId, sessionId, sequence, data }`.
+     - `terminal_lifecycle -> { sessionId, state, exitCode?, reason? }`.
+   - **RED first:** add a Tauri mock-app test asserting terminal commands require `DaemonClient`, no direct terminal service is managed, and attach returns history before a sequenced live event. Current app state directly manages all three PTY objects and has no attach command.
+
+5. **Lane 5 — UI attachment, sequence, and renderer transport**
+   - **Depends on:** frozen Lane 4 IPC contract; implementation may proceed in parallel with Lane 4.
+   - **Owns:**
+     - `ui/src/lib/types.ts`
+     - `ui/src/lib/tauri.ts`
+     - `ui/src/lib/tauri.test.ts`
+     - `ui/src/lib/terminalTransport/types.ts`
+     - `ui/src/lib/terminalTransport/tauriTransport.ts`
+     - `ui/src/lib/terminalTransport/remoteTransport.ts`
+     - `ui/src/lib/terminalTransport/terminalTransport.test.ts`
+     - `ui/src/lib/terminalEvents.ts`
+     - `ui/src/lib/terminalEvents.test.ts`
+     - `ui/src/lib/terminalEvents.bus.test.ts`
+     - `ui/src/lib/terminalOutputScheduler.ts`
+     - `ui/src/lib/terminalInstanceFactory.ts`
+     - `ui/src/lib/terminalHostManager.ts`
+     - `ui/src/lib/terminalHostManagerTestHelper.ts`
+     - all `ui/src/lib/terminalHostManager*.test.ts`
+   - **Produces:**
+     - Typed attach invocation and base64 decoding.
+     - Runtime sequence values represented as `bigint`; persisted values represented as decimal strings.
+     - Global native listeners installed before attach.
+     - Initial history written before live output is enabled.
+     - Duplicate suppression for `sequence <= historyEndSequence` and reconnect replay from the last applied sequence.
+     - Explicit replay-gap reset/history application.
+     - Renderer input, resize, and output routed through `TerminalTransport`, not direct Tauri helpers.
+   - **Handoff contract to Lane 6:**
+     - `TerminalSession` exposes optional `daemonEpoch` and `lastOutputSequence`.
+     - Event bus exposes exact applied-sequence notifications for workspace persistence.
+     - A newly created renderer requests full available history; a retained renderer reconnects after its last applied sequence.
+   - **RED first:** extend `terminalTransport.test.ts` and `terminalHostManager.output.test.ts` to require native attach invocation, history-before-live ordering, and suppression of a duplicated boundary sequence. Current `TauriTerminalTransport.attach` returns only `{ sessionId }`.
+
+6. **Lane 6 — Restore coordinator, reconciliation, and persisted identity**
+   - **Depends on:** Lane 5.
+   - **Owns:**
+     - `ui/src/App.tsx`
+     - `ui/src/state/hmrWorkspaceState.ts`
+     - `ui/src/state/workspaceStore.ts`
+     - new `ui/src/state/workspaceRestore.ts`
+     - new `ui/src/state/workspaceRestore.test.tsx`
+     - `ui/src/state/workspaceStore.hmrRetention.test.tsx`
+     - `ui/src/lib/sessionPersistence.ts`
+     - `ui/src/lib/sessionPersistence.test.ts`
+   - **Produces:**
+     - Per-workspace `idle/loading/restored/failed` restore coordinator.
+     - StrictMode cleanup cancels only its attempt and cannot permanently poison the workspace guard.
+     - One restore source at a time: HMR state first, otherwise disk list/reconcile.
+     - Reconciliation by daemon epoch plus backend session ID.
+     - Live sessions remain attached; missing or old-epoch sessions remain visibly lost and are not automatically respawned.
+     - Persisted daemon epoch and last applied output sequence without collapsing local/backend IDs.
+     - Workspace switching remounts or resets store ownership so one workspace cannot inherit another workspace’s restore guard or HMR state.
+   - **Handoff contract:**
+     - `localSessionId` and pane mappings never change during reconciliation.
+     - Only explicit user creation replaces a missing `backendSessionId`.
+     - HMR recovery performs zero spawn and zero close calls.
+   - **RED first:** mount the restore coordinator under `StrictMode`, cancel the first effect instance, and assert the second completes exactly one disk restore with zero spawn calls. Current `App.tsx:236-239` marks the project restored before asynchronous work, so StrictMode cleanup can cancel the only attempt; `App.tsx:257-281` also automatically respawns missing sessions.
+
+## Current design blockers
+
+1. **The independent daemon cannot currently spawn registered project terminals.**  
+   `src-tauri/src/daemon/server.rs:67-88` creates a private, empty `WorkspaceRegistry`, while `src-tauri/src/lib.rs:131-149` registers projects in a different GUI-owned registry. `src-tauri/src/daemon/protocol.rs:40-45` carries no repository root or registration command. Lane 1 must freeze `RegisterWorkspace`, and Lane 4 must invoke it before cutover.
+
+2. **Attach currently monopolizes the same connection used for control.**  
+   `src-tauri/src/daemon/server.rs:249-263` converts the connection into a permanent output pump, while `src-tauri/src/daemon/client.rs:61-64` has only one shared active connection. Multiple panes plus concurrent write/resize/close are impossible until Lane 2 creates dedicated attachment connections.
+
+3. **Replacing only terminal IPC would still leave a GUI-owned terminal service through remote state.**  
+   `src-tauri/src/lib.rs:131-140,172-175` creates and manages a direct `TerminalService`; `src-tauri/src/remote/state.rs:77-82` stores that concrete service; `src-tauri/src/remote/server.rs:560-607` attaches and writes through it. Lane 2 must make the daemon’s gateway authoritative, and Lane 4 must proxy remote commands before deleting the GUI service.
+
+## Exact final verification order
+
+1. `cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1`
+2. `cargo test --manifest-path src-tauri/Cargo.toml --test daemon_persistence_contract -- --test-threads=1`
+3. `cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1`
+4. `bun run --cwd ui test`
+5. `bun run --cwd ui build`
+6. `cargo build --manifest-path src-tauri/Cargo.toml`
+7. `bun run build`
+8. Manual HMR gate: run a continuously emitting command, trigger real Vite HMR, and verify unchanged daemon PID, shell PID, backend session ID, and contiguous output sequence.
+9. Manual full-reload gate: reload the webview and verify history appears before live output, with no duplicate or missing sequence.
+10. Manual crash/restart gate: record daemon and shell PIDs, SIGKILL only the GUI, verify both remain alive, relaunch, and verify the same shell accepts input.
+11. Manual close gate: close one pane and verify its shell process group exits while every other pane remains responsive.

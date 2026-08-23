@@ -1,6 +1,0 @@
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
-{"type":"assistant_message","payload":{"text":"Gemini 3.7 Flash"}}
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
-{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a0250c/sessions/st_01a0250c/2026-08-21T15-59-34-399Z_01a0250c-8bff-74c5-8ae6-25fca25aea66.jsonl"}}
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
-{"type":"suspended","payload":{"reason":"quit"}}

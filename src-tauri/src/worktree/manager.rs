@@ -1,6 +1,6 @@
 use crate::worktree::git::{
-    git_branch_delete, git_status_porcelain, git_worktree_add, git_worktree_list,
-    git_worktree_prune, git_worktree_remove, run_git,
+    git_branch_delete, git_branch_is_ancestor_of_head, git_status_porcelain, git_worktree_add,
+    git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree, run_git,
 };
 use crate::worktree::model::{
     BranchDeletionPreview, CreateWorktreeOptions, DirtyState, OrcaWorktreeInfo, Worktree,
@@ -105,24 +105,29 @@ impl WorktreeManager {
     /// Invalid roots are programmer configuration errors; fallible callers should use `try_new`.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         let requested = repo_root.into();
-        Self::try_new(&requested)
-            .unwrap_or_else(|error| panic!("invalid worktree manager root '{}': {error}", requested.display()))
+        Self::try_new(&requested).unwrap_or_else(|error| {
+            panic!(
+                "invalid worktree manager root '{}': {error}",
+                requested.display()
+            )
+        })
     }
 
     pub fn try_new(repo_root: impl Into<PathBuf>) -> Result<Self, WorktreeError> {
         let requested = repo_root.into();
-        let canonical = fs::canonicalize(&requested)
-            .map_err(|_| WorktreeError::InvalidRepoRoot {
+        let canonical =
+            fs::canonicalize(&requested).map_err(|_| WorktreeError::InvalidRepoRoot {
                 path: requested.clone(),
             })?;
         if !canonical.is_dir() {
             return Err(WorktreeError::InvalidRepoRoot { path: canonical });
         }
 
-        let top_level = run_git(&canonical, &["rev-parse", "--show-toplevel"])
-            .map_err(|_| WorktreeError::InvalidRepoRoot {
+        let top_level = run_git(&canonical, &["rev-parse", "--show-toplevel"]).map_err(|_| {
+            WorktreeError::InvalidRepoRoot {
                 path: canonical.clone(),
-            })?;
+            }
+        })?;
         let git_root = fs::canonicalize(PathBuf::from(top_level.trim())).map_err(|_| {
             WorktreeError::InvalidRepoRoot {
                 path: canonical.clone(),
@@ -147,7 +152,10 @@ impl WorktreeManager {
                 reason: "path must be absolute".into(),
             });
         }
-        if path.components().any(|component| matches!(component, Component::ParentDir)) {
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
             return Err(WorktreeError::InvalidPath {
                 path: path.to_path_buf(),
                 reason: "parent traversal ('..') is forbidden".into(),
@@ -207,10 +215,12 @@ impl WorktreeManager {
             reason: "worktree target has no parent".into(),
         })?;
         while !ancestor.exists() {
-            ancestor = ancestor.parent().ok_or_else(|| WorktreeError::InvalidPath {
-                path: path.to_path_buf(),
-                reason: "worktree target has no existing ancestor".into(),
-            })?;
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| WorktreeError::InvalidPath {
+                    path: path.to_path_buf(),
+                    reason: "worktree target has no existing ancestor".into(),
+                })?;
         }
         let canonical_ancestor = fs::canonicalize(ancestor)?;
         self.ensure_canonical_inside_root(path, canonical_ancestor)?;
@@ -231,13 +241,21 @@ impl WorktreeManager {
         Ok(target)
     }
 
-    pub fn acquire_writer(&self, worktree_path: &Path, owner_id: &str) -> Result<(), WorktreeError> {
+    pub fn acquire_writer(
+        &self,
+        worktree_path: &Path,
+        owner_id: &str,
+    ) -> Result<(), WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
         let canonical = self.canonical_worktree_path(worktree_path)?;
         self.writer_leases.acquire_canonical(canonical, owner_id)
     }
 
-    pub fn release_writer(&self, worktree_path: &Path, owner_id: &str) -> Result<(), WorktreeError> {
+    pub fn release_writer(
+        &self,
+        worktree_path: &Path,
+        owner_id: &str,
+    ) -> Result<(), WorktreeError> {
         let canonical = self.canonical_worktree_path(worktree_path)?;
         self.writer_leases.release_canonical(&canonical, owner_id)
     }
@@ -367,22 +385,16 @@ impl WorktreeManager {
         )?;
 
         let target_canonical = self.canonical_allowed_path(&options.path)?;
-        for wt in self.list_worktrees()? {
-            if let Ok(wt_canonical) = self.canonical_allowed_path(&wt.path) {
-                if wt_canonical == target_canonical {
-                    return Ok(wt);
-                }
-            }
-        }
-
-        Ok(Worktree {
-            path: target_canonical,
-            head: String::new(),
-            branch: Some(format!("refs/heads/{branch_name}")),
-            bare: false,
-            detached: false,
-            locked: None,
-            prunable: None,
+        inspect_worktree(&target_canonical).or_else(|_| {
+            Ok(Worktree {
+                path: target_canonical,
+                head: String::new(),
+                branch: Some(format!("refs/heads/{branch_name}")),
+                bare: false,
+                detached: false,
+                locked: None,
+                prunable: None,
+            })
         })
     }
 
@@ -413,13 +425,25 @@ impl WorktreeManager {
         ws_id: &str,
         slug: &str,
     ) -> Result<Option<Worktree>, WorktreeError> {
-        let target_branch = Self::format_branch_name(ws_id, slug)?;
-        for wt in self.list_worktrees()? {
-            if wt.branch_short_name() == Some(target_branch.as_str()) {
-                return Ok(Some(wt));
-            }
+        Self::format_branch_name(ws_id, slug)?;
+        let mut target = self.repo_root.join(ORCA_WORKTREE_DIR).join(ws_id);
+        for segment in slug.split('/') {
+            target.push(segment);
         }
-        Ok(None)
+        if !target.exists() {
+            return Ok(None);
+        }
+        let canonical = match self.canonical_allowed_path(&target) {
+            Ok(path) => path,
+            Err(WorktreeError::PathOutsideWorkspace { .. })
+            | Err(WorktreeError::WorktreeNotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        match inspect_worktree(&canonical) {
+            Ok(worktree) => Ok(Some(worktree)),
+            Err(WorktreeError::GitError { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn check_dirty(&self, worktree_path: &Path) -> Result<DirtyState, WorktreeError> {
@@ -466,7 +490,11 @@ impl WorktreeManager {
         let dirty_state = self.check_dirty(&canonical)?;
         if dirty_state.is_dirty {
             let count = dirty_state.files.len();
-            let files = dirty_state.files.into_iter().map(|file| file.path).collect();
+            let files = dirty_state
+                .files
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
             return Err(WorktreeError::DirtyWorktree {
                 path: canonical,
                 count,
@@ -481,19 +509,16 @@ impl WorktreeManager {
 
     pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
-        self.remove_worktree_locked(worktree_path, force).map(|_| ())
+        self.remove_worktree_locked(worktree_path, force)
+            .map(|_| ())
     }
 
     pub fn safe_delete(&self, worktree_path: &Path) -> Result<(), WorktreeError> {
         self.remove_worktree(worktree_path, false)
     }
 
-    fn branch_is_merged(&self, branch: &str) -> Result<bool, WorktreeError> {
-        let merged = run_git(
-            &self.repo_root,
-            &["branch", "--merged", "HEAD", "--format=%(refname:short)"],
-        )?;
-        Ok(merged.lines().any(|line| line.trim() == branch))
+    pub(crate) fn branch_is_merged(&self, branch: &str) -> Result<bool, WorktreeError> {
+        git_branch_is_ancestor_of_head(&self.repo_root, branch)
     }
 
     pub fn branch_deletion_preview(
@@ -501,11 +526,11 @@ impl WorktreeManager {
         worktree_path: &Path,
     ) -> Result<BranchDeletionPreview, WorktreeError> {
         let canonical = self.canonical_worktree_path(worktree_path)?;
-        let existing = self
-            .find_worktree(&canonical)?
-            .ok_or_else(|| WorktreeError::WorktreeNotFound {
-                path: canonical.clone(),
-            })?;
+        let existing =
+            self.find_worktree(&canonical)?
+                .ok_or_else(|| WorktreeError::WorktreeNotFound {
+                    path: canonical.clone(),
+                })?;
         let branch = existing
             .branch_short_name()
             .ok_or_else(|| WorktreeError::ParseError("Detached worktree has no branch".into()))?
@@ -520,7 +545,11 @@ impl WorktreeManager {
         let merged = self.branch_is_merged(&branch)?;
         let upstream = run_git(
             &self.repo_root,
-            &["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")],
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{branch}@{{upstream}}"),
+            ],
         )
         .ok()
         .map(|value| value.trim().to_string())

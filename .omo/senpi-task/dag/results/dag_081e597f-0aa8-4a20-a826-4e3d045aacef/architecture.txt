@@ -1,0 +1,43 @@
+I read this as the locked contract - concise final only.
+
+# Startup-project contract
+
+## Why fresh UI is `default`
+
+Empty `ferryx.projects` → `loadProjects()` returns `{ workspaceId: "default", repoRoot: "." }` → boot `registerProject`s that → sidebar prints the id. Backend folder slug never reaches the UI. `lib.rs` also registers the same cwd as `"default"`.
+
+## API
+
+Reuse `RegisteredProject = { workspaceId, repoRoot }` (camelCase).
+
+`cmd_project_startup` — no request → `RegisteredProject`.  
+Cwd → git toplevel → canonicalize. Id = existing `lib.rs` slug (`[A-Za-z0-9_-]`, else `-`, trim `-`, empty → `project`). Register **only** that id.
+
+This tree: `{ workspaceId: "orca-lite", repoRoot: "<canonical /Users/indo/code/project/orca-lite>" }`.
+
+Wrapper: `getStartupProject()`. Non-Tauri: `null`, never invent `"default"`.  
+`cmd_project_register` stays Add Project; must return the **winning** project, not a second id for the same root. No `cmd_project_list`.
+
+## No-alias invariant
+
+**One canonical root → one workspaceId.**
+
+Same id + same root → Ok. Same id + other root → `WorkspaceAlreadyRegistered`. Other id + same root → do not insert; return existing / `WorkspaceAlreadyRegistered`.  
+`create_app` must not `register("default", cwd)` unless the folder itself slugs to `default`.
+
+## Legacy `default`
+
+Placeholder iff id is `default` **and** root is `"."`, `""`, or the startup canonical path. A real project named `default` at another root is kept.
+
+Tauri boot: call `getStartupProject()` once.
+
+- Empty storage → persist `[startup]`, activate that id. No `DEFAULT_PROJECT` seed.
+- Placeholder row → replace with startup; remap active `"default"` → startup id; persist.
+- Startup id already present → leave list; do not add `default`.
+- Other real projects, no placeholder → do not inject cwd.
+
+Session: if `workspaces[startupId]` missing and `workspaces.default` is the same root, read it as the canonical id. Do not rewrite `orca/default/<slug>` branches.
+
+## Touchpoints
+
+`registry.rs` (invariant + `ensure_startup_project`), `lib.rs` (drop default alias; export command), `ipc/project.rs`, `ipc/error.rs`, `worktree/mod.rs` + `rorca_native_contract.rs` tests, `tauri.ts`, `App.tsx`, `sessionPersistence.ts`, `tauri.test.ts`, `App.test.tsx`.

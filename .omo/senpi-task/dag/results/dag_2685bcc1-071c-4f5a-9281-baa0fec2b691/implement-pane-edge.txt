@@ -1,0 +1,48 @@
+I read this as Implementation - Implement production fixes in TerminalSplitView.tsx and tabDragTypes.ts to turn the terminal, pane-handle, and browser pane-edge drop tests green.
+
+### Implementation Summary
+- **`ui/src/components/tab-dnd/tabDragTypes.ts`**:
+  - Recognized `"pane-edge"` in `isWorkspaceDropData` and added `PaneEdgeDropData`.
+  - Added `sourcePaneId` and `sourceSessionId` to `PaneDragData` with backwards compatibility.
+  - Added `"move-tab-to-pane-split"` and `"move-pane-to-pane-split"` to `WorkspaceDropCommand`.
+  - Updated `resolveWorkspaceDropCommand` to resolve tab-to-pane-edge and pane-handle-to-pane-edge drops with split direction/position.
+  - Adjusted `dropPriority` so pane edge drops take highest priority over group edges, tab strips, and group body drop zones.
+- **`ui/src/components/TerminalSplitView.tsx`**:
+  - Mounted `<PaneEdgeDropZones tabId={tab.id} leafId={leafId} />` on every rendered pane leaf.
+  - Updated `useDraggable` in `PaneLeafView` to pass payload `{ type: "pane", tabId, sourcePaneId, sourceSessionId }` and kept pane handles draggable (`disabled: false`) even for single-pane tabs.
+  - Added drop handling for `"move-tab-to-pane-split"` and `"move-pane-to-pane-split"` to invoke `onMoveTabToSplit` with the target pane metadata `{ tabId, leafId }`, orchestrating pane detach via `onDetachPaneToTab` for multi-pane sources and direct routing for single-pane sources.
+  - Expanded `onMoveTabToSplit` and `onDetachPaneToTab` callback typings locally.
+
+### Verification Commands and Output
+
+```bash
+cd ui && bunx vitest run src/components/TerminalSplitView.paneDrop.runtime.test.tsx src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx --maxWorkers=1
+```
+Output:
+```
+ ✓ src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx (3 tests)
+ ✓ src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx (1 test)
+ ✓ src/components/TerminalSplitView.paneDrop.runtime.test.tsx (2 tests)
+
+ Test Files  3 passed (3)
+      Tests  6 passed (6)
+```
+
+```bash
+cd ui && bunx vitest run src/components/TerminalSplitView.test.tsx src/components/TerminalSplitView.tabDropFallback.test.tsx src/state/workspaceStore.tabDrop.test.tsx src/state/workspaceStore.paneDrop.runtime.test.tsx src/state/layout.paneHandleDrop.runtime.test.ts --maxWorkers=1
+```
+Output:
+```
+ ✓ src/components/TerminalSplitView.test.tsx (14 tests)
+ ✓ src/state/workspaceStore.tabDrop.test.tsx (4 tests)
+ ✓ src/components/TerminalSplitView.tabDropFallback.test.tsx (1 test)
+ ✓ src/state/workspaceStore.paneDrop.runtime.test.tsx (2 tests)
+ ✓ src/state/layout.paneHandleDrop.runtime.test.ts (2 tests)
+
+ Test Files  5 passed (5)
+      Tests  23 passed (23)
+```
+
+### Changed Lines
+- `ui/src/components/TerminalSplitView.tsx` (+92, -21)
+- `ui/src/components/tab-dnd/tabDragTypes.ts` (+72, -18)

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
@@ -6,14 +6,16 @@ import { TerminalPane } from "./TerminalPane";
 
 const manager = vi.hoisted(() => ({
   applySettings: vi.fn(),
+  applyInstanceSettings: vi.fn(),
   updateSession: vi.fn(),
   getOrCreate: vi.fn(),
   getInstance: vi.fn(),
+  registerVisible: vi.fn(() => vi.fn()),
 }));
 
 vi.mock("../lib/terminalHostManager", () => ({ terminalHostManager: manager }));
 vi.mock("../lib/terminalSettings", () => ({
-  useTerminalSettings: () => ({ settings: { fontSize: 13 } }),
+  useTerminalSettings: () => ({ settings: { fontSize: 13, theme: { background: "#282c34" } } }),
 }));
 
 type ResizeRecord = {
@@ -23,6 +25,7 @@ type ResizeRecord = {
 };
 
 const resizeRecords: ResizeRecord[] = [];
+let fontsDescriptor: PropertyDescriptor | undefined;
 
 class TestResizeObserver {
   readonly observe = vi.fn();
@@ -48,19 +51,27 @@ function session(): TerminalSession {
 describe("TerminalPane mounted sizing", () => {
   beforeEach(() => {
     manager.applySettings.mockReset();
+    manager.applyInstanceSettings.mockReset();
     manager.updateSession.mockReset();
     manager.getOrCreate.mockReset();
     manager.getInstance.mockReset();
+    manager.registerVisible.mockReset().mockImplementation(() => vi.fn());
     resizeRecords.length = 0;
+    fontsDescriptor = Object.getOwnPropertyDescriptor(document, "fonts");
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
   });
 
   afterEach(() => {
+    if (fontsDescriptor) {
+      Object.defineProperty(document, "fonts", fontsDescriptor);
+    } else {
+      Reflect.deleteProperty(document, "fonts");
+    }
     cleanup();
     vi.unstubAllGlobals();
   });
 
-  it("waits for a measurable mounted container and then fits the new terminal to the full pane", async () => {
+  it("mounts the terminal element and focuses when active without duplicate ResizeObserver in pane", async () => {
     const element = document.createElement("div");
     element.className = "terminal-host";
     const fit = vi.fn();
@@ -77,41 +88,120 @@ describe("TerminalPane mounted sizing", () => {
 
     render(<TerminalPane session={session()} active />);
     const mount = screen.getByTestId("terminal-mount");
-    let width = 0;
-    let height = 0;
-    vi.spyOn(mount, "getBoundingClientRect").mockImplementation(
-      () =>
-        ({
-          left: 0,
-          top: 0,
-          right: width,
-          bottom: height,
-          width,
-          height,
-          x: 0,
-          y: 0,
-          toJSON: () => ({}),
-        }) as DOMRect,
-    );
 
     await waitFor(() => expect(manager.getOrCreate).toHaveBeenCalledOnce());
-    await waitFor(() => expect(resizeRecords).toHaveLength(1));
-    expect(resizeRecords[0].observe).toHaveBeenCalledWith(mount);
     expect(element.parentElement).toBe(mount);
-    expect(fit).not.toHaveBeenCalled();
+    // Sizing/ResizeObserver is owned by terminalHostManager; pane must not create a duplicate observer
+    expect(resizeRecords).toHaveLength(0);
+    expect(focus).toHaveBeenCalled();
+  });
 
-    width = 960;
-    height = 640;
-    act(() => {
-      resizeRecords[0].callback([], {} as ResizeObserver);
+  it("applies settings only to its own instance on mount and does not invoke global applySettings across all instances", async () => {
+    const element = document.createElement("div");
+    element.className = "terminal-host";
+    const instance = {
+      element,
+      fitAddon: { fit: vi.fn() },
+      terminal: { focus: vi.fn() },
+      active: true,
+      session: session(),
+    };
+    manager.getOrCreate.mockResolvedValue(instance);
+    manager.getInstance.mockReturnValue(instance);
+
+    render(<TerminalPane session={session()} active />);
+
+    await waitFor(() => expect(manager.getOrCreate).toHaveBeenCalledOnce());
+    expect(manager.applyInstanceSettings).toHaveBeenCalledWith("session-new", expect.objectContaining({ fontSize: 13 }));
+    expect(manager.applySettings).not.toHaveBeenCalled();
+  });
+
+  it("fills unused terminal rows with the active terminal theme background", () => {
+    manager.getOrCreate.mockResolvedValue({
+      element: document.createElement("div"),
+      fitAddon: { fit: vi.fn() },
+      terminal: { focus: vi.fn() },
+      active: true,
+      session: session(),
     });
 
-    await waitFor(() => expect(fit).toHaveBeenCalled());
-    expect(element.style.position).toBe("absolute");
-    expect(element.style.inset).toBe("0px");
-    expect(element.style.width).toBe("100%");
-    expect(element.style.height).toBe("100%");
-    expect(element.style.minWidth).toBe("0px");
-    expect(element.style.minHeight).toBe("0px");
+    render(<TerminalPane session={session()} active />);
+
+    expect(screen.getByTestId("terminal-pane-surface")).toHaveStyle({ backgroundColor: "#282c34" });
+    expect(screen.getByTestId("terminal-mount")).toHaveStyle({ backgroundColor: "#282c34" });
+  });
+
+  it("realigns a bottom-following terminal after the post-mount font fit shifts it by one row", async () => {
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { ready: Promise.resolve() },
+    });
+
+    const element = document.createElement("div");
+    Object.defineProperties(element, {
+      clientHeight: { configurable: true, value: 480 },
+      clientWidth: { configurable: true, value: 640 },
+    });
+    const buffer = { active: { baseY: 12, viewportY: 12 } };
+    const terminal = {
+      buffer,
+      focus: vi.fn(),
+      scrollToBottom: vi.fn(() => {
+        buffer.active.viewportY = buffer.active.baseY;
+      }),
+    };
+    const fit = vi.fn(() => {
+      buffer.active.viewportY = buffer.active.baseY - 1;
+    });
+    const instance = {
+      element,
+      fitAddon: { fit },
+      terminal,
+      active: true,
+      session: session(),
+    };
+    manager.getOrCreate.mockResolvedValue(instance);
+    manager.getInstance.mockReturnValue(instance);
+
+    render(<TerminalPane session={session()} active />);
+
+    await waitFor(() => expect(fit).toHaveBeenCalledOnce());
+    expect(terminal.scrollToBottom).toHaveBeenCalledOnce();
+    expect(buffer.active.viewportY).toBe(buffer.active.baseY);
+  });
+
+  it("preserves user scrollback after the post-mount font fit", async () => {
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { ready: Promise.resolve() },
+    });
+
+    const element = document.createElement("div");
+    Object.defineProperties(element, {
+      clientHeight: { configurable: true, value: 480 },
+      clientWidth: { configurable: true, value: 640 },
+    });
+    const buffer = { active: { baseY: 12, viewportY: 4 } };
+    const terminal = {
+      buffer,
+      focus: vi.fn(),
+      scrollToBottom: vi.fn(),
+    };
+    const fit = vi.fn();
+    const instance = {
+      element,
+      fitAddon: { fit },
+      terminal,
+      active: true,
+      session: session(),
+    };
+    manager.getOrCreate.mockResolvedValue(instance);
+    manager.getInstance.mockReturnValue(instance);
+
+    render(<TerminalPane session={session()} active />);
+
+    await waitFor(() => expect(fit).toHaveBeenCalledOnce());
+    expect(terminal.scrollToBottom).not.toHaveBeenCalled();
+    expect(buffer.active.viewportY).toBe(4);
   });
 });

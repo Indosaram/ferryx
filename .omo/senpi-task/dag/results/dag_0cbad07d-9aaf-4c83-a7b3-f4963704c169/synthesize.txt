@@ -1,0 +1,8 @@
+I read this as merging backend performance audit reports into a prioritized disjoint fix-packet ledger - inspect the audit reports in docs/backend-perf/ and construct PRIORITIZED.md with disjoint write scopes and verified test commands.
+
+Completed compiling the backend performance fix packets into `/Users/indo/code/project/orca-lite/docs/backend-perf/PRIORITIZED.md`.
+
+### Summary of Verification
+- **Disjoint write scopes**: 9 packets spanning 18 unique files with 0 file overlaps across packet boundaries.
+- **Coverage**: All 10 High severity findings across the 6 audits are assigned to active packets. All Medium and Low findings are either incorporated into matching subsystem packets or cataloged in `Deferred`.
+- **Test command verification**: Real module and test filter paths in `src-tauri` (`cargo test --lib ...`, `cargo test --test ...`) were verified against the test harness.

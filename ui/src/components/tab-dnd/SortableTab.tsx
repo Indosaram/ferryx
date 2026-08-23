@@ -1,7 +1,7 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Globe, Pin, TerminalSquare, X } from "lucide-react";
-import type { KeyboardEvent, MouseEvent, PointerEvent } from "react";
+import { memo, useMemo, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../../lib/activity";
 import { cn } from "../../lib/cn";
@@ -25,7 +25,7 @@ type SortableTabProps = {
   onContextMenu: (event: MouseEvent, tab: WorkspaceTab) => void;
 };
 
-export function SortableTab({
+export const SortableTab = memo(function SortableTab({
   tab,
   groupId,
   index,
@@ -41,10 +41,14 @@ export function SortableTab({
   onClose,
   onContextMenu,
 }: SortableTabProps) {
+  const sortableData = useMemo(
+    () => ({ type: "tab", tabId: tab.id, groupId, index }),
+    [tab.id, groupId, index],
+  );
   const sortable = useSortable({
     id: `tab:${tab.id}`,
     disabled: isRenaming,
-    data: { type: "tab", tabId: tab.id, groupId, index },
+    data: sortableData,
   });
   const resolvedActivity = tab.kind === "browser" ? null : resolveActivityIndicator(activity);
   const activityIndicator = unread && (resolvedActivity === null || resolvedActivity === "done") ? "unread" : resolvedActivity;
@@ -86,7 +90,7 @@ export function SortableTab({
       )}
     >
       {tab.kind === "browser" ? (
-        <Globe className="size-3 shrink-0 text-blue-400" />
+        <Globe className="size-3 shrink-0 text-primary" />
       ) : activityIndicator ? (
         <span
           data-testid={activityIndicator === "unread" ? "tab-unread-dot" : `tab-${activityIndicator}-indicator`}
@@ -156,4 +160,4 @@ export function SortableTab({
       ) : null}
     </div>
   );
-}
+});

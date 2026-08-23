@@ -1,0 +1,27 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"> I read this as static performance audit of the terminal host, renderer, and pane path - inspect target files and produce `/Users/indo/code/project/orca-lite/docs/frontend-perf/audit-terminal.md`."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I have completed the static performance audit for the terminal host/renderer/pane path and generated the audit report.\n\n### Audit Summary\n- **Report Location:** `/Users/indo/code/project/orca-lite/docs/frontend-perf/audit-terminal.md`\n- **Findings Identified:**\n  - `F-terminal-01` (High, Hot path: yes): 512KB string concatenation and slice on every PTY chunk in `TerminalEventBus.publishOutput` causing severe main-thread GC pressure (>200MB/s).\n  - `F-terminal-02` (High, Hot path: yes): Unvectorized character-by-character `charCodeAt` loop during base64 decoding on every terminal output chunk in `decodeBase64`.\n  - `F-terminal-03` (Medium, Hot path: no): `useTerminalSettings` hook in `TerminalPane` triggering global `applySettings` and `fitAddon.fit()` recalculations across all terminal instances upon mount.\n  - `F-terminal-04` (Medium, Hot path: yes): Duplicate `ResizeObserver` instances in `TerminalPane` and `TerminalHostManager` scheduling redundant chained `requestAnimationFrame` fitting passes on resize.\n  - `F-terminal-05` (Medium, Hot path: yes): Quadratic `droppableContainers.find` lookups within `.filter()` and `.sort()` during `collisionDetection` on every drag move event.\n  - `F-terminal-06` (Low, Hot path: no): Unmemoized fallback session object instantiation in `PaneRenderer` breaking referential equality and triggering unnecessary downstream effect cycles."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a029e4/sessions/st_01a029e4/2026-08-22T14-32-09-906Z_01a029e2-e1b2-7cb5-a341-6147cc25669f.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}

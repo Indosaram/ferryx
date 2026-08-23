@@ -33,16 +33,30 @@ fn second_writer_is_rejected_and_release_allows_reacquire() {
     let (_repo, manager) = setup_test_repo();
     let wt = create_worktree(&manager, "lease");
 
-    manager.acquire_writer(&wt, "owner-a").expect("first writer");
-    assert_eq!(manager.writer_owner(&wt).expect("writer owner"), Some("owner-a".into()));
+    manager
+        .acquire_writer(&wt, "owner-a")
+        .expect("first writer");
+    assert_eq!(
+        manager.writer_owner(&wt).expect("writer owner"),
+        Some("owner-a".into())
+    );
 
     let err = manager.acquire_writer(&wt, "owner-b").unwrap_err();
     assert!(matches!(err, WorktreeError::WriterAlreadyActive { .. }));
 
-    manager.release_writer(&wt, "owner-a").expect("release owner-a");
-    manager.acquire_writer(&wt, "owner-b").expect("owner-b reacquire");
-    assert_eq!(manager.writer_owner(&wt).expect("writer owner"), Some("owner-b".into()));
-    manager.release_writer(&wt, "owner-b").expect("release owner-b");
+    manager
+        .release_writer(&wt, "owner-a")
+        .expect("release owner-a");
+    manager
+        .acquire_writer(&wt, "owner-b")
+        .expect("owner-b reacquire");
+    assert_eq!(
+        manager.writer_owner(&wt).expect("writer owner"),
+        Some("owner-b".into())
+    );
+    manager
+        .release_writer(&wt, "owner-b")
+        .expect("release owner-b");
 }
 
 #[test]
@@ -50,11 +64,15 @@ fn active_writer_blocks_delete() {
     let (_repo, manager) = setup_test_repo();
     let wt = create_worktree(&manager, "active-writer");
 
-    manager.acquire_writer(&wt, "agent-1").expect("writer acquire");
+    manager
+        .acquire_writer(&wt, "agent-1")
+        .expect("writer acquire");
     let err = manager.safe_delete(&wt).unwrap_err();
     assert!(matches!(err, WorktreeError::WriterAlreadyActive { .. }));
     assert!(wt.exists(), "active writer worktree must remain");
-    manager.release_writer(&wt, "agent-1").expect("writer release");
+    manager
+        .release_writer(&wt, "agent-1")
+        .expect("writer release");
 }
 
 #[test]
@@ -70,7 +88,10 @@ fn default_delete_rejects_clean_unmerged_branch() {
 
     let err = manager.delete_worktree_and_branch(&wt, true).unwrap_err();
     assert!(matches!(err, WorktreeError::UnmergedBranch { .. }));
-    assert!(wt.exists(), "default delete must preserve unmerged worktree");
+    assert!(
+        wt.exists(),
+        "default delete must preserve unmerged worktree"
+    );
     let branches = ferryx_lib::worktree::run_git(manager.repo_root(), &["branch", "--list"])
         .expect("list branches");
     assert!(branches.contains("orca/ws-safety/unmerged-default"));
@@ -124,12 +145,27 @@ async fn same_worktree_supports_multiple_interactive_pty_sessions() {
     assert_ne!(first_id, second_id);
     assert_eq!(pty.session_count(), 2);
     assert_eq!(manager.writer_owner(&wt).expect("writer owner"), None);
-    assert_eq!(pty.get_session(&first_id).and_then(|session| session.worktree_path()), Some(canonical.clone()));
-    assert_eq!(pty.get_session(&second_id).and_then(|session| session.worktree_path()), Some(canonical));
+    assert_eq!(
+        pty.get_session(&first_id)
+            .and_then(|session| session.worktree_path()),
+        Some(canonical.clone())
+    );
+    assert_eq!(
+        pty.get_session(&second_id)
+            .and_then(|session| session.worktree_path()),
+        Some(canonical)
+    );
 
-    pty.close_session(&first_id).await.expect("close first terminal");
-    assert!(pty.has_session(&second_id), "closing one split PTY must not close its sibling");
-    pty.close_session(&second_id).await.expect("close second terminal");
+    pty.close_session(&first_id)
+        .await
+        .expect("close first terminal");
+    assert!(
+        pty.has_session(&second_id),
+        "closing one split PTY must not close its sibling"
+    );
+    pty.close_session(&second_id)
+        .await
+        .expect("close second terminal");
     assert_eq!(pty.session_count(), 0);
 }
 
@@ -144,9 +180,14 @@ async fn pty_worktree_ownership_clears_on_close_and_natural_exit() {
     let (session_id, _rx) = pty
         .spawn_in_worktree(shell, 80, 24, &manager, &wt)
         .expect("spawn terminal");
-    assert!(pty.get_session(&session_id).and_then(|session| session.worktree_path()).is_some());
+    assert!(pty
+        .get_session(&session_id)
+        .and_then(|session| session.worktree_path())
+        .is_some());
     assert_eq!(manager.writer_owner(&wt).expect("writer owner"), None);
-    pty.close_session(&session_id).await.expect("close terminal");
+    pty.close_session(&session_id)
+        .await
+        .expect("close terminal");
     assert!(!pty.has_session(&session_id));
 
     let mut one_shot = CommandBuilder::new("/bin/sh");
@@ -216,6 +257,9 @@ async fn five_concurrent_worktree_terminal_lifecycles_remain_isolated() {
             .expect("delete clean worktree and merged branch");
     }
 
-    assert_eq!(manager.list_worktrees().expect("remaining worktrees").len(), 1);
+    assert_eq!(
+        manager.list_worktrees().expect("remaining worktrees").len(),
+        1
+    );
     drop(receivers);
 }

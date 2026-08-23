@@ -1,0 +1,30 @@
+The prior "URGENT" turn arrived as a genuine user turn and restated the assigned task, so it was a false positive — no injected instruction misled me, and I'll proceed with the report.
+
+All three focused test files pass: **28 passed, exit 0**, no LSP diagnostics on either changed component.
+
+## What changed
+
+**Sidebar.tsx**
+- Removed the global titlebar `Add worktree` action — the titlebar now holds only `Hide sidebar` and `Add project`.
+- Every project row (expanded or collapsed, active or not) gets a compact `IconButton` at its right edge, labeled `Add worktree to <workspaceId>`, calling `onCreateWorktree(project)` with that exact project object.
+- Removed `onRefreshWorktreeStatus` from the props type, the destructured defaults, and the `WorktreeList` call site.
+
+**WorktreeList.tsx**
+- Removed the `Refresh worktree status` button, the `onRefreshStatus` prop, and the now-unused `RefreshCcw` import. Row padding tightened `pr-14` → `pr-9` to match the one remaining action.
+- Dirty-state display, deletion (with the primary-worktree disabled guard), lock icon, status dot, and empty-state creation are untouched.
+
+## Design system adherence
+
+The action reuses the existing `IconButton` primitive at `size="sm"` and the sidebar's established reveal pattern — the project row already declared `group/project`, so it mirrors the worktree row's `opacity-55` → `group-hover:opacity-100` with `focus-visible:opacity-100` for keyboard users. All colors/spacing come from existing tokens; no new hardcoded values, no one-off overrides. I deliberately chose `opacity-55` over `opacity-0`: a hover-only-invisible control on a project row is a discoverability regression, and the dim-but-present treatment is already the convention one level down.
+
+## Tests (written RED-first — 6 failures across all three files before implementation)
+
+- Titlebar asserts `Add worktree` is absent and that `onCreateWorktree` is never called from it.
+- New test asserts both project rows expose their action and that clicking each passes the **exact** project object (`toHaveBeenCalledExactlyOnceWith(projects[n])`), and that creating is neither a selection nor a collapse toggle.
+- New test asserts `Refresh worktree status` is gone while dirty text and the delete button survive.
+- Activity test asserts the action sits *outside* the project row's button, so the accessible name and badge/indicator queries stay clean.
+- Empty-state and owning-group tests tightened from `toHaveBeenCalledOnce()` to assert the project target is retained.
+
+## One thing needs your attention
+
+`App.tsx:617` still passes `onRefreshWorktreeStatus={handleRefreshWorktreeStatus}`. Since I removed that prop from `SidebarProps` and App is outside my scope, that line is now a TypeScript excess-property error — `bun run build` (which runs `tsc`) will fail until it's removed, along with the now-dead `handleRefreshWorktreeStatus` callback at `App.tsx:356-367` and its `getWorktreeStatus` import if unused elsewhere. The focused test command passes because Vitest doesn't typecheck, so this won't surface until a build or an App-level test run. Nothing was committed.

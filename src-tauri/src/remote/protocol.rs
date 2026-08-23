@@ -1,6 +1,47 @@
 use crate::worktree::{Worktree, WorktreeIdentity};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteActiveDesktopSelection {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub worktree_slug: Option<String>,
+    #[serde(default)]
+    pub worktree_label: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSelectWorkspaceRequest {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub worktree: Option<WorktreeIdentity>,
+    #[serde(default)]
+    pub worktree_slug: Option<String>,
+    #[serde(default)]
+    pub worktree_label: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSelectionRequestPayload {
+    pub workspace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteTerminalSession {

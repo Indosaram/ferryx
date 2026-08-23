@@ -15,7 +15,7 @@
 
   --radius: 0.5rem;
 
-  /* Ferryx brand tone: intentional divergence from Orca original (#0a0a0a) */
+  /* Ferryx brand tone: charcoal desktop palette (not the stock #0a0a0a base) */
   --background: #23262d;
   --background-rgb: 35 38 45;
   --foreground: #fafafa;
@@ -46,8 +46,8 @@
   --accent-foreground-rgb: 250 250 250;
   --destructive: #ff6568;
   --destructive-rgb: 255 101 104;
-  --destructive-foreground: #df2225;
-  --destructive-foreground-rgb: 223 34 37;
+  --destructive-foreground: #0a0a0a;
+  --destructive-foreground-rgb: 10 10 10;
   --border: #ffffff12;
   --border-rgb: 255 255 255;
   --border-alpha: 0.0706;
@@ -57,8 +57,8 @@
   --ring: #737373;
   --ring-rgb: 115 115 115;
 
-  --sidebar: #171717;
-  --sidebar-rgb: 23 23 23;
+  --sidebar: #23262d;
+  --sidebar-rgb: 35 38 45;
   --sidebar-foreground: #fafafa;
   --sidebar-foreground-rgb: 250 250 250;
   --sidebar-primary: #1447e6;
@@ -75,12 +75,12 @@
   --sidebar-ring: #525252;
   --sidebar-ring-rgb: 82 82 82;
 
-  --worktree-sidebar: #2a2a2a;
-  --worktree-sidebar-rgb: 42 42 42;
+  --worktree-sidebar: #23262d;
+  --worktree-sidebar-rgb: 35 38 45;
   --worktree-sidebar-foreground: #fafafa;
   --worktree-sidebar-foreground-rgb: 250 250 250;
-  --worktree-sidebar-accent: #353535;
-  --worktree-sidebar-accent-rgb: 53 53 53;
+  --worktree-sidebar-accent: #404040;
+  --worktree-sidebar-accent-rgb: 64 64 64;
   --worktree-sidebar-accent-foreground: #fafafa;
   --worktree-sidebar-accent-foreground-rgb: 250 250 250;
   --worktree-sidebar-border: #ffffff12;

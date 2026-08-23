@@ -1,0 +1,63 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"I read this as a read-only completion audit of Ferryx Remote Access lifecycle (objective 3) - inspect Rust Remote state, IPC, app construction, Settings UI/tests, and in-repo audit without edits."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I'll pull the objective definition, remote-lifecycle plan, and current Remote/Settings sources in one pass."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Objective 3 is the Remote restart lifecycle. Next I’ll read the native state/IPC, Settings copy, tests, and the in-repo audit."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The daemon path that starts the remote server looks like a possible safety gap — I’ll read that plus the IPC/status tests and Settings copy next."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I have the source picture. Next I’ll re-run the named construction/lifecycle tests so the verdict is based on current results, not the audit’s history."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"## Verdict: **PASS** (no completion blocker)\n\nObjective 3 is implemented as **session-only**: an enabled gateway does not come back listening after process reconstruction. Settings copy matches. Named construction tests pass. Remaining gaps are proof-seam limits, not a broken policy.\n\n### Chosen post-relaunch behavior (proof)\n\nAfter enable, a new process starts **OFF**, with **no bound address**, `restartPolicy = sessionOnly`. Disk never stores an enabled listener.\n\n| Mechanism | Symbol | Effect |\n|---|---|---|\n| Persist always writes `mode: off` | `RemoteGatewayConfig::persisted_snapshot` | `src-tauri/src/remote/state.rs` |\n| Load always forces Off | `apply_session_only_restart_policy` in `new_with_paths` | same file |\n| Runtime flag starts false | `is_running: false`, `bound_address: None` | `RemoteGatewayState::new_with_paths` |\n| Status `enabled` is live listener only | `cmd_remote_status` → `enabled: is_running` | `src-tauri/src/ipc/remote.rs` |\n| App factory is persistent + off | `create_app` → `create_remote_state` → `new_persistent` | `src-tauri/src/lib.rs` |\n| Bind refused while Off | `start_remote_server` returns `\"Remote gateway is OFF\"` | `src-tauri/src/remote/server.rs` |\n\n`cmd_remote_enable` writes that Off snapshot **before** `start_remote_server`. In-memory `mode` can be `localNetwork` for the current process; disk does not keep that.\n\n### Listener / network safety\n\n**Desktop Settings path (`create_app`) is safe.** No listener until `cmd_remote_enable`. When enabled, bind is `0.0.0.0` (intentional LAN). Quit teardown is process death (no `Drop` on `RemoteGatewayManager`). That matches the comment on `RemoteRestartPolicy::SessionOnly`: process-scoped.\n\n**Assumption, not test:** OS process exit closes the socket. Tests reconstruct state; they do not kill a process.\n\n**Residual, out of this path (not a blocker):** `DaemonServer::new` (`src-tauri/src/daemon/server.rs`) sets `LocalNetwork` and `tokio::spawn(start_remote_server)` on `0.0.0.0:43821`. `create_app` / `main.rs` never construct it; `--daemon` is not parsed. Launchd helper exists and is unused at startup.\n\n### Persistence\n\n**Persists:** paired devices + tokens (`AuthManager::with_persistence` / `remote-auth.json`); `port`, `allowControl`, `restartPolicy` (`remote-config.json`). Files are `0o600` via `write_private_json`.\n\n**Does not persist:** listener on/mode; pairing PINs (`Instant`, 60s, in-memory).\n\nProduction dir: `$FERRYX_DATA_DIR/remote` or `~/.ferryx/remote`.\n\nSettings still lists devices when disabled (`Paired Devices` is outside `status?.enabled`). Matches “devices remain, gateway does not.”\n\n### Settings copy vs preference\n\nHardcoded, and it matches the native policy:\n\n- Remote heading: *“The gateway stops when Ferryx quits and must be enabled again after relaunch.”* (`RemoteAccessSettings` in `SettingsDialog.tsx`)\n- General: *“Remote Access — session-only gateway and device pairing.”*\n\nUI `RemoteGatewayStatus` in `ui/src/lib/tauri.ts` **omits** native `restartPolicy`. Copy is not driven by IPC. Fine while the enum is only `SessionOnly`.\n\n### Do fresh construction tests prove every stated behavior?\n\n**They prove the reconstruction contract. They do not prove OS quit or `cmd_remote_enable` → `create_app`.**\n\n| Claim | Proof | Gap |\n|---|---|---|\n| Enabled then reopen is Off / not running / no bind | `enabled_gateway_does_not_restore_listener_after_reopen` | Fakes `is_running`; no real socket |\n| Stale `localNetwork` disk file does not enable | `stale_enabled_config_file_does_not_look_enabled` | — |\n| IPC status after reopen is disabled + `SessionOnly` | `remote_status_after_reopen_is_disabled_session_only` | Does not call `cmd_remote_enable` |\n| App factory persists pairing, starts Off | `app_remote_state_persists_pairing_but_starts_off` | Calls `create_remote_state`, not `create_app` |\n| Devices/tokens/revokes survive | `paired_devices_and_revocations_survive_reopen` | — |\n| Settings copy | `states that Remote Access stops when Ferryx quits...` | Static string |\n| `create_app` never auto-starts | Source only | No `create_app` test |\n| Real quit/relaunch UI | Manual QA in audit | Not run (no-desktop constraint) |\n\nIn-repo audit `docs/audits/settings-remote-reliability-mass-ulw.md` item 3 matches the code. It overclaims “never silently restores a listening gateway” if `DaemonServer::new` is constructed.\n\n### Commands / results (this audit)\n\n```\ncargo test --manifest-path src-tauri/Cargo.toml --lib remote::state\n  2 passed  enabled_gateway_does_not_restore_listener_after_reopen\n            stale_enabled_config_file_does_not_look_enabled\n\ncargo test --manifest-path src-tauri/Cargo.toml --lib remote_status_after_reopen_is_disabled_session_only\n  1 passed\n\ncargo test --manifest-path src-tauri/Cargo.toml --lib app_remote_state_persists_pairing_but_starts_off\n  1 passed\n\ncargo test --manifest-path src-tauri/Cargo.toml --lib remote::auth::persistence_tests\n  2 passed\n\ncd ui && npx vitest run src/components/SettingsDialog.test.tsx \\\n  -t \"states that Remote Access stops when Ferryx quits|copies the enabled Remote pairing PIN|renders paired devices\"\n  3 passed | 19 skipped\n```\n\nPre-existing dead-code warnings in `src-tauri/src/worktree/manager.rs` only. No Remote/Settings test failed.\n\n**Mark objective 3 complete.** Optional later hardening (not required to close): drive lifecycle through `cmd_remote_enable` + `create_app`; do not auto-start a listener in `DaemonServer::new`."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a68/sessions/st_01a02a68/2026-08-22T16-56-33-189Z_01a02a67-12a5-778b-a96a-8dd2bed0b2ef.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"quit"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a68/sessions/st_01a02a68/2026-08-22T16-56-33-189Z_01a02a67-12a5-778b-a96a-8dd2bed0b2ef.jsonl"}}

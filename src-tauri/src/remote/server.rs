@@ -1,15 +1,16 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
 use crate::remote::protocol::{
     ClientControlMessage, RemoteCreateWorktreeRequest, RemoteDeleteWorktreeRequest,
-    RemoteProjectInfo, RemoteTerminalSession, RemoteWorkspaceState,
+    RemoteProjectInfo, RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload,
+    RemoteTerminalSession, RemoteWorkspaceState,
 };
 use crate::remote::state::{RemoteGatewayState, RemoteNetworkMode};
 use crate::terminal::{PtySessionState, TerminalSignal};
-use crate::worktree::CreateWorktreeOptions;
+use crate::worktree::{CreateWorktreeOptions, WorktreeIdentity};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        Path as AxumPath, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
@@ -19,10 +20,12 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
+
+pub const REMOTE_SELECTION_REQUEST_EVENT: &str = "remote_selection_requested";
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -72,12 +75,197 @@ async fn pair_exchange(
         .auth_manager
         .exchange_pairing_code(&payload.code, &payload.device_name)
         .map_err(|e| match e {
-            AuthError::InvalidPairingCode => (StatusCode::BAD_REQUEST, "Invalid pairing code".into()),
-            AuthError::ExpiredPairingCode => (StatusCode::UNAUTHORIZED, "Pairing code expired".into()),
+            AuthError::InvalidPairingCode => {
+                (StatusCode::BAD_REQUEST, "Invalid pairing code".into())
+            }
+            AuthError::ExpiredPairingCode => {
+                (StatusCode::UNAUTHORIZED, "Pairing code expired".into())
+            }
             _ => (StatusCode::UNAUTHORIZED, "Unauthorized".into()),
         })?;
 
     Ok(Json(PairExchangeResponse { token, device }))
+}
+
+/// Canonicalize a filesystem path for comparison purposes. When the path itself
+/// doesn't exist (e.g. a session whose worktree was deleted after the session was
+/// spawned), canonicalizes the nearest existing ancestor instead and re-appends
+/// the missing tail, so the result still resolves symlinks (notably macOS's
+/// `/var` -> `/private/var`) in the part of the path that *does* exist. This
+/// keeps `starts_with` comparisons against a canonical repo root correct even for
+/// non-existent paths, rather than silently falling back to a raw path that may
+/// use a different symlink alias than the canonical root it's compared against.
+fn canonicalize_or_raw(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut missing_tail = Vec::new();
+    let mut ancestor = path;
+    loop {
+        match ancestor.parent() {
+            Some(parent) => {
+                missing_tail.push(ancestor.file_name());
+                ancestor = parent;
+            }
+            None => break,
+        }
+        if let Ok(canonical_ancestor) = std::fs::canonicalize(ancestor) {
+            let mut resolved = canonical_ancestor;
+            for component in missing_tail.into_iter().rev().flatten() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Snapshot of one registered workspace, captured once per request so repeated
+/// session lookups don't each re-list git worktrees from disk.
+struct WorkspaceSnapshot {
+    workspace_id: String,
+    /// Canonicalized repo root (the manager's root is already canonical at
+    /// construction time, but we re-derive defensively in case the directory
+    /// was removed or replaced by a symlink after registration).
+    root: PathBuf,
+    repo_root_display: String,
+    worktrees: Vec<crate::worktree::Worktree>,
+}
+
+/// Request-scoped cache of the workspace registry's contents. Building this once
+/// per request (rather than once per session) avoids repeated `git worktree list`
+/// subprocess invocations when a request needs metadata for many sessions.
+pub(crate) struct WorkspaceSnapshotCache {
+    workspaces: Vec<WorkspaceSnapshot>,
+}
+
+impl WorkspaceSnapshotCache {
+    pub(crate) fn build(registry: &crate::worktree::WorkspaceRegistry) -> Self {
+        let mut entries = registry.list();
+        // Deterministic order: `WorkspaceRegistry::list` iterates a `HashMap`, whose
+        // order is unspecified and can vary between calls.
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let workspaces = entries
+            .into_iter()
+            .map(|(workspace_id, mgr)| WorkspaceSnapshot {
+                workspace_id,
+                root: canonicalize_or_raw(mgr.repo_root()),
+                repo_root_display: mgr.repo_root().to_string_lossy().into_owned(),
+                worktrees: mgr.list_worktrees().unwrap_or_default(),
+            })
+            .collect();
+        Self { workspaces }
+    }
+
+    /// Workspace ids and repo roots in deterministic order, for building the
+    /// `projects` list without a second registry/disk round trip.
+    fn projects(&self) -> Vec<RemoteProjectInfo> {
+        self.workspaces
+            .iter()
+            .map(|w| RemoteProjectInfo {
+                workspace_id: w.workspace_id.clone(),
+                repo_root: w.repo_root_display.clone(),
+            })
+            .collect()
+    }
+
+    /// Previously listed worktrees for `workspace_id`, if registered. Reuses the
+    /// snapshot captured at cache-build time instead of re-listing from disk.
+    fn worktrees_for(&self, workspace_id: &str) -> Vec<crate::worktree::Worktree> {
+        self.workspaces
+            .iter()
+            .find(|w| w.workspace_id == workspace_id)
+            .map(|w| w.worktrees.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resolve `(workspace_id, worktree_label)` for a terminal session from the
+    /// worktree path that owns it. Degrades gracefully: unmatched paths yield a
+    /// best-effort label derived from the path itself, missing paths yield `None`.
+    pub(crate) fn derive_session_metadata(
+        &self,
+        worktree_path: Option<&Path>,
+    ) -> (Option<String>, Option<String>) {
+        let Some(path) = worktree_path else {
+            return (None, None);
+        };
+        let canonical = canonicalize_or_raw(path);
+        for workspace in &self.workspaces {
+            if !canonical.starts_with(&workspace.root) {
+                continue;
+            }
+            let label = workspace
+                .worktrees
+                .iter()
+                .find(|wt| wt.path == path || wt.path == canonical)
+                .and_then(|wt| wt.branch_short_name().map(str::to_string))
+                .or_else(|| relative_label(&workspace.root, &canonical));
+            return (Some(workspace.workspace_id.clone()), label);
+        }
+        (
+            None,
+            path.file_name().map(|f| f.to_string_lossy().into_owned()),
+        )
+    }
+}
+
+/// Best-effort, non-panicking label for a path that lives under `root` but isn't a
+/// listed git worktree (e.g. an ad-hoc subdirectory terminal). Prefers the path
+/// relative to the workspace root so nested/ad-hoc sessions get an informative,
+/// collision-resistant label instead of a bare directory name; falls back to the
+/// root's own directory name when the path *is* the root.
+fn relative_label(root: &Path, canonical: &Path) -> Option<String> {
+    if let Ok(rel) = canonical.strip_prefix(root) {
+        if !rel.as_os_str().is_empty() {
+            return Some(
+                rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
+        }
+    }
+    canonical
+        .file_name()
+        .or_else(|| root.file_name())
+        .map(|f| f.to_string_lossy().into_owned())
+}
+
+fn get_active_running_sessions(
+    state: &RemoteGatewayState,
+    cache: &WorkspaceSnapshotCache,
+) -> Vec<RemoteTerminalSession> {
+    let active = state.active_selection.read().clone();
+    let Some(active_sel) = active else {
+        return Vec::new();
+    };
+    let Some(session_id) = active_sel.session_id.as_deref() else {
+        return Vec::new();
+    };
+    let Some(session) = state.terminal_service.get_session(session_id) else {
+        return Vec::new();
+    };
+    let running = matches!(
+        session.state(),
+        PtySessionState::Running | PtySessionState::Starting
+    );
+    if !running {
+        return Vec::new();
+    }
+    let (derived_ws, derived_label) =
+        cache.derive_session_metadata(session.worktree_path().as_deref());
+    let workspace_id = active_sel.workspace_id.clone().or(derived_ws);
+    let worktree_label = active_sel
+        .worktree_slug
+        .clone()
+        .or_else(|| active_sel.worktree_label.clone())
+        .or(derived_label);
+
+    vec![RemoteTerminalSession {
+        session_id: session.id().to_string(),
+        title: None,
+        workspace_id,
+        worktree_label,
+        running,
+    }]
 }
 
 async fn list_sessions(
@@ -85,28 +273,17 @@ async fn list_sessions(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<RemoteTerminalSession>>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
-    let session_ids = state.terminal_service.list_sessions();
-    let mut out = Vec::new();
-    for id in session_ids {
-        if let Some(session) = state.terminal_service.get_session(&id) {
-            let running = matches!(session.state(), PtySessionState::Running | PtySessionState::Starting);
-            out.push(RemoteTerminalSession {
-                session_id: id,
-                title: None,
-                workspace_id: None,
-                worktree_label: None,
-                running,
-            });
-        }
-    }
+    let cache = WorkspaceSnapshotCache::build(&state.workspace_registry);
+    let sessions = get_active_running_sessions(&state, &cache);
 
-    Ok(Json(out))
+    Ok(Json(sessions))
 }
 
 async fn get_workspace_state(
@@ -114,42 +291,29 @@ async fn get_workspace_state(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<RemoteWorkspaceState>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
-    let projects_raw = state.workspace_registry.list();
-    let projects: Vec<RemoteProjectInfo> = projects_raw
-        .into_iter()
-        .map(|(ws_id, mgr)| RemoteProjectInfo {
-            workspace_id: ws_id,
-            repo_root: mgr.repo_root().to_string_lossy().to_string(),
-        })
-        .collect();
+    // Build the request-scoped snapshot once: it drives `projects`, the active
+    // workspace's `worktrees`, and every session's derived metadata below, so a
+    // request with many sessions only lists each workspace's git worktrees once.
+    let cache = WorkspaceSnapshotCache::build(&state.workspace_registry);
 
-    let active_ws = projects.first().map(|p| p.workspace_id.clone()).unwrap_or_else(|| "default".into());
-    let worktrees = state
-        .workspace_registry
-        .manager(&active_ws)
-        .map(|m| m.list_worktrees().unwrap_or_default())
-        .unwrap_or_default();
-
-    let session_ids = state.terminal_service.list_sessions();
-    let mut sessions = Vec::new();
-    for id in session_ids {
-        if let Some(session) = state.terminal_service.get_session(&id) {
-            let running = matches!(session.state(), PtySessionState::Running | PtySessionState::Starting);
-            sessions.push(RemoteTerminalSession {
-                session_id: id,
-                title: None,
-                workspace_id: Some(active_ws.clone()),
-                worktree_label: None,
-                running,
-            });
-        }
-    }
+    let projects = cache.projects();
+    let active_ws = state
+        .active_selection
+        .read()
+        .as_ref()
+        .and_then(|sel| sel.workspace_id.clone())
+        .filter(|id| !id.is_empty())
+        .or_else(|| projects.first().map(|p| p.workspace_id.clone()))
+        .unwrap_or_else(|| "default".into());
+    let worktrees = cache.worktrees_for(&active_ws);
+    let sessions = get_active_running_sessions(&state, &cache);
 
     Ok(Json(RemoteWorkspaceState {
         projects,
@@ -159,20 +323,94 @@ async fn get_workspace_state(
     }))
 }
 
-async fn create_worktree(
+async fn select_workspace(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
-    Json(payload): Json<RemoteCreateWorktreeRequest>,
-) -> Result<Json<crate::worktree::Worktree>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    Json(payload): Json<RemoteSelectWorkspaceRequest>,
+) -> Result<Json<RemoteSelectionRequestPayload>, (StatusCode, String)> {
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
     if device.permission != DevicePermission::Control {
-        return Err((StatusCode::FORBIDDEN, "View-only device cannot create worktrees".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "View-only device cannot request workspace selection".into(),
+        ));
+    }
+
+    let _mgr = state
+        .workspace_registry
+        .manager(&payload.workspace_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let (worktree_identity, worktree_slug, worktree_label) = if let Some(ref wt) = payload.worktree
+    {
+        let (_, resolved_wt) = state
+            .workspace_registry
+            .resolve_worktree(&payload.workspace_id, wt)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let label = resolved_wt
+            .branch_short_name()
+            .map(str::to_string)
+            .or_else(|| payload.worktree_label.clone());
+        (Some(wt.clone()), Some(wt.slug.clone()), label)
+    } else if let Some(ref slug) = payload.worktree_slug {
+        let ident = WorktreeIdentity {
+            ws_id: payload.workspace_id.clone(),
+            slug: slug.clone(),
+        };
+        let (_, resolved_wt) = state
+            .workspace_registry
+            .resolve_worktree(&payload.workspace_id, &ident)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let label = resolved_wt
+            .branch_short_name()
+            .map(str::to_string)
+            .or_else(|| payload.worktree_label.clone());
+        (Some(ident), Some(slug.clone()), label)
+    } else {
+        (None, None, payload.worktree_label.clone())
+    };
+
+    let event_payload = RemoteSelectionRequestPayload {
+        workspace_id: payload.workspace_id,
+        worktree: worktree_identity,
+        worktree_slug,
+        worktree_label,
+        session_id: payload.session_id,
+    };
+
+    state.emit_desktop_event(
+        REMOTE_SELECTION_REQUEST_EVENT,
+        serde_json::to_value(&event_payload).unwrap_or(serde_json::Value::Null),
+    );
+
+    Ok(Json(event_payload))
+}
+
+async fn create_worktree(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+    Json(payload): Json<RemoteCreateWorktreeRequest>,
+) -> Result<Json<crate::worktree::Worktree>, (StatusCode, String)> {
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    if device.permission != DevicePermission::Control {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "View-only device cannot create worktrees".into(),
+        ));
     }
 
     let mgr = state
@@ -204,14 +442,18 @@ async fn delete_worktree(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteDeleteWorktreeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
     if device.permission != DevicePermission::Control {
-        return Err((StatusCode::FORBIDDEN, "View-only device cannot delete worktrees".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "View-only device cannot delete worktrees".into(),
+        ));
     }
 
     let (mgr, worktree) = state
@@ -230,7 +472,8 @@ async fn list_devices(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<DeviceInfo>>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -243,9 +486,10 @@ async fn revoke_device(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
-    Path(device_id): Path<String>,
+    AxumPath(device_id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -264,7 +508,8 @@ async fn ws_events_handler(
     headers: HeaderMap,
     State(state): State<Arc<RemoteGatewayState>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -284,23 +529,42 @@ async fn handle_events_socket(mut socket: WebSocket, mut rx: broadcast::Receiver
 
 async fn ws_terminal_handler(
     ws: WebSocketUpgrade,
-    Path(session_id): Path<String>,
+    AxumPath(session_id): AxumPath<String>,
     Query(query): Query<AuthQuery>,
     headers: HeaderMap,
     State(state): State<Arc<RemoteGatewayState>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    let is_declared_active = {
+        let active = state.active_selection.read();
+        active
+            .as_ref()
+            .and_then(|a| a.session_id.as_deref())
+            .map(|id| id == session_id.as_str())
+            .unwrap_or(false)
+    };
+
+    if !is_declared_active {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Forbidden: session is not the active desktop session".into(),
+        ));
+    }
 
     let (history, rx) = state
         .terminal_service
         .attach(&session_id)
         .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
-    Ok(ws.on_upgrade(move |socket| handle_terminal_socket(socket, session_id, history, rx, device, state)))
+    Ok(ws.on_upgrade(move |socket| {
+        handle_terminal_socket(socket, session_id, history, rx, device, state)
+    }))
 }
 
 async fn handle_terminal_socket(
@@ -351,7 +615,8 @@ async fn handle_terminal_socket(
                             }
                             ClientControlMessage::Signal { signal } => {
                                 if can_control && signal == "interrupt" {
-                                    let _ = term_service.signal(&session_id_clone, TerminalSignal::Interrupt);
+                                    let _ = term_service
+                                        .signal(&session_id_clone, TerminalSignal::Interrupt);
                                 }
                             }
                             ClientControlMessage::Ping => {}
@@ -364,33 +629,61 @@ async fn handle_terminal_socket(
         }
     });
 
+    let mut active_session_rx = state.active_session_watch_rx();
+    let target_session_id = session_id.clone();
+    let mut focus_watcher = tokio::spawn(async move {
+        if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
+            return;
+        }
+        while active_session_rx.changed().await.is_ok() {
+            let current = active_session_rx.borrow().clone();
+            if current.as_deref() != Some(target_session_id.as_str()) {
+                break;
+            }
+        }
+    });
+
     tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
+        _ = (&mut send_task) => {
+            recv_task.abort();
+            focus_watcher.abort();
+        }
+        _ = (&mut recv_task) => {
+            send_task.abort();
+            focus_watcher.abort();
+        }
+        _ = (&mut focus_watcher) => {
+            send_task.abort();
+            recv_task.abort();
+        }
     };
 }
 
 fn resolve_dist_dir() -> PathBuf {
-    let candidates = [
+    let mut candidates = vec![
         PathBuf::from("ui/dist"),
         PathBuf::from("../ui/dist"),
         PathBuf::from("../../ui/dist"),
     ];
-    for c in &candidates {
-        if c.exists() && c.is_dir() {
-            return c.clone();
-        }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("ui/dist"));
+        candidates.push(cwd.join("dist"));
     }
     if let Ok(exe) = std::env::current_exe() {
         let mut cur = exe;
         for _ in 0..6 {
             if let Some(parent) = cur.parent() {
-                let candidate = parent.join("ui/dist");
-                if candidate.exists() && candidate.is_dir() {
-                    return candidate;
-                }
+                candidates.push(parent.join("ui/dist"));
+                candidates.push(parent.join("Resources/ui/dist"));
+                candidates.push(parent.join("../Resources/ui/dist"));
+                candidates.push(parent.join("../Resources"));
                 cur = parent.to_path_buf();
             }
+        }
+    }
+    for c in &candidates {
+        if c.exists() && c.is_dir() && c.join("index.html").exists() {
+            return c.clone();
         }
     }
     PathBuf::from("ui/dist")
@@ -430,12 +723,12 @@ const EMBEDDED_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
-
 async fn get_terminal_preferences(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
-    let _token = extract_token(&headers, Some(&query)).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     Ok(Json(crate::terminal::load_terminal_preferences()))
 }
 
@@ -450,8 +743,16 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/pair/exchange", post(pair_exchange))
         .route("/api/v1/sessions", get(list_sessions))
         .route("/api/v1/workspace/state", get(get_workspace_state))
-        .route("/api/v1/terminal/preferences", get(get_terminal_preferences))
-        .route("/api/v1/workspace/worktrees", post(create_worktree).delete(delete_worktree))
+        .route("/api/v1/workspace/select", post(select_workspace))
+        .route("/api/v1/workspace/selection", post(select_workspace))
+        .route(
+            "/api/v1/terminal/preferences",
+            get(get_terminal_preferences),
+        )
+        .route(
+            "/api/v1/workspace/worktrees",
+            post(create_worktree).delete(delete_worktree),
+        )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
         .route("/api/v1/events", get(ws_events_handler))

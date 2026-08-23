@@ -24,7 +24,9 @@ impl WorkspaceRegistry {
         if workspace_id.starts_with('-')
             || workspace_id.contains('/')
             || workspace_id.contains('\\')
-            || workspace_id.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            || workspace_id
+                .chars()
+                .any(|ch| ch.is_control() || ch.is_whitespace())
         {
             return Err(WorktreeError::InvalidNamespace {
                 reason: "Workspace registry ID contains unsafe characters".into(),
@@ -101,6 +103,14 @@ impl WorkspaceRegistry {
                 slug: identity.slug.clone(),
             })?;
         manager.canonical_allowed_path(&worktree.path)?;
+        let expected_branch = WorktreeManager::format_branch_name(&identity.ws_id, &identity.slug)?;
+        if worktree.branch_short_name() != Some(expected_branch.as_str()) {
+            return Err(WorktreeError::WorktreeIdentityNotFound {
+                workspace_id: workspace_id.to_string(),
+                ws_id: identity.ws_id.clone(),
+                slug: identity.slug.clone(),
+            });
+        }
         Ok((manager, worktree))
     }
 

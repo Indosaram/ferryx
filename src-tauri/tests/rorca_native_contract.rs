@@ -1,6 +1,7 @@
 use ferryx_lib::ipc::{
-    cmd_project_branches, cmd_project_register, IpcErrorCode, ProjectBranchesRequest,
-    RegisterProjectRequest,
+    cmd_project_branches, cmd_project_initial, cmd_project_register, derive_workspace_id,
+    initial_project, IpcErrorCode, ProjectBranchesRequest, RegisterProjectRequest,
+    LEGACY_DEFAULT_WORKSPACE_ID,
 };
 use ferryx_lib::terminal::{
     load_terminal_preferences_from_path, parse_ghostty_config, TerminalPreferencesSource,
@@ -71,8 +72,16 @@ fn ghostty_parser_combines_font_families_and_reads_macos_option_as_alt() {
     .expect("valid Ghostty subset");
 
     assert!(
-        parsed.font_family.as_deref().unwrap_or_default().contains("JetBrains Mono")
-            && parsed.font_family.as_deref().unwrap_or_default().contains("Noto Sans KR")
+        parsed
+            .font_family
+            .as_deref()
+            .unwrap_or_default()
+            .contains("JetBrains Mono")
+            && parsed
+                .font_family
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Noto Sans KR")
     );
     assert_eq!(parsed.macos_option_as_alt, Some(true));
 }
@@ -85,8 +94,16 @@ fn ghostty_parser_handles_quotes_and_macos_option_keywords() {
     .expect("valid quoted Ghostty config");
 
     assert!(
-        parsed.font_family.as_deref().unwrap_or_default().contains("MesloLGS NF")
-            && parsed.font_family.as_deref().unwrap_or_default().contains("Noto Sans KR")
+        parsed
+            .font_family
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MesloLGS NF")
+            && parsed
+                .font_family
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Noto Sans KR")
     );
     assert_eq!(parsed.macos_option_as_alt, Some(true));
 }
@@ -231,6 +248,197 @@ async fn project_registration_is_idempotent_for_the_same_workspace_and_root() {
         .expect("same project registration");
 
     assert_eq!(repeated, first);
+}
+
+/// The checkout the test binary runs from is the canonical startup repository,
+/// so `cmd_project_initial` must resolve to `orca-lite` and must not create a
+/// second `default` alias for that same root.
+#[tokio::test]
+async fn initial_project_is_the_single_canonical_checkout_without_a_default_alias() {
+    let registry = WorkspaceRegistry::new();
+    let app = tauri::test::mock_builder()
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let registry_state = app.state::<WorkspaceRegistry>();
+
+    let initial = cmd_project_initial(registry_state.clone())
+        .await
+        .expect("initial project");
+    println!("initial project: {initial:?}");
+
+    assert_eq!(initial.workspace_id, "orca-lite");
+    assert_eq!(
+        initial.repo_root,
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repository root")
+            .canonicalize()
+            .expect("canonical repository root")
+    );
+
+    let registered_ids = registry_state
+        .list()
+        .into_iter()
+        .map(|(workspace_id, _)| workspace_id)
+        .collect::<Vec<_>>();
+    assert_eq!(registered_ids, vec!["orca-lite".to_string()]);
+    assert!(
+        !registry_state.contains(LEGACY_DEFAULT_WORKSPACE_ID),
+        "the startup root must not be registered under a second `default` alias"
+    );
+
+    let repeated = cmd_project_initial(registry_state.clone())
+        .await
+        .expect("repeated initial project");
+    assert_eq!(repeated, initial);
+    assert_eq!(registry_state.list().len(), 1);
+
+    let json = serde_json::to_value(&initial).expect("serialize initial project");
+    assert!(json.get("workspaceId").is_some());
+    assert!(json.get("repoRoot").is_some());
+    assert!(json.get("workspace_id").is_none());
+}
+
+/// Clients that persisted `workspaceId: "default"` migrate by adopting the ID
+/// returned by the typed initial-project command. The legacy ID itself stays
+/// unregistered and unresolvable, so a stale request fails loudly instead of
+/// silently binding to some unrelated workspace.
+#[tokio::test]
+async fn legacy_default_workspace_id_is_never_registered_and_never_resolves() {
+    let registry = WorkspaceRegistry::new();
+    let app = tauri::test::mock_builder()
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let registry_state = app.state::<WorkspaceRegistry>();
+
+    let initial = initial_project(&registry_state).expect("initial project");
+    assert_ne!(initial.workspace_id, LEGACY_DEFAULT_WORKSPACE_ID);
+
+    // The canonical ID a migrating client adopts is immediately usable.
+    cmd_project_branches(
+        registry_state.clone(),
+        ProjectBranchesRequest {
+            workspace_id: initial.workspace_id.clone(),
+        },
+    )
+    .await
+    .expect("canonical branch listing");
+
+    let error = cmd_project_branches(
+        registry_state.clone(),
+        ProjectBranchesRequest {
+            workspace_id: LEGACY_DEFAULT_WORKSPACE_ID.into(),
+        },
+    )
+    .await
+    .expect_err("the legacy `default` alias must no longer resolve");
+    assert_eq!(error.code, IpcErrorCode::WorkspaceNotFound);
+
+    assert!(!registry_state.contains(LEGACY_DEFAULT_WORKSPACE_ID));
+    assert_eq!(registry_state.list().len(), 1);
+}
+
+/// One canonical root may hold only one workspace ID. A second registration
+/// for the same root returns the existing project rather than minting an alias,
+/// which is what stops a persisted client from re-creating `default`.
+#[tokio::test]
+async fn project_registration_enforces_one_workspace_id_per_canonical_root() {
+    let repo = setup_git_project();
+    let nested = repo.path().join("nested");
+    std::fs::create_dir(&nested).expect("nested dir");
+    let registry = WorkspaceRegistry::new();
+    let app = tauri::test::mock_builder()
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let registry_state = app.state::<WorkspaceRegistry>();
+
+    let first = cmd_project_register(
+        registry_state.clone(),
+        RegisterProjectRequest {
+            workspace_id: "project-a".into(),
+            repo_path: repo.path().to_path_buf(),
+        },
+    )
+    .await
+    .expect("first registration");
+    assert_eq!(first.workspace_id, "project-a");
+
+    // A different ID, and a nested path inside the same root, both collapse
+    // onto the already-registered project.
+    for (requested_id, repo_path) in [
+        ("project-b", repo.path().to_path_buf()),
+        (LEGACY_DEFAULT_WORKSPACE_ID, nested.clone()),
+    ] {
+        let duplicate = cmd_project_register(
+            registry_state.clone(),
+            RegisterProjectRequest {
+                workspace_id: requested_id.into(),
+                repo_path,
+            },
+        )
+        .await
+        .expect("duplicate root registration resolves to the canonical project");
+        assert_eq!(
+            duplicate, first,
+            "requested id {requested_id:?} must not alias"
+        );
+        assert!(!registry_state.contains(requested_id));
+    }
+
+    let registered_ids = registry_state
+        .list()
+        .into_iter()
+        .map(|(workspace_id, _)| workspace_id)
+        .collect::<Vec<_>>();
+    assert_eq!(registered_ids, vec!["project-a".to_string()]);
+
+    // Distinct roots still register independently.
+    let other_repo = setup_git_project();
+    let other = cmd_project_register(
+        registry_state.clone(),
+        RegisterProjectRequest {
+            workspace_id: "project-b".into(),
+            repo_path: other_repo.path().to_path_buf(),
+        },
+    )
+    .await
+    .expect("a distinct root registers under its own id");
+    assert_eq!(other.workspace_id, "project-b");
+    assert_eq!(registry_state.list().len(), 2);
+}
+
+#[test]
+fn workspace_ids_derive_safely_from_repository_folder_names() {
+    assert_eq!(
+        derive_workspace_id(Path::new("/tmp/orca-lite")),
+        "orca-lite"
+    );
+    assert_eq!(
+        derive_workspace_id(Path::new("/tmp/My Project")),
+        "My-Project"
+    );
+    assert_eq!(derive_workspace_id(Path::new("/tmp/--")), "project");
+    assert_eq!(derive_workspace_id(Path::new("/")), "project");
+
+    // Every derived ID must be accepted by the registry's own validation.
+    let repo = setup_git_project();
+    let registry = WorkspaceRegistry::new();
+    for folder in [
+        "orca-lite",
+        "My Project",
+        "weird/name",
+        "-leading-dash-",
+        "..",
+    ] {
+        let derived = derive_workspace_id(&Path::new("/tmp").join(folder));
+        registry
+            .register(&derived, repo.path())
+            .unwrap_or_else(|error| panic!("derived id {derived:?} must be registrable: {error}"));
+        assert!(registry.contains(&derived));
+    }
 }
 
 #[tokio::test]

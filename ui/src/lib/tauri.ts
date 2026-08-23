@@ -3,12 +3,30 @@ import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+export type {
+  AttachTerminalRequest,
+  AttachTerminalResponse,
+  NotificationBadgeResult,
+  SetBadgeCountResult,
+  TerminalLifecyclePayload,
+  TerminalOutputPayload,
+  TerminalReplayGap,
+  TerminalSessionSummary,
+  TerminalSignal,
+  WorktreeChangedPayload,
+};
+
 import type {
+  AttachTerminalRequest,
+  AttachTerminalResponse,
   BranchDeletionPreview,
   DirtyState,
+  NotificationBadgeResult,
+  SetBadgeCountResult,
   StructuredIpcError,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
+  TerminalReplayGap,
   TerminalSessionSummary,
   TerminalSignal,
   Worktree,
@@ -80,6 +98,10 @@ export function isTauriRuntime() {
 
 export async function registerProject(request: { workspaceId: string; repoPath: string }) {
   return invokeCommand<RegisteredProject>("cmd_project_register", { request });
+}
+
+export async function getInitialProject() {
+  return invokeCommand<RegisteredProject>("cmd_project_initial");
 }
 
 export async function listProjectBranches(workspaceId: string) {
@@ -196,6 +218,31 @@ export async function spawnTerminal(request: {
   return response.sessionId;
 }
 
+export async function attachTerminal(
+  requestOrSessionId: string | AttachTerminalRequest,
+  afterSequence?: string | null,
+): Promise<AttachTerminalResponse> {
+  const req: AttachTerminalRequest =
+    typeof requestOrSessionId === "string"
+      ? { sessionId: requestOrSessionId, afterSequence: afterSequence ?? null }
+      : { sessionId: requestOrSessionId.sessionId, afterSequence: requestOrSessionId.afterSequence ?? null };
+
+  if (!isTauri()) {
+    return {
+      sessionId: req.sessionId,
+      daemonEpoch: null,
+      historyStartSequence: null,
+      historyEndSequence: null,
+      history: "",
+      gap: null,
+    };
+  }
+  return invokeCommand<AttachTerminalResponse>("cmd_terminal_attach", {
+    sessionId: req.sessionId,
+    afterSequence: req.afterSequence ?? null,
+  });
+}
+
 export async function getTerminalCwd(sessionId: string): Promise<string | null> {
   if (!isTauri()) return null;
   const response = await invokeCommand<{ cwd: string }>("cmd_terminal_get_cwd", { sessionId });
@@ -246,6 +293,11 @@ export async function onNewTerminalTabMenu(handler: () => void): Promise<Unliste
   return listen<void>("menu_new_terminal_tab", () => handler());
 }
 
+export async function onCloseTabMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<void>("menu_close_tab", () => handler());
+}
+
 export async function onWorktreeChanged(handler: (payload: WorktreeChangedPayload) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<WorktreeChangedPayload>("worktree_changed", (event) => handler(event.payload));
@@ -281,6 +333,16 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
   }
 }
 
+
+export type AgentDetection = {
+  name: string;
+  available: boolean;
+};
+
+export async function detectAgents(names: string[]): Promise<AgentDetection[]> {
+  if (!isTauri()) return names.map((name) => ({ name, available: false }));
+  return invokeCommand<AgentDetection[]>("cmd_agents_detect", { names });
+}
 
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale";
 
@@ -412,6 +474,21 @@ export async function pickNotificationAudio(): Promise<import('./types').PickedA
   return invokeCommand<import('./types').PickedAudioFile | null>('cmd_notification_pick_audio');
 }
 
+const MAX_U32_BADGE_COUNT = 4_294_967_295;
+
+export function normalizeBadgeCount(count: number): number {
+  if (!Number.isFinite(count)) return 0;
+  return Math.min(MAX_U32_BADGE_COUNT, Math.max(0, Math.floor(count)));
+}
+
+export async function setBadgeCount(count: number): Promise<SetBadgeCountResult> {
+  const normalizedCount = normalizeBadgeCount(count);
+  if (!isTauri()) {
+    return { supported: false, count: normalizedCount };
+  }
+  return invokeCommand<SetBadgeCountResult>("cmd_notification_set_badge_count", { count: normalizedCount });
+}
+
 export async function saveSession(session: import('./types').PersistedWorkspaceSession): Promise<void> {
   if (!isTauri()) return;
   return invokeCommand<void>('cmd_session_save', { session });
@@ -425,4 +502,36 @@ export async function loadSession(): Promise<import('./types').PersistedWorkspac
 export async function clearSession(): Promise<void> {
   if (!isTauri()) return;
   return invokeCommand<void>('cmd_session_clear');
+}
+
+export type FocusedTerminalPayload = {
+  workspaceId: string;
+  worktreeSlug?: string | null;
+  worktreeLabel?: string | null;
+  backendSessionId?: string | null;
+};
+
+export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_remote_set_active_selection", {
+    request: {
+      workspaceId: payload?.workspaceId ?? null,
+      worktreeSlug: payload?.worktreeSlug ?? null,
+      worktreeLabel: payload?.worktreeLabel ?? null,
+      sessionId: payload?.backendSessionId ?? null,
+    },
+  }).catch(() => undefined);
+}
+
+export type RemoteSelectionRequestedPayload = {
+  workspaceId: string;
+  worktreeSlug?: string | null;
+  worktreeLabel?: string | null;
+};
+
+export async function onRemoteSelectionRequested(
+  handler: (payload: RemoteSelectionRequestedPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<RemoteSelectionRequestedPayload>("remote_selection_requested", (event) => handler(event.payload));
 }

@@ -21,16 +21,20 @@ fn setup_repo() -> (TempDir, WorktreeManager) {
 #[test]
 fn worktree_creation_rejects_parent_traversal_outside_registered_root() {
     let (repo, manager) = setup_repo();
-    let outside = repo.path().parent().expect("repo parent").join(format!(
-        "orca-outside-{}",
-        std::process::id()
-    ));
+    let outside = repo
+        .path()
+        .parent()
+        .expect("repo parent")
+        .join(format!("orca-outside-{}", std::process::id()));
     let result = manager.create_worktree(CreateWorktreeOptions::new(
         "ws-hardening",
         "traversal",
         &outside,
     ));
-    assert!(result.is_err(), "../ traversal target must be rejected before Git runs");
+    assert!(
+        result.is_err(),
+        "../ traversal target must be rejected before Git runs"
+    );
 }
 
 #[cfg(unix)]
@@ -49,7 +53,10 @@ fn worktree_creation_rejects_symlink_escape() {
         "symlink",
         &escaped_target,
     ));
-    assert!(result.is_err(), "symlink target outside allowed root must be rejected");
+    assert!(
+        result.is_err(),
+        "symlink target outside allowed root must be rejected"
+    );
 }
 
 #[test]
@@ -94,7 +101,10 @@ fn ipc_request_contract_rejects_raw_paths_and_shell_commands() {
 fn serialized_dirty_state_uses_explicit_camel_case_fields() {
     let value = serde_json::to_value(DirtyState::clean()).expect("serialize dirty state");
     assert_eq!(value.get("isDirty"), Some(&json!(false)));
-    assert!(value.get("is_dirty").is_none(), "snake_case IPC fields must not leak");
+    assert!(
+        value.get("is_dirty").is_none(),
+        "snake_case IPC fields must not leak"
+    );
 }
 
 #[test]
@@ -128,5 +138,8 @@ fn git_error_command_log_escapes_control_characters() {
 fn worktree_manager_validates_repo_root_during_construction() {
     let non_repo = TempDir::new().expect("non-repo tempdir");
     let result = std::panic::catch_unwind(|| WorktreeManager::new(non_repo.path()));
-    assert!(result.is_err(), "invalid/non-Git repo roots must be rejected immediately");
+    assert!(
+        result.is_err(),
+        "invalid/non-Git repo roots must be rejected immediately"
+    );
 }

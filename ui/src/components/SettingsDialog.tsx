@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
   Bell,
-  Brush,
+  Bot,
+  Check,
   CheckCircle2,
+  ChevronDown,
   ExternalLink,
   FolderGit2,
   Globe,
@@ -14,17 +16,30 @@ import {
   Plus,
   Radio,
   RotateCcw,
+  RotateCw,
   Search,
   Settings2,
   TerminalSquare,
   Trash2,
-  Zap,
 } from "lucide-react";
 
+import {
+  AGENT_CANDIDATES,
+  loadAgentSettings,
+  mergeDetections,
+  saveAgentSettings,
+  type AgentSettings,
+} from "../lib/agentsSettings";
+import {
+  useAppearanceSettings,
+  type AppearanceSettingsState,
+} from "../lib/appearanceSettings";
+import { useGeneralSettings } from "../lib/generalSettings";
 import { useNotificationSettings } from "../lib/notificationSettings";
 import { SHORTCUTS, isMacShortcutPlatform, shortcutAliasesLabels, shortcutLabel } from "../lib/shortcuts";
 import {
   createPairingCode,
+  detectAgents,
   disableRemoteGateway,
   enableRemoteGateway,
   getNotificationPermissionStatus,
@@ -37,17 +52,25 @@ import {
   probeNotificationDelivery,
   requestNotificationPermission,
   revokeRemoteDevice,
+  type AgentDetection,
   type DeviceInfo,
+  type RegisteredProject,
   type RemoteGatewayStatus,
   type TailscaleStatus,
 } from "../lib/tauri";
 import { focusBrowser, listBrowsers, setBrowserZoom } from "../lib/browserTauri";
 import { useTerminalSettings } from "../lib/terminalSettings";
-import type { BrowserSessionSummary, NotificationPermissionStatus } from "../lib/types";
+import type { BrowserSessionSummary, NotificationPermissionStatus, Worktree } from "../lib/types";
 
 export type SettingsDialogProps = {
   open: boolean;
   onClose: () => void;
+  projects?: RegisteredProject[];
+  activeProjectId?: string;
+  activeWorktree?: Worktree | null;
+  onSelectProject?: (project: RegisteredProject) => void;
+  onAddProject?: () => void;
+  onAddWorktree?: () => void;
 };
 
 type SettingsSection =
@@ -56,7 +79,7 @@ type SettingsSection =
   | "terminal"
   | "shortcuts"
   | "workspace"
-  | "quickCommands"
+  | "agents"
   | "browser"
   | "notifications"
   | "remote";
@@ -64,13 +87,30 @@ type SettingsSection =
 const inputClass =
   "h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors focus:border-ring";
 
-export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
+export function SettingsDialog({
+  open,
+  ...props
+}: SettingsDialogProps) {
+  if (!open) return null;
+  return <SettingsDialogBody {...props} />;
+}
+
+type SettingsDialogBodyProps = Omit<SettingsDialogProps, "open">;
+
+function SettingsDialogBody({
+  onClose,
+  projects = [],
+  activeProjectId,
+  activeWorktree = null,
+  onSelectProject,
+  onAddProject,
+  onAddWorktree,
+}: SettingsDialogBodyProps) {
   const { settings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
   const [section, setSection] = useState<SettingsSection>("general");
   const isMac = isMacShortcutPlatform();
 
   useEffect(() => {
-    if (!open) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -78,9 +118,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [onClose, open]);
-
-  if (!open) return null;
+  }, [onClose]);
 
   const hasLocalTerminalOverride = settings.fontFamilySource === "local" || settings.macosOptionAsAltSource === "local";
   const terminalSource = hasLocalTerminalOverride
@@ -98,7 +136,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
       aria-modal={false}
       className="fixed inset-0 z-50 flex overflow-hidden bg-background text-foreground"
     >
-      <aside data-testid="settings-nav" className="flex w-[280px] shrink-0 flex-col border-r border-border bg-card">
+      <aside data-testid="settings-nav" className="flex w-[280px] shrink-0 flex-col border-r border-border bg-background">
         <div data-tauri-drag-region className="drag-region h-titlebar shrink-0" />
         <div className="px-3 pb-3 pt-2">
           <button
@@ -116,7 +154,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
             <NavButton active={section === "terminal"} icon={<TerminalSquare />} label="Terminal" onClick={() => setSection("terminal")} />
             <NavButton active={section === "shortcuts"} icon={<Keyboard />} label="Keyboard Shortcuts" onClick={() => setSection("shortcuts")} />
             <NavButton active={section === "workspace"} icon={<FolderGit2 />} label="Workspace" onClick={() => setSection("workspace")} />
-            <NavButton active={section === "quickCommands"} icon={<Zap />} label="Quick Commands" onClick={() => setSection("quickCommands")} />
+            <NavButton active={section === "agents"} icon={<Bot />} label="Agents" onClick={() => setSection("agents")} />
             <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
             <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote Access" onClick={() => setSection("remote")} />
@@ -149,8 +187,17 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
             />
           ) : null}
           {section === "shortcuts" ? <ShortcutSettings isMac={isMac} /> : null}
-          {section === "workspace" ? <WorkspaceSettings /> : null}
-          {section === "quickCommands" ? <QuickCommandsSettings /> : null}
+          {section === "workspace" ? (
+            <WorkspaceSettings
+              projects={projects}
+              activeProjectId={activeProjectId}
+              activeWorktree={activeWorktree}
+              onSelectProject={onSelectProject}
+              onAddProject={onAddProject}
+              onAddWorktree={onAddWorktree}
+            />
+          ) : null}
+          {section === "agents" ? <AgentsSettings /> : null}
           {section === "browser" ? <BrowserSettings /> : null}
           {section === "notifications" ? <NotificationSettings /> : null}
           {section === "remote" ? <RemoteAccessSettings /> : null}
@@ -198,74 +245,57 @@ function SettingsHeading({ icon, title, description }: { icon: React.ReactNode; 
 }
 
 function GeneralSettings() {
+  const isMac = isMacShortcutPlatform();
+  const { settings, updateSettings } = useGeneralSettings();
   return (
-    <section aria-labelledby="settings-general-heading">
+    <section aria-label="General">
       <SettingsHeading
         icon={<MonitorCog />}
         title="General"
-        description="Desktop shell preferences that follow the compact Ferryx desktop layout."
+        description="Desktop shell overview and how Ferryx settings are organized."
       />
-      <h2 id="settings-general-heading" className="mb-3 flex items-center gap-2 text-[12px] font-semibold">
-        <Brush className="size-3.5 text-muted-foreground" />
-        Appearance
-      </h2>
-      <div className="border-y border-border">
-        <SettingRow label="Color scheme" description="Ferryx uses the native charcoal desktop palette.">
-          <span className="text-[11px] text-muted-foreground">Charcoal</span>
-        </SettingRow>
-        <SettingRow label="Density" description="Navigation, tabs, and chrome stay compact at desktop scale.">
-          <span className="text-[11px] text-muted-foreground">Compact</span>
-        </SettingRow>
+      <div data-testid="settings-general-overview" className="space-y-4">
+        <div className="rounded-lg border border-border bg-card p-4">
+          <h3 className="text-[12px] font-semibold">Ferryx desktop</h3>
+          <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+            Local terminal, browser, and agent workspace. Open Settings anytime with {shortcutLabel("settings.toggle", isMac)}.
+          </p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <h3 className="text-[12px] font-semibold">Settings sections</h3>
+          <ul className="mt-2 space-y-1.5 text-[12px] leading-5 text-muted-foreground">
+            <li>Appearance — theme, accent, and interface scale</li>
+            <li>Terminal — font, scrollback, and Ghostty import</li>
+            <li>Keyboard Shortcuts — registered bindings</li>
+            <li>Workspace — projects and worktrees</li>
+            <li>Agents — CLI assistants and the default agent preference</li>
+            <li>Browser — search provider, zoom, and tab restore</li>
+            <li>Notifications — permission, sounds, and delivery tests</li>
+            <li>Remote Access — session-only gateway and device pairing</li>
+          </ul>
+        </div>
+        <div className="border-y border-border">
+          <SettingRow
+            label="Confirm before closing a tab"
+            description="Ask before closing a terminal or browser tab from the tab bar, menu, or keyboard shortcut."
+          >
+            <input
+              id="general-confirm-close-tab"
+              aria-label="Confirm before closing a tab"
+              type="checkbox"
+              checked={settings.confirmCloseTab}
+              onChange={(event) => updateSettings({ confirmCloseTab: event.target.checked })}
+              className="size-4 accent-foreground"
+            />
+          </SettingRow>
+        </div>
       </div>
     </section>
   );
 }
 
-export const APPEARANCE_SETTINGS_STORAGE_KEY = "ferryx.settings.appearance";
-
-export type AppearanceSettingsState = {
-  theme: "charcoal" | "dark" | "light" | "system";
-  accentColor: "default" | "blue" | "emerald" | "purple" | "amber" | "rose";
-  density: "compact" | "comfortable";
-};
-
-const DEFAULT_APPEARANCE_SETTINGS: AppearanceSettingsState = {
-  theme: "charcoal",
-  accentColor: "default",
-  density: "compact",
-};
-
 export function AppearanceSettings() {
-  const [settings, setSettings] = useState<AppearanceSettingsState>(() => {
-    try {
-      const raw = localStorage.getItem(APPEARANCE_SETTINGS_STORAGE_KEY);
-      if (raw) return { ...DEFAULT_APPEARANCE_SETTINGS, ...JSON.parse(raw) };
-    } catch {
-      // ignore
-    }
-    return DEFAULT_APPEARANCE_SETTINGS;
-  });
-
-  const update = (patch: Partial<AppearanceSettingsState>) => {
-    setSettings((prev) => {
-      const next = { ...prev, ...patch };
-      try {
-        localStorage.setItem(APPEARANCE_SETTINGS_STORAGE_KEY, JSON.stringify(next));
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  };
-
-  const reset = () => {
-    setSettings(DEFAULT_APPEARANCE_SETTINGS);
-    try {
-      localStorage.removeItem(APPEARANCE_SETTINGS_STORAGE_KEY);
-    } catch {
-      // ignore
-    }
-  };
+  const { settings, updateSettings, resetSettings } = useAppearanceSettings();
 
   return (
     <section aria-labelledby="settings-appearance-heading">
@@ -279,7 +309,7 @@ export function AppearanceSettings() {
         <h3 className="text-[12px] font-semibold">Display & Styling</h3>
         <button
           type="button"
-          onClick={reset}
+          onClick={resetSettings}
           className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <RotateCcw className="size-3" />
@@ -293,7 +323,7 @@ export function AppearanceSettings() {
             id="appearance-theme-mode"
             aria-label="Theme mode"
             value={settings.theme}
-            onChange={(e) => update({ theme: e.target.value as AppearanceSettingsState["theme"] })}
+            onChange={(e) => updateSettings({ theme: e.target.value as AppearanceSettingsState["theme"] })}
             className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors focus:border-ring"
           >
             <option value="charcoal">Charcoal (Default)</option>
@@ -308,7 +338,7 @@ export function AppearanceSettings() {
             id="appearance-accent-color"
             aria-label="Accent color"
             value={settings.accentColor}
-            onChange={(e) => update({ accentColor: e.target.value as AppearanceSettingsState["accentColor"] })}
+            onChange={(e) => updateSettings({ accentColor: e.target.value as AppearanceSettingsState["accentColor"] })}
             className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors focus:border-ring"
           >
             <option value="default">Slate (Default)</option>
@@ -325,7 +355,7 @@ export function AppearanceSettings() {
             id="appearance-density"
             aria-label="Interface density"
             value={settings.density}
-            onChange={(e) => update({ density: e.target.value as AppearanceSettingsState["density"] })}
+            onChange={(e) => updateSettings({ density: e.target.value as AppearanceSettingsState["density"] })}
             className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors focus:border-ring"
           >
             <option value="compact">Compact (Default)</option>
@@ -533,7 +563,21 @@ function ShortcutSettings({ isMac }: { isMac: boolean }) {
   );
 }
 
-function WorkspaceSettings() {
+function WorkspaceSettings({
+  projects = [],
+  activeProjectId,
+  activeWorktree,
+  onSelectProject,
+  onAddProject,
+  onAddWorktree,
+}: {
+  projects?: RegisteredProject[];
+  activeProjectId?: string;
+  activeWorktree?: Worktree | null;
+  onSelectProject?: (project: RegisteredProject) => void;
+  onAddProject?: () => void;
+  onAddWorktree?: () => void;
+}) {
   return (
     <section aria-labelledby="settings-workspace-heading">
       <SettingsHeading
@@ -542,174 +586,89 @@ function WorkspaceSettings() {
         description="Projects are registered with the native repository registry; worktrees keep the existing safety checks before deletion."
       />
       <h2 id="settings-workspace-heading" className="sr-only">Workspace</h2>
-      <div className="border-y border-border">
-        <SettingRow label="Projects" description="Local repositories appear in the workspace rail after native registration.">
-          <span className="text-[11px] text-muted-foreground">Native registry</span>
+
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h3 className="text-[12px] font-semibold text-foreground">Registered Projects</h3>
+          <p className="text-[11px] text-muted-foreground">Manage active projects and their associated worktrees.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {onAddProject ? (
+            <button
+              type="button"
+              onClick={onAddProject}
+              className="no-drag flex h-7 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <Plus className="size-3" />
+              Add Project
+            </button>
+          ) : null}
+          {onAddWorktree ? (
+            <button
+              type="button"
+              onClick={onAddWorktree}
+              className="no-drag flex h-7 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <Plus className="size-3" />
+              Add Worktree
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="divide-y divide-border rounded-lg border border-border bg-card">
+        {projects.length === 0 ? (
+          <div className="p-4 text-center text-xs text-muted-foreground">No projects registered.</div>
+        ) : (
+          projects.map((project) => {
+            const isActive = project.workspaceId === activeProjectId;
+            return (
+              <div key={project.workspaceId} className="flex items-center justify-between gap-4 p-3">
+                <div className="min-w-0 space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-foreground">{project.workspaceId}</span>
+                    {isActive ? (
+                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                        Active
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="truncate font-mono text-[10px] text-muted-foreground">{project.repoRoot}</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {isActive ? (
+                    <button
+                      type="button"
+                      disabled
+                      className="h-7 rounded border border-border px-2.5 text-[11px] font-medium text-muted-foreground opacity-50"
+                    >
+                      Active
+                    </button>
+                  ) : onSelectProject ? (
+                    <button
+                      type="button"
+                      onClick={() => onSelectProject(project)}
+                      className="h-7 rounded border border-border px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      Select
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="mt-8 border-y border-border">
+        <SettingRow label="Active worktree" description="Currently focused git worktree directory.">
+          <span className="font-mono text-[11px] text-muted-foreground">
+            {activeWorktree?.path ?? "None"}
+          </span>
         </SettingRow>
         <SettingRow label="Worktree deletion" description="Dirty-state and branch deletion previews remain enforced by the native safety contract.">
           <span className="text-[11px] text-muted-foreground">Protected</span>
         </SettingRow>
-      </div>
-    </section>
-  );
-}
-
-export const QUICK_COMMANDS_STORAGE_KEY = "ferryx.settings.quickCommands";
-
-export type QuickCommandItem = {
-  id: string;
-  label: string;
-  command: string;
-};
-
-export type QuickCommandsState = {
-  enabled: boolean;
-  commands: QuickCommandItem[];
-};
-
-const DEFAULT_QUICK_COMMANDS: QuickCommandsState = {
-  enabled: true,
-  commands: [
-    { id: "1", label: "Git Status", command: "git status" },
-    { id: "2", label: "Git Diff", command: "git diff" },
-    { id: "3", label: "List Files", command: "ls -la" },
-  ],
-};
-
-export function QuickCommandsSettings() {
-  const [state, setState] = useState<QuickCommandsState>(() => {
-    try {
-      const raw = localStorage.getItem(QUICK_COMMANDS_STORAGE_KEY);
-      if (raw) return { ...DEFAULT_QUICK_COMMANDS, ...JSON.parse(raw) };
-    } catch {
-      // ignore
-    }
-    return DEFAULT_QUICK_COMMANDS;
-  });
-
-  const [newLabel, setNewLabel] = useState("");
-  const [newCommand, setNewCommand] = useState("");
-
-  const save = (next: QuickCommandsState) => {
-    setState(next);
-    try {
-      localStorage.setItem(QUICK_COMMANDS_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
-  };
-
-  const handleAdd = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!newLabel.trim() || !newCommand.trim()) return;
-    const newItem: QuickCommandItem = {
-      id: Date.now().toString(),
-      label: newLabel.trim(),
-      command: newCommand.trim(),
-    };
-    save({
-      ...state,
-      commands: [...state.commands, newItem],
-    });
-    setNewLabel("");
-    setNewCommand("");
-  };
-
-  const handleDelete = (id: string) => {
-    save({
-      ...state,
-      commands: state.commands.filter((c) => c.id !== id),
-    });
-  };
-
-  const handleToggle = (enabled: boolean) => {
-    save({
-      ...state,
-      enabled,
-    });
-  };
-
-  return (
-    <section aria-labelledby="settings-quick-commands-heading">
-      <SettingsHeading
-        icon={<Zap />}
-        title="Quick Commands"
-        description="Configure one-click terminal commands and quick action macros accessible from the terminal dock."
-      />
-      <h2 id="settings-quick-commands-heading" className="sr-only">Quick Commands</h2>
-      <div className="border-y border-border">
-        <SettingRow
-          label="Enable quick commands"
-          description="Show the quick command palette dock across active terminal panes."
-        >
-          <input
-            id="quick-commands-enabled"
-            aria-label="Enable quick commands"
-            type="checkbox"
-            checked={state.enabled}
-            onChange={(e) => handleToggle(e.target.checked)}
-            className="size-4 accent-foreground"
-          />
-        </SettingRow>
-      </div>
-
-      <div className="mt-8 space-y-4">
-        <h3 className="text-[12px] font-semibold">Custom Commands</h3>
-        <form onSubmit={handleAdd} className="flex items-end gap-3 rounded-lg border border-border bg-card p-3">
-          <div className="flex-1 space-y-1">
-            <label htmlFor="qc-new-label" className="text-[10px] font-medium text-muted-foreground">Label</label>
-            <input
-              id="qc-new-label"
-              aria-label="Command label"
-              placeholder="e.g. Git Status"
-              value={newLabel}
-              onChange={(e) => setNewLabel(e.target.value)}
-              className={inputClass}
-            />
-          </div>
-          <div className="flex-1 space-y-1">
-            <label htmlFor="qc-new-cmd" className="text-[10px] font-medium text-muted-foreground">Command</label>
-            <input
-              id="qc-new-cmd"
-              aria-label="Command string"
-              placeholder="e.g. git status"
-              value={newCommand}
-              onChange={(e) => setNewCommand(e.target.value)}
-              className={inputClass}
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={!newLabel.trim() || !newCommand.trim()}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium text-foreground hover:bg-accent disabled:opacity-40"
-          >
-            <Plus className="size-3.5" />
-            Add command
-          </button>
-        </form>
-
-        <div className="divide-y divide-border rounded-lg border border-border bg-card">
-          {state.commands.length === 0 ? (
-            <div className="p-4 text-center text-xs text-muted-foreground">No quick commands configured.</div>
-          ) : (
-            state.commands.map((cmd) => (
-              <div key={cmd.id} className="flex items-center justify-between gap-4 p-3">
-                <div className="min-w-0">
-                  <div className="text-xs font-medium text-foreground">{cmd.label}</div>
-                  <div className="font-mono text-[11px] text-muted-foreground">{cmd.command}</div>
-                </div>
-                <button
-                  type="button"
-                  aria-label={`Delete command ${cmd.label}`}
-                  onClick={() => handleDelete(cmd.id)}
-                  className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-destructive"
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
       </div>
     </section>
   );
@@ -1007,10 +966,10 @@ export function NotificationSettings() {
             <span
               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
                 isAuthorized
-                  ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
+                  ? "border border-status-success/20 bg-status-success/10 text-status-success"
                   : isDenied
-                  ? "bg-rose-500/10 text-rose-500 border border-rose-500/20"
-                  : "bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                   ? "border border-destructive/20 bg-destructive/10 text-destructive"
+                   : "border border-status-warning/20 bg-status-warning/10 text-status-warning"
               }`}
             >
               {isAuthorized ? <CheckCircle2 className="size-3" /> : null}
@@ -1182,6 +1141,25 @@ function RemoteAccessSettings() {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [pinCopied, setPinCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+
+  const clearCopyTimer = useCallback(() => {
+    if (copyTimerRef.current === null) return;
+    window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = null;
+  }, []);
+
+  const showCopied = useCallback((setCopiedState: (copied: boolean) => void) => {
+    clearCopyTimer();
+    setCopiedState(true);
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopiedState(false);
+      copyTimerRef.current = null;
+    }, 1500);
+  }, [clearCopyTimer]);
+
+  useEffect(() => () => clearCopyTimer(), [clearCopyTimer]);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -1210,13 +1188,13 @@ function RemoteAccessSettings() {
         setStatus(s);
         setPairingCode(null);
         setQrDataUrl(null);
+        setPinCopied(false);
         await refreshStatus();
       } else {
         const s = await enableRemoteGateway({ mode: "localNetwork" });
         setStatus(s);
         await refreshStatus();
-        // Auto-generate pairing PIN and QR upon enable
-        generatePairing(s);
+        await generatePairing(s);
       }
     } catch {
       // ignore
@@ -1272,7 +1250,7 @@ function RemoteAccessSettings() {
       <SettingsHeading
         icon={<Radio />}
         title="Remote Access"
-        description="Access desktop terminal sessions directly from your mobile browser or other devices."
+        description="Access desktop terminal sessions from your mobile browser. The gateway stops when Ferryx quits and must be enabled again after relaunch."
       />
       <h2 id="settings-remote-heading" className="sr-only">Remote Access</h2>
       <div className="border-y border-border">
@@ -1286,7 +1264,7 @@ function RemoteAccessSettings() {
               disabled={loading}
               className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                 status?.enabled
-                  ? "bg-emerald-600 text-white hover:bg-emerald-500"
+                  ? "bg-primary text-primary-foreground hover:bg-primary/90"
                   : "bg-muted text-muted-foreground hover:bg-muted/80"
               }`}
             >
@@ -1301,12 +1279,12 @@ function RemoteAccessSettings() {
         >
           <div className="text-right text-xs">
             {tailscaleStatus?.running ? (
-              <span className="inline-flex items-center gap-1 font-medium text-emerald-500">
+              <span className="inline-flex items-center gap-1 font-medium text-status-success">
                 <CheckCircle2 className="size-3.5" />
                 Running {tailscaleStatus.tailnetName ? `(${tailscaleStatus.tailnetName})` : ""}
               </span>
             ) : tailscaleStatus?.installed ? (
-              <span className="text-amber-500 font-medium">Installed (Disconnected)</span>
+              <span className="text-status-warning font-medium">Installed (Disconnected)</span>
             ) : (
               <span className="text-muted-foreground">Not installed</span>
             )}
@@ -1322,7 +1300,7 @@ function RemoteAccessSettings() {
               label="Instant QR Connect"
               description="Scan this QR code with your phone camera to pair and connect immediately without typing."
             >
-              <div className="flex flex-col items-center gap-2 bg-neutral-900 border border-neutral-800 p-3 rounded-lg">
+              <div className="flex flex-col items-center gap-2 rounded-lg border border-border bg-card p-3">
                 {qrDataUrl ? (
                   <img src={qrDataUrl} alt="Pairing QR Code" className="w-[160px] h-[160px] rounded" />
                 ) : (
@@ -1332,11 +1310,25 @@ function RemoteAccessSettings() {
                 )}
                 {pairingCode && (
                   <div className="flex items-center justify-between w-full px-1">
-                    <span className="font-mono text-xs text-emerald-400 font-semibold">
-                      PIN: {pairingCode}
-                    </span>
                     <button
-                      onClick={() => generatePairing()}
+                      type="button"
+                      data-testid="remote-pairing-code"
+                      aria-label={pinCopied ? `Copied pairing PIN ${pairingCode}` : `Copy pairing PIN ${pairingCode}`}
+                      onClick={() => {
+                        void navigator.clipboard.writeText(pairingCode);
+                        showCopied(setPinCopied);
+                      }}
+                      className="font-mono text-xs font-semibold text-status-success hover:underline"
+                    >
+                      {pinCopied ? "Copied" : `PIN: ${pairingCode}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearCopyTimer();
+                        setPinCopied(false);
+                        void generatePairing();
+                      }}
                       className="text-[10px] text-muted-foreground hover:text-foreground underline"
                     >
                       New Code
@@ -1356,8 +1348,7 @@ function RemoteAccessSettings() {
                   <button
                     onClick={() => {
                       navigator.clipboard.writeText(localUrl);
-                      setCopied(true);
-                      setTimeout(() => setCopied(false), 1500);
+                      showCopied(setCopied);
                     }}
                     className="text-[10px] px-1.5 py-0.5 bg-muted hover:bg-muted/80 rounded"
                   >
@@ -1390,7 +1381,7 @@ function RemoteAccessSettings() {
                       {dev.permission}
                     </span>
                     {dev.revoked ? (
-                      <span className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-500">
+                      <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] text-destructive">
                         Revoked
                       </span>
                     ) : null}
@@ -1433,6 +1424,244 @@ function RemoteAccessSettings() {
               </div>
             ))
           )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function AgentsSettings() {
+  const [settings, setSettings] = useState<AgentSettings>(loadAgentSettings);
+  const [detections, setDetections] = useState<AgentDetection[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
+
+  const runDetection = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const results = await detectAgents([...AGENT_CANDIDATES]);
+      setDetections(results);
+    } catch {
+      // ignore
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void runDetection();
+  }, [runDetection]);
+
+  const resolvedAgents = useMemo(
+    () => mergeDetections(settings, detections),
+    [settings, detections],
+  );
+
+  const availableAgents = useMemo(
+    () => resolvedAgents.filter((a) => a.available),
+    [resolvedAgents],
+  );
+
+  const updateOverride = (name: string, patch: Partial<{ enabled: boolean; command: string; args: string }>) => {
+    setSettings((prev) => {
+      const currentOverride = prev.overrides[name] ?? {};
+      const nextOverride = { ...currentOverride, ...patch };
+      const nextSettings: AgentSettings = {
+        ...prev,
+        overrides: {
+          ...prev.overrides,
+          [name]: nextOverride,
+        },
+      };
+      saveAgentSettings(nextSettings);
+      return nextSettings;
+    });
+  };
+
+  const setDefaultAgent = (defaultAgentId: string | null) => {
+    setSettings((prev) => {
+      const nextSettings: AgentSettings = {
+        ...prev,
+        defaultAgentId,
+      };
+      saveAgentSettings(nextSettings);
+      return nextSettings;
+    });
+  };
+
+  const toggleExpand = (name: string) => {
+    setExpandedAgents((prev) => ({ ...prev, [name]: !prev[name] }));
+  };
+
+  return (
+    <section aria-labelledby="settings-agents-heading">
+      <SettingsHeading
+        icon={<Bot />}
+        title="Agents"
+        description="Configure CLI coding agents detected on your system or customize their launch commands."
+      />
+      <h2 id="settings-agents-heading" className="sr-only">Agents</h2>
+
+      <div className="border-y border-border">
+        <SettingRow
+          label="Default Agent"
+          description="When this agent is enabled and available, it appears first in the New Tab agent list with a Default label. Clicking a listed agent still launches that agent. Ferryx does not auto-launch it. Auto stores no preference. None stores none. Unavailable, disabled, or missing selections keep the natural agent order."
+        >
+          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Default Agent">
+            <button
+              type="button"
+              onClick={() => setDefaultAgent(null)}
+              className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+                settings.defaultAgentId === null
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              {settings.defaultAgentId === null ? <Check className="size-3" /> : null}
+              Auto
+            </button>
+            <button
+              type="button"
+              onClick={() => setDefaultAgent("none")}
+              className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+                settings.defaultAgentId === "none"
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              {settings.defaultAgentId === "none" ? <Check className="size-3" /> : null}
+              None
+            </button>
+            {availableAgents.map((agent) => {
+              const isSelected = settings.defaultAgentId === agent.name;
+              const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
+              return (
+                <button
+                  key={agent.name}
+                  type="button"
+                  onClick={() => setDefaultAgent(agent.name)}
+                  className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+                    isSelected
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+                  }`}
+                >
+                  {isSelected ? <Check className="size-3" /> : null}
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </SettingRow>
+      </div>
+
+      <div className="mt-8">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h3 className="text-[12px] font-semibold text-foreground">Installed</h3>
+            <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {availableAgents.length} detected
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void runDetection()}
+            disabled={refreshing}
+            className="no-drag flex h-7 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+          >
+            <RotateCw className={`size-3 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
+
+        <div className="divide-y divide-border/40 border-y border-border">
+          {resolvedAgents.map((agent) => {
+            const isExpanded = Boolean(expandedAgents[agent.name]);
+            const displayName = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
+            const override = settings.overrides[agent.name] ?? {};
+            const commandDisplay = `${agent.command}${agent.args ? ` ${agent.args}` : ""}`;
+
+            return (
+              <div key={agent.name} className="py-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleExpand(agent.name)}
+                        aria-label={`Toggle ${displayName} configuration`}
+                        className="no-drag flex items-center gap-1.5 text-left text-xs font-medium text-foreground hover:text-primary transition-colors"
+                      >
+                        <ChevronDown className={`size-3.5 text-muted-foreground transition-transform ${isExpanded ? "" : "-rotate-90"}`} />
+                        <span>{displayName}</span>
+                      </button>
+                      {agent.available ? (
+                        <span className="inline-flex items-center gap-1 rounded bg-status-success/10 px-1.5 py-0.5 text-[10px] font-medium text-status-success">
+                          Detected
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          Not detected
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 pl-5 font-mono text-[11px] text-muted-foreground truncate">
+                      {commandDisplay}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        aria-label={`Enable ${displayName}`}
+                        checked={agent.enabled}
+                        disabled={!agent.available}
+                        onChange={(e) => updateOverride(agent.name, { enabled: e.target.checked })}
+                        className="size-4 accent-foreground disabled:opacity-40"
+                      />
+                      <span className={`text-xs ${agent.available ? "text-foreground" : "text-muted-foreground opacity-60"}`}>
+                        {agent.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                {isExpanded ? (
+                  <div className="mt-3 pl-5 space-y-3 rounded-md bg-muted/30 p-3 border border-border/50">
+                    <div>
+                      <label htmlFor={`agent-cmd-${agent.name}`} className="block text-[11px] font-medium text-muted-foreground mb-1">
+                        Command
+                      </label>
+                      <input
+                        id={`agent-cmd-${agent.name}`}
+                        type="text"
+                        aria-label={`${displayName} command`}
+                        defaultValue={override.command ?? ""}
+                        placeholder={agent.name}
+                        onBlur={(e) => updateOverride(agent.name, { command: e.target.value })}
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground outline-none transition-colors focus:border-ring"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor={`agent-args-${agent.name}`} className="block text-[11px] font-medium text-muted-foreground mb-1">
+                        Arguments
+                      </label>
+                      <input
+                        id={`agent-args-${agent.name}`}
+                        type="text"
+                        aria-label={`${displayName} arguments`}
+                        defaultValue={override.args ?? ""}
+                        placeholder="e.g. --model opus"
+                        onBlur={(e) => updateOverride(agent.name, { args: e.target.value })}
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground outline-none transition-colors focus:border-ring"
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       </div>
     </section>

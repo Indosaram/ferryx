@@ -1,0 +1,113 @@
+> I read this as Implementation - add the state-only navigation regression test for five parked workspaces with 20 live terminal tabs each in `ui/src/state/workspaceStore.test.tsx`, execute the seam mutation RED test, and prove GREEN.
+
+### Changed Paths
+- `ui/src/state/workspaceStore.test.tsx` (added characterization/regression test verifying 5 parked workspaces x 20 live terminal tabs navigation is strictly state-only with 0 terminal spawns/waits/terminations)
+
+---
+
+### Mutation RED Evidence
+
+Mutating the fast navigation seam in `ui/src/state/workspaceStore.ts` inside `ensureTabForWorktree` to invoke `spawnTerminal`:
+```ts
+      const parkedLayout = snapshot.worktreeLayouts?.[worktree.path];
+      if (parkedLayout && parkedLayout.tabs.length > 0) {
+        await services.spawnTerminal({ workspaceId, worktree: worktreeIdentity(worktree), cwd: worktree.path });
+        dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+        const activeTabId = parkedLayout.activeTabId ?? parkedLayout.tabs[0]?.id;
+...
+```
+
+**Command:**
+```bash
+cd ui && bun x vitest run src/state/workspaceStore.test.tsx -t "navigates across five parked workspaces with 20 live terminal tabs each"
+```
+
+**Output:**
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/state/workspaceStore.test.tsx (21 tests | 1 failed | 20 skipped) 43ms
+   × worktree tab and session isolation > navigates across five parked workspaces with 20 live terminal tabs each as a state-only operation 42ms
+     → expected "spy" to not be called at all, but actually been called 6 times
+
+Number of calls: 6
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/workspaceStore.test.tsx > worktree tab and session isolation > navigates across five parked workspaces with 20 live terminal tabs each as a state-only operation
+AssertionError: expected "spy" to not be called at all, but actually been called 6 times
+
+ ❯ src/state/workspaceStore.test.tsx:857:40
+    855| 
+    856|     // Explicit assertions verifying zero side-effects and pure state …
+    857|     expect(services.spawnTerminal).not.toHaveBeenCalled();
+       |                                        ^
+    858|     expect(services.closeTerminal).not.toHaveBeenCalled();
+    859|     expect(services.waitForTerminalExit).not.toHaveBeenCalled();
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 20 skipped (21)
+   Duration  1.41s
+```
+
+---
+
+### GREEN Transcript
+
+After restoring `ui/src/state/workspaceStore.ts`:
+
+**Command:**
+```bash
+cd ui && bun x vitest run src/state/workspaceStore.test.tsx -t "navigates across five parked workspaces with 20 live terminal tabs each"
+```
+
+**Output:**
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/state/workspaceStore.test.tsx (21 tests | 20 skipped) 28ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 20 skipped (21)
+   Start at  01:14:21
+   Duration  1.50s (transform 330ms, setup 642ms, collect 47ms, tests 28ms, environment 363ms, prepare 47ms)
+```
+
+**Full suite command:**
+```bash
+cd ui && bun x vitest run src/state/workspaceStore.test.tsx
+```
+
+**Output:**
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/state/workspaceStore.test.tsx (21 tests) 203ms
+
+ Test Files  1 passed (1)
+      Tests  21 passed (21)
+   Start at  01:14:57
+   Duration  1.44s
+```
+
+---
+
+### Explicit No-Spawn / No-Wait Assertions
+
+From `ui/src/state/workspaceStore.test.tsx`:
+```tsx
+// Explicit assertions verifying zero side-effects and pure state transitions
+expect(services.spawnTerminal).not.toHaveBeenCalled();
+expect(services.closeTerminal).not.toHaveBeenCalled();
+expect(services.waitForTerminalExit).not.toHaveBeenCalled();
+expect(services.ensureTerminalEvents).not.toHaveBeenCalled();
+expect(services.getTerminalCwd).not.toHaveBeenCalled();
+```
+
+---
+
+### Verification & Diagnostics
+
+- **TypeScript check**: `cd ui && bun run build` passed cleanly (`tsc && vite build` succeeded in 4.04s with 0 errors).
+- **LSP Diagnostics**: 0 diagnostics on `ui/src/state/workspaceStore.test.tsx`.
+- **Note on pre-existing failure**: `src/state/workspaceStore.browserLifecycle.test.tsx` has an unrelated pre-existing mock issue (`window.__TAURI_INTERNALS__` unset during native webview invocation).

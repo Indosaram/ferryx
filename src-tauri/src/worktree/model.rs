@@ -92,7 +92,11 @@ pub struct CreateWorktreeOptions {
 }
 
 impl CreateWorktreeOptions {
-    pub fn new(ws_id: impl Into<String>, slug: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        ws_id: impl Into<String>,
+        slug: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             ws_id: ws_id.into(),
             slug: slug.into(),
@@ -145,7 +149,9 @@ pub enum WorktreeError {
         requested_owner_id: String,
     },
 
-    #[error("Branch '{branch}' at {head} is not merged; use the explicit destructive deletion API")]
+    #[error(
+        "Branch '{branch}' at {head} is not merged; use the explicit destructive deletion API"
+    )]
     UnmergedBranch { branch: String, head: String },
 
     #[error("Workspace '{workspace_id}' is not registered")]

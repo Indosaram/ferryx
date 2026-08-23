@@ -1,0 +1,8 @@
+> I read this as verifying task deliverables for P-backlog - confirm file edits, test runs, and evidence documentation are complete.
+
+The deliverables for **P-backlog** (**F-terminal-01**) are complete:
+
+1. **RED test & failure verified**: `ui/src/lib/terminalEvents.bus.test.ts` characterizes chunk array retention (`chunks > 1`) and bounded 512KiB backlog tail replay. It failed on the original string concatenation implementation with `AssertionError: expected 1 to be greater than 1`.
+2. **Production change**: In `ui/src/lib/terminalEvents.ts`, replaced monolithic string concatenation with a chunk ring buffer (`SessionBacklog = { chunks: string[], totalChars: number }`), trimming oldest chunks past `MAX_BACKLOG_CHARS` and lazily joining chunks on subscriber replay.
+3. **GREEN test verified**: `cd /Users/indo/code/project/orca-lite/ui && bun run test src/lib/terminalEvents.test.ts src/lib/terminalEvents.bus.test.ts` passed 9/9 tests.
+4. **Evidence documentation**: Written to `/Users/indo/code/project/orca-lite/docs/frontend-perf/fix-P-backlog.md` with packet ID, production file lines, full RED/GREEN outputs, and leftover risk analysis. No git commits made.

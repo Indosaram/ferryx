@@ -1,0 +1,40 @@
+> I read this as a synthesis task - reading findings across all five domain reviews, inspecting the codebase, and authoring a comprehensive, authoritative Code Review & Architecture Audit document to `docs/code-review-report.md`.
+
+The code review and architecture audit report has been written and persisted to `docs/code-review-report.md`.
+
+### Summary of the Audit Report
+
+1. **Executive Summary & Health Scorecard**
+   - Evaluates overall codebase health at **85/100 (Grade: B)**.
+   - Comprehensive domain scorecards covering Architecture & Systems Design (86/100, B+), Code Quality & Maintainability (82/100, B), Security & IPC Boundary (88/100, B+), UI/UX, Theming & Layout (85/100, B), and Testing & QA (84/100, B).
+
+2. **Architecture Overview & High-Level System Design**
+   - Full ASCII system topology diagram mapping interactions between the desktop React shell, Tauri v2 core, PTY manager, Unix domain socket background daemon, and Axum remote gateway.
+   - Analysis of PTY streaming fan-out, session persistence schemas (v2 format), and state hydration.
+
+3. **In-Depth Domain Analyses**
+   - **Backend Daemon, PTY Pipeline & Worktree Isolation:** Exit event notification architectures, PTY memory buffering optimizations, Git worktree isolation with writer leases, and Unix domain socket framing.
+   - **Frontend State Architecture & Terminal Host Manager:** Monolithic reducer bottlenecks, xterm WebGL renderer lifecycle with canvas fallbacks, and backlog chunk ring buffers.
+   - **UI/UX Components, Drag-and-Drop, Design Tokens & Theming:** Semantic theme alignment across Charcoal, Dark, and Light surfaces, `@dnd-kit` collision indexing, and removal of intrusive DOM mutation observers.
+   - **Security Boundary, IPC Contracts, Authentication & Remote Access:** Tauri capability enforcement, constant-time PIN authentication, session-only network listener lifetime, and input sanitization.
+   - **Testing, Tooling & Build Pipeline:** Status of 138 Rust unit tests, 7 integration test suites, and 500+ Vitest tests with test runner environment considerations.
+
+4. **Prioritized Issues Matrix**
+   - Categorized by severity (0 Critical, 7 High, 9 Medium, 6 Low, 2 Nit) with exact `file:line` citations, technical root cause mechanisms, and concrete code-level fix recommendations.
+
+5. **Architectural Strengths & Well-Designed Patterns**
+   - Multi-layered worktree deletion guards and writer lease registry.
+   - Decoupled `TerminalHostManager` with WebGL context recovery.
+   - Atomic schema-versioned session persistence with corrupted backup recovery.
+
+6. **Actionable Step-by-Step Modernization & Hardening Roadmap**
+   - **Phase 1 (Immediate / P0):** Critical stability and async reactor unblocking.
+   - **Phase 2 (Short-Term / P1):** Terminal micro-batching, chunk ring buffers, and fast Base64 decoding.
+   - **Phase 3 (Medium-Term / P2):** Store slice decoupling, `@dnd-kit` collision indexing, and tab bar memoization.
+   - **Phase 4 (Long-Term / P3):** Dynamic entry chunk code splitting and CI test runner unification.
+
+### Verification
+
+- **Document Location:** `docs/code-review-report.md`
+- **Volume & Depth:** 772 lines of markdown analysis with valid source citations.
+- **Rule Verification:** Verified 0 Unicode em/en dashes and 0 forbidden template phrases.

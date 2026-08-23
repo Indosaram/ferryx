@@ -1,6 +1,7 @@
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::session::{
-    clear_session_from_path, load_session_from_path, save_session_to_path, PersistedWorkspaceSession,
+    clear_session_from_path, load_session_from_path, save_session_to_path,
+    PersistedWorkspaceSession,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};

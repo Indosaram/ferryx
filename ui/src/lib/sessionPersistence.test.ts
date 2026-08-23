@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { getGroupForTab, layoutReducer, normalizeLayout } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
+import { saveBrowserSettings } from "./browserSettings";
 import { deserializeWorkspaceState, serializeWorkspaceState, WORKSPACE_SESSION_VERSION } from "./sessionPersistence";
 
 function workspaceState(): WorkspaceState {
@@ -113,6 +114,23 @@ describe("sessionPersistence v2 serialization and migration", () => {
     });
   });
 
+  it("does not serialize terminal sessions that no tab or pane references", () => {
+    const state = workspaceState();
+    state.sessions["sess-orphan"] = {
+      id: "sess-orphan",
+      cwd: "/workspace/main",
+      worktreePath: "/workspace/main",
+      workspaceId: "default",
+      worktree: null,
+      backendSessionId: "backend-orphan",
+      lifecycle: "working",
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+
+    expect(serialized.workspaces.default.terminalSessions).not.toHaveProperty("sess-orphan");
+  });
+
   it("round-trips Orca-style split tab groups without changing either tab's pane ownership", () => {
     const state = workspaceState();
     state.layout = normalizeLayout(state.layout);
@@ -154,7 +172,24 @@ describe("sessionPersistence v2 serialization and migration", () => {
     expect(restored!.sessions["sess-1"].worktreePath).toBe("/workspace/main");
   });
 
+  it("drops persisted terminal sessions that no restored tab or pane references", () => {
+    const serialized = serializeWorkspaceState("default", "/workspace/main", workspaceState());
+    serialized.workspaces.default.terminalSessions["sess-orphan"] = {
+      localSessionId: "sess-orphan",
+      backendSessionId: null,
+      worktreePath: "/workspace/main",
+      cwd: "/workspace/main",
+      createdAt: Date.now(),
+    };
+
+    const restored = deserializeWorkspaceState("default", serialized, new Set());
+
+    expect(restored).not.toBeNull();
+    expect(restored!.sessions).not.toHaveProperty("sess-orphan");
+  });
+
   it("round-trips explicit browser metadata rather than guessing browser kind from a pane tree", () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
     const state = workspaceState();
     state.layout.tabs.push({
       kind: "browser",
@@ -282,5 +317,536 @@ describe("sessionPersistence v2 serialization and migration", () => {
       "leaf-beta": "sess-1",
     });
     expect(restored.layout.layoutsByTabId["tab-1"].sessionIdsByLeafId["tab-1"]).toBeUndefined();
+  });
+
+  it("round-trips multi-worktree workspace state with active and parked worktree layouts without session leakage", () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
+
+    const state: WorkspaceState = {
+      worktrees: [
+        {
+          path: "/workspace/main",
+          head: "111111",
+          branch: "main",
+          bare: false,
+          detached: false,
+          locked: null,
+          prunable: null,
+        },
+        {
+          path: "/workspace/feature",
+          head: "222222",
+          branch: "refs/heads/orca/default/feature-x",
+          bare: false,
+          detached: false,
+          locked: null,
+          prunable: null,
+        },
+      ],
+      activeWorktreePath: "/workspace/main",
+      sessions: {
+        "sess-main": {
+          id: "sess-main",
+          cwd: "/workspace/main/services/api",
+          worktreePath: "/workspace/main",
+          workspaceId: "default",
+          worktree: null,
+          backendSessionId: "backend-main",
+          lifecycle: "working",
+        },
+        "sess-feature": {
+          id: "sess-feature",
+          cwd: "/workspace/feature/frontend",
+          worktreePath: "/workspace/feature",
+          workspaceId: "default",
+          worktree: { wsId: "default", slug: "feature-x" },
+          backendSessionId: "backend-feature",
+          lifecycle: "working",
+        },
+        "sess-orphan": {
+          id: "sess-orphan",
+          cwd: "/workspace/main",
+          worktreePath: "/workspace/main",
+          workspaceId: "default",
+          worktree: null,
+          backendSessionId: "backend-orphan",
+          lifecycle: "working",
+        },
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+      layout: {
+        tabs: [
+          { id: "tab-main-1", label: "main terminal", sessionId: "sess-main", pinned: true },
+        ],
+        primaryTabId: "tab-main-1",
+        secondaryTabId: null,
+        split: "none",
+        nestedSplit: null,
+        activeTabId: "tab-main-1",
+        layoutsByTabId: {
+          "tab-main-1": {
+            root: { type: "leaf", leafId: "leaf-main-1" },
+            activeLeafId: "leaf-main-1",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-main-1": "sess-main" },
+          },
+        },
+      },
+      worktreeLayouts: {
+        "/workspace/feature": {
+          tabs: [
+            { id: "tab-feat-term", label: "feature terminal", sessionId: "sess-feature" },
+            {
+              kind: "browser",
+              id: "tab-feat-browser",
+              label: "Feature Preview",
+              browserId: "browser-feat-1",
+              url: "http://localhost:5173",
+              title: "Feature App",
+              loading: false,
+              canGoBack: true,
+              canGoForward: false,
+              pinned: false,
+            },
+          ],
+          primaryTabId: "tab-feat-term",
+          secondaryTabId: null,
+          split: "none",
+          nestedSplit: null,
+          activeTabId: "tab-feat-term",
+          layoutsByTabId: {
+            "tab-feat-term": {
+              root: { type: "leaf", leafId: "leaf-feat-1" },
+              activeLeafId: "leaf-feat-1",
+              expandedLeafId: null,
+              sessionIdsByLeafId: { "leaf-feat-1": "sess-feature" },
+            },
+            "tab-feat-browser": {
+              root: { type: "leaf", leafId: "leaf-browser-feat" },
+              activeLeafId: "leaf-browser-feat",
+              expandedLeafId: null,
+              sessionIdsByLeafId: { "leaf-browser-feat": "" },
+            },
+          },
+        },
+      },
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+
+    expect(serialized.workspaces.default.worktreeLayouts).toBeDefined();
+    expect(serialized.workspaces.default.worktreeLayouts?.["/workspace/feature"]).toBeDefined();
+    const parkedSerialized = serialized.workspaces.default.worktreeLayouts!["/workspace/feature"];
+    expect(parkedSerialized.tabs).toHaveLength(2);
+    expect(parkedSerialized.tabs[0]).toMatchObject({
+      id: "tab-feat-term",
+      kind: "terminal",
+      terminal: {
+        primarySessionId: "sess-feature",
+        sessionIdsByLeafId: { "leaf-feat-1": "sess-feature" },
+      },
+    });
+    expect(parkedSerialized.tabs[1]).toMatchObject({
+      id: "tab-feat-browser",
+      kind: "browser",
+      browser: {
+        browserId: "browser-feat-1",
+        url: "http://localhost:5173",
+      },
+    });
+
+    // Both referenced sessions must be persisted; orphan session must be dropped (no leakage)
+    expect(serialized.workspaces.default.terminalSessions["sess-main"]).toBeDefined();
+    expect(serialized.workspaces.default.terminalSessions["sess-feature"]).toBeDefined();
+    expect(serialized.workspaces.default.terminalSessions).not.toHaveProperty("sess-orphan");
+
+    const restored = deserializeWorkspaceState(
+      "default",
+      serialized,
+      new Set(["backend-main", "backend-feature"]),
+    );
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    expect(restored.activeWorktreePath).toBe("/workspace/main");
+    expect(restored.layout.tabs).toHaveLength(1);
+    expect(restored.layout.tabs[0].id).toBe("tab-main-1");
+    expect(restored.layout.layoutsByTabId["tab-main-1"].sessionIdsByLeafId).toEqual({
+      "leaf-main-1": "sess-main",
+    });
+
+    expect(restored.worktreeLayouts).toBeDefined();
+    expect(restored.worktreeLayouts?.["/workspace/feature"]).toBeDefined();
+    const parkedRestored = restored.worktreeLayouts!["/workspace/feature"];
+    expect(parkedRestored.tabs).toHaveLength(2);
+    expect(parkedRestored.tabs[0]).toMatchObject({
+      id: "tab-feat-term",
+      kind: "terminal",
+      sessionId: "sess-feature",
+    });
+    expect(parkedRestored.tabs[1]).toMatchObject({
+      id: "tab-feat-browser",
+      kind: "browser",
+      browserId: "browser-feat-1",
+      url: "http://localhost:5173",
+    });
+    expect(parkedRestored.layoutsByTabId["tab-feat-term"].sessionIdsByLeafId).toEqual({
+      "leaf-feat-1": "sess-feature",
+    });
+
+    // Verify session integrity and no orphan session leakage
+    expect(Object.keys(restored.sessions).sort()).toEqual(["sess-feature", "sess-main"]);
+    expect(restored.sessions["sess-main"]).toMatchObject({
+      id: "sess-main",
+      cwd: "/workspace/main/services/api",
+      worktreePath: "/workspace/main",
+      backendSessionId: "backend-main",
+      lifecycle: "working",
+      worktree: null,
+    });
+    expect(restored.sessions["sess-feature"]).toMatchObject({
+      id: "sess-feature",
+      cwd: "/workspace/feature/frontend",
+      worktreePath: "/workspace/feature",
+      backendSessionId: "backend-feature",
+      lifecycle: "working",
+      worktree: { wsId: "default", slug: "feature-x" },
+    });
+  });
+
+  it("deserializes existing v2 terminal sessionIdsByLeafId into terminal PaneContent for every leaf", () => {
+    const v2Serialized = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: "/workspace/main",
+          worktrees: [
+            { path: "/workspace/main", branch: "main", head: "111", isMain: true, isLocked: false },
+          ],
+          activeWorktreePath: "/workspace/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [
+              {
+                id: "tab-1",
+                kind: "terminal" as const,
+                label: "terminal",
+                terminal: {
+                  primarySessionId: "sess-1",
+                  paneTree: {
+                    type: "split" as const,
+                    direction: "horizontal" as const,
+                    first: { type: "leaf" as const, leafId: "leaf-1" },
+                    second: { type: "leaf" as const, leafId: "leaf-2" },
+                    ratio: 0.5,
+                  },
+                  sessionIdsByLeafId: {
+                    "leaf-1": "sess-1",
+                    "leaf-2": "sess-2",
+                  },
+                  activeLeafId: "leaf-2",
+                  expandedLeafId: null,
+                },
+              },
+            ],
+          },
+          terminalSessions: {
+            "sess-1": {
+              localSessionId: "sess-1",
+              backendSessionId: "backend-1",
+              cwd: "/workspace/main/pkg-a",
+              worktreePath: "/workspace/main",
+              createdAt: Date.now(),
+            },
+            "sess-2": {
+              localSessionId: "sess-2",
+              backendSessionId: "backend-2",
+              cwd: "/workspace/main/pkg-b",
+              worktreePath: "/workspace/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+
+    const restored = deserializeWorkspaceState("default", v2Serialized as any, ["backend-1", "backend-2"]);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    const tabLayout = restored.layout.layoutsByTabId["tab-1"] as any;
+    expect(tabLayout).toBeDefined();
+    expect(tabLayout.contentsByLeafId).toBeDefined();
+    expect(tabLayout.contentsByLeafId["leaf-1"]).toEqual({
+      kind: "terminal",
+      sessionId: "sess-1",
+    });
+    expect(tabLayout.contentsByLeafId["leaf-2"]).toEqual({
+      kind: "terminal",
+      sessionId: "sess-2",
+    });
+    expect(Object.keys(tabLayout.contentsByLeafId).sort()).toEqual(["leaf-1", "leaf-2"]);
+  });
+
+  it("round-trips mixed terminal/browser content preserving tree, browser metadata, and terminal session ownership with runtime browserId policy", () => {
+    saveBrowserSettings({ restoreTabsOnLaunch: true });
+
+    const state: any = {
+      worktrees: [
+        {
+          path: "/workspace/main",
+          head: "123456",
+          branch: "main",
+          bare: false,
+          detached: false,
+          locked: null,
+          prunable: null,
+        },
+      ],
+      activeWorktreePath: "/workspace/main",
+      sessions: {
+        "sess-term": {
+          id: "sess-term",
+          cwd: "/workspace/main/services/api",
+          worktreePath: "/workspace/main",
+          workspaceId: "default",
+          worktree: null,
+          backendSessionId: "backend-term",
+          lifecycle: "working",
+        },
+        "sess-orphan": {
+          id: "sess-orphan",
+          cwd: "/workspace/main",
+          worktreePath: "/workspace/main",
+          workspaceId: "default",
+          worktree: null,
+          backendSessionId: "backend-orphan",
+          lifecycle: "working",
+        },
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+      layout: {
+        tabs: [
+          {
+            id: "tab-mixed",
+            label: "Dev & Preview",
+            sessionId: "sess-term",
+            pinned: false,
+          },
+        ],
+        primaryTabId: "tab-mixed",
+        secondaryTabId: null,
+        split: "none",
+        nestedSplit: null,
+        activeTabId: "tab-mixed",
+        layoutsByTabId: {
+          "tab-mixed": {
+            root: {
+              type: "split",
+              direction: "horizontal",
+              first: { type: "leaf", leafId: "leaf-term" },
+              second: { type: "leaf", leafId: "leaf-browser" },
+              ratio: 0.6,
+            },
+            activeLeafId: "leaf-browser",
+            expandedLeafId: null,
+            sessionIdsByLeafId: {
+              "leaf-term": "sess-term",
+              "leaf-browser": "",
+            },
+            contentsByLeafId: {
+              "leaf-term": {
+                kind: "terminal",
+                sessionId: "sess-term",
+              },
+              "leaf-browser": {
+                kind: "browser",
+                browserId: "browser-preview-1",
+                url: "http://localhost:5173/preview",
+                title: "Vite App Preview",
+                loading: false,
+                canGoBack: true,
+                canGoForward: false,
+                profileId: "default",
+                worktreePath: "/workspace/main",
+                worktreeLabel: "main",
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    expect(serialized.workspaces.default.layout.tabs).toHaveLength(1);
+    expect(serialized.workspaces.default.terminalSessions["sess-term"]).toBeDefined();
+    expect(serialized.workspaces.default.terminalSessions).not.toHaveProperty("sess-orphan");
+
+    const restored = deserializeWorkspaceState(
+      "default",
+      serialized,
+      new Set(["backend-term"]),
+    );
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    const restoredLayout = restored.layout.layoutsByTabId["tab-mixed"] as any;
+    expect(restoredLayout).toBeDefined();
+    expect(restoredLayout.root).toMatchObject({
+      type: "split",
+      direction: "horizontal",
+      first: { type: "leaf", leafId: "leaf-term" },
+      second: { type: "leaf", leafId: "leaf-browser" },
+      ratio: 0.6,
+    });
+    expect(restoredLayout.contentsByLeafId).toBeDefined();
+    expect(restoredLayout.contentsByLeafId["leaf-term"]).toEqual({
+      kind: "terminal",
+      sessionId: "sess-term",
+    });
+    expect(restoredLayout.contentsByLeafId["leaf-browser"]).toMatchObject({
+      kind: "browser",
+      url: "http://localhost:5173/preview",
+      title: "Vite App Preview",
+      canGoBack: true,
+      canGoForward: false,
+    });
+    expect(restoredLayout.contentsByLeafId["leaf-browser"].browserId).toMatch(/^(browser-preview-1|restored-browser:.*)$/);
+
+    // Verify terminal session ownership and orphan session cleanup
+    expect(restored.sessions["sess-term"]).toMatchObject({
+      id: "sess-term",
+      cwd: "/workspace/main/services/api",
+      worktreePath: "/workspace/main",
+      backendSessionId: "backend-term",
+      lifecycle: "working",
+    });
+    expect(restored.sessions).not.toHaveProperty("sess-orphan");
+  });
+
+  it("persists decimal-string daemonEpoch and lastOutputSequence separately from local/backend IDs", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      daemonEpoch: "1710000000000",
+      lastOutputSequence: "9007199254740997",
+    };
+    state.sessions["sess-2"] = {
+      ...state.sessions["sess-2"],
+      daemonEpoch: "1710000000000",
+      lastOutputSequence: "0",
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    const sess1 = serialized.workspaces.default.terminalSessions["sess-1"];
+    const sess2 = serialized.workspaces.default.terminalSessions["sess-2"];
+
+    expect(sess1.daemonEpoch).toBe("1710000000000");
+    expect(sess1.lastOutputSequence).toBe("9007199254740997");
+    expect(sess1.localSessionId).toBe("sess-1");
+    expect(sess1.backendSessionId).toBe("backend-1");
+
+    expect(sess2.daemonEpoch).toBe("1710000000000");
+    expect(sess2.lastOutputSequence).toBe("0");
+  });
+
+  it("reconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      daemonEpoch: "epoch-100",
+      lastOutputSequence: "1050",
+    };
+    state.sessions["sess-2"] = {
+      ...state.sessions["sess-2"],
+      daemonEpoch: "epoch-100",
+      lastOutputSequence: "200",
+    };
+    state.sessions["sess-3"] = {
+      ...state.sessions["sess-3"],
+      daemonEpoch: "epoch-100",
+      lastOutputSequence: "300",
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+
+    // Live daemon has epoch-100 and live sessions backend-1, backend-2 (backend-3 is missing from live)
+    const liveSessions = [
+      { sessionId: "backend-1", daemonEpoch: "epoch-100" },
+      { sessionId: "backend-2", daemonEpoch: "epoch-100" },
+    ];
+
+    const restored = deserializeWorkspaceState("default", serialized, liveSessions);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    // sess-1: matching epoch + live backend ID -> preserved
+    expect(restored.sessions["sess-1"]).toMatchObject({
+      id: "sess-1",
+      backendSessionId: "backend-1",
+      lifecycle: "working",
+      daemonEpoch: "epoch-100",
+      lastOutputSequence: "1050",
+    });
+
+    // sess-2: matching epoch + live backend ID -> preserved
+    expect(restored.sessions["sess-2"]).toMatchObject({
+      id: "sess-2",
+      backendSessionId: "backend-2",
+      lifecycle: "working",
+      daemonEpoch: "epoch-100",
+      lastOutputSequence: "200",
+    });
+
+    // sess-3: missing backend ID in live list -> marked exited/lost without respawn
+    expect(restored.sessions["sess-3"]).toMatchObject({
+      id: "sess-3",
+      backendSessionId: null,
+      lifecycle: "exited",
+      daemonEpoch: null,
+      lastOutputSequence: null,
+    });
+    // Pane tree structure & mappings for sess-3 still preserved in layout
+    expect(restored.layout.layoutsByTabId["tab-1"].sessionIdsByLeafId["leaf-2"]).toBe("sess-3");
+  });
+
+  it("marks sessions exited/lost on daemon epoch change without auto-respawn", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      daemonEpoch: "epoch-OLD",
+      lastOutputSequence: "500",
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+
+    // Live daemon restarted with epoch-NEW, even though backend-1 ID appears in live list
+    const liveSessions = [
+      { sessionId: "backend-1", daemonEpoch: "epoch-NEW" },
+    ];
+
+    const restored = deserializeWorkspaceState("default", serialized, liveSessions);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    // On epoch mismatch, session must be marked exited/lost without auto-respawn
+    expect(restored.sessions["sess-1"]).toMatchObject({
+      id: "sess-1",
+      backendSessionId: null,
+      lifecycle: "exited",
+      daemonEpoch: null,
+      lastOutputSequence: null,
+    });
+    expect(restored.layout.layoutsByTabId["tab-1"].sessionIdsByLeafId["leaf-1"]).toBe("sess-1");
   });
 });

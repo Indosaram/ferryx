@@ -48,6 +48,12 @@ rodio = { version = "0.22", default-features = false, features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", features = ["exception"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSEvent",
+    "NSApplication",
+    "NSDockTile",
+] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSBundle",

@@ -63,6 +63,13 @@ export async function listBrowsers(): Promise<BrowserSessionSummary[]> {
   return invoke<BrowserSessionSummary[]>("cmd_browser_list");
 }
 
+export async function importBrowserCookies(profileId: string, filePath: string): Promise<number> {
+  const result = await invoke<{ importedCount: number }>("cmd_browser_import_cookies", {
+    request: { browserId: profileId, filePath },
+  });
+  return result.importedCount;
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   return invoke<void>("cmd_browser_open_external", { url });
 }

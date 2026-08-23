@@ -1,0 +1,9 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"child_error","payload":{"message":"400 <!DOCTYPE HTML PUBLIC \"-//IETF/DTD HTML 2.0//EN\">\r\n<HTML><HEAD>\r\n<TITLE>400 Bad Request</TITLE>\r\n</HEAD><BODY>\r\n<H1>Request Blocked</H1>\r\n</BODY></HTML>\r\n","stop_reason":"error"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a2c/sessions/st_01a02a2c/2026-08-22T15-31-56-126Z_01a02a19-9a5e-79f0-a4f4-c0681b1eb1d7.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"quit"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a2c/sessions/st_01a02a2c/2026-08-22T15-31-56-126Z_01a02a19-9a5e-79f0-a4f4-c0681b1eb1d7.jsonl"}}

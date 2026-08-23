@@ -1,7 +1,7 @@
 use crate::ipc::{run_blocking, IpcError};
 use crate::worktree::{
-    BranchDeletionPreview, CreateWorktreeOptions, DirtyState, Worktree, WorktreeIdentity,
-    WorkspaceRegistry,
+    BranchDeletionPreview, CreateWorktreeOptions, DirtyState, WorkspaceRegistry, Worktree,
+    WorktreeIdentity,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime, State};

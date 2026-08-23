@@ -1,0 +1,38 @@
+> I read this as adding a failing-first Rust integration test for version-2 session envelope restoration in `src-tauri/tests/session_persistence_integration.rs` - inspect existing integration tests and types, add the test case, run the test command to verify it fails at the behavioral assertion, and report the output without touching production code.
+
+Added `test_version_2_session_envelope_restore_preserves_multiple_workspaces` to `src-tauri/tests/session_persistence_integration.rs`. The test writes a representative TypeScript version-2 session envelope containing both `alpha` and `beta` workspaces, typed terminal/browser tab definitions, split and single layouts, and per-worktree state, then attempts to load the file via `load_session_from_path` and assert that both workspaces survive.
+
+### Verification
+
+Ran from `src-tauri`:
+```bash
+cargo test --test session_persistence_integration
+```
+
+Output:
+```
+warning: `ferryx` (lib) generated 4 warnings (run `cargo fix --lib -p ferryx` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/session_persistence_integration.rs (target/debug/deps/session_persistence_integration-2a840d9685889b01)
+
+running 2 tests
+test test_version_2_session_envelope_restore_preserves_multiple_workspaces ... FAILED
+test test_session_lifecycle_integration ... ok
+
+failures:
+
+---- test_version_2_session_envelope_restore_preserves_multiple_workspaces stdout ----
+Warning: Session state file was corrupted (missing field `sessionId` at line 43 column 11), moved to backup.
+
+thread 'test_version_2_session_envelope_restore_preserves_multiple_workspaces' (172867239) panicked at tests/session_persistence_integration.rs:224:10:
+native session loader must accept version-2 session envelope and restore workspaces
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_version_2_session_envelope_restore_preserves_multiple_workspaces
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--test session_persistence_integration`
+```

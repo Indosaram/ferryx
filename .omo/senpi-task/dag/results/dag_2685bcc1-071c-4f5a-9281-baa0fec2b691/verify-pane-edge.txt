@@ -1,0 +1,84 @@
+# Pane-Edge Implementation Independent Verification Report
+
+## Overall Verdict: **PASS**
+
+---
+
+### 1. Git Diff Scope
+
+The pane-edge and drag-and-drop implementation touches the following core UI and state management files:
+
+- `ui/src/components/TerminalSplitView.tsx`: Integrated `PaneEdgeDropZones` into `PaneLeafView`, added draggable handle metadata (`sourcePaneId`, `sourceSessionId`), and implemented drop command dispatching for `move-pane-to-pane-split` and `move-tab-to-pane-split`.
+- `ui/src/components/tab-dnd/PaneEdgeDropZones.tsx`: Renders directional edge drop targets (`left`, `right`, `top`, `bottom`) per leaf pane.
+- `ui/src/components/tab-dnd/SplitEdgeDropZone.tsx`: Droppable component for split zones with pointer styling and layout anchors.
+- `ui/src/components/tab-dnd/tabDragTypes.ts`: Added `PaneEdgeDropData`, `move-tab-to-pane-split`, and `move-pane-to-pane-split` command definitions with priority weighting (`pane-edge` prioritized ahead of `group-edge`).
+- `ui/src/state/tabPaneDrop.ts`: Pure tree transformation helper `moveTabIntoPaneSplit` that splices subtrees into target leaf nodes and remaps colliding leaf IDs while preserving session instances.
+- `ui/src/state/workspaceStore.ts`: Added `MOVE_TAB_TO_PANE_SPLIT` action handling in reducer and exposed `targetPane` argument in `moveTabToSplit`.
+
+---
+
+### 2. Exact Targeted Test Output
+
+Command:
+```bash
+cd ui && bunx vitest run \
+  src/components/TerminalSplitView.paneDrop.runtime.test.tsx \
+  src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx \
+  src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx \
+  src/components/TerminalSplitView.test.tsx \
+  src/components/TerminalSplitView.tabDropFallback.test.tsx \
+  src/state/workspaceStore.tabDrop.test.tsx \
+  src/state/workspaceStore.paneDrop.runtime.test.tsx \
+  src/state/layout.paneHandleDrop.runtime.test.ts \
+  --maxWorkers=1
+```
+
+Output:
+```
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/components/TerminalSplitView.test.tsx (14 tests) 419ms
+ ✓ src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx (1 test) 23ms
+ ✓ src/components/TerminalSplitView.paneDrop.runtime.test.tsx (2 tests) 32ms
+ ✓ src/components/TerminalSplitView.tabDropFallback.test.tsx (1 test) 59ms
+ ✓ src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx (3 tests) 99ms
+ ✓ src/state/workspaceStore.tabDrop.test.tsx (4 tests) 107ms
+ ✓ src/state/workspaceStore.paneDrop.runtime.test.tsx (2 tests) 34ms
+ ✓ src/state/layout.paneHandleDrop.runtime.test.ts (2 tests) 5ms
+
+ Test Files  8 passed (8)
+      Tests  29 passed (29)
+   Duration  12.03s
+```
+Exit code: `0`
+
+---
+
+### 3. Type Checking Diagnostics
+
+Command:
+```bash
+cd ui && bunx tsc --noEmit
+```
+
+Output:
+```
+(no output)
+```
+Exit code: `0` (0 type errors detected)
+
+---
+
+### 4. Behavioral Verification Matrix
+
+| Behavior Requirement | Status | Verification Evidence |
+|---|:---:|---|
+| **Terminal Pane Edge Drop Zones**<br>Registers 4 edge drop zones (left/right/top/bottom) inside each terminal pane leaf | **PASS** | Verified via `TerminalSplitView.paneDrop.runtime.test.tsx`: 4 edge zones per leaf rendered, with data attributes matching the leaf ID and drop edge. |
+| **Drop Priority Resolution**<br>Resolves hovered pane-edge ahead of group-edge drop targets (including top tab edge) | **PASS** | Verified in `tabDragTypes.ts` priority ordering and asserted in `TerminalSplitView.paneDrop.runtime.test.tsx`. |
+| **Non-Destructive PTY Pane Merging**<br>Moves source pane subtree into target leaf without respawning or terminating backend PTYs | **PASS** | Verified via `workspaceStore.paneDrop.runtime.test.tsx`: session objects preserved, `spawnTerminal` / `closeTerminal` not called. |
+| **Leaf ID Collision Protection**<br>Remaps duplicate leaf IDs when merging tabs while maintaining session references | **PASS** | Verified via `workspaceStore.paneDrop.runtime.test.tsx` (colliding legacy leaf ID test case) and `tabPaneDrop.ts` remapping logic. |
+| **Browser Tab to Pane-Edge Drop**<br>Dropping browser tab onto pane edge correctly triggers pane-targeted move | **PASS** | Verified via `TerminalSplitView.browserPaneDrop.runtime.test.tsx`: `onMoveTabToSplit` invoked with target tab and leaf ID. |
+| **Browser Tab Group Split/Merge Parity**<br>Browser tabs follow the same tab-group split and merge workflow without crash or state corruption | **PASS** | Verified via `workspaceStore.tabDrop.test.tsx` browser tab split and merge test. |
+| **Pane Drag Handle Registration**<br>Every pane toolbar registered as draggable with pane and session metadata | **PASS** | Verified via `TerminalSplitView.paneHandleDrop.runtime.test.tsx`: handle registered with `sourcePaneId` and `sourceSessionId`, not disabled. |
+| **Multi-Pane Handle Detach + Merge Composition**<br>Dragging handle from multi-pane tab detaches pane to tab and merges into target edge | **PASS** | Verified via `TerminalSplitView.paneHandleDrop.runtime.test.tsx` and `layout.paneHandleDrop.runtime.test.ts`. |
+| **Single-Pane Tab Handle Direct Move**<br>Dragging handle of a single-pane tab directly moves into target pane edge without unnecessary detach step | **PASS** | Verified via `TerminalSplitView.paneHandleDrop.runtime.test.tsx`: `onDetachPaneToTab` bypassed in favor of direct `onMoveTabToSplit`. |

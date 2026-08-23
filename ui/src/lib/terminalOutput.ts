@@ -1,10 +1,19 @@
-function decodeBase64(data: string): Uint8Array {
-  const binary = globalThis.atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
+declare global {
+  interface Uint8ArrayConstructor {
+    fromBase64?(data: string, options?: { readonly alphabet?: "base64" | "base64url" }): Uint8Array;
   }
-  return bytes;
+}
+
+export function decodeBase64(data: string): Uint8Array {
+  if (typeof Uint8Array.fromBase64 === "function") {
+    return Uint8Array.fromBase64(data);
+  }
+  if (typeof Buffer !== "undefined") {
+    const buffer = Buffer.from(data, "base64");
+    return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  }
+  const binary = globalThis.atob(data);
+  return Uint8Array.from(binary, (char) => char.codePointAt(0) ?? 0);
 }
 
 export class TerminalOutputDecoderRegistry {
@@ -22,15 +31,15 @@ export class TerminalOutputDecoderRegistry {
     return decoder.decode();
   }
 
-  reset(sessionId: string) {
+  reset(sessionId: string): void {
     this.decoders.delete(sessionId);
   }
 
-  clear() {
+  clear(): void {
     this.decoders.clear();
   }
 
-  private getDecoder(sessionId: string) {
+  private getDecoder(sessionId: string): TextDecoder {
     const existing = this.decoders.get(sessionId);
     if (existing) return existing;
     const decoder = new TextDecoder("utf-8", { fatal: false });

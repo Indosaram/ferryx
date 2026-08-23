@@ -496,7 +496,8 @@ mod tests {
 
     #[test]
     fn test_empty_font_family_resets_list() {
-        let config_str = "font-family = \"MesloLGS NF\"\nfont-family =\nfont-family = \"Fira Code\"";
+        let config_str =
+            "font-family = \"MesloLGS NF\"\nfont-family =\nfont-family = \"Fira Code\"";
         let parsed = parse_ghostty_config(config_str).unwrap();
         assert_eq!(parsed.font_family.as_deref(), Some("Fira Code, monospace"));
     }

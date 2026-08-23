@@ -18,7 +18,7 @@ export class WebSocketTerminalTransport implements TerminalTransport {
     return data.map((s: { sessionId: string }) => ({ sessionId: s.sessionId }));
   }
 
-  async attach(sessionId: string): Promise<TerminalAttachment> {
+  async attach(sessionId: string, _afterSequence?: string | null): Promise<TerminalAttachment> {
     const wsProto = this.baseUrl.startsWith("https") ? "wss" : "ws";
     const host = this.baseUrl.replace(/^https?:\/\//, "");
     const wsUrl = `${wsProto}://${host}/api/v1/terminal/${sessionId}?token=${encodeURIComponent(this.token)}`;

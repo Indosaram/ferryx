@@ -1,0 +1,12 @@
+> I read this as static performance audit of shell chrome and list components - completed the static audit across all 14 scoped files and wrote the report to docs/frontend-perf/audit-shell.md.
+
+The static performance audit report for shell chrome and list components has been generated at `/Users/indo/code/project/orca-lite/docs/frontend-perf/audit-shell.md`.
+
+### Summary of Audit
+- **Files Scanned**: `ui/src/components/Sidebar.tsx`, `ui/src/components/WorktreeList.tsx`, `ui/src/components/TabBar.tsx`, `ui/src/components/WorkspaceHeader.tsx`, `ui/src/components/CommandPalette.tsx`, `ui/src/components/NewTabPopover.tsx`, `ui/src/components/AgentCards.tsx`, `ui/src/components/tab-dnd/SortableTab.tsx`, `ui/src/components/tab-dnd/TabGroupDropSurface.tsx`, `ui/src/components/tab-dnd/PaneEdgeDropZones.tsx`, `ui/src/components/tab-dnd/SplitEdgeDropZone.tsx`, `ui/src/components/ui/IconButton.tsx`, `ui/src/components/ui/SectionHeader.tsx`, `ui/src/components/ui/StatusDot.tsx`
+- **Findings**:
+  - `F-shell-01` (Medium, Hot path: yes): `TabBar.tsx:128` passes inline callbacks and unmemoized items to `SortableTab`, which is missing `React.memo` and executes dnd sortable hooks on every activity tick/tab switch.
+  - `F-shell-02` (Medium, Hot path: yes): `WorktreeList.tsx:57` performs an O(W * A) linear search (`agents.find`) and allocates per-item summary objects inside render without memoizing row items.
+  - `F-shell-03` (Low, Hot path: no): `Sidebar.tsx:77` computes `new Set(projects.map(...))` eagerly in the initial value expression of `useRef`, allocating on every render.
+  - `F-shell-04` (Low, Hot path: no): `CommandPalette.tsx:64` renders unfiltered/unwindowed search items directly to DOM without result bounding.
+- **Accepted / Non-findings**: Verified that sidebar resize pointer handlers avoid layout reads, `JSON.parse` only runs on mount within lazy state initializers, titlebar window dragging runs on pointer down, and dnd-kit drop targets do not cause layout thrashing.

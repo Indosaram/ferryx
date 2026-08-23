@@ -1,0 +1,94 @@
+### Status: FAIL
+
+---
+
+### Command Verification & Exit Codes
+
+#### 1. Rust Remote Tests
+- **Command:** `cargo test --manifest-path /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml remote`
+- **Exit Code:** `0`
+- **Output:**
+  ```text
+  running 13 tests
+  test remote::tests::test_tailscale_status_parsing ... ok
+  test remote::tests::test_auth_manager_pairing_and_revocation ... ok
+  test remote::tests::test_desktop_ipc_active_selection_lifecycle ... ok
+  test remote::state::tests::stale_enabled_config_file_does_not_look_enabled ... ok
+  test remote::auth::persistence_tests::paired_devices_and_revocations_survive_reopen ... ok
+  test remote::state::tests::enabled_gateway_does_not_restore_listener_after_reopen ... ok
+  test tests::app_remote_state_persists_pairing_but_starts_off ... ok
+  test remote::auth::persistence_tests::validate_token_throttles_disk_persistence ... ok
+  test remote::tests::test_remote_server_health_and_lifecycle ... ok
+  test remote::tests::test_remote_server_serves_spa_index_html ... ok
+  test ipc::tests::remote_status_after_reopen_is_disabled_session_only ... ok
+  test remote::tests::test_derive_session_metadata_matches_workspace ... ok
+  test remote::tests::test_active_desktop_terminal_contract_and_safe_selection_bridge ... ok
+
+  test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.26s
+  ```
+
+#### 2. Cargo Formatting Check
+- **Command:** `cargo fmt --check --manifest-path /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml`
+- **Exit Code:** `0`
+- **Output:** (clean / no formatting violations)
+
+#### 3. Cargo Check
+- **Command:** `cargo check --manifest-path /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml`
+- **Exit Code:** `0`
+- **Output:**
+  ```text
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.65s
+  ```
+
+#### 4. UI Vitest Remote & App Tests
+- **Command:** `cd /Users/indo/code/project/orca-lite/ui && npx vitest run src/remote/RemoteUI.test.tsx src/App.test.tsx --maxWorkers=1`
+- **Exit Code:** `0`
+- **Output:**
+  ```text
+  RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+  ✓ src/App.test.tsx (41 tests) 597ms
+  ✓ src/remote/RemoteUI.test.tsx (6 tests) 78ms
+
+  Test Files  2 passed (2)
+       Tests  47 passed (47)
+    Duration  2.58s
+  ```
+
+#### 5. UI Build Check
+- **Command:** `cd /Users/indo/code/project/orca-lite/ui && npm run build`
+- **Exit Code:** `2` (FAILURE)
+- **Output:**
+  ```text
+  > ui@0.1.0 build
+  > tsc && vite build
+
+  src/state/workspaceStore.browserPaneLeafMove.runtime.test.tsx(159,11): error TS6133: 'browserTabsWithId' is declared but its value is never read.
+  ```
+
+#### 6. LSP / TypeScript Diagnostics Check
+- **Command:** `cd /Users/indo/code/project/orca-lite/ui && npx tsc --noEmit`
+- **Exit Code:** `2` (FAILURE)
+- **Diagnostics Found:**
+  - `src/state/workspaceStore.browserPaneLeafMove.runtime.test.tsx:159:11` - TS6133: `'browserTabsWithId' is declared but its value is never read.`
+  - `src/components/TerminalSplitView.mixedPaneLeaf.runtime.test.tsx:124:7` - TS2322: `Property 'browser' is missing in type '{ kind: "browser"; ... }' but required in type 'BrowserPaneContent'.`
+
+---
+
+### Invariant & Requirement Audit
+
+| Requirement / Invariant | Status | Evidence / Notes |
+|---|---|---|
+| Native list/state exposes only declared active running session | PASS | In `src-tauri/src/remote/server.rs:get_active_running_sessions`, reads `active_selection` and returns at most one session if running/starting; empty otherwise. Verified by `test_active_desktop_terminal_contract_and_safe_selection_bridge`. |
+| Direct attach to any other extant PTY is forbidden | PASS | In `src-tauri/src/remote/server.rs:ws_terminal_handler`, verifies requested `sessionId` strictly equals `active_selection.session_id`; returns `403 FORBIDDEN` if mismatched or absent. |
+| Mobile selection accepts only Control permission and safe workspace/worktree ID/slug then emits desktop bridge event | PASS | In `src-tauri/src/remote/server.rs:select_workspace`, checks `device.permission == DevicePermission::Control`, validates workspace and resolves worktree via registry, and emits `remote_selection_requested` event. |
+| App derives and clears focused backend session correctly | PARTIAL / BUG | `App.tsx:deriveFocusedTerminal` correctly derives `backendSessionId` from active tab/leaf/session or `null`. However, `publishFocusedTerminal` in `ui/src/lib/tauri.ts` invokes Tauri command with argument `{ payload: ... }`, whereas `cmd_remote_set_active_selection` in `src-tauri/src/ipc/remote.rs` expects argument name `{ request: ... }`, causing deserialization failure at runtime on Tauri invoke. |
+| Remote renders only server-declared terminal with pending/confirmed/no-focus states and no local absolute path | PASS | In `ui/src/remote/RemoteSessionList.tsx` and `RemoteTerminal.tsx`, sanitize helper `safeContextText` rejects absolute/home/file paths; displays pending/confirmed states and no-focus messaging. |
+| Public Ferryx branding preserved | PASS | Branding remains "Ferryx" across fallback HTML, headers, storage keys (`ferryx_remote_token` with legacy backwards fallback), and route responses. |
+
+---
+
+### First Concrete Failure
+
+**Failure:** `cd /Users/indo/code/project/orca-lite/ui && npm run build` exited with code `2` due to TypeScript compilation error:
+- `src/state/workspaceStore.browserPaneLeafMove.runtime.test.tsx(159,11): error TS6133: 'browserTabsWithId' is declared but its value is never read.`

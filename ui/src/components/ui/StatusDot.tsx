@@ -47,7 +47,7 @@ export function StatusDot({ state, className }: StatusDotProps) {
       <span
         aria-hidden="true"
         data-status-state="unread"
-        className={cn("size-2 shrink-0 rounded-full bg-blue-500", className)}
+        className={cn("size-2 shrink-0 rounded-full bg-primary", className)}
       />
     );
   }

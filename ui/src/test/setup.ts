@@ -46,3 +46,10 @@ if (!globalThis.cancelAnimationFrame) {
     value: (handle: number) => globalThis.clearTimeout(handle),
   });
 }
+
+const { beforeEach: setupBeforeEach } = await import("vitest");
+const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
+
+setupBeforeEach(() => {
+  clearHmrWorkspaceState();
+});

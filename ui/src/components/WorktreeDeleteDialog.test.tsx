@@ -70,10 +70,27 @@ describe("WorktreeDeleteDialog", () => {
     expect(screen.getByText(/not merged/i)).toBeInTheDocument();
     expect(screen.getByText(/2 ahead/i)).toBeInTheDocument();
     expect(screen.getByText(/1 behind/i)).toBeInTheDocument();
+    expect(screen.getByTestId("worktree-delete-divergence")).toHaveAttribute("data-state", "upstream");
 
     fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
     await waitFor(() => expect(services.deleteSafe).toHaveBeenCalledWith(worktree));
     expect(onDeleted).toHaveBeenCalledOnce();
+  });
+
+  it("contains an absolute hyphenated path and shows an explicit no-upstream divergence state", async () => {
+    const selectedWorktree = { ...worktree, path: "/repo/worktrees/orca-ws-main/task-ipc-branch" };
+    const services = createServices({
+      previewDelete: vi.fn(async () => ({ ...preview, upstream: null, ahead: null, behind: null })),
+    });
+    render(<WorktreeDeleteDialog worktree={selectedWorktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+
+    const path = await screen.findByTestId("worktree-delete-path");
+    expect(path).toHaveTextContent(selectedWorktree.path);
+    expect(path).toHaveClass("break-all");
+    expect(screen.queryByText(/\? ahead · \? behind/)).not.toBeInTheDocument();
+    const divergence = await screen.findByTestId("worktree-delete-divergence");
+    expect(divergence).toHaveAttribute("data-state", "no-upstream");
+    expect(divergence).toHaveTextContent("No upstream");
   });
 
   it("scopes native preview and safe deletion to the selected registered workspace", async () => {

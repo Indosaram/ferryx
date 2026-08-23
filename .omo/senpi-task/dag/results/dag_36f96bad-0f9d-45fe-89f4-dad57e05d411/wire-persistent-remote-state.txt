@@ -1,0 +1,18 @@
+I read this as an implementation task - completed persistent Remote construction and verified session-only listener restart behavior.
+
+Implemented:
+- `create_app()` now uses `RemoteGatewayState::new_persistent(...)`.
+- Added application-level regression test covering:
+  - paired device persistence
+  - `mode == Off`
+  - `is_running == false`
+  - no bound address
+- Existing state restart tests remain passing.
+
+Verification:
+- RED: focused test failed with non-persistent construction (`0 devices`, expected `1`).
+- GREEN:
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml`
+  - `cargo test --manifest-path src-tauri/Cargo.toml app_remote_state_persists_pairing_but_starts_off --lib` — passed
+  - `cargo test --manifest-path src-tauri/Cargo.toml remote::state::tests --lib` — 2 passed
+- LSP diagnostics: no errors.

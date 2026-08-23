@@ -1,0 +1,11 @@
+I have completed the static performance audit for the terminal host/renderer/pane path and generated the audit report.
+
+### Audit Summary
+- **Report Location:** `/Users/indo/code/project/orca-lite/docs/frontend-perf/audit-terminal.md`
+- **Findings Identified:**
+  - `F-terminal-01` (High, Hot path: yes): 512KB string concatenation and slice on every PTY chunk in `TerminalEventBus.publishOutput` causing severe main-thread GC pressure (>200MB/s).
+  - `F-terminal-02` (High, Hot path: yes): Unvectorized character-by-character `charCodeAt` loop during base64 decoding on every terminal output chunk in `decodeBase64`.
+  - `F-terminal-03` (Medium, Hot path: no): `useTerminalSettings` hook in `TerminalPane` triggering global `applySettings` and `fitAddon.fit()` recalculations across all terminal instances upon mount.
+  - `F-terminal-04` (Medium, Hot path: yes): Duplicate `ResizeObserver` instances in `TerminalPane` and `TerminalHostManager` scheduling redundant chained `requestAnimationFrame` fitting passes on resize.
+  - `F-terminal-05` (Medium, Hot path: yes): Quadratic `droppableContainers.find` lookups within `.filter()` and `.sort()` during `collisionDetection` on every drag move event.
+  - `F-terminal-06` (Low, Hot path: no): Unmemoized fallback session object instantiation in `PaneRenderer` breaking referential equality and triggering unnecessary downstream effect cycles.

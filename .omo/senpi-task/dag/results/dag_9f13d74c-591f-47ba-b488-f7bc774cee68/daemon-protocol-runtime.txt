@@ -1,0 +1,90 @@
+> I read this as implementing and proving the complete Ferryx daemon runtime contract gaps (workspace registration, runtime filesystem security, bounded event-driven readiness, remote gateway control, and typed replay-gap broadcast recovery) with RED/GREEN test evidence and an API handoff table - execute and report.
+
+### 1. Verification & RED/GREEN Evidence
+
+**Commands Executed:**
+- `cargo test --manifest-path src-tauri/Cargo.toml daemon:: --lib` (Exit 0)
+- `cargo check --manifest-path src-tauri/Cargo.toml` (Exit 0)
+
+**RED Test Run (Gaps Proven Failing Before Implementation):**
+- `test_server_register_workspace_and_spawn_isolation` (Failed when spawning in unregistered workspace without GUI fallback)
+- `test_runtime_dir_and_socket_symlink_protection` (Failed when symlink metadata was unverified)
+- `test_daemon_remote_gateway_lifecycle_and_commands` (Failed on missing typed remote requests/responses and active listener default)
+- `test_stream_lagged_replay_gap_full_recovery` (Failed on missing `ReplayGap` payload in `Lagged` frame)
+- `test_client_workspace_registration_and_remote_apis` (Failed on missing typed client remote & workspace APIs)
+
+**GREEN Test Run (25/25 Passing):**
+- `daemon::protocol::tests::test_daemon_stream_message_compact_base64_encoding` ... **ok**
+- `daemon::protocol::tests::test_daemon_stream_message_gap_roundtrip` ... **ok**
+- `daemon::protocol::tests::test_daemon_stream_message_lagged_with_replay_gap_roundtrip` ... **ok**
+- `daemon::protocol::tests::test_daemon_request_write_and_response_attach_base64` ... **ok**
+- `daemon::protocol::tests::test_describe_session_and_spawn_v2_serde` ... **ok**
+- `daemon::protocol::tests::test_protocol_v2_handshake_and_list_sessions_epoch` ... **ok**
+- `daemon::protocol::tests::test_register_workspace_and_remote_commands_serde` ... **ok**
+- `daemon::server::tests::test_pump_stream_compact_framing_and_exit` ... **ok**
+- `daemon::server::tests::test_server_epoch_in_handshake_and_list` ... **ok**
+- `daemon::server::tests::test_server_handshake_version_mismatch` ... **ok**
+- `daemon::server::tests::test_server_describe_nonexistent_session` ... **ok**
+- `daemon::server::tests::test_server_spawn_idempotency_cache` ... **ok**
+- `daemon::server::tests::test_server_spawn_cwd_validation` ... **ok**
+- `daemon::server::tests::test_server_register_workspace_and_spawn_isolation` ... **ok**
+- `daemon::server::tests::test_runtime_dir_and_socket_symlink_protection` ... **ok**
+- `daemon::server::tests::test_daemon_remote_gateway_lifecycle_and_commands` ... **ok**
+- `daemon::server::tests::test_server_attach_with_after_sequence_and_snapshot` ... **ok**
+- `daemon::server::tests::test_stream_lagged_replay_gap_full_recovery` ... **ok**
+- `daemon::client::tests::test_client_reuses_persistent_connection_without_rehandshaking` ... **ok**
+- `daemon::client::tests::test_client_reconnects_transparently_when_socket_dropped` ... **ok**
+- `daemon::client::tests::test_client_dedicated_attach_stream_does_not_monopolize_control_connection` ... **ok**
+- `daemon::client::tests::test_client_spawn_describe_attach_write_cycle` ... **ok**
+- `daemon::client::tests::test_client_workspace_registration_and_remote_apis` ... **ok**
+- `daemon::launchd::tests::test_generate_plist_contains_required_fields` ... **ok**
+- `daemon::launchd::tests::test_uninstall_surfaces_launchctl_failure` ... **ok**
+
+---
+
+### 2. Implementation Summary
+
+1. **Explicit Workspace Registration & No CWD Inference**:
+   - Added `DaemonRequest::RegisterWorkspace { workspace_id, repo_root }` and `DaemonResponse::RegisterWorkspaceOk`.
+   - Removed inference of workspace from `current_dir()`. Spawning requires prior workspace registration or returns an explicit error.
+   - Enforced canonicalization and directory checks via `WorkspaceRegistry::register`.
+
+2. **Filesystem Ownership & Symlink Hardening**:
+   - `get_runtime_dir()` and `run_server()` inspect `symlink_metadata` to prohibit symlinks and foreign UID ownership on runtime directories, lock files, and Unix domain sockets.
+   - Lock file acquired with non-blocking exclusive `flock`; stale socket file removed only after holding lock and verifying safe ownership. Permissions enforced at `0o700` (directory) and `0o600` (socket).
+
+3. **Event-Driven Bounded Readiness Path**:
+   - Replaced `connect_or_spawn` polling sleep loop with an exact readiness signal reader awaiting `FERRYX_DAEMON_READY` with a 5-second bounded timeout, immediately connecting upon receipt without sleep delays.
+
+4. **Daemon-Owned Remote Gateway Lifecycle**:
+   - Network listener is disabled by default (`RemoteNetworkMode::Off`).
+   - Daemon manages `RemoteGatewayState` and active listener lifecycle binding the daemon's `TerminalService`.
+   - Added typed control commands: `RemoteGetStatus`, `RemoteConfigure`, `RemoteCreatePairingCode`, `RemoteListDevices`, `RemoteRevokeDevice`, `RemoteSetActiveSelection`, `RemoteGetActiveSelection`.
+
+5. **Typed Replay-Gap Broadcast Recovery**:
+   - Updated `DaemonStreamMessage::Lagged` to carry `gap: Option<ReplayGap>` (requested vs available sequence bounds) alongside `start_sequence`, `end_sequence`, and base64-encoded `history`.
+   - `pump_sequenced_stream` tracks `last_seen_sequence` to resubscribe after sequence gap and pump replay snapshots.
+
+---
+
+### 3. API Handoff Table for GUI Bridge
+
+| Method / Message | Type | Request Payload / Arguments | Response / Return Type | Connection / Semantics |
+|---|---|---|---|---|
+| `handshake` | Control | `{ type: "handshake", version: 2 }` | `{ type: "handshakeOk", version: 2, pid: u32, epoch: u64 }` | Control conn; verifies v2 compatibility & acquires epoch. |
+| `register_workspace` | Control | `{ type: "registerWorkspace", workspace_id, repo_root }` | `{ type: "registerWorkspaceOk" }` | Control conn; canonicalizes path & registers git repo. |
+| `spawn_terminal` | Control | `{ type: "spawn", client_request_id, workspace_id, worktree, cwd, cols, rows }` | `{ type: "spawnOk", session_id: String }` | Control conn; cached by `client_request_id`, validates cwd inside workspace. |
+| `describe_session` | Control | `{ type: "describeSession", session_id }` | `{ type: "describeSessionOk", session: DaemonSessionDetails }` | Control conn; inspects dimensions, running state, sequence bounds. |
+| `attach` | Stream | `{ type: "attach", session_id, after_sequence: Option<u64> }` | `{ type: "attachOk", epoch, session_id, start_sequence, end_sequence, gap, history }` | **Dedicated Stream**; returns `DaemonAttachment` with snapshot + live typed message channel. |
+| `write_terminal` | Control | `{ type: "write", session_id, data: base64 }` | `{ type: "writeOk" }` | Control conn; writes PTY input without blocking attach stream. |
+| `resize_terminal` | Control | `{ type: "resize", session_id, cols, rows }` | `{ type: "resizeOk" }` | Control conn; resizes PTY dimensions. |
+| `signal_terminal` | Control | `{ type: "signal", session_id, signal }` | `{ type: "signalOk" }` | Control conn; sends Interrupt, Terminate, or Kill. |
+| `close_terminal` | Control | `{ type: "close", session_id }` | `{ type: "closeOk" }` | Control conn; cleans session and hub state. |
+| `list_sessions` | Control | `{ type: "listSessions" }` | `{ type: "listSessionsOk", epoch: u64, sessions: Vec<String> }` | Control conn; lists active session IDs. |
+| `remote_get_status` | Control | `{ type: "remoteGetStatus" }` | `{ type: "remoteStatusOk", status: DaemonRemoteStatus }` | Control conn; queries mode, port, running state, bound addr. |
+| `remote_configure` | Control | `{ type: "remoteConfigure", config: RemoteGatewayConfig }` | `{ type: "remoteConfigureOk" }` | Control conn; updates config & binds/stops daemon Axum listener. |
+| `remote_create_pairing_code` | Control | `{ type: "remoteCreatePairingCode", permission }` | `{ type: "remotePairingCodeOk", code: String }` | Control conn; generates 6-digit pairing code. |
+| `remote_list_devices` | Control | `{ type: "remoteListDevices" }` | `{ type: "remoteListDevicesOk", devices: Vec<DeviceInfo> }` | Control conn; lists paired devices. |
+| `remote_revoke_device` | Control | `{ type: "remoteRevokeDevice", device_id }` | `{ type: "remoteRevokeDeviceOk" }` | Control conn; revokes device auth token. |
+| `remote_set_active_selection` | Control | `{ type: "remoteSetActiveSelection", selection }` | `{ type: "remoteSetActiveSelectionOk" }` | Control conn; sets active workspace/worktree/session for remote. |
+| `remote_get_active_selection` | Control | `{ type: "remoteGetActiveSelection" }` | `{ type: "remoteGetActiveSelectionOk", selection }` | Control conn; reads active desktop selection. |

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -63,7 +65,6 @@ function baseProps(overrides: Record<string, unknown> = {}) {
     onSelectWorktree: vi.fn(),
     onCreateWorktree: vi.fn(),
     onAddProject: vi.fn(),
-    onOpenCommandPalette: vi.fn(),
     onOpenSettings: vi.fn(),
     ...overrides,
   } as any;
@@ -79,29 +80,54 @@ describe("Sidebar navigation", () => {
     expect(screen.getByRole("complementary")).toHaveStyle({ width: "236px" });
   });
 
-  it("keeps Workspace and Search functional and exposes Add Project", () => {
-    const onOpenCommandPalette = vi.fn();
+  it("keeps only global actions in the sidebar titlebar", () => {
     const onAddProject = vi.fn();
-    renderSidebar({ onOpenCommandPalette, onAddProject });
+    const onCreateWorktree = vi.fn();
+    renderSidebar({ projects, activeProjectId: "maho-workspace", onAddProject, onCreateWorktree });
 
     expect(screen.queryByText("Agents")).not.toBeInTheDocument();
     expect(screen.queryByText("Active agents")).not.toBeInTheDocument();
+    expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
+    expect(screen.queryByText("Search workspaces")).not.toBeInTheDocument();
+    expect(screen.queryByText("Projects")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /search workspaces/i }));
-    expect(onOpenCommandPalette).toHaveBeenCalledOnce();
+    const titlebar = screen.getByTestId("sidebar-drag-region");
+    expect(within(titlebar).getByRole("button", { name: "Hide sidebar" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
-    expect(screen.getByTestId("worktree-region")).toHaveFocus();
+    // Worktree creation is a per-project action, so the global titlebar must not offer it.
+    expect(within(titlebar).queryByRole("button", { name: /add worktree/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    fireEvent.click(within(titlebar).getByRole("button", { name: "Add project" }));
     expect(onAddProject).toHaveBeenCalledOnce();
+    expect(onCreateWorktree).not.toHaveBeenCalled();
+  });
+
+  it("gives every project row its own add-worktree action bound to that exact project", () => {
+    const onCreateWorktree = vi.fn();
+    const onSelectProject = vi.fn();
+    renderSidebar({ projects, activeProjectId: "maho-workspace", onCreateWorktree, onSelectProject });
+
+    for (const project of projects) {
+      expect(screen.getByRole("button", { name: `Add worktree to ${project.workspaceId}` })).toBeInTheDocument();
+    }
+
+    // The collapsed, non-active project still exposes creation, and passes its own project object.
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to content-intel-dashboard" }));
+    expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(projects[1]);
+
+    onCreateWorktree.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to maho-workspace" }));
+    expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(projects[0]);
+
+    // Creating from a project row is not a selection or a collapse toggle.
+    expect(onSelectProject).not.toHaveBeenCalled();
+    expect(projectToggle("content-intel-dashboard")).toHaveAttribute("aria-expanded", "false");
   });
 
   it("nests each project's worktrees inside that project's own tree group", () => {
     renderSidebar({ projects, activeProjectId: "maho-workspace" });
 
-    // A single "Projects" section owns the tree — there is no disjoint "Worktrees" section.
-    expect(screen.getByText("Projects")).toBeInTheDocument();
+    expect(screen.queryByText("Projects")).not.toBeInTheDocument();
     expect(screen.queryByText("Worktrees")).not.toBeInTheDocument();
 
     const activeToggle = projectToggle("maho-workspace");
@@ -218,9 +244,8 @@ describe("Sidebar navigation", () => {
     expect(within(qaGroup).queryByRole("button", { name: /feature/ })).not.toBeInTheDocument();
   });
 
-  it("hooks worktree creation, status refresh, and deletion into the owning project group", () => {
+  it("hooks worktree creation and deletion into the owning project group", () => {
     const onCreateWorktree = vi.fn();
-    const onRefreshWorktreeStatus = vi.fn();
     const onDeleteWorktree = vi.fn();
     renderSidebar({
       projects: accordionProjects,
@@ -228,21 +253,33 @@ describe("Sidebar navigation", () => {
       worktrees: [defaultWorktree, qaWorktree],
       activePath: defaultWorktree.path,
       onCreateWorktree,
-      onRefreshWorktreeStatus,
       onDeleteWorktree,
     });
 
     fireEvent.click(projectToggle("rorca-qa"));
     const qaGroup = screen.getByRole("list", { name: "rorca-qa worktrees" });
 
-    fireEvent.click(within(qaGroup).getByRole("button", { name: "Refresh worktree status" }));
-    expect(onRefreshWorktreeStatus).toHaveBeenCalledWith(qaWorktree);
-
     fireEvent.click(within(qaGroup).getByRole("button", { name: "Delete worktree" }));
     expect(onDeleteWorktree).toHaveBeenCalledWith(qaWorktree);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add worktree" }));
-    expect(onCreateWorktree).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to rorca-qa" }));
+    expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(accordionProjects[1]);
+  });
+
+  it("drops the per-worktree status refresh control", () => {
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree, qaWorktree],
+      activePath: defaultWorktree.path,
+      statuses: { [defaultWorktree.path]: { isDirty: true, files: [{ statusCode: "M", path: "src/main.ts" }] } },
+    });
+
+    expect(screen.queryByRole("button", { name: /refresh worktree status/i })).not.toBeInTheDocument();
+
+    // Dirty state and deletion survive the refresh removal.
+    expect(screen.getByText("Dirty · 1 file")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete worktree" })).toBeInTheDocument();
   });
 
   it("offers first-worktree creation inside a project with no worktrees", () => {
@@ -258,7 +295,7 @@ describe("Sidebar navigation", () => {
     expect(screen.queryByRole("list", { name: "rorca-qa worktrees" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /create the first worktree/i }));
-    expect(onCreateWorktree).toHaveBeenCalledOnce();
+    expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(accordionProjects[1]);
   });
 
   it("marks the active worktree inside the nested group as current", () => {
@@ -268,11 +305,13 @@ describe("Sidebar navigation", () => {
     expect(within(group).getByRole("button", { name: /main/ })).toHaveAttribute("aria-current", "true");
   });
 
-  it("marks only the noninteractive titlebar background as a Tauri drag region", () => {
+  it("keeps all titlebar actions out of the Tauri drag region", () => {
     renderSidebar();
     const dragBackground = screen.getByTestId("sidebar-drag-region");
     expect(dragBackground).toHaveAttribute("data-tauri-drag-region");
-    expect(screen.getByRole("button", { name: "Hide sidebar" })).toHaveClass("no-drag");
+    for (const name of ["Hide sidebar", "Add project"]) {
+      expect(screen.getByRole("button", { name })).toHaveClass("no-drag");
+    }
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveClass("no-drag");
   });
 
@@ -319,5 +358,15 @@ describe("Sidebar navigation", () => {
   it("renders null when open is false", () => {
     const { container } = renderSidebar({ open: false });
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("initializes knownProjectsRef lazily without allocating a new Set on every render (F-shell-03)", () => {
+    const sourcePath = resolve(__dirname, "Sidebar.tsx");
+    const source = readFileSync(sourcePath, "utf-8");
+
+    // When: checking Sidebar knownProjectsRef initialization
+    // Then: it must not allocate new Set(projects.map(...)) as an eager useRef parameter
+    expect(source).not.toContain("useRef<Set<string>>(new Set");
+    expect(source).not.toMatch(/useRef<Set<string>>\(\s*new Set/);
   });
 });

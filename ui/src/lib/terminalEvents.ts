@@ -7,9 +7,14 @@ const MAX_OSC_TITLE_CHARS = 8 * 1024;
 const OSC_TITLE_START_RE = /\u001b\](?:0|1|2);/g;
 const OSC_PARTIAL_PREFIXES = ["\u001b", "\u001b]", "\u001b]0", "\u001b]1", "\u001b]2"] as const;
 
-type OutputListener = (text: string) => void;
+type OutputListener = (text: string, sequence?: string | null, daemonEpoch?: string | null) => void;
 type LifecycleListener = (payload: TerminalLifecyclePayload) => void;
 type TitleListener = (sessionId: string, title: string) => void;
+
+type SessionBacklog = {
+  chunks: string[];
+  totalChars: number;
+};
 
 export type OscTitleScanResult = {
   titles: string[];
@@ -70,7 +75,7 @@ class TerminalEventBus {
   private readonly outputListeners = new Map<string, Set<OutputListener>>();
   private readonly lifecycleListeners = new Set<LifecycleListener>();
   private readonly titleListeners = new Set<TitleListener>();
-  private readonly backlog = new Map<string, string>();
+  private readonly backlog = new Map<string, SessionBacklog>();
   private readonly titleCarry = new Map<string, string>();
   private readonly lastTitle = new Map<string, string>();
   private startPromise: Promise<void> | null = null;
@@ -91,7 +96,9 @@ class TerminalEventBus {
 
     if (replay) {
       const existing = this.backlog.get(sessionId);
-      if (existing) listener(existing);
+      if (existing && existing.totalChars > 0) {
+        listener(existing.chunks.join(""));
+      }
     }
 
     return () => {
@@ -115,6 +122,10 @@ class TerminalEventBus {
     };
   }
 
+  resetDecoder(sessionId: string) {
+    this.decoderRegistry.reset(sessionId);
+  }
+
   clearSession(sessionId: string) {
     this.decoderRegistry.reset(sessionId);
     this.backlog.delete(sessionId);
@@ -123,9 +134,32 @@ class TerminalEventBus {
     this.lastTitle.delete(sessionId);
   }
 
+  getBacklogMetricsForTest(sessionId?: string): { sessions: number; chunks: number; chars: number } {
+    if (sessionId) {
+      const entry = this.backlog.get(sessionId);
+      if (!entry) return { sessions: 0, chunks: 0, chars: 0 };
+      return {
+        sessions: 1,
+        chunks: entry.chunks.length,
+        chars: entry.totalChars,
+      };
+    }
+    let totalChunks = 0;
+    let totalChars = 0;
+    for (const entry of this.backlog.values()) {
+      totalChunks += entry.chunks.length;
+      totalChars += entry.totalChars;
+    }
+    return {
+      sessions: this.backlog.size,
+      chunks: totalChunks,
+      chars: totalChars,
+    };
+  }
+
   private handleOutput(payload: TerminalOutputPayload) {
     const text = this.decoderRegistry.decode(payload.sessionId, payload.data);
-    if (text) this.publishOutput(payload.sessionId, text);
+    if (text) this.publishOutput(payload.sessionId, text, payload.sequence, payload.daemonEpoch);
   }
 
   private handleLifecycle(payload: TerminalLifecyclePayload) {
@@ -136,7 +170,12 @@ class TerminalEventBus {
     for (const listener of this.lifecycleListeners) listener(payload);
   }
 
-  private publishOutput(sessionId: string, text: string) {
+  private publishOutput(
+    sessionId: string,
+    text: string,
+    sequence?: string | null,
+    daemonEpoch?: string | null,
+  ) {
     const scan = scanTerminalOscTitles(text, this.titleCarry.get(sessionId) ?? "");
     if (scan.carry) this.titleCarry.set(sessionId, scan.carry);
     else this.titleCarry.delete(sessionId);
@@ -147,13 +186,42 @@ class TerminalEventBus {
       for (const listener of this.titleListeners) listener(sessionId, title);
     }
 
-    const nextBacklog = `${this.backlog.get(sessionId) ?? ""}${text}`;
-    this.backlog.set(sessionId, nextBacklog.slice(-MAX_BACKLOG_CHARS));
-    for (const listener of this.outputListeners.get(sessionId) ?? []) listener(text);
+    if (text.length > 0) {
+      let entry = this.backlog.get(sessionId);
+      if (!entry) {
+        entry = { chunks: [], totalChars: 0 };
+        this.backlog.set(sessionId, entry);
+      }
+
+      entry.chunks.push(text);
+      entry.totalChars += text.length;
+
+      while (entry.totalChars > MAX_BACKLOG_CHARS && entry.chunks.length > 0) {
+        const oldest = entry.chunks[0];
+        if (oldest === undefined) break;
+        const overflow = entry.totalChars - MAX_BACKLOG_CHARS;
+        if (oldest.length <= overflow) {
+          entry.chunks.shift();
+          entry.totalChars -= oldest.length;
+        } else {
+          entry.chunks[0] = oldest.slice(overflow);
+          entry.totalChars -= overflow;
+          break;
+        }
+      }
+    }
+
+    for (const listener of this.outputListeners.get(sessionId) ?? []) {
+      listener(text, sequence, daemonEpoch);
+    }
   }
 }
 
 export const terminalEventBus = new TerminalEventBus();
+
+export function getBacklogMetricsForTest(sessionId?: string) {
+  return terminalEventBus.getBacklogMetricsForTest(sessionId);
+}
 
 export function ensureTerminalEvents() {
   return terminalEventBus.ensureStarted();

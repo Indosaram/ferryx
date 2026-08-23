@@ -1,0 +1,10 @@
+The static performance audit for the `app-store` lane (`App.tsx`, `WorkspaceApp`, `workspaceStore.ts`, `workspaceRuntime.ts`, `layout.ts`, `paneTree.ts`, `main.tsx`) is complete.
+
+The audit report has been written to `/Users/indo/code/project/orca-lite/docs/frontend-perf/audit-app-store.md`.
+
+### Summary of findings:
+- **`F-app-store-01` (High)**: Monolithic `useReducer` in `useWorkspaceStore` triggers top-level `WorkspaceApp` re-renders across the entire workspace tree on high-frequency dispatches (`SET_PANE_RATIO` drag resizing, `SESSION_TITLE_ACTIVITY` ticks), coupled with unmemoized derived activity summaries and agent objects.
+- **`F-app-store-02` (Medium)**: `registerWindowCloseGuard` effect dependencies include monolithic `state`, constantly tearing down and re-registering the window close guard on every state update.
+- **`F-app-store-03` (Medium)**: `shortcutHandlers` invalidates during pane divider drag updates via transitive dependencies on `state.layout.layoutsByTabId`, causing `useShortcuts` to tear down and reattach the global `keydown` listener on every mousemove frame.
+- **`F-app-store-04` (Low)**: Inline arrow function props passed down to `TerminalSplitView` and `Sidebar` defeat child component memoization.
+- **`F-app-store-05` (Low)**: Inactive dialog overlays (`SettingsDialog` and `CommandPalette`) remain mounted when closed, participating in reconciliation on every store tick.

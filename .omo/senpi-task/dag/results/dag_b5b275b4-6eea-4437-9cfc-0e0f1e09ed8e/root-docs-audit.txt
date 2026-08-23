@@ -1,0 +1,46 @@
+> I read this as research/evaluation - inspect root Markdown files, reference check across the repo, and classify each with an evidence-backed disposition and cleanup plan.
+
+### Root Markdown Inventory & Classification
+
+Every root-level Markdown file (active on disk as well as tracked in git status) was analyzed against repository references, active scripts, and current architecture.
+
+| Path | Purpose | References & Usages in Repo | Recommended Disposition |
+|---|---|---|---|
+| `README.md` | Primary developer documentation, quickstart guide, available scripts, and system architecture summary. | Referenced in `PRODUCT.md` (line 39), mock backend list `site/src/mock/backend.ts` (line 16), and repository fixtures in tests (`src-tauri/src/worktree/mod.rs`, `src-tauri/tests/worktree_safety.rs`). | **preserve** (retain at repository root) |
+| `PRODUCT.md` | Product definition, target persona, capabilities matrix, brand commitments, and core product principles (`impeccable:product-schema 1`). | Referenced in internal task drafts; cross-references `BRANDING_AND_ICON_SPECIFICATION.md` and `README.md`. No build/runtime dependency. | **relocate to docs/reference** (`docs/reference/PRODUCT.md`) |
+| `BRANDING_AND_ICON_SPECIFICATION.md` | Canonical specification for Ferryx dark squircle icons, transparent margins, Vite loopback HMR topology, TabBar UX, and verification gates. | Referenced in `PRODUCT.md` (line 38) and past branding commits (`14dee2c`, `5ad9fe2`). No build/runtime code dependencies. | **relocate to docs/reference** (`docs/reference/BRANDING_AND_ICON_SPECIFICATION.md`) |
+| `ACTIVITY_INDICATORS_IMPLEMENTATION_PLAN.md` | Ephemeral sprint implementation plan for terminal status indicators. | Implemented in `ui/src/components/ui/StatusDot.tsx` and `ui/src/state/workspaceStore.ts`. No active references. | **delete as obsolete** (already removed in working tree) |
+| `ACTIVITY_INDICATORS_MANUAL_E2E_CHECKLIST.md` | Historical manual QA verification checklist for activity dots. | Replaced by automated unit/integration tests in `ui/src/components/Sidebar.activity.test.tsx`. | **delete as obsolete** (already removed in working tree) |
+| `ADD_PROJECT_UI_PARITY.md` | Historical feature spec for project addition modal. | Implemented in `ui/src/components/ProjectDialogs.tsx`. No active references. | **delete as obsolete** (already removed in working tree) |
+| `BROWSER_SUPPORT_IMPLEMENTATION_RECEIPT.md` | Execution receipt documenting embedded browser webview implementation. | Historical delivery log. Superseded by active code in `src-tauri/src/ipc/browser.rs`. | **delete as obsolete** (already removed in working tree) |
+| `BROWSER_SUPPORT_PLAN.md` | Sprint implementation plan for Tauri webview companion tabs. | Superseded by codebase implementation in `ui/src/lib/browserTauri.ts`. | **delete as obsolete** (already removed in working tree) |
+| `FERRYX_PARITY_FULL_SWEEP.md` | One-off parity audit comparing Ferryx features against upstream reference. | Historical QA audit. No active references. | **delete as obsolete** (already removed in working tree) |
+| `FERRYX_PARITY_SWEEP_FIX_RECEIPT.md` | Execution receipt for bug fixes identified during the parity sweep. | Historical execution log. Superseded by current test suite. | **delete as obsolete** (already removed in working tree) |
+| `GHOSTTY_INTEGRATION_REVIEW_AND_REMEDIATION.md` | Review document on terminal PTY streaming and Ghostty parity. | Superseded by `src-tauri/src/terminal/` and `src-tauri/src/daemon/`. | **delete as obsolete** (already removed in working tree) |
+| `HMR_ROOT_CAUSE_AND_FIX.md` | Investigation report on Vite loopback HMR websocket connection issues. | Findings integrated into `BRANDING_AND_ICON_SPECIFICATION.md` §2 and `ui/vite.config.ts`. | **delete as obsolete** (already removed in working tree) |
+| `KEYBOARD_SHORTCUTS_AUDIT_AND_IMPROVEMENT_REPORT.md` | Audit of keybindings and cross-platform modifier discrepancies. | Implemented in `ui/src/lib/shortcuts.ts` and documented in `site/src/content/docs/docs/shortcuts.md`. | **delete as obsolete** (already removed in working tree) |
+| `NOTIFICATION_IMPLEMENTATION_PLAN.md` | Plan for desktop notifications via Tauri notification plugin. | Implemented in `src-tauri/src/notification/` and `ui/src/lib/notificationSettings.ts`. | **delete as obsolete** (already removed in working tree) |
+| `ORCA_LITE_FIX_PLAN.md` | Legacy fix plan predating the project rebrand to Ferryx. | Outdated naming and superseded scope. | **delete as obsolete** (already removed in working tree) |
+| `ORCA_LITE_PARITY_AUDIT.md` | Legacy pre-rebrand audit log. | Outdated naming and superseded findings. | **delete as obsolete** (already removed in working tree) |
+| `ORCA_LITE_PARITY_FIX_EXECUTION.md` | Legacy execution receipt predating current branding. | Outdated naming and obsolete task receipts. | **delete as obsolete** (already removed in working tree) |
+| `ORCA_TAB_PARITY_AUDIT_AND_PLAN.md` | Tab bar feature parity plan predating recent TabBar refactors. | Implemented in `ui/src/components/TabBar.tsx` and `ui/src/components/tab-dnd/`. | **delete as obsolete** (already removed in working tree) |
+| `PERF_NOTES.md` | Ad-hoc performance notes. | Superseded by organized performance audits under `docs/frontend-perf/` and `docs/backend-perf/`. | **delete as obsolete** (already removed in working tree) |
+| `RORCA_EMBEDDED_BROWSER_SUPPORT_ANALYSIS.md` | Analysis of embedded browser approaches under legacy working title. | Superseded by current Webview2 / WebKit implementation. | **delete as obsolete** (already removed in working tree) |
+| `SESSION_PERSISTENCE_AND_UPDATER_PLAN.md` | Early conceptual plan for daemon-based session persistence. | Superseded by `markdown/TERMINAL_SESSION_PERSISTENCE_FUNDAMENTAL_SOLUTION.md` and `src-tauri/tests/daemon_persistence_contract.rs`. | **delete as obsolete** (already removed in working tree) |
+| `SESSION_PERSISTENCE_IMPLEMENTATION_PLAN.md` | Detailed step-by-step implementation plan for session persistence. | Superseded by current codebase implementation (`src-tauri/src/session/` and `src-tauri/src/daemon/`). | **delete as obsolete** (already removed in working tree) |
+
+---
+
+### Root-Only-README Cleanup Plan
+
+To maintain a clean root where `README.md` is the single canonical entry point:
+
+1. **Create Reference Directory**: Ensure `docs/reference/` exists.
+2. **Relocate Non-README Specifications**:
+   - Move `PRODUCT.md` → `docs/reference/PRODUCT.md`
+   - Move `BRANDING_AND_ICON_SPECIFICATION.md` → `docs/reference/BRANDING_AND_ICON_SPECIFICATION.md`
+3. **Update Cross-Document Links**:
+   - Update `docs/reference/PRODUCT.md` internal links to point to `./BRANDING_AND_ICON_SPECIFICATION.md` and `../../README.md`.
+   - Update `README.md` architecture section to mention `docs/reference/` alongside `docs/audits/`, `docs/frontend-perf/`, and `docs/backend-perf/`.
+4. **Stage Deletion of Historical Sprint Receipts**:
+   - Commit the deletion of the 19 obsolete sprint plans and execution receipts already removed from the working tree.

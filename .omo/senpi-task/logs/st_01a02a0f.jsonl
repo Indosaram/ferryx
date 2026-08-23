@@ -1,0 +1,21 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"I read this as an audit request for backend terminal performance - I will inspect the scoped terminal Rust source files and write the structured audit document to `docs/backend-perf/audit-terminal.md`."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I read this as an audit request for backend terminal performance - I inspected the scoped terminal source files and wrote the complete audit report to `docs/backend-perf/audit-terminal.md`.\n\n### Summary of Findings in `docs/backend-perf/audit-terminal.md`\n- **F-terminal-01 (High)**: 20ms active polling loop in PTY lifecycle watcher issuing non-blocking `try_wait` (`waitpid`) syscalls and acquiring mutexes 50 times/sec per session while idle.\n- **F-terminal-02 (High)**: Double heap allocation per 4KB chunk (`buf[..n].to_vec()` + `hub.buffer.push(chunk.clone())`) across a 3-hop async queue pipeline (`spawn_blocking` -> `mpsc` -> pump task -> `output_hub` -> `broadcast`).\n- **F-terminal-03 (High)**: Per-chunk Base64 string encoding and unbatched Tauri IPC event emission flooding the webview bridge and triggering subscriber buffer drops (`RecvError::Lagged`).\n- **F-terminal-04 (Medium)**: Blocking subprocess execution of `/usr/sbin/lsof` for macOS CWD resolution on IPC calls taking 20–100ms per invocation.\n- **F-terminal-05 (Low)**: 8 distinct `Arc<Mutex<Option<T>>>` field allocations inside each `PtySession`."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a0f/sessions/st_01a02a0f/2026-08-22T15-18-05-061Z_01a02a0c-ec05-7ea6-a467-b930fcb34824.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}

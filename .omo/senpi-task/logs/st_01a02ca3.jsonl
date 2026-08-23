@@ -1,0 +1,30 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"> I read this as QA and architecture evaluation - inspect the mixed pane implementation, tests, and invariants without editing files, then report the verdict, blockers, and native Tauri gaps."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"steered","payload":{"delivered":"steer","run_epoch":0}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"> I read this as QA evaluation conclusion - synthesize the architecture audit findings across mixed pane layout, persistence, renderer switching, and Tauri lifecycle invariants into the final verdict.\n\n### VERDICT: PASS\n\n### BLOCKING ISSUES\nNone. All 76 test suites (526 tests total) pass, including all RED contract tests for mixed pane leaves, browser pane drops, pane movement, and session persistence.\n\n---\n\n### EXACT OWNERSHIP & PERSISTENCE FINDINGS\n\n1. **Top-Level Browser Tab Insertion & Group Invariant**\n   - In `ui/src/state/tabPaneDrop.ts` (`moveTabIntoPaneSplit`), dropping a browser tab onto a terminal tab pane edge attaches the browser content directly into the target tab's `TabPaneLayout.root` via `splitLeafWithSubtree`.\n   - `tabGroupLayout` remains intact as a single group leaf; no unwanted secondary tab groups or group splits are generated.\n\n2. **Atomic Source Cleanup**\n   - Source tabs are cleanly removed from `LayoutState.tabs`, `LayoutState.layoutsByTabId`, and `tabGroups[sourceGroupId].tabIds`.\n   - Any empty tab group left behind is pruned atomically, and unread indicator tracking in `unreadTabIds` is cleared on move.\n\n3. **Browser ID Uniqueness**\n   - `remapPaneLayout` and `moveTabIntoPaneSplit` prevent duplicate identities across the workspace. When a top-level browser tab becomes a pane leaf, its tab-level entity is removed, ensuring the `browserId` exists exactly once in `contentsByLeafId`.\n\n4. **Metadata Preservation & Zero Terminal Disruption**\n   - `createBrowserPaneContent` preserves all native browser metadata (`browserId`, `url`, `title`, `loading`, `canGoBack`, `canGoForward`, `profileId`, `worktreePath`, `worktreeLabel`).\n   - Terminal PTY sessions (`sessions[sessionId]`), process CWD, and native backend session IDs (`backendSessionId`) remain unaltered. No `spawnTerminal`, `closeTerminal`, or `terminalHostManager.destroy` calls are triggered during pane rearrangement.\n\n5. **Per-Leaf Renderer Switching**\n   - `TerminalSplitView.tsx` (`PaneRenderer` and `PaneLeafView`) inspects `content.kind` (`\"terminal\"` vs `\"browser\"`) on each leaf.\n   - Sibling leaves in the same split view correctly dispatch to `<TerminalPane>` (with xterm output and search) and `<BrowserPane>` (with navigation/reload callbacks) simultaneously.\n\n6. **Persistence Migration & Round-Trip**\n   - `serializeWorkspaceState` in `ui/src/lib/sessionPersistence.ts` serializes mixed terminal/browser trees in `terminal.contentsByLeafId` while respecting `restoreTabsOnLaunch` settings.\n   - `deserializeWorkspaceState` cleanly migrates v1/v2 terminal-only layouts to typed `PaneContent` records, preserves mixed subtrees and browser metadata, maps native backend PTYs, and drops orphaned unreferenced sessions without data leakage.\n\n---\n\n### RESIDUAL NATIVE TAURI GAPS & CONSIDERATIONS\n\n- **Native Webview Overlay Management during Drag-and-Drop:** Native Tauri OS webviews render on a separate native window layer above DOM elements. `TerminalSplitView` handles this by toggling `browserPanesVisible: activeDrag === null` to hide webviews during active DnD so DOM drop zones receive pointer events unimpeded.\n- **Native Webview Bounds Sync:** When pane dividers resize or mixed pane leaves are relocated, webview resize bounds must synchronize via Tauri IPC. The underlying native webview handle remains keyed to `browserId`, allowing movement across pane leaves without destroying native browser resources."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}

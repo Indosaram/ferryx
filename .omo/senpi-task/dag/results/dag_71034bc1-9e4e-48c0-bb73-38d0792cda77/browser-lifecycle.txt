@@ -1,0 +1,295 @@
+I read this as a read-only browser ownership diagnosis - I traced native and React ownership through creation, movement, source-group removal, rendering, and worktree cleanup, then ran the focused suites.
+
+## Verdict
+
+**Browser-specific stale ownership is confirmed**, but **ordinary whole-tab group moves are not the failing lifecycle**.
+
+Whole-browser-tab movement is safe in the final state because React unmount/mount visibility operations are serialized per `browserId`. The confirmed stale cases are:
+
+1. A browser can be created natively as visible after its owning worktree has become parked, without any `BrowserPane` ever mounting to hide it.
+2. Removing a browser-owning worktree does not close its native browser session.
+3. If the removed worktree was active and the replacement worktree has no parked layout, its browser tab can remain rendered and be treated as the replacement worktree's active tab while retaining the deleted `worktreePath`.
+
+No files were edited.
+
+## Exact lifecycle/state trace
+
+### 1. Browser creation
+
+1. `createBrowserTab` captures the current worktree path:
+   - `ui/src/state/workspaceStore.ts:536-541`
+2. It calls native creation with `visible: true`:
+   - `ui/src/state/workspaceStore.ts:542-547`
+3. Native registration immediately records:
+   - `worktree_path = captured path`
+   - `visible = true`
+   - `src-tauri/src/browser/manager.rs:39-68`
+4. Native child creation uses an 800x600 default and only hides the child when `visible` is false:
+   - `src-tauri/src/ipc/browser.rs:12-18`
+   - `src-tauri/src/ipc/browser.rs:36-59`
+5. After the asynchronous call returns, the frontend constructs a `BrowserTab` carrying the same `browserId` and worktree path:
+   - `ui/src/state/workspaceStore.ts:549-561`
+6. `ADD_TAB_WITH_SESSION` inserts it into either:
+   - the active layout, or
+   - `worktreeLayouts[capturedWorktreePath]` if the active worktree changed during native creation:
+   - `ui/src/state/workspaceStore.ts:563`
+   - `ui/src/state/workspaceStore.ts:887-912`
+
+**Defect:** when it is inserted into a parked layout, no `BrowserPane` mounts. The native child was nevertheless created visible, so no React cleanup exists to issue `setBrowserVisible(false)`.
+
+### 2. Browser rendering ownership
+
+`TerminalSplitView` renders browser content only when that browser is the active tab in a rendered tab group:
+
+- Active tab selection:
+  - `ui/src/components/TerminalSplitView.tsx:500-505`
+- Browser-only render branch:
+  - `ui/src/components/TerminalSplitView.tsx:577-584`
+
+`BrowserPane` is therefore the sole frontend visibility/geometry owner:
+
+1. On mount, it sends bounds and `visible=true`:
+   - `ui/src/components/BrowserPane.tsx:24-40`
+2. On resize, it updates bounds:
+   - `ui/src/components/BrowserPane.tsx:42-47`
+3. On unmount, it sends `visible=false`:
+   - `ui/src/components/BrowserPane.tsx:49-54`
+
+A browser tab in a parked worktree or behind another active tab has no mounted rendering owner.
+
+### 3. Whole-tab move and source-group leaf removal
+
+Browser tabs move through the normal tab-group reducers, not through terminal-pane ownership:
+
+- Store dispatch:
+  - `ui/src/state/workspaceStore.ts:319-347`
+- Group merge:
+  - `ui/src/state/layout.ts:255-313`
+- Group split:
+  - `ui/src/state/layout.ts:315-363`
+
+When the source group becomes empty, the group and its tab-group-layout leaf are removed:
+
+- Merge source removal:
+  - `ui/src/state/layout.ts:277-292`
+- Split source removal:
+  - `ui/src/state/layout.ts:323-341`
+
+The browser tab object and `browserId` survive unchanged. No `CLOSE_TAB` or `closeBrowser` occurs because ownership is being transferred, not destroyed.
+
+Render lifecycle for such a move:
+
+1. Old source-group `BrowserPane` unmounts and queues `visible=false`.
+2. New target-group `BrowserPane` mounts, updates bounds, and queues `visible=true`.
+3. `browserTauri` serializes visibility operations per `browserId`:
+   - `ui/src/lib/browserTauri.ts:9-24`
+   - `ui/src/lib/browserTauri.ts:42-44`
+4. Final native visibility is therefore `true`, owned by the target render.
+
+**Conclusion:** stale final ownership across normal group moves is refuted by the cleanup/setup sequence plus the lifecycle queue.
+
+### 4. Terminal-pane-targeted movement
+
+Browsers cannot participate in terminal pane subtree ownership:
+
+- `moveTabIntoPaneSplit` rejects either a browser source or browser target:
+  - `ui/src/state/tabPaneDrop.ts:33-45`
+- Browser tabs render `BrowserPane`, not `PaneRenderer`:
+  - `ui/src/components/TerminalSplitView.tsx:577-603`
+
+Therefore, references to browser “pane movement” mean moving the whole browser tab between tab-group leaves. Browser sessions never become entries in `sessionIdsByLeafId`.
+
+### 5. Explicit browser close
+
+For an active-layout browser:
+
+1. `closeTab` calls and awaits `closeBrowser`.
+2. Only after native close succeeds does it dispatch `CLOSE_TAB`:
+   - `ui/src/state/workspaceStore.ts:369-378`
+3. Native close removes the manager session and closes the child:
+   - `src-tauri/src/ipc/browser.rs:177-188`
+   - `src-tauri/src/browser/manager.rs:212-214`
+4. React then unmounts `BrowserPane`; its trailing hide is queued after close and the resulting not-found rejection is caught.
+
+The focused lifecycle test covers this ordering:
+
+- `ui/src/state/workspaceStore.browserLifecycle.test.tsx:47-65`
+
+### 6. Worktree removal: confirmed stale ownership
+
+`workspaceRuntime` refreshes by synchronizing the listed worktrees and then ensuring a tab for the preferred worktree:
+
+- `ui/src/state/workspaceRuntime.ts:61-70`
+
+`syncWorktrees` only computes and closes stale **terminal sessions**:
+
+- `ui/src/state/workspaceStore.ts:478-488`
+
+During `SET_WORKTREES`:
+
+- Terminal tabs without retained sessions are removed.
+- Browser tabs in the active layout are explicitly skipped:
+  - `ui/src/state/workspaceStore.ts:760-765`
+- An invalid parked layout is omitted wholesale:
+  - `ui/src/state/workspaceStore.ts:767-778`
+- No removed browser IDs are returned to the effect layer, and `closeBrowser` is never called.
+
+Consequences:
+
+- **Parked deleted worktree:** browser tab state disappears, but its native browser manager session remains orphaned, normally hidden.
+- **Active deleted worktree with a parked replacement layout:** old browser DOM unmounts and hides, but the native session remains orphaned.
+- **Active deleted worktree without a parked replacement layout:** the old layout is retained, including the deleted worktree's browser. `activeWorktreePath` changes to the replacement worktree.
+- `ensureTabForWorktree` then falls back to `snapshot.layout.tabs[0]`, which may be that stale browser:
+  - `ui/src/state/workspaceStore.ts:216-227`
+
+That leaves three identities disagreeing:
+
+- `WorkspaceState.activeWorktreePath`: replacement worktree
+- `BrowserTab.worktreePath`: deleted worktree
+- Native manager `worktree_path`: deleted worktree
+
+The browser can remain visible under the replacement worktree.
+
+## Defect candidates
+
+### High confidence
+
+1. **Missing browser disposal during worktree synchronization**
+   - `ui/src/state/workspaceStore.ts:478-488`
+   - `ui/src/state/workspaceStore.ts:752-805`
+   - Terminal sessions are explicitly disposed; browser sessions are neither identified nor closed.
+
+2. **Native browser created visible before rendered ownership is established**
+   - `ui/src/state/workspaceStore.ts:536-563`
+   - `src-tauri/src/ipc/browser.rs:12-59`
+   - A worktree switch during the asynchronous create leaves a parked tab with a visible native child.
+
+3. **Deleted-worktree browser accepted as replacement-worktree active tab**
+   - `ui/src/state/workspaceStore.ts:216-227`
+   - `ui/src/state/workspaceRuntime.ts:66-70`
+   - The generic `layout.tabs[0]` fallback does not verify terminal ownership or browser `worktreePath`.
+
+4. **`closeTab` cannot close a parked browser by ID**
+   - `ui/src/state/workspaceStore.ts:369-373`
+   - It searches only `state.layout.tabs`, while the reducer itself supports removing tabs from parked layouts at `ui/src/state/workspaceStore.ts:1031-1042`.
+
+### Ownership observability weakness
+
+5. **Visibility errors are silently discarded**
+   - `ui/src/components/BrowserPane.tsx:20-21`
+   - `ui/src/components/BrowserPane.tsx:31-37`
+   - This makes native/frontend ownership disagreement invisible.
+
+### Separate current pane-drop defects
+
+The current uncommitted pane-edge implementation is incomplete, independently of browser ownership:
+
+- `PaneEdgeDropData` exists, but `isWorkspaceDropData` does not accept it:
+  - `ui/src/components/tab-dnd/tabDragTypes.ts:35-43`
+  - `ui/src/components/tab-dnd/tabDragTypes.ts:85-100`
+- Resolver and priority logic do not handle `pane-edge`:
+  - `ui/src/components/tab-dnd/tabDragTypes.ts:102-184`
+- `TerminalSplitView` does not render `PaneEdgeDropZones`.
+- `executeDrop` cannot forward a target pane to `onMoveTabToSplit`:
+  - `ui/src/components/TerminalSplitView.tsx:232-257`
+
+These explain the existing RED pane UI tests but do not create the browser-native stale ownership described above.
+
+## Proposed deterministic RED integration test
+
+The highest-value test should compare terminal and browser cleanup during worktree removal. It belongs in `workspaceStore.browserLifecycle.test.tsx` or a new worktree-browser lifecycle integration file:
+
+```tsx
+it("closes native browsers owned by a removed worktree instead of reassigning them", async () => {
+  const worktreeA = {
+    path: "/repo/a",
+    head: "a",
+    branch: "refs/heads/orca/ws/a",
+    bare: false,
+    detached: false,
+    locked: null,
+    prunable: null,
+  };
+  const worktreeB = { ...worktreeA, path: "/repo/b", head: "b" };
+
+  const workspaceServices: WorkspaceServices = {
+    ...services,
+    spawnTerminal: vi.fn(async () => "terminal-a"),
+  };
+
+  const { result } = renderHook(() =>
+    useWorkspaceStore({
+      workspaceId: "workspace-1",
+      initialWorktrees: [worktreeA, worktreeB],
+      services: workspaceServices,
+    }),
+  );
+
+  await act(async () => {
+    await result.current.openTab(worktreeA, "Terminal A");
+    await result.current.createBrowserTab(
+      "https://example.com",
+      "Browser A",
+      { worktreePath: worktreeA.path },
+    );
+  });
+
+  await act(async () => {
+    await result.current.syncWorktrees([worktreeB]);
+  });
+
+  // Existing terminal cleanup already satisfies this.
+  expect(workspaceServices.closeTerminal).toHaveBeenCalledWith("terminal-a");
+
+  // Browser-specific assertion: RED with current implementation.
+  expect(browserMocks.closeBrowser).toHaveBeenCalledWith("browser-1");
+
+  expect(result.current.state.activeWorktreePath).toBe(worktreeB.path);
+  expect([
+    ...result.current.state.layout.tabs,
+    ...Object.values(result.current.state.worktreeLayouts ?? {})
+      .flatMap((layout) => layout.tabs),
+  ]).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ browserId: "browser-1" }),
+    ]),
+  );
+});
+```
+
+Current deterministic failures would be:
+
+- `closeBrowser("browser-1")`: expected one call, receives zero.
+- Depending on whether worktree B already has a parked layout, the browser either remains in the active layout or disappears while its native session remains orphaned.
+
+This differs materially from terminal movement/removal: terminal ownership is represented in `sessions` and explicitly disposed by `syncWorktrees`; browser ownership resides in a native child webview and has no corresponding disposal reconciliation.
+
+A second useful race test would defer `createBrowser`, switch worktrees before resolving it, and require the parked browser to be created hidden. Current code sends `visible: true`, so that test would also be RED.
+
+## Verification
+
+Authoritative tests were run with the workspace's installed Vitest binary.
+
+- Browser lifecycle/render/group-move suite:
+  - 5 files, 10 tests passed
+  - **Exit code 0**
+- Workspace runtime and worktree-isolation suite:
+  - 2 files, 23 tests passed
+  - **Exit code 0**
+- Pane reducer ownership tests:
+  - 1 file, 2 tests passed
+  - **Exit code 0**
+- Pane resolver/reducer subset:
+  - 2 files, 7 tests passed
+  - **Exit code 0**
+- Combined pane UI suite:
+  - 3 files passed, 2 files failed
+  - 9 passed, 5 failed
+  - Failures are the incomplete pane-edge registration/resolution described above
+  - **Exit code 1**
+- Native browser manager lifecycle:
+  - `browser::tests::test_browser_manager_lifecycle`
+  - 1 passed
+  - **Exit code 0**
+
+The browser suites are green because they test explicit close, isolated mount/unmount, lifecycle serialization, and reducer movement separately. None combines worktree removal or asynchronous parked creation with native browser ownership.

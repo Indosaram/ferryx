@@ -1,6 +1,10 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  APPEARANCE_SETTINGS_EVENT,
+  loadAppearanceSettings,
+} from "../lib/appearanceSettings";
 import { SHORTCUTS, shortcutLabel } from "../lib/shortcuts";
 import { TERMINAL_SETTINGS_STORAGE_KEY } from "../lib/terminalSettings";
 import { SettingsDialog } from "./SettingsDialog";
@@ -16,6 +20,11 @@ const native = vi.hoisted(() => ({
   listRemoteDevices: vi.fn(),
   revokeRemoteDevice: vi.fn(),
   getTailscaleStatus: vi.fn(),
+  detectAgents: vi.fn(),
+  getRemoteStatus: vi.fn(),
+  enableRemoteGateway: vi.fn(),
+  disableRemoteGateway: vi.fn(),
+  createPairingCode: vi.fn(),
 }));
 
 const browserNative = vi.hoisted(() => ({
@@ -52,6 +61,11 @@ vi.mock(import("../lib/tauri"), async (importOriginal) => {
     listRemoteDevices: native.listRemoteDevices,
     revokeRemoteDevice: native.revokeRemoteDevice,
     getTailscaleStatus: native.getTailscaleStatus,
+    detectAgents: native.detectAgents,
+    getRemoteStatus: native.getRemoteStatus,
+    enableRemoteGateway: native.enableRemoteGateway,
+    disableRemoteGateway: native.disableRemoteGateway,
+    createPairingCode: native.createPairingCode,
   };
 });
 
@@ -128,6 +142,52 @@ beforeEach(() => {
     selfDns: "orca-host.tailscale.net",
     serveActive: true,
   });
+  const disabledRemoteStatus = {
+    enabled: false,
+    mode: "off" as const,
+    port: 43821,
+    boundAddress: null,
+    localIp: null,
+    tailscale: {
+      installed: true,
+      running: true,
+      tailnetName: "orca-mesh",
+      selfDns: "orca-host.tailscale.net",
+      serveActive: true,
+    },
+  };
+  native.getRemoteStatus.mockReset();
+  native.getRemoteStatus.mockResolvedValue(disabledRemoteStatus);
+  native.enableRemoteGateway.mockReset();
+  native.enableRemoteGateway.mockImplementation(async (request?: { mode?: string }) => {
+    const enabledStatus = {
+      ...disabledRemoteStatus,
+      enabled: true,
+      mode: request?.mode ?? "localNetwork",
+      boundAddress: "0.0.0.0:43821",
+      localIp: "10.0.0.8",
+    };
+    native.getRemoteStatus.mockResolvedValue(enabledStatus);
+    return enabledStatus;
+  });
+  native.disableRemoteGateway.mockReset();
+  native.disableRemoteGateway.mockResolvedValue(disabledRemoteStatus);
+  native.createPairingCode.mockReset();
+  native.createPairingCode.mockResolvedValue({
+    code: "482916",
+    expiresInSeconds: 300,
+  });
+  native.detectAgents.mockReset();
+  native.detectAgents.mockResolvedValue([
+    { name: "claude", available: true },
+    { name: "codex", available: false },
+    { name: "gemini", available: false },
+    { name: "opencode", available: true },
+    { name: "aider", available: false },
+    { name: "cursor-agent", available: false },
+    { name: "droid", available: false },
+    { name: "crush", available: false },
+  ]);
   browserNative.setBrowserZoom.mockReset();
   browserNative.setBrowserZoom.mockResolvedValue(1.25);
   browserNative.listBrowsers.mockReset();
@@ -156,9 +216,20 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("button", { name: "Terminal" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Keyboard Shortcuts" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Quick Commands" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Browser" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Notifications" })).toBeInTheDocument();
+  });
+
+  it("persists confirm before closing a tab checkbox in General settings", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "General" })).toBeInTheDocument();
+
+    const checkbox = screen.getByLabelText("Confirm before closing a tab");
+    expect(checkbox).not.toBeChecked();
+
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    expect(localStorage.getItem("ferryx.settings.general")).toContain('"confirmCloseTab":true');
   });
 
   it("fetches Ghostty preferences and shows the effective terminal value/source", async () => {
@@ -259,13 +330,13 @@ describe("SettingsDialog", () => {
     });
   });
 
-  it("displays Ferryx branding in footer and general settings without rorca references", () => {
+  it("keeps General free of the duplicate appearance summary", () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
 
     expect(screen.getByText("Ferryx · local desktop")).toBeInTheDocument();
     expect(screen.queryByText(/rorca · local desktop/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/Ferryx uses the native charcoal desktop palette\./i)).toBeInTheDocument();
-    expect(screen.queryByText(/rorca uses the native charcoal desktop palette\./i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Color scheme")).not.toBeInTheDocument();
+    expect(screen.queryByText("Density")).not.toBeInTheDocument();
   });
 
   it("navigates to Appearance section, renders controls, and persists changes to localStorage", () => {
@@ -304,38 +375,6 @@ describe("SettingsDialog", () => {
     expect((screen.getByLabelText("Accent color") as HTMLSelectElement).value).toBe("default");
     expect((screen.getByLabelText("Interface density") as HTMLSelectElement).value).toBe("compact");
     expect(localStorage.getItem("ferryx.settings.appearance")).toBeNull();
-  });
-
-  it("navigates to Quick Commands section, toggles enablement, adds a command, and persists to localStorage", () => {
-    const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Quick Commands" }));
-
-    expect(screen.getByRole("region", { name: "Quick Commands" })).toBeInTheDocument();
-    const enableToggle = screen.getByLabelText("Enable quick commands") as HTMLInputElement;
-    expect(enableToggle.checked).toBe(true);
-
-    const labelInput = screen.getByLabelText("Command label");
-    const cmdInput = screen.getByLabelText("Command string");
-    fireEvent.change(labelInput, { target: { value: "Build Project" } });
-    fireEvent.change(cmdInput, { target: { value: "cargo build --release" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add command" }));
-
-    expect(screen.getByText("Build Project")).toBeInTheDocument();
-    expect(screen.getByText("cargo build --release")).toBeInTheDocument();
-
-    const stored = JSON.parse(localStorage.getItem("ferryx.settings.quickCommands")!);
-    expect(stored.enabled).toBe(true);
-    expect(stored.commands.some((c: { label: string; command: string }) => c.label === "Build Project" && c.command === "cargo build --release")).toBe(true);
-
-    unmount();
-    render(<SettingsDialog open onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Quick Commands" }));
-    expect(screen.getByText("Build Project")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Delete command Build Project" }));
-    expect(screen.queryByText("Build Project")).not.toBeInTheDocument();
-    const updatedStored = JSON.parse(localStorage.getItem("ferryx.settings.quickCommands")!);
-    expect(updatedStored.commands.some((c: { label: string }) => c.label === "Build Project")).toBe(false);
   });
 
   it("navigates to Browser section, changes search engine and zoom, and persists to localStorage", () => {
@@ -409,6 +448,194 @@ describe("SettingsDialog", () => {
 
     await waitFor(() => {
       expect(browserNative.setBrowserZoom).toHaveBeenCalledWith("b-1", 1.25);
+    });
+  });
+
+  it("navigates to Agents section, displays detected agents, configures default agent and overrides", async () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+
+    await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
+
+    expect(screen.getByText("2 detected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Toggle Claude configuration" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Toggle Opencode configuration" })).toBeInTheDocument();
+
+    // Default agent selection
+    const claudeDefaultBtn = screen.getByRole("button", { name: "Claude" });
+    fireEvent.click(claudeDefaultBtn);
+
+    let stored = JSON.parse(localStorage.getItem("ferryx.agents.v1")!);
+    expect(stored.defaultAgentId).toBe("claude");
+
+    // Toggle enabled checkbox
+    const claudeToggle = screen.getByLabelText("Enable Claude") as HTMLInputElement;
+    expect(claudeToggle.checked).toBe(true);
+    fireEvent.click(claudeToggle);
+    expect(claudeToggle.checked).toBe(false);
+
+    stored = JSON.parse(localStorage.getItem("ferryx.agents.v1")!);
+    expect(stored.overrides.claude.enabled).toBe(false);
+
+    // Expand configuration and edit command & arguments
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Claude configuration" }));
+
+    const cmdInput = screen.getByLabelText("Claude command");
+    const argsInput = screen.getByLabelText("Claude arguments");
+
+    fireEvent.change(cmdInput, { target: { value: "claude-custom" } });
+    fireEvent.blur(cmdInput);
+    fireEvent.change(argsInput, { target: { value: "--dangerously-skip-permissions" } });
+    fireEvent.blur(argsInput);
+
+    stored = JSON.parse(localStorage.getItem("ferryx.agents.v1")!);
+    expect(stored.overrides.claude.command).toBe("claude-custom");
+    expect(stored.overrides.claude.args).toBe("--dangerously-skip-permissions");
+
+    // Refresh button
+    native.detectAgents.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /Refresh/i }));
+    await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
+  });
+
+  it("persists Appearance through the appearanceSettings API across remount", () => {
+    const events: unknown[] = [];
+    const listener = (event: Event) => {
+      events.push((event as CustomEvent).detail);
+    };
+    window.addEventListener(APPEARANCE_SETTINGS_EVENT, listener);
+
+    try {
+      const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
+      fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+
+      fireEvent.change(screen.getByLabelText("Theme mode"), { target: { value: "light" } });
+      fireEvent.change(screen.getByLabelText("Accent color"), { target: { value: "blue" } });
+      fireEvent.change(screen.getByLabelText("Interface density"), { target: { value: "comfortable" } });
+
+      expect(loadAppearanceSettings()).toEqual({
+        theme: "light",
+        accentColor: "blue",
+        density: "comfortable",
+      });
+      expect(events.at(-1)).toEqual({
+        theme: "light",
+        accentColor: "blue",
+        density: "comfortable",
+      });
+
+      unmount();
+      render(<SettingsDialog open onClose={vi.fn()} />);
+      fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+      expect((screen.getByLabelText("Theme mode") as HTMLSelectElement).value).toBe("light");
+      expect((screen.getByLabelText("Accent color") as HTMLSelectElement).value).toBe("blue");
+      expect((screen.getByLabelText("Interface density") as HTMLSelectElement).value).toBe("comfortable");
+    } finally {
+      window.removeEventListener(APPEARANCE_SETTINGS_EVENT, listener);
+    }
+  });
+
+  it("copies the enabled Remote pairing PIN and shows copied feedback", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+    await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Disabled" }));
+
+    const pinButton = await screen.findByTestId("remote-pairing-code");
+    expect(pinButton.tagName).toBe("BUTTON");
+    expect(pinButton).toHaveTextContent("482916");
+
+    fireEvent.click(pinButton);
+
+    expect(writeText).toHaveBeenCalledWith("482916");
+    expect(pinButton).toHaveTextContent(/copied/i);
+  });
+
+  it("states that Remote Access stops when Ferryx quits and must be enabled again after relaunch", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+
+    const remote = screen.getByRole("region", { name: "Remote Access" });
+    expect(remote).toHaveTextContent(/stops when Ferryx quits/i);
+    expect(remote).toHaveTextContent(/enabled again after relaunch/i);
+  });
+
+  it("describes Default Agent as first in the New Tab list with a Default label, not auto-launch", async () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
+
+    expect(screen.getByRole("group", { name: "Default Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Auto" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "None" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claude" })).toBeInTheDocument();
+
+    const agents = screen.getByRole("region", { name: "Agents" });
+    expect(agents).toHaveTextContent(/New Tab/i);
+    expect(agents).toHaveTextContent(/Default label/i);
+    expect(agents).toHaveTextContent(/enabled and available/i);
+    expect(agents).toHaveTextContent(/does not auto-launch/i);
+    expect(agents).toHaveTextContent(/clicking a listed agent still launches that agent/i);
+    expect(agents).toHaveTextContent(/unavailable, disabled, or missing/i);
+    expect(agents).toHaveTextContent(/natural agent order/i);
+    expect(agents).not.toHaveTextContent(/New Terminal/i);
+    expect(agents).not.toHaveTextContent(/default agent action/i);
+    expect(screen.queryByText(/launched by default/i)).not.toBeInTheDocument();
+  });
+
+  it("does not expose Quick Commands navigation or section", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "Quick Commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Quick Commands" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Enable quick commands")).not.toBeInTheDocument();
+  });
+
+  it("renders a non-empty General overview that does not duplicate Appearance controls", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+
+    const overview = screen.getByTestId("settings-general-overview");
+    expect(overview).toBeInTheDocument();
+    expect(overview.querySelectorAll("li").length).toBeGreaterThanOrEqual(4);
+    expect(screen.getByRole("region", { name: "General" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Theme mode")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Accent color")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Interface density")).not.toBeInTheDocument();
+    expect(screen.queryByText("Color scheme")).not.toBeInTheDocument();
+    expect(screen.queryByText("Density")).not.toBeInTheDocument();
+  });
+
+  describe("F-settings-03: deferred hooks when closed", () => {
+    it("does not invoke useTerminalSettings or register listeners when open=false", () => {
+      native.getTerminalPreferences.mockClear();
+      const addEventListenerSpy = vi.spyOn(window, "addEventListener");
+      addEventListenerSpy.mockClear();
+
+      render(<SettingsDialog open={false} onClose={vi.fn()} />);
+
+      expect(native.getTerminalPreferences).not.toHaveBeenCalled();
+      const registeredTerminalListeners = addEventListenerSpy.mock.calls.filter(
+        ([event]) => event === "orca:terminal-settings" || event === "keydown",
+      );
+      expect(registeredTerminalListeners).toHaveLength(0);
+
+      addEventListenerSpy.mockRestore();
+    });
+
+    it("source structure gates useTerminalSettings behind open check via inner component", () => {
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const source = fs.readFileSync(path.resolve(__dirname, "./SettingsDialog.tsx"), "utf8");
+
+      expect(source).toMatch(/export function SettingsDialog\([\s\S]*?\)\s*\{[\s\S]*?if\s*\(!(?:open|props\.open)\)\s*return null;/);
+      expect(source).toMatch(/function SettingsDialogBody[\s\S]*?useTerminalSettings\(\)/);
     });
   });
 });

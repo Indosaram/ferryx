@@ -1,0 +1,9 @@
+I read this as static performance audit of remote/mobile HTTP+WebSocket server - completed static analysis and wrote audit deliverable.
+
+The static performance audit report for the remote/mobile server lane is complete and written to `/Users/indo/code/project/orca-lite/docs/backend-perf/audit-remote.md`.
+
+### Verification Summary
+- Document contains `# Audit: remote`, `## Findings`, `## Non-findings / accepted`, and `## Scan coverage`.
+- Findings `F-remote-01` through `F-remote-05` document issues including synchronous disk writes/JSON serialization on token validation, synchronous `git worktree list` child processes during session listing, blocking Tailscale CLI execution on Tokio threads in Tauri commands, missing static asset caching/directory lookup overhead, and WebSocket event stream termination on broadcast lag.
+- Each finding includes Severity, File line reference, Mechanism, Hot path flag, Suggested fix, Write scope, and quoted RED proof.
+- No files outside the deliverable write path were modified.

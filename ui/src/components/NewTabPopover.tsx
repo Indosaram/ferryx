@@ -1,12 +1,43 @@
-import { useState, useRef, useEffect } from "react";
-import { TerminalSquare, Globe, ArrowRight } from "lucide-react";
-import { isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
+import { useRef, useEffect, useMemo } from "react";
+import { TerminalSquare, Globe, FileText, Smartphone, Settings, Sparkles } from "lucide-react";
+import { newBrowserTabUrl } from "../lib/browserSettings";
+import { formatBindingLabel, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
+
+export type PopoverAgent = {
+  name: string;
+  command: string;
+  args: string;
+  enabled?: boolean;
+  available?: boolean;
+};
 
 interface NewTabPopoverProps {
   open: boolean;
   onClose: () => void;
   onNewTerminal: () => void;
   onNewBrowser: (url?: string) => void;
+  onNewMarkdown?: () => void;
+  onNewMobileEmulator?: () => void;
+  onOpenSettings?: () => void;
+  agents?: PopoverAgent[];
+  onLaunchAgent?: (agent: PopoverAgent) => void;
+  defaultAgentId?: string | null;
+}
+
+function isUsableDefaultAgent(agent: PopoverAgent, defaultAgentId?: string | null): boolean {
+  if (!defaultAgentId || defaultAgentId === "none") return false;
+  if (agent.name !== defaultAgentId) return false;
+  if (agent.enabled === false || agent.available === false) return false;
+  return true;
+}
+
+function orderAgentsForNewTab(agents: PopoverAgent[], defaultAgentId?: string | null): PopoverAgent[] {
+  const defaultIndex = agents.findIndex((agent) => isUsableDefaultAgent(agent, defaultAgentId));
+  if (defaultIndex <= 0) return agents;
+  const ordered = agents.slice();
+  const [selected] = ordered.splice(defaultIndex, 1);
+  ordered.unshift(selected);
+  return ordered;
 }
 
 export function NewTabPopover({
@@ -14,18 +45,22 @@ export function NewTabPopover({
   onClose,
   onNewTerminal,
   onNewBrowser,
+  onNewMarkdown,
+  onNewMobileEmulator,
+  onOpenSettings,
+  agents,
+  onLaunchAgent,
+  defaultAgentId,
 }: NewTabPopoverProps) {
-  const [query, setQuery] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isMac = isMacShortcutPlatform();
+  const launcherAgents = useMemo(
+    () => (agents && agents.length > 0 ? orderAgentsForNewTab(agents, defaultAgentId) : agents),
+    [agents, defaultAgentId],
+  );
 
   useEffect(() => {
-    if (!open) {
-      setQuery("");
-      return;
-    }
-    inputRef.current?.focus();
+    if (!open) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -52,35 +87,6 @@ export function NewTabPopover({
 
   if (!open) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = query.trim();
-    if (!trimmed) {
-      onNewTerminal();
-      onClose();
-      return;
-    }
-
-    if (
-      trimmed.startsWith("http://") ||
-      trimmed.startsWith("https://") ||
-      trimmed.startsWith("localhost") ||
-      trimmed.startsWith("127.0.0.1") ||
-      trimmed.includes(".")
-    ) {
-      let target = trimmed;
-      if (!target.startsWith("http://") && !target.startsWith("https://")) {
-        target = target.startsWith("localhost") || target.startsWith("127.0.0.1")
-          ? `http://${target}`
-          : `https://${target}`;
-      }
-      onNewBrowser(target);
-    } else {
-      onNewBrowser(`https://www.google.com/search?q=${encodeURIComponent(trimmed)}`);
-    }
-    onClose();
-  };
-
   return (
     <div
       ref={containerRef}
@@ -88,30 +94,7 @@ export function NewTabPopover({
       aria-label="New tab menu"
       className="absolute top-full left-0 mt-1 w-80 rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl z-50 p-2 text-xs select-none backdrop-blur-md"
     >
-      <form onSubmit={handleSubmit} className="mb-2">
-        <div className="relative flex items-center">
-          <input
-            ref={inputRef}
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search open tabs, files, URLs, agents..."
-            aria-label="New tab query input"
-            className="w-full bg-background/80 border border-border/80 rounded-lg px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary font-sans"
-          />
-          {query.trim() ? (
-            <button
-              type="submit"
-              className="absolute right-1.5 p-1 text-muted-foreground hover:text-foreground"
-              aria-label="Open query"
-            >
-              <ArrowRight className="size-3.5" />
-            </button>
-          ) : null}
-        </div>
-      </form>
-
-      <div className="flex flex-col gap-0.5 border-t border-border/60 pt-1.5">
+      <div className="flex flex-col gap-0.5">
         <button
           type="button"
           onClick={() => {
@@ -132,7 +115,7 @@ export function NewTabPopover({
         <button
           type="button"
           onClick={() => {
-            onNewBrowser();
+            onNewBrowser(newBrowserTabUrl());
             onClose();
           }}
           className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
@@ -145,6 +128,93 @@ export function NewTabPopover({
             {shortcutLabel("tab.newBrowser", isMac)}
           </span>
         </button>
+
+        {onNewMarkdown ? (
+          <button
+            type="button"
+            onClick={() => {
+              onNewMarkdown();
+              onClose();
+            }}
+            className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
+          >
+            <div className="flex items-center gap-2.5">
+              <FileText className="size-4 text-muted-foreground group-hover:text-foreground" />
+              <span className="font-medium">New Markdown</span>
+            </div>
+            <span className="text-[11px] font-mono text-muted-foreground">
+              {formatBindingLabel({ key: "m", mod: true, shift: true }, isMac)}
+            </span>
+          </button>
+        ) : null}
+
+        {onNewMobileEmulator ? (
+          <button
+            type="button"
+            onClick={() => {
+              onNewMobileEmulator();
+              onClose();
+            }}
+            className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
+          >
+            <div className="flex items-center gap-2.5">
+              <Smartphone className="size-4 text-muted-foreground group-hover:text-foreground" />
+              <span className="font-medium">New Mobile Emulator</span>
+            </div>
+            <span className="text-[11px] font-mono text-muted-foreground">
+              {formatBindingLabel({ key: "e", mod: true, alt: true, shift: true }, isMac)}
+            </span>
+          </button>
+        ) : null}
+
+        {launcherAgents && launcherAgents.length > 0 ? (
+          <div className="flex flex-col gap-0.5 border-t border-border/60 pt-1.5 mt-0.5">
+            <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+              AGENTS
+            </div>
+            {launcherAgents.map((agent) => {
+              const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
+              const isDefault = isUsableDefaultAgent(agent, defaultAgentId);
+              return (
+                <button
+                  key={agent.name}
+                  type="button"
+                  onClick={() => {
+                    onLaunchAgent?.(agent);
+                    onClose();
+                  }}
+                  className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Sparkles className="size-4 text-muted-foreground group-hover:text-foreground" />
+                    <span className="font-medium">{label}</span>
+                  </div>
+                  {isDefault ? (
+                    <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      Default
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {onOpenSettings ? (
+          <button
+            type="button"
+            onClick={() => {
+              onOpenSettings();
+              onClose();
+            }}
+            className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group border-t border-border/60 mt-0.5 pt-1.5"
+          >
+            <div className="flex items-center gap-2.5">
+              <Settings className="size-4 text-muted-foreground group-hover:text-foreground" />
+              <span className="font-medium">Agent settings…</span>
+            </div>
+          </button>
+        ) : null}
       </div>
     </div>
   );

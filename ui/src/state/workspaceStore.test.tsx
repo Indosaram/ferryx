@@ -1,9 +1,25 @@
-import { act, renderHook } from "@testing-library/react";
+import { JSDOM } from "jsdom";
+
+if (typeof window === "undefined") {
+  const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", { url: "http://localhost:3000" });
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  globalThis.navigator = dom.window.navigator;
+  globalThis.localStorage = dom.window.localStorage;
+  globalThis.sessionStorage = dom.window.sessionStorage;
+  globalThis.HTMLElement = dom.window.HTMLElement;
+}
+
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { TerminalSession, TerminalTab, Worktree } from "../lib/types";
-import { terminalHostManager } from "../lib/terminalHostManager";
-import { useWorkspaceStore, type WorkspaceServices, type WorkspaceState } from "./workspaceStore";
+import type { BrowserTab, LayoutState, TerminalSession, TerminalTab, Worktree } from "../lib/types";
+import * as browserTauri from "../lib/browserTauri";
+import { createLayoutState } from "./layout";
+const { terminalHostManager } = await import("../lib/terminalHostManager");
+const { useWorkspaceStore } = await import("./workspaceStore");
+type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
+type WorkspaceState = import("./workspaceStore").WorkspaceState;
 
 const worktree: Worktree = {
   path: "/repo/main",
@@ -181,7 +197,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     await act(async () => {
       await result.current.openTab(worktree);
     });
-    vi.mocked(services.spawnTerminal).mockClear();
+    (services.spawnTerminal as any).mockClear();
 
     const tabId = result.current.state.layout.activeTabId!;
     const tabLayout = result.current.state.layout.layoutsByTabId[tabId];
@@ -376,9 +392,9 @@ describe("useWorkspaceStore terminal ownership", () => {
     let featureTabId = "";
     let docsTabId = "";
     await act(async () => {
-      mainTabId = await result.current.openTab(worktree);
-      featureTabId = await result.current.openTab(featureWorktree);
-      docsTabId = await result.current.openTab(docsWorktree);
+      mainTabId = await result.current.openTab(worktree, "main");
+      featureTabId = await result.current.openTab(worktree, "feature");
+      docsTabId = await result.current.openTab(worktree, "docs");
     });
 
     act(() => {
@@ -397,7 +413,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(result.current.state.layout.tabs.map((tab) => tab.id)).toEqual([docsTabId, featureTabId]);
     expect(services.closeTerminal).toHaveBeenCalledWith("backend-1");
 
-    vi.mocked(services.closeTerminal).mockClear();
+    (services.closeTerminal as any).mockClear();
     await act(async () => {
       await result.current.closeTab(featureTabId);
     });
@@ -444,12 +460,12 @@ describe("useWorkspaceStore terminal ownership", () => {
     const closingBackendId = result.current.state.sessions[closingSessionId].backendSessionId!;
 
     const closePromise = result.current.closeTab(closingTabId);
-    await vi.waitFor(() => expect(services.closeTerminal).toHaveBeenCalledWith(closingBackendId));
+    await waitFor(() => expect(services.closeTerminal).toHaveBeenCalledWith(closingBackendId));
 
     expect(services.waitForTerminalExit).toHaveBeenCalledWith(closingBackendId, 5_000);
     expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(services.waitForTerminalExit).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(services.closeTerminal).mock.invocationCallOrder[0],
+    expect((services.waitForTerminalExit as any).mock.invocationCallOrder[0]).toBeLessThan(
+      (services.closeTerminal as any).mock.invocationCallOrder[0],
     );
 
     confirmExit(closingBackendId);
@@ -461,8 +477,8 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(result.current.state.layout.activeTabId).toBe(result.current.state.layout.tabs[0].id);
     expect(result.current.state.layout.tabs[0].id).not.toBe(closingTabId);
     expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(services.closeTerminal).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(services.spawnTerminal).mock.invocationCallOrder[1],
+    expect((services.closeTerminal as any).mock.invocationCallOrder[0]).toBeLessThan(
+      (services.spawnTerminal as any).mock.invocationCallOrder[1],
     );
   });
 
@@ -562,8 +578,8 @@ describe("session title activity", () => {
 
     let tab1Id!: string;
     await act(async () => {
-      tab1Id = await result.current.openTab(worktree);
-      await result.current.openTab(featureWorktree);
+      tab1Id = await result.current.openTab(worktree, "tab-1");
+      await result.current.openTab(worktree, "tab-2");
     });
 
     const tab1 = result.current.state.layout.tabs.find((t) => t.id === tab1Id);
@@ -618,5 +634,303 @@ describe("session title activity", () => {
 
     expect(destroySpy).toHaveBeenCalledWith(sessionId);
     destroySpy.mockRestore();
+  });
+});
+
+describe("worktree tab and session isolation", () => {
+  it("maintains independent tabs and sessions per worktree when switching between worktrees", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    let tabA1!: string;
+    let tabA2!: string;
+    let tabB1!: string;
+
+    await act(async () => {
+      tabA1 = await result.current.openTab(worktree, "main-1");
+      tabA2 = await result.current.openTab(worktree, "main-2");
+    });
+
+    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabA1, tabA2]);
+
+    await act(async () => {
+      tabB1 = await result.current.openTab(featureWorktree, "feature-1");
+    });
+
+    // Selecting worktree B must display only worktree B's tabs, without worktree A's tabs
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabB1]);
+
+    // Switching back to worktree A must restore worktree A's tabs without worktree B's tabs
+    await act(async () => {
+      await result.current.ensureTabForWorktree(worktree);
+    });
+
+    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabA1, tabA2]);
+  });
+
+  it("isolates browser tabs to the worktree in which they were created", async () => {
+    (window as any).__TAURI_INTERNALS__ = {
+      invoke: vi.fn(async (cmd: string) => {
+        if (cmd === "cmd_browser_create") {
+          return {
+            browserId: "browser-mock-1",
+            webviewLabel: "browser-webview-1",
+            workspaceId: "ws-main",
+            worktreePath: worktree.path,
+            profileId: "default",
+            generation: 1,
+            url: "http://localhost:3000/docs",
+            title: "Docs",
+            loading: false,
+            canGoBack: false,
+            canGoForward: false,
+            zoomFactor: 1,
+            loadError: null,
+            visible: true,
+          };
+        }
+        return undefined;
+      }),
+    };
+
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    let terminalTabA!: string;
+    let browserTabA!: string;
+    let terminalTabB!: string;
+
+    await act(async () => {
+      terminalTabA = await result.current.openTab(worktree, "terminal-A");
+      browserTabA = await result.current.createBrowserTab("http://localhost:3000/docs", "Docs");
+    });
+
+    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([terminalTabA, browserTabA]);
+
+    await act(async () => {
+      terminalTabB = await result.current.openTab(featureWorktree, "terminal-B");
+    });
+
+    // Worktree B should have its own tab set and not show Worktree A's browser tab
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([terminalTabB]);
+  });
+
+  it("navigates across five parked workspaces with 20 live terminal tabs each as a state-only operation", async () => {
+    const { services } = createServices();
+    const parkedWorktrees: Worktree[] = Array.from({ length: 5 }, (_, i) => ({
+      path: `/repo/parked-${i}`,
+      head: `commit-${i}`,
+      branch: `refs/heads/orca/ws-${i}/feature-${i}`,
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    }));
+
+    const allWorktrees = [worktree, ...parkedWorktrees];
+    const sessions: Record<string, TerminalSession> = {};
+    const worktreeLayouts: Record<string, LayoutState> = {};
+
+    for (let w = 0; w < 5; w++) {
+      const wt = parkedWorktrees[w];
+      const tabs: TerminalTab[] = [];
+      for (let t = 0; t < 20; t++) {
+        const sessionId = `session-parked-${w}-${t}`;
+        const backendSessionId = `backend-parked-${w}-${t}`;
+        const tabId = `tab-parked-${w}-${t}`;
+        sessions[sessionId] = {
+          id: sessionId,
+          cwd: wt.path,
+          workspaceId: "ws-main",
+          worktree: { wsId: `ws-${w}`, slug: `feature-${w}` },
+          backendSessionId,
+          lifecycle: "working",
+        };
+        tabs.push({
+          id: tabId,
+          label: `tab-${w}-${t}`,
+          sessionId,
+        });
+      }
+      worktreeLayouts[wt.path] = createLayoutState(tabs, tabs[0].id);
+    }
+
+    const primaryTab: TerminalTab = { id: "tab-main", label: "main", sessionId: "session-main" };
+    sessions["session-main"] = restoredSession("session-main", "restored-main-backend", worktree.path);
+
+    const initialState: WorkspaceState = {
+      worktrees: allWorktrees,
+      activeWorktreePath: worktree.path,
+      sessions,
+      layout: createLayoutState([primaryTab], primaryTab.id),
+      worktreeLayouts,
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: allWorktrees, services }),
+    );
+
+    act(() => {
+      result.current.restoreWorkspace(initialState);
+    });
+
+    expect(Object.keys(result.current.state.worktreeLayouts ?? {})).toHaveLength(5);
+    for (let w = 0; w < 5; w++) {
+      expect(result.current.state.worktreeLayouts![parkedWorktrees[w].path].tabs).toHaveLength(20);
+    }
+    expect(Object.keys(result.current.state.sessions)).toHaveLength(101);
+
+    (services.spawnTerminal as any).mockClear();
+    (services.closeTerminal as any).mockClear();
+    (services.waitForTerminalExit as any).mockClear();
+    (services.getTerminalCwd as any).mockClear();
+    (services.ensureTerminalEvents as any).mockClear();
+
+    // 1. Activate parked workspace 0 via ensureTabForWorktree
+    let activeTabId!: string;
+    await act(async () => {
+      activeTabId = await result.current.ensureTabForWorktree(parkedWorktrees[0]);
+    });
+    expect(activeTabId).toBe("tab-parked-0-0");
+    expect(result.current.state.activeWorktreePath).toBe(parkedWorktrees[0].path);
+    expect(result.current.state.layout.tabs).toHaveLength(20);
+    expect(result.current.state.layout.activeTabId).toBe("tab-parked-0-0");
+
+    // Switch tabs within active workspace 0
+    act(() => {
+      result.current.activateTab("tab-parked-0-5");
+    });
+    expect(result.current.state.layout.activeTabId).toBe("tab-parked-0-5");
+    act(() => {
+      result.current.activateTab("tab-parked-0-19");
+    });
+    expect(result.current.state.layout.activeTabId).toBe("tab-parked-0-19");
+
+    // 2. Navigate through all remaining parked workspaces (1 through 4)
+    for (let w = 1; w < 5; w++) {
+      const wt = parkedWorktrees[w];
+      await act(async () => {
+        activeTabId = await result.current.ensureTabForWorktree(wt);
+      });
+      expect(activeTabId).toBe(`tab-parked-${w}-0`);
+      expect(result.current.state.activeWorktreePath).toBe(wt.path);
+      expect(result.current.state.layout.tabs).toHaveLength(20);
+      expect(result.current.state.layout.activeTabId).toBe(`tab-parked-${w}-0`);
+
+      // Activate an internal tab in each workspace
+      const targetTabId = `tab-parked-${w}-${(w * 3) % 20}`;
+      act(() => {
+        result.current.activateTab(targetTabId);
+      });
+      expect(result.current.state.layout.activeTabId).toBe(targetTabId);
+    }
+
+    // 3. Jump directly to a tab in parked workspace 2 via activateTab cross-workspace activation
+    act(() => {
+      result.current.activateTab("tab-parked-2-14");
+    });
+    expect(result.current.state.activeWorktreePath).toBe(parkedWorktrees[2].path);
+    expect(result.current.state.layout.activeTabId).toBe("tab-parked-2-14");
+    expect(result.current.state.layout.tabs).toHaveLength(20);
+
+    // 4. Return to parked workspace 0 via ensureTabForWorktree and verify remembered active tab
+    await act(async () => {
+      activeTabId = await result.current.ensureTabForWorktree(parkedWorktrees[0]);
+    });
+    expect(activeTabId).toBe("tab-parked-0-19");
+    expect(result.current.state.activeWorktreePath).toBe(parkedWorktrees[0].path);
+    expect(result.current.state.layout.activeTabId).toBe("tab-parked-0-19");
+    expect(result.current.state.layout.tabs).toHaveLength(20);
+
+    // Explicit assertions verifying zero side-effects and pure state transitions
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(services.closeTerminal).not.toHaveBeenCalled();
+    expect(services.waitForTerminalExit).not.toHaveBeenCalled();
+    expect(services.ensureTerminalEvents).not.toHaveBeenCalled();
+    expect(services.getTerminalCwd).not.toHaveBeenCalled();
+
+    // Verify all 101 live sessions remain intact with valid backend metadata
+    expect(Object.keys(result.current.state.sessions)).toHaveLength(101);
+    for (let w = 0; w < 5; w++) {
+      for (let t = 0; t < 20; t++) {
+        const session = result.current.state.sessions[`session-parked-${w}-${t}`];
+        expect(session).toBeDefined();
+        expect(session.backendSessionId).toBe(`backend-parked-${w}-${t}`);
+        expect(session.cwd).toBe(parkedWorktrees[w].path);
+      }
+    }
+  });
+
+  it("creates a replacement terminal tab and closes browser when closing the sole browser tab", async () => {
+    const closeBrowserSpy = vi.spyOn(browserTauri, "closeBrowser").mockResolvedValue(undefined);
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree], services }),
+    );
+
+    const singleBrowserTab: BrowserTab = {
+      kind: "browser",
+      id: "tab-browser-1",
+      label: "Docs",
+      browserId: "browser-123",
+      url: "http://localhost:3000/docs",
+      worktreePath: worktree.path,
+    };
+
+    const singleBrowserState: WorkspaceState = {
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {},
+      layout: {
+        tabs: [singleBrowserTab],
+        activeTabId: singleBrowserTab.id,
+        layoutsByTabId: {
+          [singleBrowserTab.id]: {
+            root: { type: "leaf", leafId: "leaf-browser" },
+            activeLeafId: "leaf-browser",
+            expandedLeafId: null,
+            sessionIdsByLeafId: {},
+          },
+        },
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    act(() => {
+      result.current.restoreWorkspace(singleBrowserState);
+    });
+
+    expect(result.current.state.layout.tabs).toHaveLength(1);
+    expect(result.current.state.layout.tabs[0].kind).toBe("browser");
+
+    await act(async () => {
+      await result.current.closeTab("tab-browser-1");
+    });
+
+    expect(closeBrowserSpy).toHaveBeenCalledWith("browser-123");
+    expect(result.current.state.layout.tabs).toHaveLength(1);
+    const replacementTab = result.current.state.layout.tabs[0];
+    expect(replacementTab.kind).not.toBe("browser");
+    if (replacementTab.kind !== "browser") {
+      expect(replacementTab.sessionId).toBeDefined();
+      const session = result.current.state.sessions[replacementTab.sessionId];
+      expect(session).toBeDefined();
+      expect(session.backendSessionId).toBeDefined();
+    }
+    closeBrowserSpy.mockRestore();
   });
 });

@@ -1,0 +1,11 @@
+> I read this as verification and closure - ensuring all requirements and constraints are satisfied, evidence is written to disk, tests are green, and stopping.
+
+### Deliverable Summary
+
+- **Implementation**: In `src-tauri/src/remote/auth.rs`, token validation now throttles disk persistence of `last_seen_at` to `>=60s` (`LAST_SEEN_PERSIST_INTERVAL`) while immediate persistence is preserved for pairing and revocations.
+- **Evidence Document**: Written to `/Users/indo/code/project/orca-lite/docs/backend-perf/fix-P-auth-persist.md` including the RED test failure tail, GREEN test pass tail, and exact `file:line` references.
+- **Verification Command**:
+  ```bash
+  cargo test --manifest-path /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml --lib remote::auth
+  ```
+  Result: `2 passed; 0 failed; 0 ignored` (and `8 passed; 0 failed` across `remote::`).

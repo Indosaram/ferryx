@@ -47,6 +47,7 @@ export type TerminalSignal = "interrupt" | "terminate" | "kill";
 export type TerminalSessionSummary = {
   sessionId: string;
   worktreePath: string | null;
+  daemonEpoch?: string | null;
 };
 
 export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed";
@@ -64,6 +65,8 @@ export type TerminalSession = {
   backendSessionId: string | null;
   lifecycle: TerminalLifecycle;
   ownerId?: string | null;
+  daemonEpoch?: string | null;
+  lastOutputSequence?: string | null;
 };
 
 export type TerminalTab = {
@@ -111,6 +114,9 @@ export type BrowserTab = {
   loading?: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  profileId?: string;
+  worktreePath?: string;
+  worktreeLabel?: string;
   pinned?: boolean;
 };
 
@@ -129,6 +135,7 @@ export type BrowserSessionSummary = {
   browserId: string;
   webviewLabel: string;
   workspaceId?: string | null;
+  profileId?: string | null;
   url: string;
   title?: string | null;
   visible: boolean;
@@ -146,6 +153,65 @@ export type NestedSplit = {
   tabId: string;
 };
 
+export type TerminalPaneContent = {
+  readonly kind: "terminal";
+  readonly sessionId: string;
+};
+
+export type BrowserPaneState = {
+  readonly browserId: string;
+  readonly url: string;
+  readonly title?: string | null;
+  readonly loading?: boolean;
+  readonly canGoBack?: boolean;
+  readonly canGoForward?: boolean;
+  readonly profileId?: string;
+  readonly worktreePath?: string;
+  readonly worktreeLabel?: string;
+};
+
+export type BrowserPaneContent = {
+  readonly kind: "browser";
+  readonly browser?: BrowserPaneState;
+  readonly browserId?: string;
+  readonly url?: string;
+  readonly title?: string | null;
+  readonly loading?: boolean;
+  readonly canGoBack?: boolean;
+  readonly canGoForward?: boolean;
+  readonly profileId?: string;
+  readonly worktreePath?: string;
+  readonly worktreeLabel?: string;
+};
+
+export type PaneContent = TerminalPaneContent | BrowserPaneContent;
+
+export function createBrowserPaneContent(browser: BrowserPaneState): BrowserPaneContent {
+  const content: BrowserPaneContent = {
+    kind: "browser",
+    browser: { ...browser },
+  };
+  Object.defineProperties(content, {
+    browserId: { get() { return this.browser.browserId; }, enumerable: false },
+    url: { get() { return this.browser.url; }, enumerable: false },
+    title: { get() { return this.browser.title; }, enumerable: false },
+    loading: { get() { return this.browser.loading; }, enumerable: false },
+    canGoBack: { get() { return this.browser.canGoBack; }, enumerable: false },
+    canGoForward: { get() { return this.browser.canGoForward; }, enumerable: false },
+    profileId: { get() { return this.browser.profileId; }, enumerable: false },
+    worktreePath: { get() { return this.browser.worktreePath; }, enumerable: false },
+    worktreeLabel: { get() { return this.browser.worktreeLabel; }, enumerable: false },
+  });
+  return content;
+}
+
+export function createTerminalPaneContent(sessionId: string): TerminalPaneContent {
+  return {
+    kind: "terminal",
+    sessionId,
+  };
+}
+
 /**
  * The split arrangement inside a single terminal tab. This is intentionally separate
  * from TabGroupLayoutNode: Orca keeps terminal panes inside a tab and split tab groups
@@ -159,6 +225,8 @@ export type TabPaneLayout = {
   expandedLeafId: string | null;
   /** Frontend-local terminal session rendered by each leaf of `root`. */
   sessionIdsByLeafId: Record<string, string>;
+  /** Authoritative content map for each leaf of `root`. */
+  contentsByLeafId?: Record<string, PaneContent>;
 };
 
 export type TabGroup = {
@@ -209,6 +277,27 @@ export type ActiveAgent = {
 export type TerminalOutputPayload = {
   sessionId: string;
   data: string;
+  sequence?: string | null;
+  daemonEpoch?: string | null;
+};
+
+export type TerminalReplayGap = {
+  requestedAfterSequence: string;
+  availableFromSequence: string;
+};
+
+export type AttachTerminalRequest = {
+  sessionId: string;
+  afterSequence?: string | null;
+};
+
+export type AttachTerminalResponse = {
+  sessionId: string;
+  daemonEpoch?: string | null;
+  historyStartSequence?: string | null;
+  historyEndSequence?: string | null;
+  history: string;
+  gap?: TerminalReplayGap | null;
 };
 
 export type TerminalLifecyclePayload = {
@@ -280,6 +369,14 @@ export interface PlaySoundResult {
   reason?: string | null;
 }
 
+export interface NotificationBadgeResult {
+  readonly supported: boolean;
+  readonly count: number;
+  readonly badgeLabel?: string;
+}
+
+export type SetBadgeCountResult = NotificationBadgeResult;
+
 export interface PickedAudioFile {
   path: string;
   displayName?: string;
@@ -306,6 +403,7 @@ export interface PersistedTerminalTabState {
   primarySessionId: string;
   paneTree: PaneNode;
   sessionIdsByLeafId: Record<string, string>;
+  contentsByLeafId?: Record<string, PaneContent>;
   activeLeafId: string | null;
   expandedLeafId: string | null;
 }
@@ -317,6 +415,9 @@ export interface PersistedBrowserTabState {
   loading?: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  profileId?: string;
+  worktreePath?: string;
+  worktreeLabel?: string;
 }
 
 /**
@@ -337,6 +438,7 @@ export interface PersistedTab {
   worktreePath?: string;
   paneTree?: PaneNode;
   sessionIdsByLeafId?: Record<string, string>;
+  contentsByLeafId?: Record<string, PaneContent>;
   activeLeafId?: string | null;
   expandedLeafId?: string | null;
 }
@@ -356,6 +458,7 @@ export interface PersistedLayout {
   tabGroups?: PersistedTabGroup[];
   tabGroupLayout?: TabGroupLayoutNode | null;
   focusedGroupId?: string | null;
+  layoutsByTabId?: Record<string, TabPaneLayout>;
 }
 
 export interface PersistedTerminalSession {
@@ -370,6 +473,8 @@ export interface PersistedTerminalSession {
   lastCommand?: string;
   recentScrollback?: string;
   createdAt: number;
+  daemonEpoch?: string | null;
+  lastOutputSequence?: string | null;
 }
 
 export interface PersistedWorkspace {
@@ -378,6 +483,7 @@ export interface PersistedWorkspace {
   worktrees: PersistedWorktree[];
   activeWorktreePath: string | null;
   layout: PersistedLayout;
+  worktreeLayouts?: Record<string, PersistedLayout>;
   terminalSessions: Record<string, PersistedTerminalSession>;
 }
 

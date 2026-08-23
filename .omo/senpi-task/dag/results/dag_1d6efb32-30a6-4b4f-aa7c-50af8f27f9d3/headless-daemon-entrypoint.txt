@@ -1,0 +1,41 @@
+> I read this as implementing the independent Ferryx daemon entrypoint and checked launchd control with tests - assessing the existing code, writing red tests, implementing the required entrypoint and launchd changes, and verifying green.
+
+### Summary of Changes
+
+1. **`src-tauri/src/main.rs`**:
+   - Added testable argument routing with `LaunchMode` and `parse_launch_mode`.
+   - `--daemon` executes `DaemonServer` headlessly using a Tokio runtime without constructing a Tauri GUI context or window.
+   - Normal invocation retains default Tauri GUI application initialization (`ferryx_lib::run()`).
+   - Implemented exact readiness signaling via `FERRYX_DAEMON_READY` emitted to stdout once the server listener is bound and accepting.
+
+2. **`src-tauri/src/daemon/launchd.rs`**:
+   - Preserved `com.rorca.daemon` compatibility identifier.
+   - Refactored `install_launchd_agent` and `uninstall_launchd_agent` (and added path-parameterized variants) to check `launchctl` command execution status and stderr/stdout to surface `launchctl` failures rather than discarding them.
+   - Added unit tests for plist generation and launchctl failure detection.
+
+3. **`src-tauri/tests/daemon_persistence_contract.rs`**:
+   - Added deterministic integration test `test_daemon_cli_selection_headless_readiness_and_cancellation` that executes the `ferryx` binary with `--daemon`, awaits the exact `FERRYX_DAEMON_READY` readiness signal with zero polling/sleep loops, performs protocol handshake/ping, and terminates with a cancellation signal.
+   - Added tests for launchd plist compatibility and idempotent uninstallation.
+
+---
+
+### RED & GREEN Test Cycle
+
+#### RED Run
+- **Command**: `cargo test --manifest-path src-tauri/Cargo.toml --test daemon_persistence_contract -- --test-threads=1`
+- **Exit Code**: `101`
+- **Failure**: `test_daemon_cli_selection_headless_readiness_and_cancellation` timed out awaiting daemon readiness because `main.rs` did not handle `--daemon` headlessly.
+
+#### GREEN Run
+- **Command**: `cargo test --manifest-path src-tauri/Cargo.toml --test daemon_persistence_contract -- --test-threads=1`
+- **Exit Code**: `0`
+- **Result**: `5 passed; 0 failed; finished in 0.93s`
+- **Command**: `cargo check --manifest-path src-tauri/Cargo.toml --bin ferryx`
+- **Exit Code**: `0`
+
+---
+
+### Files Changed
+- `src-tauri/src/main.rs`
+- `src-tauri/src/daemon/launchd.rs`
+- `src-tauri/tests/daemon_persistence_contract.rs`

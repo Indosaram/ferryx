@@ -129,9 +129,10 @@ export function WorktreeDeleteDialog({
         </header>
 
         <div className="space-y-4 p-4 text-xs">
-          <p className="text-muted-foreground">
-            Review the branch state before deleting <span className="font-mono text-foreground">{worktree.path}</span>.
-          </p>
+          <p className="text-muted-foreground">Review the branch state before deleting this worktree.</p>
+          <div data-testid="worktree-delete-path" className="break-all rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-foreground">
+            {worktree.path}
+          </div>
 
           {busy && !preview ? <div className="rounded-md border border-border bg-background/50 px-3 py-4 text-muted-foreground">Loading deletion preview…</div> : null}
 
@@ -141,7 +142,11 @@ export function WorktreeDeleteDialog({
               <PreviewRow label="HEAD" value={preview.head} mono />
               <PreviewRow label="Upstream" value={preview.upstream ?? "None"} />
               <PreviewRow label="Merge state" value={preview.merged ? "Merged" : "Not merged"} />
-              <PreviewRow label="Divergence" value={`${preview.ahead ?? "?"} ahead · ${preview.behind ?? "?"} behind`} />
+              <PreviewRow
+                label="Divergence"
+                value={preview.upstream === null ? "No upstream" : `${preview.ahead ?? "—"} ahead · ${preview.behind ?? "—"} behind`}
+                dataState={preview.upstream === null ? "no-upstream" : "upstream"}
+              />
             </div>
           ) : null}
 
@@ -160,7 +165,7 @@ export function WorktreeDeleteDialog({
                 type="button"
                 disabled={busy}
                 onClick={() => void handleDestructiveDelete()}
-                className="w-full rounded-md bg-destructive px-3 py-2 font-semibold text-white disabled:opacity-50"
+                className="w-full rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
               >
                 Delete unmerged branch permanently
               </button>
@@ -183,7 +188,7 @@ export function WorktreeDeleteDialog({
                 type="button"
                 disabled={busy || !preview}
                 onClick={() => void handleSafeDelete()}
-                className="rounded-md bg-destructive px-3 py-2 font-semibold text-white disabled:opacity-50"
+                className="rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
               >
                 Delete worktree and branch
               </button>
@@ -195,9 +200,9 @@ export function WorktreeDeleteDialog({
   );
 }
 
-function PreviewRow({ label, value, mono = false, icon }: { label: string; value: string; mono?: boolean; icon?: React.ReactNode }) {
+function PreviewRow({ label, value, mono = false, icon, dataState }: { label: string; value: string; mono?: boolean; icon?: React.ReactNode; dataState?: string }) {
   return (
-    <div className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-b-0">
+    <div data-testid={dataState ? "worktree-delete-divergence" : undefined} data-state={dataState} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-b-0">
       <span className="flex w-24 shrink-0 items-center gap-1 text-muted-foreground">{icon}{label}</span>
       <span className={`min-w-0 flex-1 truncate text-right text-foreground ${mono ? "font-mono" : ""}`}>{value}</span>
     </div>

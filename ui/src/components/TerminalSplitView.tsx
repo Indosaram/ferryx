@@ -17,21 +17,24 @@ import {
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { Columns2, Rows2, X } from "lucide-react";
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import type { ActivitySummary } from "../lib/activity";
 import type {
+  BrowserTab,
   LayoutState,
+  PaneContent,
   TabGroup,
   TabGroupLayoutNode,
   TabPaneLayout,
   TerminalSession,
   WorkspaceTab,
 } from "../lib/types";
-import { normalizeLayout } from "../state/layout";
+import { defaultContentForTab, normalizeLayout, toPaneContent } from "../state/layout";
 import type { PaneDirection, PaneNode } from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
 import { TabBar } from "./TabBar";
+import { PaneEdgeDropZones } from "./tab-dnd/PaneEdgeDropZones";
 import { TabGroupDropSurface } from "./tab-dnd/TabGroupDropSurface";
 import {
   dropPriority,
@@ -47,6 +50,36 @@ import { TerminalPane } from "./TerminalPane";
 import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
+
+export const FALLBACK_SESSION: TerminalSession = {
+  id: "",
+  cwd: "",
+  worktreePath: "",
+  workspaceId: "",
+  worktree: null,
+  backendSessionId: null,
+  lifecycle: "working",
+};
+
+export const workspaceCollisionDetection: CollisionDetection = (args) => {
+  const activeData = args.active.data.current;
+  if (!isWorkspaceDragData(activeData)) return pointerWithin(args);
+  const containerDataById = new Map<UniqueIdentifier, unknown>();
+  for (const container of args.droppableContainers) {
+    containerDataById.set(container.id, container.data.current);
+  }
+  return pointerWithin(args)
+    .filter((collision) => {
+      const data = containerDataById.get(collision.id);
+      return isWorkspaceDropData(data) && dropPriority(activeData, data) < 100;
+    })
+    .sort((left, right) => {
+      const leftData = containerDataById.get(left.id);
+      const rightData = containerDataById.get(right.id);
+      if (!isWorkspaceDropData(leftData) || !isWorkspaceDropData(rightData)) return 0;
+      return dropPriority(activeData, leftData) - dropPriority(activeData, rightData);
+    });
+};
 
 type SplitPaneOptions = { position?: "first" | "second" };
 
@@ -66,12 +99,24 @@ type TerminalSplitViewProps = {
     targetGroupId: string,
     direction: PaneDirection,
     position?: "first" | "second",
+    targetPane?: { tabId: string; leafId: string },
   ) => void;
-  onDetachPaneToTab?: (sourceTabId: string, leafId: string, targetGroupId?: string, targetIndex?: number) => void;
+  onDetachPaneToTab?: (
+    sourceTabId: string,
+    leafId: string,
+    targetGroupId?: string,
+    targetIndex?: number,
+  ) => string | null | void;
   onRenameTab?: (tabId: string, label: string) => void;
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab?: () => void;
   onAddBrowserTab?: (url?: string) => void;
+  onAddMarkdown?: () => void;
+  onAddMobileEmulator?: () => void;
+  onOpenSettings?: () => void;
+  agents?: Array<{ name: string; command: string; args: string }>;
+  onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+  defaultAgentId?: string | null;
   onNavigateBrowserTab?: (tabId: string, url: string) => void;
   onReloadBrowserTab?: (tabId: string) => void;
   onSplitPane?: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
@@ -110,6 +155,12 @@ export function TerminalSplitView({
   onToggleTabPin,
   onAddTab = () => undefined,
   onAddBrowserTab = () => undefined,
+  onAddMarkdown,
+  onAddMobileEmulator,
+  onOpenSettings,
+  agents,
+  onLaunchAgent,
+  defaultAgentId,
   onNavigateBrowserTab = () => undefined,
   onReloadBrowserTab = () => undefined,
   onSplitPane = () => undefined,
@@ -132,34 +183,15 @@ export function TerminalSplitView({
   const firstGroupId = firstTabGroupId(groupLayout);
   const dragSnapshotRef = useRef<DragFocusSnapshot | null>(null);
   const activeDragRef = useRef<WorkspaceDragData | null>(null);
+  const [activeDrag, setActiveDrag] = useState<WorkspaceDragData | null>(null);
   const previewedTabIdRef = useRef<string | null>(null);
-  const [, forceDragOverlay] = React.useReducer((value) => value + 1, 0);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 12 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const collisionDetection = useMemo<CollisionDetection>(
-    () => (args) => {
-      const activeData = args.active.data.current;
-      if (!isWorkspaceDragData(activeData)) return pointerWithin(args);
-      const dataFor = (id: UniqueIdentifier) =>
-        args.droppableContainers.find((container) => container.id === id)?.data.current;
-      return pointerWithin(args)
-        .filter((collision) => {
-          const data = dataFor(collision.id);
-          return isWorkspaceDropData(data) && dropPriority(activeData, data) < 100;
-        })
-        .sort((left, right) => {
-          const leftData = dataFor(left.id);
-          const rightData = dataFor(right.id);
-          if (!isWorkspaceDropData(leftData) || !isWorkspaceDropData(rightData)) return 0;
-          return dropPriority(activeData, leftData) - dropPriority(activeData, rightData);
-        });
-    },
-    [],
-  );
+  const collisionDetection = workspaceCollisionDetection;
 
   const splitTerminalTab = (tabId: string, direction: PaneDirection) => {
     const tab = normalizedLayout.tabs.find((candidate) => candidate.id === tabId);
@@ -176,21 +208,21 @@ export function TerminalSplitView({
 
   const clearDragState = () => {
     activeDragRef.current = null;
+    setActiveDrag(null);
     dragSnapshotRef.current = null;
     previewedTabIdRef.current = null;
-    forceDragOverlay();
   };
 
   const handleDragStart = (event: DragStartEvent) => {
     const data = event.active.data.current;
     if (!isWorkspaceDragData(data)) return;
     activeDragRef.current = data;
+    setActiveDrag(data);
     dragSnapshotRef.current = {
       activeTabId: normalizedLayout.activeTabId,
       focusedGroupId: normalizedLayout.focusedGroupId ?? null,
     };
     previewedTabIdRef.current = null;
-    forceDragOverlay();
   };
 
   const handleDragOver = (event: DragOverEvent) => {
@@ -199,11 +231,19 @@ export function TerminalSplitView({
     if (!active || active.type !== "tab" || !isWorkspaceDropData(overData)) return;
 
     let previewTabId: string | null = null;
-    if (overData.type === "tab") previewTabId = overData.tabId;
+    if (overData.type === "tab" || overData.type === "pane-edge" || overData.type === "pane-leaf") {
+      previewTabId = overData.tabId;
+    }
     if (overData.type === "group-body" || overData.type === "group-edge") {
       previewTabId = groups[overData.groupId]?.activeTabId ?? groups[overData.groupId]?.tabIds[0] ?? null;
     }
-    if (!previewTabId || previewTabId === active.tabId || previewedTabIdRef.current === previewTabId) return;
+    if (
+      !previewTabId ||
+      previewTabId === active.tabId ||
+      previewTabId === normalizedLayout.activeTabId ||
+      previewedTabIdRef.current === previewTabId
+    )
+      return;
     previewedTabIdRef.current = previewTabId;
     onActivateTab(previewTabId);
   };
@@ -227,6 +267,58 @@ export function TerminalSplitView({
       case "move-tab-to-split":
         onMoveTabToSplit?.(command.tabId, command.targetGroupId, command.direction, command.position);
         return Boolean(onMoveTabToSplit);
+      case "move-tab-to-pane-split": {
+        const targetGroupId =
+          Object.values(groups).find((g) => g.tabIds.includes(command.targetTabId))?.id ??
+          firstGroupId ??
+          "";
+        if (command.sourceTabId === command.targetTabId) {
+          onSplitPane(command.targetTabId, command.targetLeafId, command.direction, {
+            position: command.position,
+          });
+          return true;
+        }
+        onMoveTabToSplit?.(
+          command.sourceTabId,
+          targetGroupId,
+          command.direction,
+          command.position,
+          { tabId: command.targetTabId, leafId: command.targetLeafId },
+        );
+        return Boolean(onMoveTabToSplit);
+      }
+      case "move-pane-to-pane-split": {
+        const targetGroupId =
+          Object.values(groups).find((g) => g.tabIds.includes(command.targetTabId))?.id ??
+          firstGroupId ??
+          "";
+        const sourceLayout = normalizedLayout.layoutsByTabId?.[command.sourceTabId];
+        const isSinglePane = !sourceLayout || sourceLayout.root.type === "leaf";
+        if (isSinglePane) {
+          onMoveTabToSplit?.(
+            command.sourceTabId,
+            targetGroupId,
+            command.direction,
+            command.position,
+            { tabId: command.targetTabId, leafId: command.targetLeafId },
+          );
+          return Boolean(onMoveTabToSplit);
+        }
+        const sourceGroupId =
+          Object.values(groups).find((g) => g.tabIds.includes(command.sourceTabId))?.id ??
+          firstGroupId ??
+          "";
+        const detachedTabId = onDetachPaneToTab?.(command.sourceTabId, command.sourceLeafId, sourceGroupId);
+        if (typeof detachedTabId !== "string" || !detachedTabId) return false;
+        onMoveTabToSplit?.(
+          detachedTabId,
+          targetGroupId,
+          command.direction,
+          command.position,
+          { tabId: command.targetTabId, leafId: command.targetLeafId },
+        );
+        return true;
+      }
       case "detach-pane-to-tab":
         onDetachPaneToTab?.(command.sourceTabId, command.leafId, command.targetGroupId, command.targetIndex);
         return Boolean(onDetachPaneToTab);
@@ -262,6 +354,12 @@ export function TerminalSplitView({
     onToggleTabPin,
     onAddTab,
     onAddBrowserTab,
+    onAddMarkdown,
+    onAddMobileEmulator,
+    onOpenSettings,
+    agents,
+    onLaunchAgent,
+    defaultAgentId,
     onNavigateBrowserTab,
     onReloadBrowserTab,
     onSplitPane,
@@ -277,9 +375,9 @@ export function TerminalSplitView({
     searchLeafId,
     onCloseSearch,
     splitTerminalTab,
+    browserPanesVisible: activeDrag === null,
   };
 
-  const activeDrag = activeDragRef.current;
   const overlayLabel =
     activeDrag?.type === "tab"
       ? normalizedLayout.tabs.find((tab) => tab.id === activeDrag.tabId)?.label ?? "Tab"
@@ -314,6 +412,12 @@ export function TerminalSplitView({
             onClose={onCloseTab}
             onAdd={onAddTab}
             onAddBrowser={onAddBrowserTab}
+            onAddMarkdown={onAddMarkdown}
+            onAddMobileEmulator={onAddMobileEmulator}
+            onOpenSettings={onOpenSettings}
+            agents={agents}
+            onLaunchAgent={onLaunchAgent}
+            defaultAgentId={defaultAgentId}
             leadingSpacer={leadingSpacer}
           />
         )}
@@ -402,6 +506,12 @@ type TabGroupViewProps = {
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab: () => void;
   onAddBrowserTab: (url?: string) => void;
+  onAddMarkdown?: () => void;
+  onAddMobileEmulator?: () => void;
+  onOpenSettings?: () => void;
+  agents?: Array<{ name: string; command: string; args: string }>;
+  onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+  defaultAgentId?: string | null;
   onNavigateBrowserTab: (tabId: string, url: string) => void;
   onReloadBrowserTab: (tabId: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
@@ -410,6 +520,7 @@ type TabGroupViewProps = {
     targetGroupId: string,
     direction: PaneDirection,
     position?: "first" | "second",
+    targetPane?: { tabId: string; leafId: string },
   ) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number) => void;
@@ -422,6 +533,7 @@ type TabGroupViewProps = {
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   splitTerminalTab: (tabId: string, direction: PaneDirection) => void;
+  browserPanesVisible: boolean;
 };
 
 function TabGroupView({
@@ -439,6 +551,12 @@ function TabGroupView({
   onToggleTabPin,
   onAddTab,
   onAddBrowserTab,
+  onAddMarkdown,
+  onAddMobileEmulator,
+  onOpenSettings,
+  agents,
+  onLaunchAgent,
+  defaultAgentId,
   onNavigateBrowserTab,
   onReloadBrowserTab,
   onSplitPane,
@@ -454,6 +572,7 @@ function TabGroupView({
   searchLeafId,
   onCloseSearch,
   splitTerminalTab,
+  browserPanesVisible,
 }: TabGroupViewProps) {
   const group = groups[groupId];
   if (!group) return null;
@@ -504,24 +623,47 @@ function TabGroupView({
           focusGroup();
           onAddBrowserTab(url);
         }}
+        onAddMarkdown={
+          onAddMarkdown
+            ? () => {
+                focusGroup();
+                onAddMarkdown();
+              }
+            : undefined
+        }
+        onAddMobileEmulator={
+          onAddMobileEmulator
+            ? () => {
+                focusGroup();
+                onAddMobileEmulator();
+              }
+            : undefined
+        }
+        onOpenSettings={onOpenSettings}
+        agents={agents}
+        defaultAgentId={defaultAgentId}
+        onLaunchAgent={
+          onLaunchAgent
+            ? (agent) => {
+                focusGroup();
+                onLaunchAgent(agent);
+              }
+            : undefined
+        }
         leadingSpacer={leadingSpacer}
       />
 
       <TabGroupDropSurface groupId={groupId}>
-        {!activeTab ? null : activeTab.kind === "browser" ? (
-          <BrowserPane
-            tab={activeTab}
-            visible={true}
-            onNavigate={(url) => onNavigateBrowserTab(activeTab.id, url)}
-            onReload={() => onReloadBrowserTab(activeTab.id)}
-          />
-        ) : activeTabLayout ? (
+        {!activeTab ? null : activeTabLayout ? (
           <PaneRenderer
             node={activeTabLayout.root}
             tab={activeTab}
             tabLayout={activeTabLayout}
             sessions={sessions}
             groupFocused={isFocused}
+            browserPanesVisible={browserPanesVisible}
+            onNavigateBrowserTab={onNavigateBrowserTab}
+            onReloadBrowserTab={onReloadBrowserTab}
             path=""
             searchLeafId={searchLeafId}
             onCloseSearch={onCloseSearch}
@@ -542,11 +684,13 @@ function TabGroupView({
 function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPaneLayout {
   const isBrowserTab = tab.kind === "browser";
   const fallbackLeafId = `leaf-default-${tab.id}`;
+  const defaultContent = defaultContentForTab(tab);
   return layout.layoutsByTabId?.[tab.id] ?? {
     root: { type: "leaf", leafId: fallbackLeafId },
     activeLeafId: fallbackLeafId,
     expandedLeafId: null,
     sessionIdsByLeafId: { [fallbackLeafId]: isBrowserTab ? "" : tab.sessionId },
+    contentsByLeafId: { [fallbackLeafId]: defaultContent },
   };
 }
 
@@ -569,9 +713,12 @@ type PaneRendererProps = {
   tabLayout: TabPaneLayout;
   sessions: Record<string, TerminalSession>;
   groupFocused: boolean;
+  browserPanesVisible: boolean;
   path: string;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
+  onNavigateBrowserTab: (tabId: string, url: string) => void;
+  onReloadBrowserTab: (tabId: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number) => void;
@@ -581,29 +728,29 @@ type PaneRendererProps = {
   onBell?: (sessionId: string, tabId: string) => void;
 };
 
-function PaneRenderer(props: PaneRendererProps) {
-  const { node, tab, tabLayout, sessions, path } = props;
+const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) {
+  const { node, tab, tabLayout, sessions, path, browserPanesVisible, onNavigateBrowserTab, onReloadBrowserTab } = props;
   if (node.type === "leaf") {
+    const rawContent = tabLayout.contentsByLeafId?.[node.leafId];
     const defaultSessionId = tab.kind === "browser" ? "" : tab.sessionId;
     const sessionId = tabLayout.sessionIdsByLeafId[node.leafId] ?? defaultSessionId;
-    const session = sessions[sessionId] ?? {
-      id: sessionId,
-      cwd: "",
-      worktreePath: "",
-      workspaceId: "",
-      worktree: null,
-      backendSessionId: null,
-      lifecycle: "working" as const,
-    };
+    const content = rawContent
+      ? toPaneContent(rawContent, sessionId)
+      : defaultContentForTab(tab, sessionId);
+    const session = sessions[sessionId] ?? FALLBACK_SESSION;
     return (
       <PaneLeafView
         leafId={node.leafId}
         tab={tab}
+        content={content}
         session={session}
         isOnlyLeaf={tabLayout.root.type === "leaf"}
         isActive={props.groupFocused && tabLayout.activeLeafId === node.leafId}
+        browserPanesVisible={browserPanesVisible}
         searchOpen={props.searchLeafId === node.leafId}
         onCloseSearch={props.onCloseSearch}
+        onNavigateBrowserTab={onNavigateBrowserTab}
+        onReloadBrowserTab={onReloadBrowserTab}
         onSplitPane={props.onSplitPane}
         onClosePane={props.onClosePane}
         onFocusPane={props.onFocusPane}
@@ -635,16 +782,20 @@ function PaneRenderer(props: PaneRendererProps) {
       </div>
     </div>
   );
-}
+});
 
 type PaneLeafViewProps = {
   leafId: string;
   tab: WorkspaceTab;
+  content: PaneContent;
   session: TerminalSession;
   isOnlyLeaf: boolean;
   isActive: boolean;
+  browserPanesVisible: boolean;
   searchOpen?: boolean;
   onCloseSearch?: () => void;
+  onNavigateBrowserTab: (tabId: string, url: string) => void;
+  onReloadBrowserTab: (tabId: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
@@ -652,14 +803,18 @@ type PaneLeafViewProps = {
   onBell?: (sessionId: string, tabId: string) => void;
 };
 
-function PaneLeafView({
+const PaneLeafView = React.memo(function PaneLeafView({
   leafId,
   tab,
+  content,
   session,
   isOnlyLeaf,
   isActive,
+  browserPanesVisible,
   searchOpen,
   onCloseSearch,
+  onNavigateBrowserTab,
+  onReloadBrowserTab,
   onSplitPane,
   onClosePane,
   onFocusPane,
@@ -673,8 +828,13 @@ function PaneLeafView({
   });
   const draggable = useDraggable({
     id: `pane:${tab.id}:${leafId}`,
-    disabled: isOnlyLeaf,
-    data: { type: "pane", tabId: tab.id, leafId },
+    disabled: false,
+    data: {
+      type: "pane",
+      tabId: tab.id,
+      sourcePaneId: leafId,
+      sourceSessionId: content.kind === "terminal" ? session.id : "",
+    },
   });
 
   return (
@@ -689,6 +849,7 @@ function PaneLeafView({
       data-dnd-type="pane-leaf"
       onClick={() => onFocusPane(tab.id, leafId)}
     >
+      <PaneEdgeDropZones tabId={tab.id} leafId={leafId} />
       <div
         className="absolute inset-x-0 top-0 z-20 h-6"
         data-testid="pane-toolbar-hotspot"
@@ -703,9 +864,9 @@ function PaneLeafView({
         ref={draggable.setNodeRef}
         {...draggable.attributes}
         {...draggable.listeners}
-        className={`absolute inset-x-0 top-0 z-30 flex h-6 items-center justify-end border-b border-border/20 bg-background/50 backdrop-blur-md px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none ${
-          isOnlyLeaf ? "cursor-default" : "cursor-grab touch-none active:cursor-grabbing"
-        } ${isHoveredTop ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"} ${draggable.isDragging ? "opacity-30" : ""}`}
+        className={`absolute inset-x-0 top-0 z-30 flex h-6 items-center justify-end border-b border-border/30 bg-background/85 backdrop-blur-md px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
+          isHoveredTop ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
+        } ${draggable.isDragging ? "opacity-30" : ""}`}
         data-testid="pane-toolbar"
         data-dnd-type="pane"
         onMouseEnter={() => setIsHoveredTop(true)}
@@ -754,18 +915,61 @@ function PaneLeafView({
       </div>
 
       <div className="h-full w-full min-h-0 flex-1 overflow-hidden">
-        <TerminalPane
-          session={session}
-          active={isActive}
-          onTitleChange={(title) => onTitleChange(tab.id, title, session.id)}
-          onBell={() => onBell?.(session.id, tab.id)}
-          searchOpen={searchOpen}
-          onCloseSearch={onCloseSearch}
-        />
+        {(() => {
+          switch (content.kind) {
+            case "terminal":
+              return (
+                <TerminalPane
+                  session={session}
+                  active={isActive}
+                  onTitleChange={(title) => onTitleChange(tab.id, title, session.id)}
+                  onBell={() => onBell?.(session.id, tab.id)}
+                  searchOpen={searchOpen}
+                  onCloseSearch={onCloseSearch}
+                />
+              );
+            case "browser": {
+              const browserState = content.browser ?? {
+                browserId: content.browserId ?? "",
+                url: content.url ?? "about:blank",
+                title: content.title ?? null,
+                loading: content.loading ?? false,
+                canGoBack: content.canGoBack ?? false,
+                canGoForward: content.canGoForward ?? false,
+                profileId: content.profileId,
+                worktreePath: content.worktreePath,
+                worktreeLabel: content.worktreeLabel,
+              };
+              const browserTab: BrowserTab = {
+                id: tab.id,
+                kind: "browser",
+                label: (tab.kind === "browser" ? tab.label : browserState.title) || tab.label,
+                browserId: browserState.browserId ?? "",
+                url: browserState.url ?? "",
+                title: browserState.title ?? null,
+                loading: browserState.loading ?? false,
+                canGoBack: browserState.canGoBack ?? false,
+                canGoForward: browserState.canGoForward ?? false,
+                profileId: browserState.profileId,
+                worktreePath: browserState.worktreePath,
+                worktreeLabel: browserState.worktreeLabel,
+                pinned: tab.pinned,
+              };
+              return (
+                <BrowserPane
+                  tab={browserTab}
+                  visible={browserPanesVisible}
+                  onNavigate={(url) => onNavigateBrowserTab(tab.id, url)}
+                  onReload={() => onReloadBrowserTab(tab.id)}
+                />
+              );
+            }
+          }
+        })()}
       </div>
     </div>
   );
-}
+});
 
 type PaneResizeDividerProps = {
   direction: PaneDirection;

@@ -28,6 +28,7 @@ export type EffectiveTerminalSettings = {
 export type ResolvedTerminalSettings = EffectiveTerminalSettings;
 
 export { TERMINAL_SETTINGS_STORAGE_KEY };
+export const TERMINAL_BACKGROUND_STORAGE_KEY = "ferryx.terminal.background";
 export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fontFamily: null,
   macosOptionAsAlt: null,
@@ -112,6 +113,38 @@ export function saveTerminalSettings(
     window.dispatchEvent(new CustomEvent<TerminalSettings>(TERMINAL_SETTINGS_EVENT, { detail: normalized }));
   }
   return normalized;
+}
+
+export function syncTerminalBackground(background: string) {
+  if (typeof document !== "undefined") {
+    document.documentElement.style.setProperty("--terminal", background);
+    const channels = hexColorChannels(background);
+    if (channels) document.documentElement.style.setProperty("--terminal-rgb", channels);
+  }
+  try {
+    browserStorage()?.setItem(TERMINAL_BACKGROUND_STORAGE_KEY, background);
+  } catch {
+  }
+}
+
+export function applyCachedTerminalBackground() {
+  try {
+    const background = browserStorage()?.getItem(TERMINAL_BACKGROUND_STORAGE_KEY) ?? null;
+    if (background && typeof document !== "undefined") {
+      document.documentElement.style.setProperty("--terminal", background);
+      const channels = hexColorChannels(background);
+      if (channels) document.documentElement.style.setProperty("--terminal-rgb", channels);
+    }
+    return background;
+  } catch {
+    return null;
+  }
+}
+
+function hexColorChannels(background: string) {
+  const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(background);
+  if (!match) return null;
+  return `${Number.parseInt(match[1], 16)} ${Number.parseInt(match[2], 16)} ${Number.parseInt(match[3], 16)}`;
 }
 
 export function resolveTerminalSettings(
@@ -237,6 +270,10 @@ export function useTerminalSettings() {
     () => resolveTerminalSettings(localSettings, nativePreferences),
     [localSettings, nativePreferences],
   );
+
+  useEffect(() => {
+    syncTerminalBackground(settings.theme.background);
+  }, [settings.theme.background]);
 
   return { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences };
 }

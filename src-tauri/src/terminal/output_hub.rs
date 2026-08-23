@@ -1,4 +1,5 @@
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -6,10 +7,38 @@ use tokio::sync::broadcast;
 const DEFAULT_BUFFER_CAPACITY: usize = 512 * 1024; // 512 KiB
 const BROADCAST_CAPACITY: usize = 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputChunk {
+    pub sequence: u64,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayGap {
+    pub requested_after_sequence: u64,
+    pub available_from_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentSnapshot {
+    pub session_id: String,
+    pub history_start_sequence: Option<u64>,
+    pub history_end_sequence: Option<u64>,
+    pub history: Vec<u8>,
+    pub gap: Option<ReplayGap>,
+}
+
+#[derive(Debug)]
+pub struct SessionAttachment {
+    pub snapshot: AttachmentSnapshot,
+    pub receiver: broadcast::Receiver<OutputChunk>,
+}
+
 pub struct BoundedBuffer {
     capacity: usize,
-    chunks: VecDeque<Vec<u8>>,
+    chunks: VecDeque<OutputChunk>,
     current_size: usize,
+    next_sequence: u64,
 }
 
 impl BoundedBuffer {
@@ -18,35 +47,104 @@ impl BoundedBuffer {
             capacity,
             chunks: VecDeque::new(),
             current_size: 0,
+            next_sequence: 1,
         }
     }
 
-    pub fn push(&mut self, chunk: Vec<u8>) {
-        if chunk.is_empty() {
-            return;
+    pub fn push(&mut self, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
+        if chunk_bytes.is_empty() {
+            return None;
         }
-        self.current_size += chunk.len();
-        self.chunks.push_back(chunk);
+
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+
+        let chunk = OutputChunk {
+            sequence,
+            bytes: chunk_bytes,
+        };
+
+        self.current_size += chunk.bytes.len();
+        self.chunks.push_back(chunk.clone());
 
         while self.current_size > self.capacity && !self.chunks.is_empty() {
             if let Some(front) = self.chunks.pop_front() {
-                self.current_size -= front.len();
+                self.current_size -= front.bytes.len();
             }
         }
+
+        Some(chunk)
+    }
+
+    pub fn start_sequence(&self) -> Option<u64> {
+        self.chunks.front().map(|c| c.sequence)
+    }
+
+    pub fn end_sequence(&self) -> Option<u64> {
+        self.chunks.back().map(|c| c.sequence)
+    }
+
+    pub fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    pub fn current_size(&self) -> usize {
+        self.current_size
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.current_size);
         for chunk in &self.chunks {
-            out.extend_from_slice(chunk);
+            out.extend_from_slice(&chunk.bytes);
         }
         out
+    }
+
+    pub fn snapshot_after(
+        &self,
+        after_sequence: Option<u64>,
+    ) -> (Vec<u8>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+        if self.chunks.is_empty() {
+            return (Vec::new(), None, None, None);
+        }
+
+        let first_seq = self.chunks.front().unwrap().sequence;
+        let last_seq = self.chunks.back().unwrap().sequence;
+
+        match after_sequence {
+            None => (self.snapshot(), Some(first_seq), Some(last_seq), None),
+            Some(req_seq) => {
+                if req_seq >= last_seq {
+                    (Vec::new(), None, Some(last_seq), None)
+                } else if req_seq + 1 < first_seq {
+                    // Eviction gap: requested sequence has been evicted
+                    let gap = Some(ReplayGap {
+                        requested_after_sequence: req_seq,
+                        available_from_sequence: first_seq,
+                    });
+                    (self.snapshot(), Some(first_seq), Some(last_seq), gap)
+                } else {
+                    let mut history = Vec::new();
+                    let mut start_seq = None;
+                    for chunk in &self.chunks {
+                        if chunk.sequence > req_seq {
+                            if start_seq.is_none() {
+                                start_seq = Some(chunk.sequence);
+                            }
+                            history.extend_from_slice(&chunk.bytes);
+                        }
+                    }
+                    (history, start_seq, Some(last_seq), None)
+                }
+            }
+        }
     }
 }
 
 struct SessionHub {
     buffer: BoundedBuffer,
-    sender: broadcast::Sender<Vec<u8>>,
+    sender: broadcast::Sender<OutputChunk>,
+    raw_sender: broadcast::Sender<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -70,29 +168,53 @@ impl TerminalOutputHub {
     }
 
     pub fn register_session(&self, session_id: &str) -> broadcast::Receiver<Vec<u8>> {
+        let (raw_rx, _seq_rx) = self.register_session_channels(session_id);
+        raw_rx
+    }
+
+    pub fn register_session_with_sequence(
+        &self,
+        session_id: &str,
+    ) -> broadcast::Receiver<OutputChunk> {
+        let (_raw_rx, seq_rx) = self.register_session_channels(session_id);
+        seq_rx
+    }
+
+    pub fn register_session_channels(
+        &self,
+        session_id: &str,
+    ) -> (
+        broadcast::Receiver<Vec<u8>>,
+        broadcast::Receiver<OutputChunk>,
+    ) {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let (raw_tx, raw_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let hub = SessionHub {
             buffer: BoundedBuffer::new(self.capacity),
             sender: tx,
+            raw_sender: raw_tx,
         };
         self.sessions
             .write()
             .insert(session_id.to_string(), Arc::new(RwLock::new(hub)));
-        rx
+        (raw_rx, rx)
     }
 
-    pub fn publish(&self, session_id: &str, chunk: Vec<u8>) {
+    pub fn publish(&self, session_id: &str, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
-        };
+        }?;
 
-        if let Some(hub) = session_hub {
-            let mut hub = hub.write();
-            hub.buffer.push(chunk.clone());
-            // It is okay if there are no active receivers; send returns Err in that case
-            let _ = hub.sender.send(chunk);
-        }
+        let mut hub = session_hub.write();
+        let chunk = hub.buffer.push(chunk_bytes)?;
+
+        // Broadcast to sequence subscribers
+        let _ = hub.sender.send(chunk.clone());
+        // Broadcast to legacy raw receivers
+        let _ = hub.raw_sender.send(chunk.bytes.clone());
+
+        Some(chunk)
     }
 
     pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
@@ -102,9 +224,41 @@ impl TerminalOutputHub {
         }?;
 
         let hub = session_hub.read();
+        // Subscribe first to preserve subscriber-first snapshot invariant
+        let rx = hub.raw_sender.subscribe();
         let history = hub.buffer.snapshot();
-        let rx = hub.sender.subscribe();
         Some((history, rx))
+    }
+
+    pub fn subscribe_with_sequence(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Option<SessionAttachment> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+
+        let hub = session_hub.read();
+        // 1. Subscribe FIRST in the critical section
+        let rx = hub.sender.subscribe();
+        // 2. Snapshot within the same critical section
+        let (history, history_start_sequence, history_end_sequence, gap) =
+            hub.buffer.snapshot_after(after_sequence);
+
+        let snapshot = AttachmentSnapshot {
+            session_id: session_id.to_string(),
+            history_start_sequence,
+            history_end_sequence,
+            history,
+            gap,
+        };
+
+        Some(SessionAttachment {
+            snapshot,
+            receiver: rx,
+        })
     }
 
     pub fn remove_session(&self, session_id: &str) {
@@ -113,6 +267,15 @@ impl TerminalOutputHub {
 
     pub fn has_session(&self, session_id: &str) -> bool {
         self.sessions.read().contains_key(session_id)
+    }
+
+    pub fn session_sequence_range(&self, session_id: &str) -> Option<(Option<u64>, Option<u64>)> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+        let hub = session_hub.read();
+        Some((hub.buffer.start_sequence(), hub.buffer.end_sequence()))
     }
 }
 
@@ -147,5 +310,178 @@ mod tests {
         let snap = buffer.snapshot();
         assert!(snap.len() <= 16); // pops chunks until under capacity
         assert!(snap.ends_with(b"abcdef"));
+    }
+
+    #[tokio::test]
+    async fn test_monotonic_u64_sequences_per_session() {
+        let hub = TerminalOutputHub::new(1024);
+        let session1 = "session-1";
+        let session2 = "session-2";
+        let _rx1 = hub.register_session(session1);
+        let _rx2 = hub.register_session(session2);
+
+        let c1_1 = hub
+            .publish(session1, b"s1_first".to_vec())
+            .expect("chunk published");
+        let c1_2 = hub
+            .publish(session1, b"s1_second".to_vec())
+            .expect("chunk published");
+        let c2_1 = hub
+            .publish(session2, b"s2_first".to_vec())
+            .expect("chunk published");
+        let c1_3 = hub
+            .publish(session1, b"s1_third".to_vec())
+            .expect("chunk published");
+
+        assert_eq!(c1_1.sequence, 1);
+        assert_eq!(c1_2.sequence, 2);
+        assert_eq!(c1_3.sequence, 3);
+        assert_eq!(
+            c2_1.sequence, 1,
+            "session 2 sequence must start at 1 independently"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_history_sequence_range_and_eviction() {
+        let hub = TerminalOutputHub::new(24);
+        let session_id = "bounded-session";
+        let _rx = hub.register_session(session_id);
+
+        hub.publish(session_id, b"1234567890".to_vec()); // seq 1, len 10
+        hub.publish(session_id, b"abcdefghij".to_vec()); // seq 2, len 10 (total 20 <= 24)
+        hub.publish(session_id, b"klmnopqrst".to_vec()); // seq 3, len 10 (total 30 > 24 -> evicts seq 1)
+
+        let attachment = hub
+            .subscribe_with_sequence(session_id, None)
+            .expect("session attachment");
+
+        assert_eq!(attachment.snapshot.history_start_sequence, Some(2));
+        assert_eq!(attachment.snapshot.history_end_sequence, Some(3));
+        assert_eq!(attachment.snapshot.history, b"abcdefghijklmnopqrst");
+        assert_eq!(attachment.snapshot.gap, None);
+    }
+
+    #[tokio::test]
+    async fn test_replay_after_sequence_partial_and_up_to_date() {
+        let hub = TerminalOutputHub::new(1024);
+        let session_id = "replay-session";
+        let _rx = hub.register_session(session_id);
+
+        hub.publish(session_id, b"one;".to_vec()); // seq 1
+        hub.publish(session_id, b"two;".to_vec()); // seq 2
+        hub.publish(session_id, b"three;".to_vec()); // seq 3
+        hub.publish(session_id, b"four;".to_vec()); // seq 4
+
+        // Replay after seq 2
+        let attach_mid = hub
+            .subscribe_with_sequence(session_id, Some(2))
+            .expect("attach mid");
+        assert_eq!(attach_mid.snapshot.history_start_sequence, Some(3));
+        assert_eq!(attach_mid.snapshot.history_end_sequence, Some(4));
+        assert_eq!(attach_mid.snapshot.history, b"three;four;");
+        assert_eq!(attach_mid.snapshot.gap, None);
+
+        // Replay after seq 4 (already up to date)
+        let attach_latest = hub
+            .subscribe_with_sequence(session_id, Some(4))
+            .expect("attach latest");
+        assert_eq!(attach_latest.snapshot.history_start_sequence, None);
+        assert_eq!(attach_latest.snapshot.history_end_sequence, Some(4));
+        assert_eq!(attach_latest.snapshot.history, b"");
+        assert_eq!(attach_latest.snapshot.gap, None);
+    }
+
+    #[tokio::test]
+    async fn test_replay_gap_detection_on_eviction() {
+        let hub = TerminalOutputHub::new(20);
+        let session_id = "gap-session";
+        let _rx = hub.register_session(session_id);
+
+        hub.publish(session_id, b"1234567890".to_vec()); // seq 1
+        hub.publish(session_id, b"abcdefghij".to_vec()); // seq 2
+        hub.publish(session_id, b"klmnopqrst".to_vec()); // seq 3 (seq 1 evicted)
+        hub.publish(session_id, b"uvwxyz1234".to_vec()); // seq 4 (seq 2 evicted)
+
+        // Request after seq 1 (which was evicted)
+        let attach_gapped = hub
+            .subscribe_with_sequence(session_id, Some(1))
+            .expect("attach gapped");
+
+        assert_eq!(
+            attach_gapped.snapshot.gap,
+            Some(ReplayGap {
+                requested_after_sequence: 1,
+                available_from_sequence: 3,
+            })
+        );
+        assert_eq!(attach_gapped.snapshot.history_start_sequence, Some(3));
+        assert_eq!(attach_gapped.snapshot.history_end_sequence, Some(4));
+        assert_eq!(attach_gapped.snapshot.history, b"klmnopqrstuvwxyz1234");
+
+        // Request after seq 2 (next requested is 3, which is available_from_sequence) -> NO GAP
+        let attach_boundary = hub
+            .subscribe_with_sequence(session_id, Some(2))
+            .expect("attach boundary");
+        assert_eq!(attach_boundary.snapshot.gap, None);
+        assert_eq!(attach_boundary.snapshot.history_start_sequence, Some(3));
+        assert_eq!(attach_boundary.snapshot.history_end_sequence, Some(4));
+    }
+
+    #[test]
+    fn test_replay_after_last_emitted_sequence_is_bounded_unless_evicted() {
+        let mut buffer = BoundedBuffer::new(10);
+        buffer.push(b"11111".to_vec()); // 1
+        buffer.push(b"22222".to_vec()); // 2
+        buffer.push(b"33333".to_vec()); // 3, evicts 1
+
+        let (bounded, start, end, gap) = buffer.snapshot_after(Some(2));
+        assert_eq!(bounded, b"33333");
+        assert_eq!(start, Some(3));
+        assert_eq!(end, Some(3));
+        assert_eq!(gap, None);
+
+        let (required_full, start, end, gap) = buffer.snapshot_after(Some(0));
+        assert_eq!(required_full, b"2222233333");
+        assert_eq!(start, Some(2));
+        assert_eq!(end, Some(3));
+        assert_eq!(
+            gap,
+            Some(ReplayGap {
+                requested_after_sequence: 0,
+                available_from_sequence: 2,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_first_attachment_ordering_prevents_lost_chunks() {
+        let hub = TerminalOutputHub::new(1024);
+        let session_id = "ordering-session";
+        let _rx = hub.register_session(session_id);
+
+        hub.publish(session_id, b"init-1;".to_vec()); // seq 1
+        hub.publish(session_id, b"init-2;".to_vec()); // seq 2
+
+        let mut attachment = hub
+            .subscribe_with_sequence(session_id, None)
+            .expect("attachment");
+
+        assert_eq!(attachment.snapshot.history_end_sequence, Some(2));
+        assert_eq!(attachment.snapshot.history, b"init-1;init-2;");
+
+        // Live publish occurs after attachment
+        let live_chunk = hub
+            .publish(session_id, b"live-3;".to_vec())
+            .expect("published");
+        assert_eq!(live_chunk.sequence, 3);
+
+        let received = attachment
+            .receiver
+            .recv()
+            .await
+            .expect("subscriber receives live chunk");
+        assert_eq!(received.sequence, 3);
+        assert_eq!(received.bytes, b"live-3;");
     }
 }

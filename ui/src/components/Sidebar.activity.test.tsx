@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ActivitySummary } from "../lib/activity";
@@ -86,6 +86,33 @@ describe("Sidebar project activity", () => {
       "data-attention-state",
       "unread",
     );
+  });
+
+  it("keeps the per-project add-worktree action outside the project's activity row button", () => {
+    const onCreateWorktree = vi.fn();
+    render(
+      <Sidebar
+        projects={projects}
+        activeProjectId="default"
+        worktrees={[defaultWorktree, qaWorktree]}
+        agents={[]}
+        activePath={defaultWorktree.path}
+        activityByWorktreePath={{
+          [defaultWorktree.path]: summary({ workingCount: 1, runningCount: 1, hasWorking: true }),
+        }}
+        onSelectWorktree={vi.fn()}
+        onCreateWorktree={onCreateWorktree}
+        onOpenCommandPalette={vi.fn()}
+      />,
+    );
+
+    // The badge/indicator row button stays clean; creation lives beside it, not inside it.
+    const defaultProject = screen.getByRole("button", { name: "default" });
+    expect(within(defaultProject).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(defaultProject).getByTestId("project-running-badge")).toHaveTextContent("1 running");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to qa" }));
+    expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(projects[1]);
   });
 
   it("does not invent project activity for idle worktrees", () => {

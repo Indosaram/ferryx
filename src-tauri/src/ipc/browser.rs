@@ -1,4 +1,6 @@
-use crate::browser::{BrowserManager, BrowserSessionSummary, BrowserState, CreateBrowserRequest, LogicalRect};
+use crate::browser::{
+    BrowserManager, BrowserSessionSummary, BrowserState, CreateBrowserRequest, LogicalRect,
+};
 use crate::ipc::error::IpcError;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
@@ -196,9 +198,7 @@ pub async fn cmd_browser_list(
 }
 
 #[tauri::command]
-pub async fn cmd_browser_open_external(
-    url: String,
-) -> Result<(), IpcError> {
+pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
     let valid_url = crate::browser::validate_url(&url)?;
     #[cfg(target_os = "macos")]
     {
@@ -206,11 +206,15 @@ pub async fn cmd_browser_open_external(
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(&valid_url).spawn();
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&valid_url)
+            .spawn();
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd").args(["/C", "start", &valid_url]).spawn();
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", &valid_url])
+            .spawn();
     }
     Ok(())
 }

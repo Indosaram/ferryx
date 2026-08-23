@@ -1,0 +1,172 @@
+### Exact Changed Files
+- `ui/src/lib/terminalHostManager.ts`
+- `ui/src/lib/terminalHostManager.test.ts`
+
+---
+
+### RED Transcript
+
+```
+$ bun run --cwd ui test -- terminalHostManager
+$ vitest run --maxWorkers=1 terminalHostManager
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/terminalHostManager.test.ts (13 tests | 1 failed) 188ms
+   ✓ terminalHostManager > renders Ferryx branding in non-Tauri preview banner 124ms
+   ✓ terminalHostManager > fires onBell and onTitleChange exactly once and does not fire stale initial closures when cleared 2ms
+   ✓ terminalHostManager > unsubscribes previous backendSessionId output subscription when backendSessionId changes in updateSession 5ms
+   ✓ terminalHostManager > batches same-frame output writes at animation-frame cadence into a single ordered terminal write 2ms
+   ✓ terminalHostManager > cancels pending batched output and prevents writes after destroy or updateSession rebinding 1ms
+   ✓ terminalHostManager > batches outputs per session independently without cross-session mixing 1ms
+   ✓ terminalHostManager > maintains replay-before-live ordering on initial subscription 1ms
+   ✓ terminalHostManager > integrates search addon into terminal instance and disposes it on destroy 1ms
+   × terminalHostManager > disposes stale renderer and does not resurrect instances or LRU when destroy occurs during pending creation 5ms
+     → expected { element: <div …(3)></div>, …(11) } to be undefined
+   ✓ terminalHostManager > evicts oldest inactive instance when exceeding warm budget while preserving all visible split instances and backend sessions 2ms
+   ✓ terminalHostManager > suspends inactive output without background writes and replays in correct order upon reactivation 1ms
+   ✓ terminalHostManager > synchronously flushes pending output when accumulated characters reach or exceed MAX_PENDING_OUTPUT_CHARS before rAF 1ms
+   ✓ terminalHostManager > supports 100 simulated live sessions across five workspaces with visible sessions pinned and inactive renderers bounded by warm limit 42ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/terminalHostManager.test.ts > terminalHostManager > disposes stale renderer and does not resurrect instances or LRU when destroy occurs during pending creation
+AssertionError: expected { element: <div …(3)></div>, …(11) } to be undefined
+
+- Expected: 
+undefined
+
++ Received: 
+{
+  "active": true,
+  "disposables": [
+    [Function anonymous],
+    [Function anonymous],
+    [Function anonymous],
+    [Function anonymous],
+  ],
+  "disposeWebgl": [Function disposeWebgl],
+  "element": <div
+    aria-label="Terminal in /workspace/ws-1"
+    class="terminal-host h-full w-full bg-terminal"
+    style="position: absolute; inset: 0px; width: 100%; height: 100%; min-width: 0px; min-height: 0px; overflow: hidden;"
+  />,
+  "fitAddon": MockFitAddon {
+    "fit": [Function spy],
+  },
+  "onBell": undefined,
+  "onTitleChange": undefined,
+  "resizeObserver": ResizeObserverStub {},
+  "searchAddon": MockSearchAddon {
+    "clearDecorations": [Function spy],
+    "dispose": [Function spy],
+    "findNext": [Function spy],
+    "findPrevious": [Function spy],
+  },
+  "session": {
+    "backendSessionId": "backend-race-destroy",
+    "cwd": "/workspace/ws-1",
+    "id": "sess-race-destroy",
+    "lifecycle": "working",
+    "workspaceId": "ws-1",
+    "worktree": {
+      "slug": "main",
+      "wsId": "ws-1",
+    },
+  },
+  "terminal": MockTerminal {
+    "cols": 80,
+    "dispose": [Function spy],
+    "focus": [Function spy],
+    "loadAddon": [Function spy],
+    "open": [Function spy],
+    "reset": [Function spy],
+    "rows": 24,
+    "unicode": {
+      "activeVersion": "11",
+    },
+    "write": [Function spy],
+    "writeln": [Function spy],
+  },
+  "unsubscribeOutput": undefined,
+}
+
+ ❯ src/lib/terminalHostManager.test.ts:430:68
+    428| 
+    429|       // 4. Stale instance must be disposed and not populate instances…
+    430|       expect(terminalHostManager.getInstance("sess-race-destroy")).toBeUndefined();
+       |                                                                    ^
+    431|       expect(mocks.terminalDisposed).toHaveBeenCalledTimes(1);
+    432|       expect(mocks.searchAddonDisposed).toHaveBeenCalledTimes(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 12 passed (13)
+   Start at  01:57:31
+   Duration  1.34s (transform 379ms, setup 254ms, collect 295ms, tests 188ms, environment 255ms, prepare 134ms)
+
+error: script "test" exited with code 1
+```
+
+---
+
+### GREEN Transcript
+
+```
+$ bun run --cwd ui build && bun run --cwd ui test -- terminalHostManager
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1714 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                              1.18 kB │ gzip:  0.55 kB
+dist/assets/geist-variable-CrgPqtmy.woff2   69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png       805.82 kB
+dist/assets/xterm-9CEnUXvW.css               5.75 kB │ gzip:  1.98 kB
+dist/assets/index-DmTfKDW2.css              46.26 kB │ gzip:  8.50 kB
+dist/assets/addon-fit-YJmn1quW.js            1.60 kB │ gzip:  0.71 kB
+dist/assets/terminalRenderer-D5nhdvG-.js     5.63 kB │ gzip:  1.92 kB
+dist/assets/RemoteApp-wmfQyJKn.js           19.37 kB │ gzip:  5.98 kB
+dist/assets/addon-unicode11-CU4jat_f.js     25.09 kB │ gzip:  9.26 kB
+dist/assets/browser-DF292TOB.js             25.78 kB │ gzip: 10.13 kB
+dist/assets/addon-search-CNv4eh2c.js        32.46 kB │ gzip: 10.34 kB
+dist/assets/SettingsDialog-BgTBkY1A.js      49.63 kB │ gzip: 11.91 kB
+dist/assets/addon-webgl-BrQ0bpT6.js        111.96 kB │ gzip: 30.52 kB
+dist/assets/index-CsFLkh-o.js              169.04 kB │ gzip: 54.70 kB
+dist/assets/App-DDGmiyiB.js                260.22 kB │ gzip: 74.62 kB
+dist/assets/xterm-BqvuqXEL.js              332.63 kB │ gzip: 84.18 kB
+✓ built in 4.08s
+$ vitest run --maxWorkers=1 terminalHostManager
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/terminalHostManager.test.ts (13 tests) 262ms
+
+ Test Files  1 passed (1)
+      Tests  13 passed (13)
+   Start at  02:01:09
+   Duration  1.50s (transform 513ms, setup 349ms, collect 269ms, tests 262ms, environment 292ms, prepare 124ms)
+```
+
+---
+
+### Lifecycle Reasoning
+
+1. **Generation Counter (`spawnGenerations: Map<string, number>`)**:
+   - When `getOrCreate(session)` begins an asynchronous spawn, it increments and registers a monotonically increasing spawn generation number for that `session.id`.
+   - When `destroy(sessionId)` is invoked, it immediately increments the generation for `sessionId`, in addition to clearing `visibleRefCounts`, removing from `inactiveLruSessionIds`, deleting `pendingSpawns`, and disposing any active instance.
+
+2. **Resolution Invalidation & Resource Teardown (`disposeInstance`)**:
+   - When `spawnPromise` resolves, `getOrCreate` compares the captured spawn generation with `this.spawnGenerations.get(session.id)`.
+   - If the generation has advanced (invalidated by `destroy`), the newly resolved instance is immediately torn down using `disposeInstance(instance)`: disconnecting its `ResizeObserver`, disposing all registered event listeners, `SearchAddon`, WebGL addon, `Terminal`, removing the DOM element, and unlistening output subscriptions.
+   - The invalidated instance is rejected from `this.instances` and skipped from `inactiveLruSessionIds` or LRU eviction bookkeeping.
+
+3. **Safe Pending Spawn Cleanup**:
+   - In the `finally` block of `getOrCreate`, deletion from `this.pendingSpawns` checks identity: `if (this.pendingSpawns.get(session.id) === spawnPromise) { this.pendingSpawns.delete(session.id); }`.
+   - This ensures that if a subsequent `getOrCreate` for the same session was initiated while the old promise was resolving, the old promise's completion will not delete or disrupt the active pending promise of the new generation.
+
+4. **Preserved Frontend Scope**:
+   - No backend PTY close, spawn, or Tauri IPC calls are triggered by this lifecycle fix. Backend session records and PTY state remain isolated from frontend renderer lifecycle invalidations.

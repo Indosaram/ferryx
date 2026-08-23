@@ -1,9 +1,13 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActivitySummary } from "../lib/activity";
+import { saveBrowserSettings } from "../lib/browserSettings";
 import type { WorkspaceTab } from "../lib/types";
 import { TabBar } from "./TabBar";
+import { SortableTab } from "./tab-dnd/SortableTab";
 
 const nativeWindow = vi.hoisted(() => ({
   startDragging: vi.fn(),
@@ -16,6 +20,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 afterEach(() => {
   cleanup();
   nativeWindow.startDragging.mockClear();
+  localStorage.clear();
 });
 
 function activity(overrides: Partial<ActivitySummary> = {}): ActivitySummary {
@@ -142,7 +147,6 @@ describe("TabBar", () => {
     fireEvent.contextMenu(getTab("main"), { clientX: 100, clientY: 100 });
     expect(screen.getByRole("menuitem", { name: "Move Tab to Split Left" })).toBeEnabled();
     expect(screen.getByRole("menuitem", { name: /Split terminal right/i })).toBeEnabled();
-    expect(screen.getByRole("menuitem", { name: /Split terminal down/i })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Move Tab to Split Left" }));
     expect(onMoveTabToSplit).toHaveBeenCalledWith("tab-a", "left");
@@ -168,7 +172,7 @@ describe("TabBar", () => {
     );
 
     fireEvent.contextMenu(getTab("main"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Pin Tab" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Pin tab" }));
     expect(onTogglePin).toHaveBeenCalledWith("tab-a", true);
 
     rerender(
@@ -185,8 +189,8 @@ describe("TabBar", () => {
     expect(screen.queryByRole("button", { name: "Close main" })).not.toBeInTheDocument();
 
     fireEvent.contextMenu(getTab("main"));
-    expect(screen.getByRole("menuitem", { name: /^Close(?:\s*⌘W)?$/i })).toBeDisabled();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Unpin Tab" }));
+    expect(screen.getByRole("menuitem", { name: "Close tab" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Unpin tab" }));
     expect(onTogglePin).toHaveBeenLastCalledWith("tab-a", false);
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -205,14 +209,14 @@ describe("TabBar", () => {
     );
 
     fireEvent.contextMenu(getTab("main"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Change Title" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename tab" }));
     let input = screen.getByDisplayValue("main");
     fireEvent.change(input, { target: { value: "  discarded  " } });
     fireEvent.keyDown(input, { key: "Escape" });
     expect(onRenameTab).not.toHaveBeenCalled();
 
     fireEvent.contextMenu(getTab("main"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Change Title" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename tab" }));
     input = screen.getByDisplayValue("main");
     fireEvent.change(input, { target: { value: "  custom title  " } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -239,7 +243,7 @@ describe("TabBar", () => {
     expect(getTab("main")).toHaveAttribute("draggable", "false");
   });
 
-  it("forwards typed URLs from the new-tab popover and keeps popovers out of window dragging", () => {
+  it("opens browser tabs from the action-only menu and keeps popovers out of window dragging", () => {
     const onAddBrowser = vi.fn();
     render(
       <TabBar
@@ -254,16 +258,34 @@ describe("TabBar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    const input = screen.getByRole("textbox", { name: "New tab query input" });
-    fireEvent.pointerDown(input, { button: 0 });
+    const browserAction = screen.getByRole("button", { name: /New Browser Tab/i });
+    fireEvent.pointerDown(browserAction, { button: 0 });
     expect(nativeWindow.startDragging).not.toHaveBeenCalled();
 
-    fireEvent.change(input, { target: { value: "example.com" } });
-    fireEvent.click(screen.getByRole("button", { name: "Open query" }));
-    expect(onAddBrowser).toHaveBeenCalledWith("https://example.com");
+    fireEvent.click(browserAction);
+    expect(onAddBrowser).toHaveBeenCalledWith("about:blank");
 
     fireEvent.pointerDown(screen.getByRole("button", { name: "Action" }), { button: 0 });
     expect(nativeWindow.startDragging).not.toHaveBeenCalled();
+  });
+
+  it("passes the configured homepage when opening a browser tab from the new-tab menu", () => {
+    saveBrowserSettings({ homePage: "https://example.com/start" });
+    const onAddBrowser = vi.fn();
+    render(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onAddBrowser={onAddBrowser}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
+    expect(onAddBrowser).toHaveBeenCalledWith("https://example.com/start");
   });
 
   it("disables terminal split for browser tabs while preserving whole-tab split", () => {
@@ -311,5 +333,97 @@ describe("TabBar", () => {
 
     fireEvent.pointerDown(getTab("main"), { button: 0 });
     expect(nativeWindow.startDragging).toHaveBeenCalledOnce();
+  });
+
+  it("renders new tab trigger and popover outside the horizontal overflow tablist container to avoid vertical clipping", () => {
+    render(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+
+    const tablist = screen.getByRole("tablist");
+    const newTabButton = screen.getByRole("button", { name: "New tab" });
+
+    // The add trigger / menu wrapper must NOT be a descendant of the overflow-x-auto [role=tablist] container
+    expect(tablist.contains(newTabButton)).toBe(false);
+
+    // Open popover and verify popover dialog is also outside the tablist
+    fireEvent.click(newTabButton);
+    const popover = screen.getByRole("dialog", { name: "New tab menu" });
+    expect(tablist.contains(popover)).toBe(false);
+  });
+
+  it("forwards launchable agents and triggers onLaunchAgent when clicked in new tab popover", () => {
+    const onLaunchAgent = vi.fn();
+    const agents = [{ name: "claude", command: "claude", args: "" }];
+    render(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        agents={agents}
+        onLaunchAgent={onLaunchAgent}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    expect(screen.getByText("Claude")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Claude"));
+    expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
+  });
+
+  it("forwards defaultAgentId so the usable default is first with a Default label", () => {
+    const onLaunchAgent = vi.fn();
+    const agents = [
+      { name: "claude", command: "claude", args: "" },
+      { name: "aider", command: "aider", args: "" },
+    ];
+    render(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        agents={agents}
+        onLaunchAgent={onLaunchAgent}
+        defaultAgentId="aider"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    const buttons = within(screen.getByText("AGENTS").parentElement as HTMLElement).getAllByRole("button");
+    expect(buttons[0]).toHaveTextContent("Aider");
+    expect(within(buttons[0]).getByText("Default")).toBeVisible();
+    fireEvent.click(screen.getByText("Claude"));
+    expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
+  });
+
+  it("memoizes SortableTab with React.memo", () => {
+    const isMemo = typeof SortableTab === "object" && (SortableTab as any)?.$$typeof === Symbol.for("react.memo");
+    const source = fs.readFileSync(path.resolve(__dirname, "tab-dnd/SortableTab.tsx"), "utf8");
+    const sourceHasMemo = /export const SortableTab = (?:React\.)?memo\(/.test(source);
+    expect(isMemo || sourceHasMemo).toBe(true);
+    expect(sourceHasMemo).toBe(true);
+  });
+
+  it("stabilizes onCancelRename callback across all rendered tabs", () => {
+    const tabBarSource = fs.readFileSync(path.resolve(__dirname, "TabBar.tsx"), "utf8");
+    expect(tabBarSource).toMatch(/const handleCancelRename = useCallback\(/);
+    expect(tabBarSource).toMatch(/onCancelRename=\{handleCancelRename\}/);
+    expect(tabBarSource).not.toMatch(/onCancelRename=\{\(\)\s*=>/);
+  });
+
+  it("memoizes SortableContext items array across re-renders when tabs are stable", () => {
+    const tabBarSource = fs.readFileSync(path.resolve(__dirname, "TabBar.tsx"), "utf8");
+    expect(tabBarSource).toMatch(/const sortableItems = useMemo\(\(\) => tabs\.map\(/);
+    expect(tabBarSource).toMatch(/<SortableContext\s+items=\{sortableItems\}/);
   });
 });

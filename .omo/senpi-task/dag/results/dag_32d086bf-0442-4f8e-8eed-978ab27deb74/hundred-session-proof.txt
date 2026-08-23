@@ -1,0 +1,147 @@
+I read this as Implementation - Add a test-only deterministic proof to `ui/src/lib/terminalHostManager.test.ts` verifying Ferryx's terminal renderer lifecycle with 100 simulated live sessions (5 workspaces × 20 sessions), pinned visible sessions, LRU warm limit bounds, reference counting, and zero backend IPC side effects; perform RED/GREEN mutation verification and report transcripts.
+
+### Changed File Path
+- `ui/src/lib/terminalHostManager.test.ts`
+
+### Exact Assertions Added
+The test creates 5 workspace groups with 20 `TerminalSession` instances each (100 total), registers visible instances across multiple workspaces (`ws-0-sess-0`, `ws-1-sess-4`, `ws-2-sess-8`, `ws-3-sess-12`, `ws-4-sess-16`), registers a second visible mount on `ws-0-sess-0`, creates all 100 sessions via `terminalHostManager.getOrCreate()`, and executes the following exact assertions:
+
+1. **Visible renderer instances remain pinned and alive:**
+   ```ts
+   for (const visId of visibleSessionIds) {
+     expect(terminalHostManager.isSessionVisible(visId)).toBe(true);
+     const inst = terminalHostManager.getInstance(visId);
+     expect(inst).toBeDefined();
+     expect(inst?.session.id).toBe(visId);
+   }
+   ```
+2. **Inactive renderer count is strictly bounded by `getWarmCacheLimit()`:**
+   ```ts
+   const aliveInstances = allSessions.filter((s) => terminalHostManager.getInstance(s.id) !== undefined);
+   const aliveVisible = aliveInstances.filter((s) => terminalHostManager.isSessionVisible(s.id));
+   const aliveInactive = aliveInstances.filter((s) => !terminalHostManager.isSessionVisible(s.id));
+
+   expect(aliveVisible).toHaveLength(visibleSessionIds.length);
+   expect(aliveInactive.length).toBeLessThanOrEqual(terminalHostManager.getWarmCacheLimit());
+   expect(aliveInactive.length).toBe(targetWarmLimit);
+   expect(aliveInstances).toHaveLength(visibleSessionIds.length + targetWarmLimit);
+   ```
+3. **All 100 backend session records remain intact:**
+   ```ts
+   for (const session of allSessions) {
+     expect(session.backendSessionId).toBe(`backend-${session.id}`);
+     expect(session.lifecycle).toBe("working");
+     expect(session.workspaceId).toMatch(/^ws-\d+$/);
+   }
+   ```
+4. **No backend close/spawn IPC APIs called:**
+   ```ts
+   expect(closeTerminalSpy).not.toHaveBeenCalled();
+   expect(spawnTerminalSpy).not.toHaveBeenCalled();
+   ```
+5. **Oldest inactive frontend renderers were disposed while newest within LRU limit remain:**
+   ```ts
+   const allInactiveSessions = allSessions.filter((s) => !visibleSessionIds.includes(s.id));
+   const expectedWarmInactive = allInactiveSessions.slice(-targetWarmLimit);
+   const expectedDisposedInactive = allInactiveSessions.slice(0, -targetWarmLimit);
+
+   expect(expectedDisposedInactive.length).toBe(95 - targetWarmLimit);
+   for (const session of expectedDisposedInactive) {
+     expect(terminalHostManager.getInstance(session.id)).toBeUndefined();
+   }
+   for (const session of expectedWarmInactive) {
+     expect(terminalHostManager.getInstance(session.id)).toBeDefined();
+   }
+   ```
+6. **Reference-count lifecycle behavior:**
+   ```ts
+   // Releasing handle 1 keeps the session pinned
+   unregFirstMount();
+   expect(terminalHostManager.isSessionVisible(multiRefSessionId)).toBe(true);
+   expect(terminalHostManager.getInstance(multiRefSessionId)).toBeDefined();
+
+   // Releasing handle 2 unpins the session and transitions it to inactive LRU
+   unregSecondMount();
+   expect(terminalHostManager.isSessionVisible(multiRefSessionId)).toBe(false);
+   const inactiveAfterRelease = allSessions.filter(
+     (s) => !terminalHostManager.isSessionVisible(s.id) && terminalHostManager.getInstance(s.id) !== undefined,
+   );
+   expect(inactiveAfterRelease.length).toBeLessThanOrEqual(terminalHostManager.getWarmCacheLimit());
+   ```
+
+---
+
+### RED Mutation Evidence
+Temporary mutation on the cache enforcement seam in `ui/src/lib/terminalHostManager.ts`:
+```diff
+--- a/ui/src/lib/terminalHostManager.ts
++++ b/ui/src/lib/terminalHostManager.ts
+@@ -156,2 +156,3 @@ class TerminalHostManager {
+   private evictInactiveIfNeeded(): void {
++    return;
+     while (this.inactiveLruSessionIds.length > this.warmCacheLimit) {
+```
+
+Transcript from `bun run --cwd ui test -- terminalHostManager`:
+```
+$ vitest run --maxWorkers=1 terminalHostManager
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/terminalHostManager.test.ts (12 tests | 2 failed) 146ms
+   ✓ terminalHostManager > renders Ferryx branding in non-Tauri preview banner 87ms
+   ✓ terminalHostManager > fires onBell and onTitleChange exactly once and does not fire stale initial closures when cleared 1ms
+   ✓ terminalHostManager > unsubscribes previous backendSessionId output subscription when backendSessionId changes in updateSession 1ms
+   ✓ terminalHostManager > batches same-frame output writes at animation-frame cadence into a single ordered terminal write 1ms
+   ✓ terminalHostManager > cancels pending batched output and prevents writes after destroy or updateSession rebinding 1ms
+   ✓ terminalHostManager > batches outputs per session independently without cross-session mixing 1ms
+   ✓ terminalHostManager > maintains replay-before-live ordering on initial subscription 1ms
+   ✓ terminalHostManager > integrates search addon into terminal instance and disposes it on destroy 1ms
+   × terminalHostManager > evicts oldest inactive instance when exceeding warm budget while preserving all visible split instances and backend sessions 12ms
+     → expected { element: <div …(3)></div>, …(11) } to be undefined
+   ✓ terminalHostManager > suspends inactive output without background writes and replays in correct order upon reactivation 3ms
+   ✓ terminalHostManager > synchronously flushes pending output when accumulated characters reach or exceed MAX_PENDING_OUTPUT_CHARS before rAF 1ms
+   × terminalHostManager > supports 100 simulated live sessions across five workspaces with visible sessions pinned and inactive renderers bounded by warm limit 36ms
+     → expected 95 to be less than or equal to 3
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/terminalHostManager.test.ts > terminalHostManager > supports 100 simulated live sessions across five workspaces with visible sessions pinned and inactive renderers bounded by warm limit
+AssertionError: expected 95 to be less than or equal to 3
+ ❯ src/lib/terminalHostManager.test.ts:602:36
+    600| 
+    601|       expect(aliveVisible).toHaveLength(visibleSessionIds.length);
+    602|       expect(aliveInactive.length).toBeLessThanOrEqual(terminalHostManager.getWarmCacheLimit());
+       |                                    ^
+    603|       expect(aliveInactive.length).toBe(targetWarmLimit);
+    604|       expect(aliveInstances).toHaveLength(visibleSessionIds.length + targetWarmLimit);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 10 passed (12)
+   Start at  01:49:17
+   Duration  1.73s (transform 199ms, setup 276ms, collect 131ms, tests 146ms, environment 524ms, prepare 53ms)
+
+error: script "test" exited with code 1
+```
+
+---
+
+### GREEN Test Output
+After restoring the temporary mutation (zero production changes):
+```
+$ vitest run --maxWorkers=1 terminalHostManager
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/terminalHostManager.test.ts (12 tests) 247ms
+
+ Test Files  1 passed (1)
+      Tests  12 passed (12)
+   Start at  01:50:01
+   Duration  1.88s (transform 328ms, setup 284ms, collect 208ms, tests 247ms, environment 606ms, prepare 105ms)
+```
+
+No background test processes remain active.

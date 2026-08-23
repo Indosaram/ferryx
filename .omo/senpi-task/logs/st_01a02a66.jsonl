@@ -1,0 +1,35 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"I read this as investigation - audit objective 3 Remote Access against the current code and proofs, no edits."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The repo has a dedicated remote-reliability plan and audit notes — I’ll pull those first so the objective and proof bar are exact."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Objective 3 is the Remote restart lifecycle. Next I’ll read the audit report and the current Remote/state/IPC/app/Settings seams in parallel."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I have the stated policy; now I’m reading the live construction path and tests to see what actually happens after relaunch."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Core construction is `new_persistent` with session-only mode reset. Next I’ll verify IPC tests, Settings copy, and auth persistence against that claim."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"cancelled","residency_state":"resident"}}
+{"type":"cancelled","payload":{"previous_status":"running","reason":"parent turn aborted"}}
+{"type":"late_transition_ignored","payload":{"type":"late_transition_ignored","attempted_status":"cancelled","current_status":"cancelled"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"cancelled","residency_state":"disposed"}}
+{"type":"destroyed","payload":{"cause":"cancel"}}

@@ -1,0 +1,108 @@
+> I read this as an evaluation and verification task - synthesize the three audit lanes, independently check source files against git status, and deliver an integration-ready implementation boundary report with serialized DAG topology and dirty-tree safety reasons.
+
+### Ferryx Scalable Terminal Implementation Boundary & Topology
+
+---
+
+### 1. Executive Implementation Boundary & Ownership Lanes
+
+To scale Ferryx reliably to 5 workspaces with 20+ terminals each without WebGL context exhaustion, UI main-thread event starvation, or navigation lag, the implementation boundaries must strictly separate **Renderer Lifecycle**, **Output Scheduling**, and **Workspace Navigation**.
+
+| Lane | Domain | File Ownership (Write Scope) | Parallelism Constraint | Shared Seam / Dependency |
+|---|---|---|---|---|
+| **Lane 1: Output Scheduling** | Frame batching, write coalescing, replay ordering | `ui/src/lib/terminalHostManager.ts` (write queue), `ui/src/lib/terminalHostManager.test.ts` | **SERIALIZED with Lane 2** | Touches instance write binding in `terminalHostManager.ts`. Must precede lifecycle LRU to ensure eviction flushes pending rAF queues cleanly. |
+| **Lane 2: Renderer Lifecycle** | Visible tracking, LRU warm cache, WebGL context bounding | `ui/src/lib/terminalHostManager.ts` (LRU/visible state), `ui/src/components/TerminalPane.tsx` (mount hooks), `ui/src/lib/terminalHostManager.test.ts` | **SERIALIZED after Lane 1** | Modifies `terminalHostManager.ts` and `TerminalPane.tsx`. Reuses the output queue from Lane 1. |
+| **Lane 3: Workspace Navigation** | Parked-layout state transitions, 0-PTY-spawn fast path | `ui/src/state/workspaceStore.ts`, `ui/src/state/workspaceStore.test.tsx` | **INDEPENDENT / PARALLEL with Lanes 1 & 2** | Pure in-memory reducer operations (`worktreeLayouts`). Completely disjoint from `terminalHostManager.ts`. |
+| **Lane 4: Verification Gate** | Full test suite, UI compilation, and native contract checks | Read-only verification runner across all modified targets | **FINAL CONVERGENCE (Depends on Lanes 1, 2, 3)** | Gates release readiness. |
+
+---
+
+### 2. File:Line Source Evidence Independently Checked
+
+#### A. Shared `terminalHostManager.ts` Bottleneck & Serial Requirement
+* **Synchronous Unbatched Output Binding**: `ui/src/lib/terminalHostManager.ts:133-138` and `172-177`. Output subscriptions invoke `terminal.write(text)` synchronously on every incoming decoded chunk, causing main-thread parser lock during high-throughput agent streaming.
+* **Lack of LRU Eviction**: `ui/src/lib/terminalHostManager.ts:28-66`. `instances` retains every instantiated `TerminalInstance` in a `Map<string, TerminalInstance>` until explicit tab closure (`destroy()` at lines `236-247`). Inactive tabs retain WebGL contexts (`attachWebglRenderer` at lines `100-104`), exceeding browser context caps (>8–16).
+* **Pane Detach Without Host Disposal**: `ui/src/components/TerminalPane.tsx:30-64`. React unmount only sets `cancelled = true` (`TerminalPane.tsx:61-63`), retaining background renderers indefinitely.
+* **Conclusion**: Both **Output Scheduling** (rAF write queue) and **Renderer Lifecycle** (LRU eviction / visible tracking) mutate `TerminalInstance` and `TerminalHostManager` in `ui/src/lib/terminalHostManager.ts`. **They must be serialized into ordered implementation steps to avoid code overwrite and race hazards.**
+
+#### B. Independent Workspace Navigation Seam
+* **Parked Layout Preservation**: `ui/src/state/workspaceStore.ts:860-864` (`SELECT_WORKTREE`) saves inactive layouts in `state.worktreeLayouts[worktreePath]`.
+* **Zero-Spawn Navigation**: `ui/src/state/workspaceStore.ts:222-234` (`ensureTabForWorktree`) synchronously restores parked layouts and dispatches `SELECT_WORKTREE` and `ACTIVATE_TAB` without invoking `services.spawnTerminal(...)` (`workspaceStore.ts:173-195`) or `services.waitForTerminalExit(...)` (`workspaceStore.ts:472-488`).
+* **Direct Tab Switching**: `ui/src/state/workspaceStore.ts:1067-1088` (`ACTIVATE_TAB`) switches across parked worktrees in memory.
+* **Conclusion**: Navigation strictly touches `LayoutState` and `worktreeLayouts` in `workspaceStore.ts`; it does not touch `terminalHostManager.ts` or native PTY sessions.
+
+#### C. Backlog & Replay Continuity
+* **Frontend Backlog**: `ui/src/lib/terminalEvents.ts:5`, `14-17`, `153-176`. Retains up to 512 KiB per session and scans OSC titles across chunks (`ui/src/lib/terminalEvents.ts:29-53`) regardless of renderer mount state.
+* **Rust Native Backlog**: `src-tauri/src/terminal/output_hub.rs:8-39`, `60-70`. `BoundedBuffer` retains up to 512 KiB in `VecDeque<Vec<u8>>` for reconnecting remotes and reattaching renderers.
+
+---
+
+### 3. Pre-Existing Dirty Work Conflict Analysis (`git status --short`)
+
+The working tree has active uncommitted modifications from recent feature sprints:
+1. **Layout & Drag-Drop Infrastructure**: `ui/src/state/tabPaneDrop.ts`, `ui/src/state/layout.paneHandleDrop.runtime.test.ts`, `ui/src/components/TerminalSplitView.*`, and `ui/src/components/tab-dnd/*`.
+   - *Conflict Guard*: Do not modify split layout math or tab-dnd zones. Renderer lifecycle must track `visibleSessionIds` generically from `TerminalPane` mount/unmount rather than intercepting split drag handlers.
+2. **Workspace Store Modifications**: `ui/src/state/workspaceStore.ts` and `workspaceStore.test.tsx` contain uncommitted changes for browser pane drops and HMR state retention.
+   - *Conflict Guard*: Navigation changes must only refine synchronous `ensureTabForWorktree` / `activateTab` fast paths; do not re-format or rewrite other reducer actions.
+3. **IPC & Native State**: `src-tauri/src/terminal/pty.rs`, `src-tauri/src/terminal/service.rs`, and `src-tauri/src/ipc/terminal.rs`.
+   - *Conflict Guard*: Do not touch backend PTY or output-hub files; backend tests confirm output hub (`output_hub.rs`) is already fully compliant.
+
+---
+
+### 4. Ordered Dependency Sequence (Safe DAG Implementation Topology)
+
+```
+       ┌───────────────────────────────────────────────────────────┐
+       │   Lane 3: Workspace Navigation Fast-Path (State Only)     │
+       │   Scope: ui/src/state/workspaceStore.ts                   │
+       └─────────────────────────────┬─────────────────────────────┘
+                                     │
+┌──────────────────────────────────┐ │
+│ Lane 1: Output Batching & Queue  │ │
+│ Scope: ui/src/lib/terminalHost...│ │
+└────────────────┬─────────────────┘ │
+                 │                   │
+                 ▼                   │
+┌──────────────────────────────────┐ │
+│ Lane 2: Renderer LRU & Visible   │ │
+│ Scope: ui/src/lib/terminalHost...│ │
+│        ui/src/components/Term... │ │
+└────────────────┬─────────────────┘ │
+                 │                   │
+                 ▼                   ▼
+       ┌───────────────────────────────────────────────────────────┐
+       │   Lane 4: Integration Verification Gate                   │
+       │   - Vitest: terminalHostManager, terminalEvents, store    │
+       │   - Cargo: terminal::output_hub                           │
+       │   - Build: bun run --cwd ui build                         │
+       └───────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 5. Tests to Make RED First (Exact Names & Commands)
+
+#### Step 1: Output Batching Seam (RED First)
+* **Command**: `bun run --cwd ui test -- terminalHostManager`
+* **Test Location**: `ui/src/lib/terminalHostManager.test.ts`
+* **Test Name**: `it("coalesces multiple rapid session output emissions into a single terminal.write call per animation frame")`
+* **Red Assertion**: Verify that multiple synchronous chunks emitted from `terminalEventBus` trigger 0 immediate writes, and exactly 1 coalesced write after `requestAnimationFrame`.
+
+#### Step 2: Renderer Lifecycle & Warm-Cache Seam (RED First)
+* **Command**: `bun run --cwd ui test -- terminalHostManager`
+* **Test Location**: `ui/src/lib/terminalHostManager.test.ts`
+* **Test Name**: `it("evicts oldest inactive instance when exceeding maxInactiveWarmInstances while preserving all visible split instances")`
+* **Red Assertion**: Verify that when opening background sessions exceeding `maxInactiveWarmInstances` (e.g. 2), the oldest inactive instance is disposed while pinned visible split instances (`visibleSessionIds`) remain allocated.
+
+#### Step 3: Workspace Fast-Path Navigation Seam (RED First)
+* **Command**: `bun run --cwd ui test -- workspaceStore`
+* **Test Location**: `ui/src/state/workspaceStore.test.tsx`
+* **Test Name**: `it("parked worktree navigation selects layout in memory without calling spawnTerminal, closeTerminal, or waitForTerminalExit")`
+* **Red Assertion**: Verify that navigating between 5 parked workspaces containing 20 tabs each executes synchronously via `SELECT_WORKTREE` / `ACTIVATE_TAB` with 0 calls to `services.spawnTerminal` or `services.waitForTerminalExit`.
+
+#### Step 4: Verification Suite Commands
+* `bun run --cwd ui test -- terminalHostManager` (PASS)
+* `bun run --cwd ui test -- workspaceStore` (PASS)
+* `bun run --cwd ui test -- terminalEvents` (PASS)
+* `cargo test --manifest-path src-tauri/Cargo.toml terminal::output_hub` (PASS)
+* `bun run --cwd ui build` (Exit code 0)

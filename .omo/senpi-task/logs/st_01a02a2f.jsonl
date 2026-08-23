@@ -1,0 +1,84 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"I read this as implementation - inspect remote gateway state/IPC, add a failing session-only restart test, then make enabling persist no listener across a new launch."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I'll read the remote state, IPC, tests, and any existing lifecycle notes before changing production code."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The persisted `mode` may make a new process look enabled even though nothing is listening. I'll check auth persistence, enable/disable paths, and any existing policy notes."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The existing reopen test keeps `mode: LocalNetwork` after a new state is built, which is the inconsistency to fix. I'll read the plan, lib wiring, and how status is consumed."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I'll check status types, existing IPC test patterns, and whether enable currently writes config to disk."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I'll add the failing session-only restart tests first, then run them to capture RED before any production change."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Those tests referenced types that do not exist yet, so I am narrowing them to current APIs so RED is a real assertion failure, not a compile error."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"child_error","payload":{"message":"Error Code null: Internal error during token generation","stop_reason":"error"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I'll run the new tests now, before any production change, so we have a real RED."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"assistant_message","payload":{"text":"RED is in: persist still writes `localNetwork`, and a new state looks enabled. Next I’ll encode the session-only policy in state and status."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Production changes are in. Next I’ll format the touched Rust files and run the focused tests for GREEN."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The IPC test diff is larger than expected, so I’m checking whether fmt or an extra edit touched unrelated tests."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I read this as implementation - session-only Remote restart is now explicit, tested RED then GREEN, and formatted.\n\n## Policy\n\nEnabling a listener is **process-scoped**. A new `RemoteGatewayState` never restores or auto-starts a network listener. Port / `allowControl` and paired devices still persist.\n\n## Source behavior\n\n`src-tauri/src/remote/state.rs`\n- Added `RemoteRestartPolicy::SessionOnly` (`config.restart_policy()`).\n- `persist_config()` writes `mode: off` plus `restartPolicy: sessionOnly`. Live in-memory mode can stay `localNetwork` while the process is enabled.\n- `new_with_paths` still loads port/`allowControl`, then forces `mode = Off`, `is_running = false`. Stale `localNetwork` files cannot look enabled.\n\n`src-tauri/src/ipc/remote.rs`\n- Status: `enabled` is only `is_running`; after relaunch `mode` is `off`; `restartPolicy` is `sessionOnly`.\n- Enable/disable persist the session-only snapshot (no-op when there is no config path).\n\nAuth persistence is unchanged (`remote-auth.json`).\n\n## Tests\n\n**RED** (before production changes)\n\n`cd src-tauri && cargo test --lib remote::state::tests -- --nocapture`\n\n```\ntest remote::state::tests::stale_enabled_config_file_does_not_look_enabled ... FAILED\ntest remote::state::tests::enabled_gateway_does_not_restore_listener_after_reopen ... FAILED\n  left: LocalNetwork / String(\"localNetwork\")\n right: Off / \"off\"\n```\n\n`cd src-tauri && cargo test --lib remote_status_after_reopen_is_disabled_session_only -- --nocapture`\n\n```\ntest ipc::tests::remote_status_after_reopen_is_disabled_session_only ... FAILED\n  left: LocalNetwork\n right: Off\n```\n\n**GREEN** (after)\n\n`cd src-tauri && cargo test --lib remote::state::tests -- --nocapture` — 2 passed  \n`cd src-tauri && cargo test --lib remote_status_after_reopen_is_disabled_session_only -- --nocapture` — 1 passed  \n`cd src-tauri && cargo test --lib remote:: -- --nocapture` — 9 passed (includes auth persistence)\n\n`cargo fmt -- src/remote/state.rs src/ipc/remote.rs src/ipc/tests.rs`  \nLSP: no diagnostics on the three files."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a2f/sessions/st_01a02a2f/2026-08-22T15-37-47-564Z_01a02a1e-f72c-7f71-ac10-6768b7ff657a.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"quit"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a2f/sessions/st_01a02a2f/2026-08-22T15-37-47-564Z_01a02a1e-f72c-7f71-ac10-6768b7ff657a.jsonl"}}

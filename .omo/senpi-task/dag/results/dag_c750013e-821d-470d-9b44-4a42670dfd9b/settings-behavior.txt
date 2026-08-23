@@ -1,0 +1,30 @@
+Both missing deliverables are fixed. App was left untouched.
+
+**1. Quick Commands key removed**
+- Deleted `QUICK_COMMANDS_STORAGE_KEY` from `ui/src/lib/storageKeys.ts`.
+- Nothing else imported it.
+- Regression: `storageKeys.test.ts` asserts the export and `"ferryx.settings.quickCommands"` are absent.
+
+**2. Default Agent is truthful**
+- No launch path reads `defaultAgentId` (only `agentsSettings` + Settings UI).
+- Settings copy now: it **saves** `defaultAgentId` only; Ferryx **does not currently preselect or launch** this agent.
+- Auto/None still persist `null` / `"none"`.
+
+**Required App edit if you want real default-agent launch** (not done; out of scope):
+
+In `ui/src/App.tsx`, after `launchableAgents` is computed, resolve `agentSettings.defaultAgentId` against that list and pass the match into `handleAddTerminalTab` / a dedicated default-agent action. `NewTabPopover` would need a `defaultAgentId` prop to mark/preselect. Today `handleLaunchAgent` only runs on an explicit agent click.
+
+**RED**
+```text
+cd ui && npx vitest run src/lib/storageKeys.test.ts src/components/SettingsDialog.test.tsx --maxWorkers=1 -t "does not expose a dedicated Quick Commands storage key|describes Default Agent as a stored preference"
+2 failed | 25 skipped
+```
+- Default Agent: missing `/does not currently (preselect|launch)/i`
+- storageKeys: `QUICK_COMMANDS_STORAGE_KEY` still exported
+
+**GREEN**
+```text
+cd ui && npx vitest run src/lib/storageKeys.test.ts src/components/SettingsDialog.test.tsx --maxWorkers=1 -t "does not expose a dedicated Quick Commands storage key|describes Default Agent as a stored preference|does not expose Quick Commands|all storage keys start"
+4 passed | 23 skipped
+```
+Full `storageKeys.test.ts`: **5 passed**. LSP on the test file: clean.

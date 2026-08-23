@@ -71,15 +71,13 @@ impl From<WorktreeError> for IpcError {
     fn from(error: WorktreeError) -> Self {
         let message = error.to_string();
         match error {
-            WorktreeError::DirtyWorktree {
-                path,
-                count,
-                files,
-            } => Self::new(IpcErrorCode::DirtyWorktree, message).with_details(json!({
-                "path": path,
-                "count": count,
-                "files": files,
-            })),
+            WorktreeError::DirtyWorktree { path, count, files } => {
+                Self::new(IpcErrorCode::DirtyWorktree, message).with_details(json!({
+                    "path": path,
+                    "count": count,
+                    "files": files,
+                }))
+            }
             WorktreeError::WriterAlreadyActive { path, owner_id } => {
                 Self::new(IpcErrorCode::WriterAlreadyActive, message).with_details(json!({
                     "path": path,
@@ -193,7 +191,9 @@ impl From<crate::browser::BrowserError> for IpcError {
             crate::browser::BrowserError::InvalidBounds => IpcErrorCode::BrowserBoundsInvalid,
             crate::browser::BrowserError::UnsupportedProfile(_) => IpcErrorCode::InternalError,
             crate::browser::BrowserError::CreateFailed(_) => IpcErrorCode::BrowserCreateFailed,
-            crate::browser::BrowserError::NavigationFailed(_) => IpcErrorCode::BrowserNavigationFailed,
+            crate::browser::BrowserError::NavigationFailed(_) => {
+                IpcErrorCode::BrowserNavigationFailed
+            }
             crate::browser::BrowserError::HistoryFailed(_) => IpcErrorCode::BrowserHistoryFailed,
             crate::browser::BrowserError::CloseFailed(_) => IpcErrorCode::BrowserCloseFailed,
             crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::InternalError,
@@ -202,7 +202,6 @@ impl From<crate::browser::BrowserError> for IpcError {
         Self::new(code, message)
     }
 }
-
 
 impl std::fmt::Display for IpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

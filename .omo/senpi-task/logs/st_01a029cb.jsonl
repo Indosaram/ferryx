@@ -1,0 +1,28 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"I read this as a focused Astro island regression fix - I’ll inspect the three required files, make the smallest compatible composition change, then run diagnostics, build, and Playwright verification."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The failure is the nested-island boundary: `Hero client:load` owns the React island, so the `client:only` child is treated as slot content rather than an independently mounted Astro island. I’ll remove the parent hydration directive so Astro can process the demo as its own island while preserving the existing Hero markup and slot layout."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The first semantic adjustment confirms Astro does not hydrate a React island nested as a child of a React framework component even when the parent is server-rendered (`.xterm` remained 0). I’ll move the demo to the Astro page level and overlay it into the same terminal frame space with the existing dimensions, leaving Hero’s visual structure/content unchanged."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I read this as a focused Astro island regression fix - completed.\n\nChanged:\n- `site/src/pages/index.astro`\n\nFix:\n- Moved `LiveFerryxDemo` outside the React `Hero` component so Astro mounts it as a proper standalone island.\n- Preserved the hero structure and content with matching terminal layout positioning.\n\nVerified:\n- `/`: visible h1, `.xterm` count `1`, visible, no page errors.\n- `/docs/shortcuts/`: visible `Keyboard Shortcuts` h1 and `3` tables.\n- `cd site && bun run build`: exit `0`."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}

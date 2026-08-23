@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import * as storageKeys from "./storageKeys";
 import {
   ACTIVE_PROJECT_STORAGE_KEY,
+  GENERAL_SETTINGS_STORAGE_KEY,
   getMigratedItem,
   NOTIFICATION_SETTINGS_STORAGE_KEY,
   PROJECTS_STORAGE_KEY,
@@ -25,10 +27,17 @@ describe("storageKeys unification and migration", () => {
       SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
       TERMINAL_SETTINGS_STORAGE_KEY,
       NOTIFICATION_SETTINGS_STORAGE_KEY,
+      GENERAL_SETTINGS_STORAGE_KEY,
     ];
     for (const key of keys) {
       expect(key.startsWith("ferryx.")).toBe(true);
     }
+  });
+
+  it("does not expose a dedicated Quick Commands storage key", () => {
+    expect("QUICK_COMMANDS_STORAGE_KEY" in storageKeys).toBe(false);
+    const stringValues = Object.values(storageKeys).filter((value) => typeof value === "string");
+    expect(stringValues).not.toContain("ferryx.settings.quickCommands");
   });
 
   it("returns current value when new key exists", () => {
@@ -72,5 +81,14 @@ describe("storageKeys unification and migration", () => {
     localStorage.setItem("rorca.sidebar.collapsedProjects", JSON.stringify(["p1"]));
     expect(getMigratedItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, localStorage)).toBe(JSON.stringify(["p1"]));
     expect(localStorage.getItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY)).toBe(JSON.stringify(["p1"]));
+
+    localStorage.setItem("rorca.settings.general", JSON.stringify({ confirmCloseTab: true }));
+    expect(getMigratedItem(GENERAL_SETTINGS_STORAGE_KEY, localStorage)).toBe(JSON.stringify({ confirmCloseTab: true }));
+    expect(localStorage.getItem(GENERAL_SETTINGS_STORAGE_KEY)).toBe(JSON.stringify({ confirmCloseTab: true }));
+
+    localStorage.removeItem(GENERAL_SETTINGS_STORAGE_KEY);
+    localStorage.setItem("orca.settings.general", JSON.stringify({ confirmCloseTab: true }));
+    expect(getMigratedItem(GENERAL_SETTINGS_STORAGE_KEY, localStorage)).toBe(JSON.stringify({ confirmCloseTab: true }));
+    expect(localStorage.getItem(GENERAL_SETTINGS_STORAGE_KEY)).toBe(JSON.stringify({ confirmCloseTab: true }));
   });
 });

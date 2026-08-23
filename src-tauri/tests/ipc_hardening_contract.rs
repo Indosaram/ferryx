@@ -1,15 +1,16 @@
+use ferryx_lib::daemon::{DaemonClient, DaemonServer};
 use ferryx_lib::ipc::{
     cmd_terminal_close, cmd_terminal_spawn, cmd_worktree_create, cmd_worktree_delete,
     cmd_worktree_status, CreateWorktreeRequest, DeleteWorktreeRequest, IpcErrorCode,
     SpawnTerminalRequest, TerminalLifecycleState, WorktreeChangeKind, WorktreeChangedPayload,
     WorktreeStatusRequest, WORKTREE_CHANGED_EVENT,
 };
-use ferryx_lib::terminal::{PtyManager, TerminalService};
 use ferryx_lib::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
 use std::fs;
 use std::sync::Arc;
 use tauri::{Listener, Manager};
 use tempfile::TempDir;
+use tokio::net::UnixListener;
 
 fn setup_repo() -> TempDir {
     let repo = TempDir::new().expect("repo tempdir");
@@ -22,6 +23,35 @@ fn setup_repo() -> TempDir {
     repo
 }
 
+async fn setup_test_daemon() -> (
+    TempDir,
+    Arc<DaemonClient>,
+    Arc<DaemonServer>,
+    tokio::task::JoinHandle<()>,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("test_daemon.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
+    let server = Arc::new(DaemonServer::new());
+    let server_clone = Arc::clone(&server);
+    let server_task = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let s = Arc::clone(&server_clone);
+                    tokio::spawn(async move {
+                        s.handle_client(stream).await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket_path));
+    (dir, client, server, server_task)
+}
+
 #[tokio::test]
 async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_events() {
     let repo = setup_repo();
@@ -30,14 +60,14 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .register("workspace-a", repo.path())
         .expect("register workspace");
 
-    let pty = Arc::new(PtyManager::new());
-    let hub = Arc::new(ferryx_lib::terminal::TerminalOutputHub::default());
-    let srv = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+    let (_daemon_dir, daemon_client, daemon_server, server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-a", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
 
     let app = tauri::test::mock_builder()
-        .manage(pty)
-        .manage(hub)
-        .manage(srv)
+        .manage(daemon_client)
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -79,7 +109,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
 
     let spawned = cmd_terminal_spawn(
         app.handle().clone(),
-        app.state::<Arc<TerminalService>>(),
+        app.state::<Arc<DaemonClient>>(),
         app.state::<WorkspaceRegistry>(),
         SpawnTerminalRequest {
             workspace_id: "workspace-a".into(),
@@ -92,8 +122,9 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
     .await
     .expect("identity terminal spawn");
 
-    let session = app
-        .state::<Arc<PtyManager>>()
+    let session = daemon_server
+        .terminal_service()
+        .pty_manager()
         .get_session(&spawned.session_id)
         .expect("session");
     assert_eq!(session.worktree_path(), Some(canonical_created.clone()));
@@ -108,7 +139,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         "interactive terminals must not consume the exclusive writer lease"
     );
 
-    cmd_terminal_close(app.state::<Arc<TerminalService>>(), spawned.session_id)
+    cmd_terminal_close(app.state::<Arc<DaemonClient>>(), spawned.session_id)
         .await
         .expect("close terminal");
 
@@ -138,6 +169,82 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
     assert_eq!(pruned_event.workspace_id, "workspace-a");
     assert_eq!(pruned_event.worktree, identity);
     assert_eq!(pruned_event.kind, WorktreeChangeKind::Pruned);
+
+    server_task.abort();
+}
+
+// TEMPORARY-GIT-FIXTURE: protects identity deletion from stale checked-out branches.
+#[tokio::test]
+async fn swapped_checked_out_branches_cannot_delete_a_stale_identity_slot() {
+    let repo = setup_repo();
+    let registry = WorkspaceRegistry::new();
+    registry
+        .register("workspace-a", repo.path())
+        .expect("register workspace");
+    let app = tauri::test::mock_builder()
+        .manage(registry.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let identity_a = WorktreeIdentity {
+        ws_id: "agent".into(),
+        slug: "slot-a".into(),
+    };
+    let identity_b = WorktreeIdentity {
+        ws_id: "agent".into(),
+        slug: "slot-b".into(),
+    };
+    let created_a = cmd_worktree_create(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        CreateWorktreeRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity_a.clone(),
+            base_ref: None,
+        },
+    )
+    .await
+    .expect("create slot A");
+    let created_b = cmd_worktree_create(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        CreateWorktreeRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity_b.clone(),
+            base_ref: None,
+        },
+    )
+    .await
+    .expect("create slot B");
+
+    run_git(&created_a.path, &["checkout", "--detach"]).expect("detach slot A");
+    run_git(&created_b.path, &["checkout", "--detach"]).expect("detach slot B");
+    run_git(&created_a.path, &["checkout", "orca/agent/slot-b"]).expect("swap branch into slot A");
+    run_git(&created_b.path, &["checkout", "orca/agent/slot-a"]).expect("swap branch into slot B");
+
+    let err = cmd_worktree_delete(
+        app.handle().clone(),
+        app.state::<WorkspaceRegistry>(),
+        DeleteWorktreeRequest {
+            workspace_id: "workspace-a".into(),
+            worktree: identity_a,
+            delete_branch: Some(true),
+        },
+    )
+    .await
+    .expect_err("stale identity must fail closed");
+    assert_eq!(err.code, IpcErrorCode::WorktreeNotFound);
+    assert!(created_a.path.exists(), "slot A must survive");
+    assert!(created_b.path.exists(), "slot B must survive");
+    let branches = run_git(repo.path(), &["branch", "--list"]).expect("list managed branches");
+    assert!(
+        branches.contains("orca/agent/slot-a"),
+        "branch A must survive"
+    );
+    assert!(
+        branches.contains("orca/agent/slot-b"),
+        "branch B must survive"
+    );
 }
 
 #[tokio::test]
@@ -359,14 +466,8 @@ async fn dirty_delete_returns_structured_error_code() {
     registry
         .register("workspace-a", repo.path())
         .expect("register workspace");
-    let pty = Arc::new(PtyManager::new());
-    let hub = Arc::new(ferryx_lib::terminal::TerminalOutputHub::default());
-    let srv = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
 
     let app = tauri::test::mock_builder()
-        .manage(pty)
-        .manage(hub)
-        .manage(srv)
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");

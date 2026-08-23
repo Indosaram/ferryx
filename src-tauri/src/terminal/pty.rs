@@ -1,4 +1,6 @@
-use crate::terminal::{session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal};
+use crate::terminal::{
+    session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal,
+};
 use crate::worktree::WorktreeManager;
 use parking_lot::{Mutex, RwLock};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};
@@ -9,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+pub(crate) const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
@@ -158,6 +160,11 @@ impl PtyManager {
     fn start_lifecycle_watcher(&self, session_id: String) {
         let manager = self.clone();
         tokio::spawn(async move {
+            let Some(session) = manager.get_session(&session_id) else {
+                return;
+            };
+            let mut reader_task = session.take_reader_task();
+
             loop {
                 let Some(session) = manager.get_session(&session_id) else {
                     break;
@@ -203,7 +210,16 @@ impl PtyManager {
                     }
                 }
 
-                tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
+                if let Some(ref mut handle) = reader_task {
+                    tokio::select! {
+                        _ = handle => {
+                            reader_task = None;
+                        }
+                        _ = tokio::time::sleep(LIFECYCLE_POLL_INTERVAL) => {}
+                    }
+                } else {
+                    tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
+                }
             }
         });
     }
@@ -230,9 +246,7 @@ impl PtyManager {
 
         match tokio::time::timeout(READER_SHUTDOWN_TIMEOUT, &mut reader_task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(PtyError::Other(format!(
-                "PTY reader task failed: {error}"
-            ))),
+            Ok(Err(error)) => Err(PtyError::Other(format!("PTY reader task failed: {error}"))),
             Err(_) => {
                 reader_task.abort();
                 Err(PtyError::Other(
@@ -291,7 +305,9 @@ impl PtyManager {
         session.close_io();
 
         if let Err(reader_error) = Self::join_reader_bounded(&session).await {
-            let _ = session.signal(TerminalSignal::Kill).or_else(|_| session.kill());
+            let _ = session
+                .signal(TerminalSignal::Kill)
+                .or_else(|_| session.kill());
             if first_error.is_none() {
                 first_error = Some(reader_error);
             }

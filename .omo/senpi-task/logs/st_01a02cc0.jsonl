@@ -1,0 +1,25 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"> I read this as fix Vitest mock hoisting in `ui/src/state/workspaceStore.browserLifecycle.test.tsx` - inspect the test file, reproduce the error, fix the hoisted variable access, and verify test suites pass."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I read this as fixing Vitest mock hoisting in `ui/src/state/workspaceStore.browserLifecycle.test.tsx` - cleaned up the mock hoisting structure, preserved the hoisted `browserMocks` and `worktree` fixture, removed unneeded manual JSDOM boilerplate and dynamic imports, and verified the test suite.\n\n### Changes\n- Updated `ui/src/state/workspaceStore.browserLifecycle.test.tsx` to define `browserMocks` via `vi.hoisted` before module mocking and imported `useWorkspaceStore` directly.\n- Preserved the `Worktree` fixture and strong lifecycle assertions ensuring the native webview is closed and a replacement non-browser tab/session is created.\n\n### Verification\n- `bun run --cwd ui test -- workspaceStore.browserLifecycle --reporter=verbose` passed cleanly.\n- `bun test ui/src/state/workspaceStore.test.tsx` passed all 22 tests.\n- Full Vitest suite (`bun run --cwd ui test`) passed all 76 test files (542 tests)."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}

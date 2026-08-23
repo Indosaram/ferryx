@@ -1,0 +1,51 @@
+> I read this as Implementation - Complete the protocol-v2 sequence attachment implementation in the owned UI transport/renderer scope and verify with tests and build.
+
+### Summary of Changes
+
+1. **DTOs & Type Definitions (`ui/src/lib/types.ts`, `ui/src/lib/tauri.ts`)**:
+   - Re-exported protocol-v2 attachment DTOs (`AttachTerminalRequest`, `AttachTerminalResponse`, `TerminalReplayGap`).
+   - Ensured decimal-string sequence representation (`sequence?: string | null`, `historyStartSequence?: string | null`, `historyEndSequence?: string | null`, `requestedAfterSequence: string`, `availableFromSequence: string`) to prevent JavaScript safe-integer precision loss for 64-bit sequence counters.
+
+2. **UI Transport Layer (`ui/src/lib/terminalTransport/tauriTransport.ts`, `ui/src/lib/terminalTransport/types.ts`)**:
+   - Implemented `TauriTerminalTransport.attach(sessionId, afterSequence)` calling `attachTerminal` with typed DTO and decoding base64 history into `Uint8Array`.
+   - Updated `TauriTerminalTransport.onOutput` to decode base64 PTY payloads to `Uint8Array` when delivering to subscribers.
+
+3. **Output Scheduling & Attachment Ordering (`ui/src/lib/terminalOutputScheduler.ts`, `ui/src/lib/terminalHostManager.ts`)**:
+   - Implemented sequence parsing with `BigInt` for arbitrary 64-bit sequence comparisons.
+   - Enforced history-before-live application: in-flight live output chunks are buffered during attach and drained in original order only after decoded base64 history is queued.
+   - Enforced sequence de-duplication: live chunks with `sequence <= historyEndSequence` or `sequence <= lastAppliedSequence` are suppressed.
+   - Maintained advancement of `lastAppliedSequence` and updated session metadata (`lastOutputSequence` and `daemonEpoch`).
+   - Handled explicit replay gaps (`gap: { requestedAfterSequence, availableFromSequence }`) and daemon epoch mismatches by invoking `terminal.reset()`, resetting the decoder registry, clearing `lastAppliedSequence`, and firing `onGap` callback.
+
+4. **Test Suite Expansion (`ui/src/lib/terminalTransport/terminalTransport.test.ts`, `ui/src/lib/terminalHostManager.output.test.ts`)**:
+   - Added unit tests for `TauriTerminalTransport` verifying base64 decoding on attach, empty history handling, IPC command delegation (`write`, `resize`, `signal`, `close`), and decoded `onOutput`/`onLifecycle` event dispatching.
+   - Added tests in `terminalHostManager.output.test.ts` verifying 64-bit decimal-string sequences beyond `Number.MAX_SAFE_INTEGER` without precision loss, sequence de-duplication, history-before-live ordering, and replay-gap reset.
+
+### Changed Files
+
+- `ui/src/lib/tauri.ts`
+- `ui/src/lib/terminalTransport/tauriTransport.ts`
+- `ui/src/lib/terminalTransport/terminalTransport.test.ts`
+- `ui/src/lib/terminalHostManager.output.test.ts`
+
+### Verification Evidence
+
+```bash
+$ bun run --cwd ui test -- src/lib/tauri.test.ts src/lib/terminalTransport/terminalTransport.test.ts src/lib/terminalEvents.test.ts src/lib/terminalEvents.bus.test.ts src/lib/terminalHostManager.output.test.ts src/lib/terminalHostManager.test.ts
+✓ src/lib/terminalHostManager.output.test.ts (12 tests) 71ms
+✓ src/lib/terminalHostManager.test.ts (5 tests) 69ms
+✓ src/lib/terminalEvents.bus.test.ts (7 tests) 17ms
+✓ src/lib/tauri.test.ts (16 tests) 5ms
+✓ src/lib/terminalTransport/terminalTransport.test.ts (8 tests) 4ms
+✓ src/lib/terminalEvents.test.ts (4 tests) 2ms
+
+Test Files  6 passed (6)
+     Tests  52 passed (52)
+```
+
+```bash
+$ bun run --cwd ui build
+vite v6.4.3 building for production...
+✓ 1719 modules transformed.
+✓ built in 1.67s
+```

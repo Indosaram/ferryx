@@ -1,4 +1,4 @@
-use crate::terminal::output_hub::TerminalOutputHub;
+use crate::terminal::output_hub::{SessionAttachment, TerminalOutputHub};
 use crate::terminal::{PtyError, PtyManager, PtySession, TerminalSignal};
 use crate::worktree::manager::WorktreeManager;
 use portable_pty::CommandBuilder;
@@ -14,7 +14,10 @@ pub struct TerminalService {
 
 impl Default for TerminalService {
     fn default() -> Self {
-        Self::new(Arc::new(PtyManager::new()), Arc::new(TerminalOutputHub::default()))
+        Self::new(
+            Arc::new(PtyManager::new()),
+            Arc::new(TerminalOutputHub::default()),
+        )
     }
 }
 
@@ -42,9 +45,9 @@ impl TerminalService {
         worktree_manager: &WorktreeManager,
         worktree_path: &Path,
     ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
-        let (session_id, mut pty_rx) = self
-            .pty_manager
-            .spawn_in_worktree(cmd, cols, rows, worktree_manager, worktree_path)?;
+        let (session_id, mut pty_rx) =
+            self.pty_manager
+                .spawn_in_worktree(cmd, cols, rows, worktree_manager, worktree_path)?;
 
         let broadcast_rx = self.output_hub.register_session(&session_id);
 
@@ -55,18 +58,44 @@ impl TerminalService {
             while let Some(chunk) = pty_rx.recv().await {
                 output_hub.publish(&session_id_clone, chunk);
             }
+            output_hub.remove_session(&session_id_clone);
         });
 
         Ok((session_id, broadcast_rx))
     }
 
-    pub fn attach(&self, session_id: &str) -> Result<(Vec<u8>, broadcast::Receiver<Vec<u8>>), PtyError> {
-        if !self.pty_manager.list_sessions().contains(&session_id.to_string()) {
+    pub fn attach(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<u8>, broadcast::Receiver<Vec<u8>>), PtyError> {
+        if !self
+            .pty_manager
+            .list_sessions()
+            .contains(&session_id.to_string())
+        {
             return Err(PtyError::SessionNotFound(session_id.to_string()));
         }
 
         self.output_hub
             .subscribe(session_id)
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))
+    }
+
+    pub fn attach_with_sequence(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<SessionAttachment, PtyError> {
+        if !self
+            .pty_manager
+            .list_sessions()
+            .contains(&session_id.to_string())
+        {
+            return Err(PtyError::SessionNotFound(session_id.to_string()));
+        }
+
+        self.output_hub
+            .subscribe_with_sequence(session_id, after_sequence)
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))
     }
 

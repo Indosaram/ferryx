@@ -1,0 +1,45 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"> I read this as fixing F-terminal-01 (backlog chunk ring in TerminalEventBus) - inspect the current implementation, write a failing test exposing concat storage, implement the chunk ring, verify green, and document the fix."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"steered","payload":{"delivered":"followUp","run_epoch":0}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I have resolved packet **P-backlog** (**F-terminal-01**):\n\n1. **Test Characterization & RED Phase**:\n   - Extended `ui/src/lib/terminalEvents.bus.test.ts` to assert that terminal output chunks are retained as distinct chunks across appends (exposing quadratic string concatenation) and that the backlog stays capped at 512KiB (`MAX_BACKLOG_CHARS`) while replaying the latest tail on subscription.\n   - Verified that the initial string concatenation implementation failed on `chunks > 1` (`AssertionError: expected 1 to be greater than 1`).\n\n2. **Chunk Ring Implementation & GREEN Phase**:\n   - In `ui/src/lib/terminalEvents.ts`, replaced the monolithic string map with a chunk ring buffer structure (`SessionBacklog = { chunks: string[], totalChars: number }`).\n   - `publishOutput` appends incoming chunks, updates total character count, and trims oldest chunks only when exceeding `MAX_BACKLOG_CHARS`.\n   - `subscribeOutput` joins chunk strings lazily only on initial replay.\n   - All tests in `ui/src/lib/terminalEvents.test.ts` and `ui/src/lib/terminalEvents.bus.test.ts` pass cleanly (`9 passed`).\n\n3. **Documentation**:\n   - Generated `/Users/indo/code/project/orca-lite/docs/frontend-perf/fix-P-backlog.md` with the packet details, exact production change locations, RED test run output, GREEN test run output, and risk analysis."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"> I read this as verifying task deliverables for P-backlog - confirm file edits, test runs, and evidence documentation are complete.\n\nThe deliverables for **P-backlog** (**F-terminal-01**) are complete:\n\n1. **RED test & failure verified**: `ui/src/lib/terminalEvents.bus.test.ts` characterizes chunk array retention (`chunks > 1`) and bounded 512KiB backlog tail replay. It failed on the original string concatenation implementation with `AssertionError: expected 1 to be greater than 1`.\n2. **Production change**: In `ui/src/lib/terminalEvents.ts`, replaced monolithic string concatenation with a chunk ring buffer (`SessionBacklog = { chunks: string[], totalChars: number }`), trimming oldest chunks past `MAX_BACKLOG_CHARS` and lazily joining chunks on subscriber replay.\n3. **GREEN test verified**: `cd /Users/indo/code/project/orca-lite/ui && bun run test src/lib/terminalEvents.test.ts src/lib/terminalEvents.bus.test.ts` passed 9/9 tests.\n4. **Evidence documentation**: Written to `/Users/indo/code/project/orca-lite/docs/frontend-perf/fix-P-backlog.md` with packet ID, production file lines, full RED/GREEN outputs, and leftover risk analysis. No git commits made."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a029f0/sessions/st_01a029f0/2026-08-22T14-38-57-760Z_01a029e9-1ae0-794d-ab53-2ea592d540b6.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}

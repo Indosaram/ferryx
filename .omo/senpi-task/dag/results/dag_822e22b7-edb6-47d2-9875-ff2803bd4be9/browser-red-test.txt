@@ -1,0 +1,39 @@
+Created `ui/src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx` with Given/When/Then structure to test dragging an inactive browser tab onto a terminal pane edge (`leaf-target`, edge `'right'`) and asserting that `onMoveTabToSplit` is invoked with `("browser-source", "group-default", "horizontal", "second", { tabId: "terminal-target", leafId: "leaf-target" })`.
+
+### Verification Output
+
+```
+$ cd ui && bunx vitest run src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx --maxWorkers=1
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx (1 test | 1 failed) 34ms
+   × TerminalSplitView browser tab to pane edge drop > resolves and invokes pane-targeted movement when an inactive browser tab is dropped onto a concrete terminal pane edge 33ms
+     → expected "spy" to be called with arguments: [ 'browser-source', …(4) ]
+
+Number of calls: 0
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx > TerminalSplitView browser tab to pane edge drop > resolves and invokes pane-targeted movement when an inactive browser tab is dropped onto a concrete terminal pane edge
+AssertionError: expected "spy" to be called with arguments: [ 'browser-source', …(4) ]
+
+Number of calls: 0
+
+ ❯ src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx:157:30
+    155| 
+    156|     // Then: onMoveTabToSplit is called with browser-source, group-def…
+    157|     expect(onMoveTabToSplit).toHaveBeenCalledWith(
+       |                              ^
+    158|       "browser-source",
+    159|       "group-default",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  00:28:55
+   Duration  5.01s (transform 269ms, setup 529ms, collect 2.31s, tests 34ms, environment 863ms, prepare 93ms)
+```

@@ -1,0 +1,127 @@
+> I read this as an investigation and audit request for Ferryx workspace/tab navigation under a multi-workspace high-terminal-count scale (5 workspaces, 20+ terminals each) - inspect state stores, runtimes, UI switcher components, and tests to deliver a concise audit report with file:line evidence.
+
+# Audit Report: Ferryx Known-Workspace and Tab Navigation
+
+## 1. Executive Verification
+
+**Can selecting a known parked workspace or tab return without terminal spawn, network call, or PTY wait?**
+**YES.** When navigating to a known parked workspace that already has retained tabs (`parkedLayout.tabs.length > 0`), navigation is resolved entirely in memory via pure synchronous reducer state transitions (`SELECT_WORKTREE` and `ACTIVATE_TAB`). No `spawnTerminal`, no IPC network/filesystem call, and no `waitForTerminalExit` is triggered.
+
+---
+
+## 2. Exact State Transitions
+
+| Navigation Event | Initiating Call | Reducer Action | State Fields Mutated | File:Line Evidence |
+| :--- | :--- | :--- | :--- | :--- |
+| **Select Known Parked Worktree** | `ensureTabForWorktree(worktree)` | `SELECT_WORKTREE` + `ACTIVATE_TAB` | `activeWorktreePath`, `layout`, `worktreeLayouts`, `unreadTabIds`, `unreadWorktreePaths` | `ui/src/state/workspaceStore.ts:222-234`, `848-874`, `1056-1090` |
+| **Select Active Worktree (No-op / Mark Read)** | `ensureTabForWorktree(worktree)` | `SELECT_WORKTREE` / `ACTIVATE_TAB` | `unreadWorktreePaths`, `unreadTabIds` | `ui/src/state/workspaceStore.ts:210-220`, `850-858` |
+| **Select Tab in Active Worktree** | `handleSelectTerminalTab(tabId)` | `ACTIVATE_TAB` | `layout.activeTabId`, `layout.focusedGroupId`, `layout.tabGroups[id].activeTabId`, `unreadTabIds` | `ui/src/App.tsx:230-249`, `ui/src/state/layout.ts:121-137`, `ui/src/state/workspaceStore.ts:1056-1066` |
+| **Direct Cross-Worktree Tab Activation** | `activateTab(tabId)` (on parked tab) | `ACTIVATE_TAB` | Stashes active layout to `worktreeLayouts`, restores parked layout to `layout`, updates `activeWorktreePath`, clears unread | `ui/src/state/workspaceStore.ts:1067-1088` |
+| **Project Switch (Sidebar / Accel)** | `handleSelectProject(project)` | `SET_WORKTREES`, `RESTORE_WORKSPACE` | `projects`, `activeProjectId`, full store state rehydration | `ui/src/App.tsx:197-207`, `180-186`, `189-242` |
+
+---
+
+## 3. Places That Can Spawn or Await Terminals
+
+1. **`createSpawnedTab` / `openTab`**:
+   - `ui/src/state/workspaceStore.ts:173-195`, `197-206`
+   - Awaits `services.ensureTerminalEvents()` and `services.spawnTerminal(...)`.
+   - Triggered when opening a new tab, when `ensureTabForWorktree` encounters an empty/unknown worktree (`ui/src/state/workspaceStore.ts:219, 247`), or during last-tab replacement (`ui/src/state/workspaceStore.ts:486`).
+2. **`splitPane`**:
+   - `ui/src/state/workspaceStore.ts:253-298`, `301-344`
+   - Awaits `services.ensureTerminalEvents()`, `services.getTerminalCwd(...)`, and `services.spawnTerminal(...)`.
+3. **`closeTab` (Last Tab Exit Guard)**:
+   - `ui/src/state/workspaceStore.ts:472-488`, `1279-1288`
+   - Awaits `services.waitForTerminalExit(backendSessionId, 5000)` and `services.closeTerminal(...)` before spawning a replacement tab.
+4. **`closeTab` / `closePane` / `syncWorktrees`**:
+   - `ui/src/state/workspaceStore.ts:498`, `515`, `554`
+   - Awaits `services.closeTerminal(...)` for destroyed sessions.
+5. **Runtime Refresh & Worktree Discovery**:
+   - `ui/src/state/workspaceRuntime.ts:61-80`
+   - Awaits IPC `services.listWorktrees(workspaceId)`.
+6. **App Boot & Session Restore**:
+   - `ui/src/App.tsx:209-232`
+   - Awaits `spawnTerminal(...)` sequentially for dead sessions found in disk session storage.
+7. **Agent Launch**:
+   - `ui/src/App.tsx:257-276`
+   - Awaits `spawnTerminal(...)` and `writeTerminal(...)`.
+
+---
+
+## 4. Parked-Layout Behavior (5 Workspaces × 20+ Live Terminals)
+
+- **Layout Persistence (`worktreeLayouts`)**:
+  - `ui/src/state/workspaceStore.ts:860-864`
+  - Inactive workspaces store their entire `LayoutState` (`tabs`, `layoutsByTabId` binary split trees, pane ratios, tab groups, `activeLeafId`) in `state.worktreeLayouts[worktreePath]`.
+- **PTY Process & Session Retention**:
+  - `ui/src/state/workspaceStore.ts:848-874`
+  - All 100+ sessions remain in `state.sessions`. No PTY is killed, suspended, or disconnected when parked. Background output buffers in `terminalEventBus` chunk rings and OSC title listeners continue processing in the background (`ui/src/lib/terminalEvents.ts`).
+- **DOM / Canvas Virtualization**:
+  - `ui/src/components/TerminalSplitView.tsx:145-165`, `ui/src/components/TerminalPane.tsx`
+  - Only the active worktree’s currently active tab pane tree is mounted into the DOM / XTerm instances. Inactive tabs and all parked workspace terminals are kept out of React DOM, preventing 100+ concurrent WebGL/Canvas surfaces.
+- **Background Activity Aggregation**:
+  - `ui/src/state/workspaceStore.ts:619-674`
+  - `selectWorktreeActivitySummaries` and `selectTabActivitySummaries` traverse `getAllTabs(state)` to surface badge indicators in `Sidebar.tsx` and `TabBar.tsx` for parked workspaces without activating them.
+
+---
+
+## 5. Minimal State-Only Fast-Path & Switcher Implications
+
+### Minimal State-Only Fast-Path
+- `ensureTabForWorktree` in `ui/src/state/workspaceStore.ts:208-251` is currently typed as `async (worktree: Worktree) => Promise<string>`. For known parked workspaces, the branch at lines `222-234` immediately dispatches `SELECT_WORKTREE` and `ACTIVATE_TAB`.
+- **Fast-path optimization**: Expose a synchronous selector `hasKnownWorktreeLayout(state, path)` and a synchronous action dispatcher `selectKnownWorktree(path)` to bypass async promise microtask scheduling and IPC error-boundary wrapping (`reportRuntimeError`).
+- In `ui/src/App.tsx:230-249` (`handleSelectTerminalTab`), the function only inspects `currentState.layout.tabs`. For parked tabs, dispatching `activateTab(tabId)` directly triggers the built-in parked-layout switch in `workspaceStore.ts:1067-1088` without requiring `ensureTabForWorktree`.
+
+### Navigation Virtualization & Switcher Implications (100+ Terminals)
+1. **`CommandPalette.tsx` (`ui/src/components/CommandPalette.tsx:16, 26, 60-103`)**:
+   - `App.tsx:693` currently passes `tabs={state.layout.tabs}` (only active workspace tabs).
+   - If updated to search all 100+ terminals across 5 workspaces via `getAllTabs(state)`, `CommandPalette`'s flat DOM list (`ui/src/components/CommandPalette.tsx:90-101`) will require list virtualization or top-N result truncation to avoid scroll lag during keystrokes.
+2. **`TabBar.tsx` (`ui/src/components/TabBar.tsx:143-167`)**:
+   - Renders all 20+ tabs of the active group in a horizontal `SortableContext`. 20+ tabs fit with overflow scroll, but drag-and-drop coordinate computation (`workspaceCollisionDetection`) scales linearly with tab count.
+3. **Session State Serialization**:
+   - `ui/src/App.tsx:164-173` debounces session persistence on `state` change. For 100+ sessions, `serializeWorkspaceState` handles full snapshot serialization; pruning parked terminal scrollback from disk serialization prevents IPC serialization stalls.
+
+---
+
+## 6. Disjoint Navigation Write Scope & Exact Failing-First Test Seam
+
+### Disjoint Navigation Write Scope
+The navigation write scope is strictly isolated from session and backend PTY lifecycles:
+```typescript
+// Disjoint Write Scope (State Mutated Exclusively by Navigation):
+type NavigationWriteScope = {
+  activeWorktreePath: string | null;
+  layout: LayoutState;
+  worktreeLayouts: Record<string, LayoutState>;
+  unreadTabIds: Record<string, boolean>;
+  unreadWorktreePaths: Record<string, boolean>;
+};
+
+// Disjoint Read-Only Scope (Untouched During Navigation):
+// - state.sessions: Record<string, TerminalSession>
+// - state.worktrees: Worktree[]
+// - state.activityBySessionId: Record<string, TerminalActivity>
+// - services.spawnTerminal / services.closeTerminal / services.waitForTerminalExit
+```
+
+### Exact Failing-First Test Seam
+- **Location**: `ui/src/state/workspaceStore.test.tsx:645-685` (`describe("worktree tab and session isolation")`)
+- **Failing-First Test**:
+  Add an assertion verifying that navigating back to a parked worktree with multiple live sessions (`ensureTabForWorktree(worktree)`) does **not** call `services.spawnTerminal`, `services.closeTerminal`, or `services.waitForTerminalExit`:
+  ```typescript
+  // Seam: ui/src/state/workspaceStore.test.tsx:671
+  services.spawnTerminal.mockClear();
+  services.closeTerminal.mockClear();
+  services.waitForTerminalExit.mockClear();
+
+  await act(async () => {
+    await result.current.ensureTabForWorktree(worktree);
+  });
+
+  // Failing-first assertion seam:
+  expect(services.spawnTerminal).not.toHaveBeenCalled();
+  expect(services.closeTerminal).not.toHaveBeenCalled();
+  expect(services.waitForTerminalExit).not.toHaveBeenCalled();
+  expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+  expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabA1, tabA2]);
+  ```

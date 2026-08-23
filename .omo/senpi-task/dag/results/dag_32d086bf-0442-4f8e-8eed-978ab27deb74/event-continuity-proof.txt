@@ -1,0 +1,178 @@
+> I read this as a request for direct test coverage on `TerminalEventBus` verifying bounded retention replay, title continuity without an xterm renderer subscribed, and chunk replay ordering - I will add direct test coverage to `ui/src/lib/terminalEvents.bus.test.ts`, provide RED mutation proof, and verify clean GREEN test execution.
+
+### Changed Path
+- `ui/src/lib/terminalEvents.bus.test.ts`
+
+### Exact Assertions Added
+Direct bus test added in `ui/src/lib/terminalEvents.bus.test.ts`:
+```typescript
+it("replays bounded retained suffix in order and preserves title updates while unsubscribed", async () => {
+  await terminalEventBus.ensureStarted();
+  const sessionId = "unsubscribed-bounded-replay";
+  const titles: Array<[string, string]> = [];
+  const unsubscribeTitle = terminalEventBus.subscribeTitle((id, title) => {
+    titles.push([id, title]);
+  });
+
+  const maxBacklog = 512 * 1024;
+  const initialPrefix = "START_OF_STREAM_THAT_SHOULD_BE_DROPPED\n";
+  callbacks.output?.({
+    sessionId,
+    data: encodeOutput(initialPrefix),
+  });
+
+  // Send OSC title update while no output renderer is subscribed
+  callbacks.output?.({
+    sessionId,
+    data: encodeOutput("\x1b]0;background task running\x07"),
+  });
+
+  // Send large volume exceeding maxBacklog to trigger retention truncation
+  const chunkSize = 10000;
+  const chunkCount = 60; // 600,000 chars > 512 * 1024 (524,288)
+  for (let index = 0; index < chunkCount; index += 1) {
+    callbacks.output?.({
+      sessionId,
+      data: encodeOutput(`chunk-${index.toString().padStart(4, "0")}: ${"a".repeat(chunkSize - 16)}\n`),
+    });
+  }
+
+  // Send another title update while unsubscribed from output
+  callbacks.output?.({
+    sessionId,
+    data: encodeOutput("\x1b]0;background task complete\x07"),
+  });
+
+  // Assert title listener caught both title events despite no output listener being subscribed
+  expect(titles).toEqual([
+    [sessionId, "background task running"],
+    [sessionId, "background task complete"],
+  ]);
+
+  // Now subscribe an output listener and verify replay behavior
+  const receivedChunks: string[] = [];
+  const unsubscribeOutput = terminalEventBus.subscribeOutput(
+    sessionId,
+    (chunk) => {
+      receivedChunks.push(chunk);
+    },
+    true,
+  );
+
+  // Initial replayed chunk must be bounded to MAX_BACKLOG_CHARS and contain the suffix, not the dropped prefix
+  expect(receivedChunks).toHaveLength(1);
+  const replayedBacklog = receivedChunks[0]!;
+  expect(replayedBacklog.length).toBe(maxBacklog);
+  expect(replayedBacklog.includes(initialPrefix)).toBe(false);
+  expect(replayedBacklog.includes("chunk-0059:")).toBe(true);
+
+  // Emit live output after subscribing
+  const liveChunk1 = "LIVE_CHUNK_ALPHA\n";
+  const liveChunk2 = "LIVE_CHUNK_BETA\n";
+  callbacks.output?.({
+    sessionId,
+    data: encodeOutput(liveChunk1),
+  });
+  callbacks.output?.({
+    sessionId,
+    data: encodeOutput(liveChunk2),
+  });
+
+  // Assert retained chunk was received first, followed by live output in exact order
+  expect(receivedChunks).toEqual([
+    replayedBacklog,
+    liveChunk1,
+    liveChunk2,
+  ]);
+
+  unsubscribeTitle();
+  unsubscribeOutput();
+  terminalEventBus.clearSession(sessionId);
+});
+```
+
+---
+
+### RED Mutation Evidence
+
+#### Mutation 1: Disabling Bounded Backlog Retention in `ui/src/lib/terminalEvents.ts`
+```typescript
+// Bounded trimming loop disabled:
+/*
+while (entry.totalChars > MAX_BACKLOG_CHARS && entry.chunks.length > 0) { ... }
+*/
+```
+**Output from `bun run --cwd ui test -- terminalEvents`:**
+```
+ FAIL  src/lib/terminalEvents.bus.test.ts > terminalEventBus backlog buffer > replays bounded retained suffix in order and preserves title updates while unsubscribed
+AssertionError: expected 599916 to be 524288 // Object.is equality
+
+- Expected
++ Received
+
+- 524288
++ 599916
+
+ ❯ src/lib/terminalEvents.bus.test.ts:203:36
+    201|     expect(receivedChunks).toHaveLength(1);
+    202|     const replayedBacklog = receivedChunks[0]!;
+    203|     expect(replayedBacklog.length).toBe(maxBacklog);
+       |                                    ^
+    204|     expect(replayedBacklog.includes(initialPrefix)).toBe(false);
+    205|     expect(replayedBacklog.includes("chunk-0059:")).toBe(true);
+```
+
+#### Mutation 2: Conditioning Title Parsing on Output Subscriber Presence
+```typescript
+// Title scanning skipped if no output listener:
+if (this.outputListeners.has(sessionId)) {
+  const scan = scanTerminalOscTitles(text, this.titleCarry.get(sessionId) ?? "");
+  ...
+}
+```
+**Output from `bun run --cwd ui test -- terminalEvents`:**
+```
+ FAIL  src/lib/terminalEvents.bus.test.ts > terminalEventBus backlog buffer > replays bounded retained suffix in order and preserves title updates while unsubscribed
+AssertionError: expected [] to deeply equal [ [ …(2) ], [ …(2) ] ]
+
+- Expected
++ Received
+
+- [
+-   [
+-     "unsubscribed-bounded-replay",
+-     "background task running",
+-   ],
+-   [
+-     "unsubscribed-bounded-replay",
+-     "background task complete",
+-   ],
+- ]
++ []
+
+ ❯ src/lib/terminalEvents.bus.test.ts:185:20
+    183| 
+    184|     // Assert title listener caught both title events despite no output listener being subscribed
+    185|     expect(titles).toEqual([
+       |                    ^
+    186|       [sessionId, "background task running"],
+    187|       [sessionId, "background task complete"],
+```
+
+---
+
+### GREEN Output
+
+```
+$ vitest run --maxWorkers=1 terminalEvents
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/terminalEvents.bus.test.ts (6 tests) 31ms
+ ✓ src/lib/terminalEvents.test.ts (4 tests) 4ms
+
+ Test Files  2 passed (2)
+      Tests  10 passed (10)
+   Start at  01:49:58
+   Duration  2.17s (transform 100ms, setup 434ms, collect 161ms, tests 35ms, environment 784ms, prepare 88ms)
+```

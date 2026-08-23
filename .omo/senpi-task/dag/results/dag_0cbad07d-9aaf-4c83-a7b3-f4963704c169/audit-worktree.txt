@@ -1,0 +1,10 @@
+I read this as an audit request - I will inspect the specified worktree, git, registry, and IPC files for backend performance degradations and write the findings to docs/backend-perf/audit-worktree.md.
+
+Completed the static backend performance audit for `worktree`, `git`, `registry`, and worktree IPC commands.
+
+The audit deliverable has been written to `docs/backend-perf/audit-worktree.md` with:
+- **`F-worktree-01` (High)**: O(N) `git worktree list --porcelain` subprocess execution and repeated `fs::canonicalize` traversals on single worktree status and resolution requests (`resolve_worktree`, `cmd_worktree_status`).
+- **`F-worktree-02` (Medium)**: Unnecessary `git worktree list` process spawn and double-canonicalization loop during worktree creation in `WorktreeManager::create_worktree`.
+- **`F-worktree-03` (Medium)**: Unbounded repository branch list formatting and linear scanning in `WorktreeManager::branch_is_merged` instead of using `git merge-base --is-ancestor`.
+- **`F-worktree-04` (Medium)**: Coarse synchronous `delete_lock` Mutex held across a 6–8 serial Git subprocess cascade during deletion, blocking concurrent writer leases and independent worktree deletions.
+- **`F-worktree-05` (Low)**: Redundant subprocess validation in `git_worktree_add` (`git rev-parse --verify`) prior to atomic worktree creation.

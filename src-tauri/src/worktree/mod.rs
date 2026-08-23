@@ -24,8 +24,7 @@ pub mod tests {
             .expect("git config user.email failed");
         fs::write(repo_path.join("README.md"), "# Test Repo\n").expect("write README");
         git::run_git(repo_path, &["add", "README.md"]).expect("git add failed");
-        git::run_git(repo_path, &["commit", "-m", "Initial commit"])
-            .expect("git commit failed");
+        git::run_git(repo_path, &["commit", "-m", "Initial commit"]).expect("git commit failed");
         let manager = WorktreeManager::new(repo_path);
         (temp_dir, manager)
     }
@@ -91,10 +90,7 @@ prunable reason gitdir gone
             Some("maintenance in progress")
         );
         assert!(worktrees[3].detached);
-        assert_eq!(
-            worktrees[4].prunable.as_deref(),
-            Some("reason gitdir gone")
-        );
+        assert_eq!(worktrees[4].prunable.as_deref(), Some("reason gitdir gone"));
     }
 
     #[test]
@@ -118,11 +114,14 @@ prunable reason gitdir gone
     #[test]
     fn create_find_and_list_worktree() {
         let (_temp, manager) = setup_test_repo();
-        let path = path_for(&manager, "feature");
+        let path = manager.worktree_path_for("ws-alpha", "feat-login").unwrap();
         let created = manager
             .create_worktree(CreateWorktreeOptions::new("ws-alpha", "feat-login", &path))
             .expect("create worktree");
-        assert_eq!(created.branch_short_name(), Some("orca/ws-alpha/feat-login"));
+        assert_eq!(
+            created.branch_short_name(),
+            Some("orca/ws-alpha/feat-login")
+        );
         assert!(path.join("README.md").exists());
         assert_eq!(manager.list_worktrees().unwrap().len(), 2);
         assert!(manager.find_worktree(&path).unwrap().is_some());
@@ -220,7 +219,9 @@ prunable reason gitdir gone
     fn registry_resolves_only_registered_workspace_identity() {
         let (_temp, manager) = setup_test_repo();
         let registry = WorkspaceRegistry::new();
-        registry.register("workspace-a", manager.repo_root()).unwrap();
+        registry
+            .register("workspace-a", manager.repo_root())
+            .unwrap();
         let identity = WorktreeIdentity {
             ws_id: "ws".into(),
             slug: "task".into(),
@@ -243,5 +244,78 @@ prunable reason gitdir gone
             .expect("nested Git directory must resolve to its repository root");
 
         assert_eq!(resolved.repo_root(), manager.repo_root());
+    }
+
+    #[test]
+    fn git_merge_base_is_ancestor_and_branch_merge_detection() {
+        let (_temp, manager) = setup_test_repo();
+        let wt_path = manager.worktree_path_for("ws-merge", "task-merge").unwrap();
+        manager
+            .create_worktree(CreateWorktreeOptions::new(
+                "ws-merge",
+                "task-merge",
+                &wt_path,
+            ))
+            .expect("create worktree");
+
+        // Newly branched from HEAD is an ancestor of HEAD
+        let branch = "orca/ws-merge/task-merge";
+        assert!(git::git_merge_base_is_ancestor(manager.repo_root(), branch, "HEAD").unwrap());
+        assert!(manager.branch_is_merged(branch).unwrap());
+
+        // Add a commit to the worktree branch -> no longer an ancestor of HEAD
+        fs::write(wt_path.join("new_feature.txt"), "feature data").unwrap();
+        git::run_git(&wt_path, &["add", "new_feature.txt"]).unwrap();
+        git::run_git(&wt_path, &["commit", "-m", "add feature"]).unwrap();
+
+        assert!(!git::git_merge_base_is_ancestor(manager.repo_root(), branch, "HEAD").unwrap());
+        assert!(!manager.branch_is_merged(branch).unwrap());
+
+        // Merge the branch into HEAD (main/master) -> becomes an ancestor of HEAD again
+        git::run_git(manager.repo_root(), &["merge", branch]).unwrap();
+        assert!(git::git_merge_base_is_ancestor(manager.repo_root(), branch, "HEAD").unwrap());
+        assert!(manager.branch_is_merged(branch).unwrap());
+    }
+
+    #[test]
+    fn resolve_worktree_by_path_and_identity() {
+        let (_temp, manager) = setup_test_repo();
+        let registry = WorkspaceRegistry::new();
+        registry
+            .register("workspace-test", manager.repo_root())
+            .unwrap();
+
+        let identity = WorktreeIdentity {
+            ws_id: "ws-direct".into(),
+            slug: "direct-task".into(),
+        };
+
+        // Before creation, resolve fails with WorktreeIdentityNotFound
+        assert!(matches!(
+            registry.resolve_worktree("workspace-test", &identity),
+            Err(WorktreeError::WorktreeIdentityNotFound { .. })
+        ));
+
+        let wt_path = manager
+            .worktree_path_for(&identity.ws_id, &identity.slug)
+            .unwrap();
+        let created = manager
+            .create_worktree(CreateWorktreeOptions::new(
+                &identity.ws_id,
+                &identity.slug,
+                &wt_path,
+            ))
+            .expect("create worktree");
+        assert_eq!(
+            created.branch_short_name(),
+            Some("orca/ws-direct/direct-task")
+        );
+
+        // After creation, resolve succeeds and returns matching canonical path
+        let (resolved_mgr, resolved_wt) = registry
+            .resolve_worktree("workspace-test", &identity)
+            .expect("resolve worktree");
+        assert_eq!(resolved_wt.path, created.path);
+        assert_eq!(resolved_mgr.repo_root(), manager.repo_root());
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
 use portable_pty::CommandBuilder;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -51,7 +52,10 @@ async fn test_spawn_write_echo_and_read() {
         String::from_utf8_lossy(&accumulated)
     );
 
-    manager.close_session(&session_id).await.expect("close failed");
+    manager
+        .close_session(&session_id)
+        .await
+        .expect("close failed");
 }
 
 #[tokio::test]
@@ -73,7 +77,10 @@ async fn test_resize() {
         .expect("failed to resize second time");
     assert_eq!(session.get_size(), (200, 60));
 
-    manager.close_session(&session_id).await.expect("close failed");
+    manager
+        .close_session(&session_id)
+        .await
+        .expect("close failed");
 }
 
 #[tokio::test]
@@ -90,7 +97,10 @@ async fn test_kill() {
 
     assert!(pid > 0);
 
-    manager.close_session(&session_id).await.expect("failed to close session");
+    manager
+        .close_session(&session_id)
+        .await
+        .expect("failed to close session");
     assert!(!manager.has_session(&session_id));
 }
 
@@ -139,8 +149,16 @@ async fn test_multiple_concurrent_sessions() {
         }
     }
 
-    assert!(found1, "Session 1 output: {}", String::from_utf8_lossy(&text1));
-    assert!(found2, "Session 2 output: {}", String::from_utf8_lossy(&text2));
+    assert!(
+        found1,
+        "Session 1 output: {}",
+        String::from_utf8_lossy(&text1)
+    );
+    assert!(
+        found2,
+        "Session 2 output: {}",
+        String::from_utf8_lossy(&text2)
+    );
 
     manager.close_session(&id1).await.expect("close 1");
     manager.close_session(&id2).await.expect("close 2");
@@ -181,8 +199,36 @@ async fn test_session_lifecycle_and_errors() {
     let sessions = manager.list_sessions();
     assert!(sessions.contains(&custom_id.to_string()));
 
-    manager.close_session(custom_id).await.expect("close failed");
+    manager
+        .close_session(custom_id)
+        .await
+        .expect("close failed");
     assert!(!manager.has_session(custom_id));
+}
+
+#[tokio::test]
+async fn test_lifecycle_poll_interval_is_relaxed_and_event_driven() {
+    assert!(
+        LIFECYCLE_POLL_INTERVAL >= Duration::from_millis(250),
+        "Lifecycle watcher poll interval must be relaxed (>= 250ms), got {:?}",
+        LIFECYCLE_POLL_INTERVAL
+    );
+
+    let manager = PtyManager::new();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg("exit 42");
+
+    let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+    let session = manager.get_session(&session_id).expect("session");
+
+    wait_for_session_removal(&manager, &session_id).await;
+    assert_eq!(
+        session.state(),
+        PtySessionState::Exited { code: Some(42) },
+        "exit code must be accurately captured"
+    );
+    assert!(session.is_reaped(), "child process must be reaped");
 }
 
 #[tokio::test]
@@ -228,8 +274,14 @@ async fn close_session_is_idempotent() {
         .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
         .expect("spawn");
 
-    manager.close_session(&session_id).await.expect("first close");
-    manager.close_session(&session_id).await.expect("second close");
+    manager
+        .close_session(&session_id)
+        .await
+        .expect("first close");
+    manager
+        .close_session(&session_id)
+        .await
+        .expect("second close");
     assert!(!manager.has_session(&session_id));
 }
 
@@ -279,4 +331,78 @@ async fn interrupt_signal_targets_foreground_pty_process_group() {
 
     wait_for_session_removal(&manager, &session_id).await;
     assert!(!manager.has_session(&session_id));
+}
+
+#[tokio::test]
+async fn terminal_service_natural_exit_closes_daemon_owned_output_stream() {
+    let pty_manager = Arc::new(PtyManager::new());
+    let output_hub = Arc::new(TerminalOutputHub::new(1024));
+    let service = TerminalService::new(Arc::clone(&pty_manager), Arc::clone(&output_hub));
+    let mut command = CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("printf done");
+
+    let repo = tempfile::tempdir().expect("tempdir");
+    crate::worktree::run_git(repo.path(), &["init"]).expect("git init");
+    let manager = crate::worktree::WorktreeManager::try_new(repo.path()).expect("worktree manager");
+    command.cwd(repo.path());
+    let (session_id, _legacy_rx) = service
+        .spawn_in_worktree(command, 80, 24, &manager, repo.path())
+        .expect("spawn service session");
+    let attachment = service
+        .attach_with_sequence(&session_id, None)
+        .expect("attach while session is live");
+    let mut receiver = attachment.receiver;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match receiver.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+    .await
+    .expect("natural exit closes output stream");
+    assert!(!output_hub.has_session(&session_id));
+}
+
+#[tokio::test]
+async fn test_terminal_service_sequence_safe_attach_and_replay() {
+    let pty_manager = Arc::new(PtyManager::new());
+    let output_hub = Arc::new(TerminalOutputHub::new(1024));
+    let service = TerminalService::new(Arc::clone(&pty_manager), Arc::clone(&output_hub));
+
+    let (session_id, _rx) = pty_manager
+        .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+        .expect("spawn");
+    let _hub_rx = output_hub.register_session(&session_id);
+
+    output_hub.publish(&session_id, b"chunk 1;".to_vec());
+    output_hub.publish(&session_id, b"chunk 2;".to_vec());
+
+    // Test non-existent session
+    let err = service.attach_with_sequence("invalid-session", None);
+    assert!(matches!(err, Err(PtyError::SessionNotFound(_))));
+
+    // Test valid attach full history
+    let attach = service
+        .attach_with_sequence(&session_id, None)
+        .expect("attach successful");
+    assert_eq!(attach.snapshot.history_start_sequence, Some(1));
+    assert_eq!(attach.snapshot.history_end_sequence, Some(2));
+    assert_eq!(attach.snapshot.history, b"chunk 1;chunk 2;");
+    assert_eq!(attach.snapshot.gap, None);
+
+    // Test replay after sequence 1
+    let attach_partial = service
+        .attach_with_sequence(&session_id, Some(1))
+        .expect("partial attach");
+    assert_eq!(attach_partial.snapshot.history_start_sequence, Some(2));
+    assert_eq!(attach_partial.snapshot.history_end_sequence, Some(2));
+    assert_eq!(attach_partial.snapshot.history, b"chunk 2;");
+    assert_eq!(attach_partial.snapshot.gap, None);
+
+    service.close_session(&session_id).await.expect("close");
+    assert!(!service.output_hub().has_session(&session_id));
 }

@@ -45,7 +45,10 @@ async fn test_e2e_agent_worktree_and_terminal_lifecycle() {
     let agent_wt_path = repo_path.join("wt_agent_task");
     let opts = CreateWorktreeOptions::new("agent1", "task-code", &agent_wt_path);
     let created_wt = worktree_mgr.create_worktree(opts).unwrap();
-    assert_eq!(created_wt.path.canonicalize().unwrap(), agent_wt_path.canonicalize().unwrap());
+    assert_eq!(
+        created_wt.path.canonicalize().unwrap(),
+        agent_wt_path.canonicalize().unwrap()
+    );
 
     let mut cmd = portable_pty::CommandBuilder::new("/bin/sh");
     cmd.cwd(&agent_wt_path);
@@ -65,22 +68,34 @@ async fn test_e2e_agent_worktree_and_terminal_lifecycle() {
     let mut captured_output = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !String::from_utf8_lossy(&captured_output).contains("__ORCA_AGENT_DONE__") {
-            let chunk = rx.recv().await.expect("terminal output before completion marker");
+            let chunk = rx
+                .recv()
+                .await
+                .expect("terminal output before completion marker");
             captured_output.extend_from_slice(&chunk);
         }
     })
     .await
     .expect("agent completion marker timeout");
 
-    assert!(agent_wt_path.join("task.out").exists(), "Agent task file must exist");
+    assert!(
+        agent_wt_path.join("task.out").exists(),
+        "Agent task file must exist"
+    );
     let content = std::fs::read_to_string(agent_wt_path.join("task.out")).unwrap();
     assert!(content.contains("agent work done"));
 
     let dirty = worktree_mgr.check_dirty(&agent_wt_path).unwrap();
-    assert!(dirty.is_dirty, "Untracked task.out must make worktree dirty");
+    assert!(
+        dirty.is_dirty,
+        "Untracked task.out must make worktree dirty"
+    );
 
     let delete_dirty_err = worktree_mgr.remove_worktree(&agent_wt_path, false);
-    assert!(delete_dirty_err.is_err(), "Must refuse to delete dirty worktree");
+    assert!(
+        delete_dirty_err.is_err(),
+        "Must refuse to delete dirty worktree"
+    );
 
     std::process::Command::new("git")
         .args(["add", "."])

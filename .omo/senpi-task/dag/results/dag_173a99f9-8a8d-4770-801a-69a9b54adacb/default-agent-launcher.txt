@@ -1,0 +1,25 @@
+Default Agent now changes the New Tab launcher instead of being a dead Settings preference.
+
+When `defaultAgentId` is enabled and available, that agent is first in the New Tab list with a visible, accessible `Default` label. Click still launches the exact clicked agent object. Missing, `none`, disabled, or unavailable defaults keep natural order and show no badge. Settings copy describes this and does not claim auto-launch.
+
+`defaultAgentId` is wired `App` → `TerminalSplitView` → `TabBar` → `NewTabPopover`.
+
+**RED** (before implementation)
+
+```bash
+cd ui && ./node_modules/.bin/vitest run --maxWorkers=1 \
+  src/components/NewTabPopover.test.tsx src/components/TabBar.test.tsx \
+  src/components/TerminalSplitView.test.tsx src/components/SettingsDialog.test.tsx \
+  src/App.test.tsx \
+  -t "defaultAgentId|Default Agent|Default label|exact clicked|natural agent order|surfaces the stored"
+```
+
+Failures were the missing UI: first button was `Claude` instead of `Aider`, and Settings still said it does not preselect/launch.
+
+**GREEN** (after implementation)
+
+Same command: **8 passed**, 94 skipped.
+
+`tsc --noEmit` exit 0. LSP diagnostics on the touched UI files timed out after repeated retries.
+
+Unrelated pre-existing failures (not from this change): Settings Ghostty preference spies, and `NewTabPopover.browserTab.runtime.test.tsx` (`__TAURI_INTERNALS__.invoke` undefined).

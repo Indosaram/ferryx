@@ -1,0 +1,125 @@
+> I read this as verification - inspect changes, run targeted UI and native tests, check build/diagnostics, inspect wire contracts, check real surface QA, and record exact results.
+
+### 1. Verification Summary & Command Outputs
+
+#### A. Targeted UI Tests
+Command:
+```bash
+cd ui && bun x vitest run src/lib/terminalHostManager.test.ts src/state/workspaceStore.test.tsx src/components/TerminalPane.test.tsx src/lib/terminalEvents.bus.test.ts
+```
+Exit Code: `0`
+Output:
+```text
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/state/workspaceStore.test.tsx (21 tests) 108ms
+ ✓ src/lib/terminalHostManager.test.ts (10 tests) 118ms
+ ✓ src/components/TerminalPane.test.tsx (3 tests) 52ms
+ ✓ src/lib/terminalEvents.bus.test.ts (5 tests) 15ms
+
+ Test Files  4 passed (4)
+      Tests  39 passed (39)
+```
+
+Full UI Suite Verification (`bun run --cwd ui test`):
+Exit Code: `0`
+Output:
+```text
+ Test Files  67 passed (67)
+      Tests  488 passed (488)
+```
+
+#### B. UI Production Build
+Command:
+```bash
+bun run --cwd ui build
+```
+Exit Code: `0`
+Output:
+```text
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1714 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                              1.18 kB │ gzip:  0.55 kB
+dist/assets/geist-variable-CrgPqtmy.woff2   69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png       805.82 kB
+dist/assets/xterm-9CEnUXvW.css               5.75 kB │ gzip:  1.98 kB
+dist/assets/index-DmTfKDW2.css              46.26 kB │ gzip:  8.50 kB
+dist/assets/addon-fit-YJmn1quW.js            1.60 kB │ gzip:  0.71 kB
+dist/assets/terminalRenderer-BFPhjQwh.js     5.63 kB │ gzip:  1.93 kB
+dist/assets/RemoteApp-D55Bcb0m.js           19.37 kB │ gzip:  5.98 kB
+dist/assets/addon-unicode11-CU4jat_f.js     25.09 kB │ gzip:  9.26 kB
+dist/assets/browser-HDvuZ649.js             25.78 kB │ gzip: 10.13 kB
+dist/assets/addon-search-CNv4eh2c.js        32.46 kB │ gzip: 10.34 kB
+dist/assets/SettingsDialog-LV1DDFPc.js      49.63 kB │ gzip: 11.92 kB
+dist/assets/addon-webgl-BrQ0bpT6.js        111.96 kB │ gzip: 30.52 kB
+dist/assets/index-BghC3HH3.js              169.04 kB │ gzip: 54.70 kB
+dist/assets/App-CMJFwaip.js                259.86 kB │ gzip: 74.52 kB
+dist/assets/xterm-BqvuqXEL.js              332.63 kB │ gzip: 84.18 kB
+✓ built in 4.18s
+```
+
+#### C. Native Output Hub Tests
+Command:
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml terminal::output_hub
+```
+Exit Code: `0`
+Output:
+```text
+running 2 tests
+test terminal::output_hub::tests::test_bounded_buffer_overflow ... ok
+test terminal::output_hub::tests::test_output_hub_replay_and_broadcast ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.01s
+```
+
+Native Terminal Suite Verification (`cargo test --manifest-path src-tauri/Cargo.toml terminal::`):
+Exit Code: `0` (16 passed; 0 failed)
+Native Remote Suite Verification (`cargo test --manifest-path src-tauri/Cargo.toml remote::`):
+Exit Code: `0` (9 passed; 0 failed)
+
+---
+
+### 2. Source Inspection & Wire Contract Validation
+
+1. **Rust Bounded Output Hub**:
+   - Remote WebSocket streaming via `/api/v1/terminal/{sessionId}` attaches to `TerminalService::attach` (`src-tauri/src/terminal/service.rs`), which subscribes to the bounded output hub (`TerminalOutputHub` in `src-tauri/src/terminal/output_hub.rs`).
+   - Replay backlog on attach sends the buffer snapshot, followed by live chunks received over the broadcast channel.
+2. **Mobile Wire Contract Preservation**:
+   - `ClientControlMessage` (`Resize`, `Signal`, `Ping`) and `ServerControlMessage` (`Pong`, `Error`) in `src-tauri/src/remote/protocol.rs` remain intact.
+   - Remote terminal client (`ui/src/remote/RemoteTerminal.tsx`) continues to send binary stdin and json control messages (`resize`, `signal`) without contract drift.
+3. **Frontend Scaling Implementation**:
+   - `ui/src/lib/terminalHostManager.ts` enforces `DEFAULT_WARM_CACHE_LIMIT = 2` for inactive terminal instances, evicting the oldest unmounted renderer instances to avoid memory leaks while retaining warm instances for fast switching.
+   - Unmounted/inactive renderers unsubscribe from output streams, while background OSC title tracking (`ui/src/lib/terminalEvents.ts`) continues to update tab activity.
+
+---
+
+### 3. Corrective Edits Made
+
+- **File**: `ui/src/test/setup.ts`
+- **Correction**: Changed `clearHmrWorkspaceState` import path from `../state/workspaceStore` to `../state/hmrWorkspaceState`.
+- **Reason**: Eager top-level import of `workspaceStore` during test setup initialized the Tauri IPC bridge module before individual test file mocks were applied, causing test pollution across mock-dependent test suites. Importing directly from pure `hmrWorkspaceState` eliminates this side-effect.
+
+---
+
+### 4. Real-Surface & Manual QA Disposition
+
+- **Desktop UI Automation Status**: Automated desktop UI testing (such as Tauri WebDriver / end-to-end desktop GUI test runners) is not configured in this project repository (no Cypress, Playwright, or Selenium harness installed).
+- **Manual Real-Surface Verification Procedure**:
+  1. Launch Ferryx via `cargo tauri dev`.
+  2. Create 4 terminal tabs in a workspace (Tab 1, Tab 2, Tab 3, Tab 4).
+  3. In Tab 1, run a long-running process with periodic output (e.g. `seq 1 1000`).
+  4. Switch focus through Tab 2, Tab 3, and Tab 4.
+  5. **Warm Retention Check**: Switch back to Tab 3 (within warm limit of 2 inactive renderers) — the terminal renders instantly without remounting/replaying.
+  6. **Eviction Re-mount Check**: Switch back to Tab 1 (evicted renderer after LRU depth > 2) — the terminal remounts cleanly, reconnects output subscription, replays the bounded backlog buffer, and re-attaches the PTY without lost state or process corruption.
+  7. Close a tab and verify frontend instance disposal and cleanup.
+
+---
+
+### 5. Process Lifecycle Check
+
+Checked running processes with `ps aux | grep -E "cargo tauri|vite|vitest"`. No orphan servers, test processes, or background daemons remain alive.

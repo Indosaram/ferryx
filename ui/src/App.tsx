@@ -1,15 +1,25 @@
 import { PanelLeft } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { AddProjectDialog, AddWorktreeDialog } from "./components/ProjectDialogs";
-import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
+import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { IconButton } from "./components/ui/IconButton";
-import { deserializeWorkspaceState, serializeWorkspaceState } from "./lib/sessionPersistence";
+import { newBrowserTabUrl } from "./lib/browserSettings";
+import { useGeneralSettings } from "./lib/generalSettings";
+import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
+import {
+  AGENT_CANDIDATES,
+  AGENTS_SETTINGS_CHANGED_EVENT,
+  getLaunchableAgents,
+  loadAgentSettings,
+  mergeDetections,
+  type AgentSettings,
+} from "./lib/agentsSettings";
 import {
   ACTIVE_PROJECT_STORAGE_KEY,
   getMigratedItem,
@@ -19,36 +29,219 @@ import {
 } from "./lib/storageKeys";
 import {
   DEFAULT_WORKSPACE_ID,
-  getWorktreeStatus,
+  detectAgents,
+  getInitialProject,
+  isTauriRuntime,
   loadSession,
+  onCloseTabMenu,
   onNewTerminalTabMenu,
+  onRemoteSelectionRequested,
+  publishFocusedTerminal,
   registerProject,
   saveSession,
+  setBadgeCount,
   spawnTerminal,
+  writeTerminal,
+  type AgentDetection,
+  type FocusedTerminalPayload,
   type RegisteredProject,
+  type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
-import { defaultTauriTransport } from "./lib/terminalTransport/tauriTransport";
 import { worktreeIdentity, type DirtyState, type WorkspaceTab, type Worktree } from "./lib/types";
 import { registerWindowCloseGuard } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { useWorkspaceRestore } from "./state/workspaceRestore";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { useWorkspaceStore } from "./state/workspaceStore";
+import { useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: "." };
+const SettingsDialog = lazy(() =>
+  import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog })),
+);
+
+type ProjectBootstrap = {
+  projects: RegisteredProject[];
+  activeProjectId: string;
+};
+
+function loadProjectBootstrap(): ProjectBootstrap {
+  return { projects: loadProjects(), activeProjectId: loadActiveProjectId() };
+}
+
+function isInitialProjectPlaceholder(project: RegisteredProject, startup: RegisteredProject) {
+  return (
+    project.workspaceId === DEFAULT_WORKSPACE_ID &&
+    (project.repoRoot === "." || project.repoRoot === "" || project.repoRoot === startup.repoRoot)
+  );
+}
+
+function canonicalizeProjectBootstrap(stored: ProjectBootstrap, startup: RegisteredProject): ProjectBootstrap {
+  const replacesPlaceholder = stored.projects.some((project) => isInitialProjectPlaceholder(project, startup));
+  if (!replacesPlaceholder) return stored;
+
+  const projects = stored.projects.reduce<RegisteredProject[]>((next, project) => {
+    const canonical = isInitialProjectPlaceholder(project, startup) ? startup : project;
+    if (!next.some((candidate) => candidate.workspaceId === canonical.workspaceId)) next.push(canonical);
+    return next;
+  }, []);
+  const activeProjectId = stored.activeProjectId === DEFAULT_WORKSPACE_ID ? startup.workspaceId : stored.activeProjectId;
+  persistProjects(projects);
+  persistActiveProjectId(activeProjectId);
+  return { projects, activeProjectId };
+}
 
 export function App() {
-  const [projects, setProjects] = useState<RegisteredProject[]>(loadProjects);
-  const [activeProjectId, setActiveProjectId] = useState(loadActiveProjectId);
+  const [isNativeRuntime] = useState(() => isTauriRuntime());
+  const [bootstrap, setBootstrap] = useState<ProjectBootstrap | null>(() =>
+    isNativeRuntime ? null : loadProjectBootstrap(),
+  );
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    let cancelled = false;
+    void getInitialProject()
+      .then((startup) => {
+        if (!cancelled) setBootstrap(canonicalizeProjectBootstrap(loadProjectBootstrap(), startup));
+      })
+      .catch((error) => {
+        if (!cancelled) setBootstrapError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNativeRuntime]);
+
+  if (bootstrapError) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background text-xs text-destructive">
+        Unable to initialize project: {bootstrapError}
+      </div>
+    );
+  }
+  if (!bootstrap) return <div className="h-screen w-screen bg-background" aria-label="Initializing project" />;
+
+  return <WorkspaceApp initialProjects={bootstrap.projects} initialActiveProjectId={bootstrap.activeProjectId} />;
+}
+
+export function deriveFocusedTerminal(
+  workspaceId: string,
+  state: WorkspaceState,
+): FocusedTerminalPayload | null {
+  const focusedGroup = state.layout.focusedGroupId
+    ? state.layout.tabGroups?.[state.layout.focusedGroupId]
+    : undefined;
+  const activeTabId =
+    focusedGroup?.activeTabId ?? state.layout.activeTabId ?? state.layout.tabs[0]?.id ?? null;
+  if (!activeTabId) return null;
+
+  const activeTab = state.layout.tabs.find((tab) => tab.id === activeTabId);
+  if (!activeTab || activeTab.kind === "browser") return null;
+
+  const tabLayout = state.layout.layoutsByTabId?.[activeTab.id];
+  const activeLeafId =
+    tabLayout?.activeLeafId ?? (tabLayout?.root ? collectLeafIds(tabLayout.root)[0] : null);
+  const localSessionId =
+    (activeLeafId && tabLayout?.sessionIdsByLeafId?.[activeLeafId]) || activeTab.sessionId;
+  const session = localSessionId ? state.sessions[localSessionId] : undefined;
+
+  const sessionWorktreePath = session?.worktreePath ?? session?.cwd;
+  const foundWorktree = sessionWorktreePath
+    ? state.worktrees.find((wt) => wt.path === sessionWorktreePath)
+    : (state.worktrees.find((wt) => wt.path === state.activeWorktreePath) ?? null);
+
+  const ident = foundWorktree ? worktreeIdentity(foundWorktree) : null;
+  const worktreeSlug =
+    ident?.slug ??
+    (foundWorktree?.branch ? foundWorktree.branch.replace(/^refs\/heads\//, "") : null);
+  const worktreeLabel = foundWorktree?.branch
+    ? foundWorktree.branch.replace(/^refs\/heads\//, "")
+    : activeTab.label;
+
+  return {
+    workspaceId,
+    worktreeSlug: worktreeSlug ?? null,
+    worktreeLabel: worktreeLabel ?? null,
+    backendSessionId: session?.backendSessionId ?? null,
+  };
+}
+
+function matchWorktreeBySlug(worktrees: Worktree[], slug: string): Worktree | undefined {
+  return worktrees.find((wt) => {
+    const ident = worktreeIdentity(wt);
+    if (ident && (ident.slug === slug || ident.slug.endsWith("/" + slug))) return true;
+    const branchName = wt.branch?.replace(/^refs\/heads\//, "");
+    if (branchName === slug || branchName?.endsWith("/" + slug)) return true;
+    const lastComponent = wt.path.split("/").filter(Boolean).pop();
+    if (lastComponent === slug) return true;
+    return false;
+  });
+}
+
+function WorkspaceApp({
+  initialProjects,
+  initialActiveProjectId,
+}: {
+  initialProjects: RegisteredProject[];
+  initialActiveProjectId: string;
+}) {
+  const [projects, setProjects] = useState<RegisteredProject[]>(initialProjects);
+  const [activeProjectId, setActiveProjectId] = useState(initialActiveProjectId);
+  const { settings: generalSettings } = useGeneralSettings();
   const activeProject = useMemo(
     () => projects.find((project) => project.workspaceId === activeProjectId) ?? projects[0] ?? DEFAULT_PROJECT,
     [activeProjectId, projects],
   );
 
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+  const activeProjectRef = useRef(activeProject);
+  activeProjectRef.current = activeProject;
+
+  const [agentSettings, setAgentSettings] = useState<AgentSettings>(loadAgentSettings);
+  const [agentDetections, setAgentDetections] = useState<AgentDetection[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function runDetection() {
+      if (!isTauriRuntime()) return;
+      try {
+        const results = await detectAgents([...AGENT_CANDIDATES]);
+        if (!cancelled) setAgentDetections(results);
+      } catch (error) {
+        console.warn("Failed to detect agents:", error);
+      }
+    }
+    void runDetection();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleSettingsChange = () => {
+      setAgentSettings(loadAgentSettings());
+    };
+    window.addEventListener(AGENTS_SETTINGS_CHANGED_EVENT, handleSettingsChange);
+    return () => window.removeEventListener(AGENTS_SETTINGS_CHANGED_EVENT, handleSettingsChange);
+  }, []);
+
+  const resolvedAgents = useMemo(
+    () => mergeDetections(agentSettings, agentDetections),
+    [agentSettings, agentDetections],
+  );
+
+  const launchableAgents = useMemo(
+    () => getLaunchableAgents(resolvedAgents),
+    [resolvedAgents],
+  );
+
   const {
     state,
+    recoveredFromHmr,
     agents,
     tabActivity,
     worktreeActivity,
@@ -78,6 +271,8 @@ export function App() {
     syncWorktrees,
     restoreWorkspace,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const { runtimeError, refreshWorktrees, reportRuntimeError } = useWorkspaceRuntime({
     workspaceId: activeProject.workspaceId,
     activeWorktreePath: state.activeWorktreePath,
@@ -94,128 +289,80 @@ export function App() {
       .catch(reportRuntimeError);
   }, [activeProject.repoRoot, activeProject.workspaceId, refreshWorktrees, reportRuntimeError]);
 
-  // Initial session restore on startup & HMR recovery.
-  useEffect(() => {
-    let cancelled = false;
-    async function restore() {
-      try {
-        const session = await loadSession();
-        if (cancelled || !session) return;
+  // Initial session restore on startup & HMR recovery managed by coordinator.
+  useWorkspaceRestore({
+    workspaceId: activeProject.workspaceId,
+    recoveredFromHmr,
+    restoreWorkspace,
+  });
 
-        const liveSessions = await defaultTauriTransport.listSessions().catch(() => []);
-        const liveBackendIds = new Set(liveSessions.map((candidate) => candidate.sessionId));
-        const restoredState = deserializeWorkspaceState(activeProject.workspaceId, session, liveBackendIds);
-
-        if (restoredState && restoredState.layout.tabs.length > 0) {
-          restoreWorkspace(restoredState);
-
-          // A persisted local session can outlive its native PTY. Respawn only the dead
-          // native side while preserving the local session/leaf ownership graph.
-          const deadSessions = Object.values(restoredState.sessions).filter((candidate) => !candidate.backendSessionId);
-          if (deadSessions.length > 0) {
-            let hasSpawned = false;
-            await ensureTerminalEvents().catch(() => undefined);
-            for (const restoredSession of deadSessions) {
-              if (cancelled) return;
-              try {
-                const worktreePath = restoredSession.worktreePath ?? restoredSession.cwd;
-                const foundWorktree = restoredState.worktrees.find((worktree) => worktree.path === worktreePath);
-                const backendSessionId = await spawnTerminal({
-                  workspaceId: activeProject.workspaceId,
-                  worktree: foundWorktree ? worktreeIdentity(foundWorktree) : null,
-                  cwd: restoredSession.cwd,
-                });
-                restoredSession.backendSessionId = backendSessionId;
-                restoredSession.lifecycle = "working";
-                hasSpawned = true;
-              } catch (error) {
-                console.warn("Failed to respawn terminal session on restore:", error);
-              }
-            }
-
-            if (hasSpawned && !cancelled) restoreWorkspace({ ...restoredState });
-          }
-          // Typed v2 restoration already reconstructed every tab. Do not run the legacy
-          // per-worktree fallback as well or it can create duplicate terminal tabs.
-          return;
-        }
-
-        // Legacy best-effort fallback for sessions that cannot be deserialized as a
-        // workspace state. Browser records are skipped because they require explicit v2
-        // browser metadata and should never be guessed from terminal fields.
-        const workspace = session.workspaces?.[activeProject.workspaceId];
-        if (!workspace || !workspace.layout?.tabs?.length) return;
-        for (const persistedTab of workspace.layout.tabs) {
-          if (cancelled) return;
-          if (persistedTab.kind === "browser") continue;
-          const legacyWorktreePath = persistedTab.worktreePath || workspace.repoRoot;
-          const found = workspace.worktrees?.find((candidate) => candidate.path === legacyWorktreePath);
-          const worktree: Worktree = found
-            ? {
-                path: found.path,
-                head: found.head,
-                branch: found.branch,
-                bare: false,
-                detached: false,
-                locked: found.isLocked ? "locked" : null,
-                prunable: null,
-              }
-            : {
-                path: legacyWorktreePath,
-                head: "",
-                branch: persistedTab.label,
-                bare: false,
-                detached: false,
-                locked: null,
-                prunable: null,
-              };
-          try {
-            const alreadyOpen = state.layout.tabs.some((tab) => {
-              if (tab.kind === "browser") return false;
-              const localSession = state.sessions[tab.sessionId];
-              return (localSession?.worktreePath ?? localSession?.cwd) === worktree.path;
-            });
-            if (!alreadyOpen) await ensureTabForWorktree(worktree);
-          } catch {
-            // Safe fallback if the terminal for this worktree is already open.
-          }
-        }
-      } catch (error) {
-        console.warn("Session restore on boot skipped:", error);
-      }
-    }
-    void restore();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProject.workspaceId, ensureTabForWorktree, restoreWorkspace, state.layout.tabs, state.sessions]);
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const persistSession = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
+    saveChainRef.current = saveChainRef.current
+      .then(async () => {
+        const existing = await loadSession().catch(() => null);
+        const session = serializeWorkspaceState(
+          workspaceId,
+          repoRoot,
+          currentState,
+          existing,
+        );
+        await saveSession(session);
+      })
+      .catch((error) => {
+        console.error("Failed to save workspace session:", error);
+      });
+    return saveChainRef.current;
+  }, []);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
-      const session = serializeWorkspaceState(activeProject.workspaceId, activeProject.repoRoot, state);
-      await saveSession(session);
+      await persistSession(activeProjectRef.current.workspaceId, activeProjectRef.current.repoRoot, stateRef.current);
     });
     return unregister;
-  }, [activeProject.repoRoot, activeProject.workspaceId, state]);
+  }, [persistSession]);
 
   useEffect(() => {
-    if (state.worktrees.length === 0 || state.layout.tabs.length === 0) return;
+    const hasTabs =
+      state.layout.tabs.length > 0 ||
+      Object.values(state.worktreeLayouts ?? {}).some((l) => l.tabs.length > 0);
+    if (state.worktrees.length === 0 || !hasTabs) return;
     const timer = setTimeout(() => {
-      const session = serializeWorkspaceState(activeProject.workspaceId, activeProject.repoRoot, state);
-      void Promise.resolve(saveSession(session)).catch((error) => console.error("Failed to auto-save session:", error));
+      void persistSession(activeProject.workspaceId, activeProject.repoRoot, stateRef.current);
     }, 500);
     return () => clearTimeout(timer);
-  }, [activeProject.repoRoot, activeProject.workspaceId, state]);
+  }, [activeProject.repoRoot, activeProject.workspaceId, persistSession, state]);
 
   const [isAddProjectOpen, setIsAddProjectOpen] = useState(false);
+  const [createTargetProject, setCreateTargetProject] = useState<RegisteredProject | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
+  const [pendingTabClose, setPendingTabClose] = useState<{ id: string; label: string } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
+  const [pendingRemoteSlug, setPendingRemoteSlug] = useState<string | null>(null);
+
+  const focusedTerminalPayload = useMemo(
+    () => deriveFocusedTerminal(activeProject.workspaceId, state),
+    [activeProject.workspaceId, state],
+  );
+
+  useEffect(() => {
+    void publishFocusedTerminal(focusedTerminalPayload);
+  }, [focusedTerminalPayload]);
+
+  const unreadBadgeCount = useMemo(
+    () => Object.values(state.unreadTabIds ?? {}).filter(Boolean).length,
+    [state.unreadTabIds],
+  );
+
+  useEffect(() => {
+    void setBadgeCount(unreadBadgeCount).catch(reportRuntimeError);
+  }, [reportRuntimeError, unreadBadgeCount]);
 
   const toggleSidebar = useCallback(() => {
     setIsSidebarOpen((current) => {
@@ -229,17 +376,19 @@ export function App() {
     () => state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? null,
     [state.activeWorktreePath, state.worktrees],
   );
+  const activeWorktreeRef = useRef(activeWorktree);
+  activeWorktreeRef.current = activeWorktree;
 
   const handleSelectProject = useCallback(
     (project: RegisteredProject) => {
-      if (project.workspaceId === activeProject.workspaceId) return;
+      if (project.workspaceId === activeProjectRef.current.workspaceId) return;
       setActiveProjectId(project.workspaceId);
       persistActiveProjectId(project.workspaceId);
       setWorktreeStatuses({});
       setDeleteTarget(null);
       setPendingWorktreePath(null);
     },
-    [activeProject.workspaceId],
+    [],
   );
 
   const handleRegisteredProject = useCallback((project: RegisteredProject) => {
@@ -256,15 +405,15 @@ export function App() {
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
       const ownerId = worktreeIdentity(worktree)?.wsId;
-      const owner = ownerId ? projects.find((project) => project.workspaceId === ownerId) : undefined;
-      if (owner && owner.workspaceId !== activeProject.workspaceId) {
+      const owner = ownerId ? projectsRef.current.find((project) => project.workspaceId === ownerId) : undefined;
+      if (owner && owner.workspaceId !== activeProjectRef.current.workspaceId) {
         handleSelectProject(owner);
         setPendingWorktreePath(worktree.path);
         return;
       }
       void ensureTabForWorktree(worktree).catch(reportRuntimeError);
     },
-    [activeProject.workspaceId, ensureTabForWorktree, handleSelectProject, projects, reportRuntimeError],
+    [ensureTabForWorktree, handleSelectProject, reportRuntimeError],
   );
 
   useEffect(() => {
@@ -275,20 +424,67 @@ export function App() {
     void ensureTabForWorktree(target).catch(reportRuntimeError);
   }, [ensureTabForWorktree, pendingWorktreePath, reportRuntimeError, state.worktrees]);
 
+  useEffect(() => {
+    if (!pendingRemoteSlug) return;
+    const target = matchWorktreeBySlug(state.worktrees, pendingRemoteSlug);
+    if (!target) return;
+    setPendingRemoteSlug(null);
+    void ensureTabForWorktree(target).catch(reportRuntimeError);
+  }, [ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
+
+  const handleRemoteSelectionRequested = useCallback(
+    (payload: RemoteSelectionRequestedPayload) => {
+      if (!payload || !payload.workspaceId) return;
+      const targetProject = projectsRef.current.find((p) => p.workspaceId === payload.workspaceId);
+      const isCurrentProject = activeProjectRef.current.workspaceId === payload.workspaceId;
+
+      if (payload.worktreeSlug) {
+        if (isCurrentProject) {
+          const targetWorktree = matchWorktreeBySlug(stateRef.current.worktrees, payload.worktreeSlug);
+          if (targetWorktree) {
+            handleSelectWorktree(targetWorktree);
+          }
+        } else if (targetProject) {
+          handleSelectProject(targetProject);
+          setPendingRemoteSlug(payload.worktreeSlug);
+        }
+      } else {
+        if (!isCurrentProject && targetProject) {
+          handleSelectProject(targetProject);
+        }
+      }
+    },
+    [handleSelectProject, handleSelectWorktree],
+  );
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void onRemoteSelectionRequested(handleRemoteSelectionRequested).then((dispose: () => void) => {
+      if (cancelled) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleRemoteSelectionRequested]);
+
   const handleSelectTerminalTab = useCallback(
     (tabId: string) => {
-      const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
+      const currentState = stateRef.current;
+      const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
       if (tab.kind === "browser") {
         activateTab(tabId);
         return;
       }
-      const session = state.sessions[tab.sessionId];
+      const session = currentState.sessions[tab.sessionId];
       const sessionWorktreePath = session?.worktreePath ?? session?.cwd;
       const worktree = sessionWorktreePath
-        ? state.worktrees.find((candidate) => candidate.path === sessionWorktreePath)
+        ? currentState.worktrees.find((candidate) => candidate.path === sessionWorktreePath)
         : undefined;
-      if (!worktree || worktree.path === state.activeWorktreePath) {
+      if (!worktree || worktree.path === currentState.activeWorktreePath) {
         activateTab(tabId);
         return;
       }
@@ -296,26 +492,38 @@ export function App() {
         .then(() => activateTab(tabId))
         .catch(reportRuntimeError);
     },
-    [activateTab, ensureTabForWorktree, reportRuntimeError, state.activeWorktreePath, state.layout.tabs, state.sessions, state.worktrees],
-  );
-
-  const handleRefreshWorktreeStatus = useCallback(
-    (worktree: Worktree) => {
-      const identity = worktreeIdentity(worktree);
-      if (!identity) return;
-      void getWorktreeStatus({ workspaceId: activeProject.workspaceId, worktree: identity })
-        .then((status) => {
-          setWorktreeStatuses((current) => ({ ...current, [worktree.path]: status }));
-        })
-        .catch(reportRuntimeError);
-    },
-    [activeProject.workspaceId, reportRuntimeError],
+    [activateTab, ensureTabForWorktree, reportRuntimeError],
   );
 
   const handleAddTerminalTab = useCallback(() => {
-    if (!activeWorktree) return;
-    void openTab(activeWorktree).catch(reportRuntimeError);
-  }, [activeWorktree, openTab, reportRuntimeError]);
+    const activeWt = activeWorktreeRef.current;
+    if (!activeWt) return;
+    void openTab(activeWt).catch(reportRuntimeError);
+  }, [openTab, reportRuntimeError]);
+
+  const handleLaunchAgent = useCallback(
+    async (agent: { name: string; command: string; args: string }) => {
+      try {
+        const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
+        if (!targetWorktree) return;
+        await ensureTerminalEvents().catch(() => undefined);
+        const backendSessionId = await spawnTerminal({
+          workspaceId: activeProjectRef.current.workspaceId,
+          worktree: worktreeIdentity(targetWorktree),
+          cwd: targetWorktree.path,
+        });
+        const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
+        await openTab(targetWorktree, label, backendSessionId);
+        const fullCommand = `${agent.command} ${agent.args}`.trim();
+        if (fullCommand) {
+          await writeTerminal({ sessionId: backendSessionId, data: `${fullCommand}\r` });
+        }
+      } catch (error) {
+        reportRuntimeError(error);
+      }
+    },
+    [openTab, reportRuntimeError],
+  );
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -332,10 +540,23 @@ export function App() {
 
   const handleCloseTab = useCallback(
     (tabId: string) => {
+      const tab = stateRef.current.layout.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab || tab.pinned) return;
+      if (generalSettings.confirmCloseTab) {
+        setPendingTabClose({ id: tab.id, label: tab.label });
+        return;
+      }
       void closeTab(tabId).catch(reportRuntimeError);
     },
-    [closeTab, reportRuntimeError],
+    [closeTab, generalSettings.confirmCloseTab, reportRuntimeError],
   );
+
+  const handleConfirmTabClose = useCallback(() => {
+    if (!pendingTabClose) return;
+    const tabId = pendingTabClose.id;
+    setPendingTabClose(null);
+    void closeTab(tabId).catch(reportRuntimeError);
+  }, [closeTab, pendingTabClose, reportRuntimeError]);
 
   const handleCloseOtherTabs = useCallback(
     (tabId: string) => {
@@ -360,46 +581,50 @@ export function App() {
 
   const handleCycleTab = useCallback(
     (offset: number) => {
-      const focusedGroup = state.layout.focusedGroupId
-        ? state.layout.tabGroups?.[state.layout.focusedGroupId]
+      const currentState = stateRef.current;
+      const focusedGroup = currentState.layout.focusedGroupId
+        ? currentState.layout.tabGroups?.[currentState.layout.focusedGroupId]
         : undefined;
-      const tabById = new Map(state.layout.tabs.map((tab) => [tab.id, tab]));
+      const tabById = new Map(currentState.layout.tabs.map((tab) => [tab.id, tab]));
       const tabs: WorkspaceTab[] = focusedGroup
         ? focusedGroup.tabIds.map((tabId) => tabById.get(tabId)).filter((tab): tab is WorkspaceTab => Boolean(tab))
-        : state.layout.tabs;
+        : currentState.layout.tabs;
       if (tabs.length < 2) return;
-      const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.id === state.layout.activeTabId));
+      const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.id === currentState.layout.activeTabId));
       const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
       handleSelectTerminalTab(tabs[nextIndex].id);
     },
-    [handleSelectTerminalTab, state.layout.activeTabId, state.layout.focusedGroupId, state.layout.tabGroups, state.layout.tabs],
+    [handleSelectTerminalTab],
   );
 
   const handleSplitActive = useCallback(
     (direction: PaneDirection) => {
-      const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+      const currentState = stateRef.current;
+      const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
       if (!activeTab || activeTab.kind === "browser") return;
-      const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+      const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
       const targetLeafId = activeLayout?.activeLeafId ?? "leaf-default";
       void splitPane(activeTab.id, targetLeafId, direction).catch(reportRuntimeError);
     },
-    [reportRuntimeError, splitPane, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs],
+    [reportRuntimeError, splitPane],
   );
 
   const handleUnsplitActive = useCallback(() => {
-    const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+    const currentState = stateRef.current;
+    const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
     if (!activeTab || activeTab.kind === "browser") return;
-    const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+    const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
     if (!activeLayout || activeLayout.root.type === "leaf") return;
     const activeLeafId = activeLayout.activeLeafId ?? "leaf-default";
     void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
-  }, [closePane, reportRuntimeError, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs]);
+  }, [closePane, reportRuntimeError]);
 
   const handleCyclePaneFocus = useCallback(
     (offset: number) => {
-      const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+      const currentState = stateRef.current;
+      const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
       if (!activeTab || activeTab.kind === "browser") return;
-      const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+      const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
       if (!activeLayout) return;
       const leafIds = collectLeafIds(activeLayout.root);
       if (leafIds.length < 2) return;
@@ -408,37 +633,40 @@ export function App() {
       const nextIndex = (currentIndex + offset + leafIds.length) % leafIds.length;
       focusPane(activeTab.id, leafIds[nextIndex]);
     },
-    [focusPane, state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs],
+    [focusPane],
   );
 
   const handleOpenTerminalSearch = useCallback(() => {
-    const activeTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? state.layout.tabs[0];
+    const currentState = stateRef.current;
+    const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
     if (!activeTab || activeTab.kind === "browser") return;
-    const activeLayout = state.layout.layoutsByTabId?.[activeTab.id];
+    const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
     const leafId = activeLayout?.activeLeafId ?? (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : "leaf-default");
     setSearchLeafId(leafId);
-  }, [state.layout.activeTabId, state.layout.layoutsByTabId, state.layout.tabs]);
+  }, []);
 
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
-      const visible = listVisibleWorktrees(projects, state.worktrees, activeProject.workspaceId);
+      const visible = listVisibleWorktrees(projectsRef.current, stateRef.current.worktrees, activeProjectRef.current.workspaceId);
       const target = visible[index];
       if (target) handleSelectWorktree(target);
     },
-    [activeProject.workspaceId, handleSelectWorktree, projects, state.worktrees],
+    [handleSelectWorktree],
   );
 
   const { settings: terminalSettings, updateSettings: updateTerminalSettings } = useTerminalSettings();
+  const terminalSettingsRef = useRef(terminalSettings);
+  terminalSettingsRef.current = terminalSettings;
 
   const handleZoomIn = useCallback(() => {
-    const nextSize = Math.min(36, terminalSettings.fontSize + 1);
+    const nextSize = Math.min(36, terminalSettingsRef.current.fontSize + 1);
     updateTerminalSettings({ fontSize: nextSize });
-  }, [terminalSettings.fontSize, updateTerminalSettings]);
+  }, [updateTerminalSettings]);
 
   const handleZoomOut = useCallback(() => {
-    const nextSize = Math.max(10, terminalSettings.fontSize - 1);
+    const nextSize = Math.max(10, terminalSettingsRef.current.fontSize - 1);
     updateTerminalSettings({ fontSize: nextSize });
-  }, [terminalSettings.fontSize, updateTerminalSettings]);
+  }, [updateTerminalSettings]);
 
   const handleZoomReset = useCallback(() => {
     updateTerminalSettings({ fontSize: null });
@@ -446,21 +674,93 @@ export function App() {
 
   const handleSelectTerminalTabByIndex = useCallback(
     (index: number) => {
-      const focusedGroup = state.layout.focusedGroupId
-        ? state.layout.tabGroups?.[state.layout.focusedGroupId]
+      const currentState = stateRef.current;
+      const focusedGroup = currentState.layout.focusedGroupId
+        ? currentState.layout.tabGroups?.[currentState.layout.focusedGroupId]
         : undefined;
-      const tabId = focusedGroup?.tabIds[index] ?? state.layout.tabs[index]?.id;
+      const tabId = focusedGroup?.tabIds[index] ?? currentState.layout.tabs[index]?.id;
       if (tabId) handleSelectTerminalTab(tabId);
     },
-    [handleSelectTerminalTab, state.layout.focusedGroupId, state.layout.tabGroups, state.layout.tabs],
+    [handleSelectTerminalTab],
   );
+
+  const handleOpenAddProject = useCallback(() => setIsAddProjectOpen(true), []);
+  const handleCloseAddProject = useCallback(() => setIsAddProjectOpen(false), []);
+  const handleOpenCreateWorktree = useCallback((project?: RegisteredProject) => {
+    setCreateTargetProject(project ?? activeProjectRef.current);
+    setIsCreateOpen(true);
+  }, []);
+  const handleCloseCreateWorktree = useCallback(() => {
+    setIsCreateOpen(false);
+    setCreateTargetProject(null);
+  }, []);
+  const handleOpenCommandPalette = useCallback(() => setIsCommandPaletteOpen(true), []);
+  const handleCloseCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
+  const handleOpenSettings = useCallback(() => setIsSettingsOpen(true), []);
+  const handleCloseSettings = useCallback(() => setIsSettingsOpen(false), []);
+  const handleToggleSettings = useCallback(() => setIsSettingsOpen((current) => !current), []);
+  const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
+  const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
+  const handleCancelTabClose = useCallback(() => setPendingTabClose(null), []);
+
+  const handleAddBrowserTab = useCallback(
+    (url?: string) => {
+      void createBrowserTab(url ?? newBrowserTabUrl()).catch(reportRuntimeError);
+    },
+    [createBrowserTab, reportRuntimeError],
+  );
+
+  const handleNavigateBrowserTab = useCallback(
+    (tabId: string, url: string) => {
+      void navigateBrowserTab(tabId, url).catch(reportRuntimeError);
+    },
+    [navigateBrowserTab, reportRuntimeError],
+  );
+
+  const handleReloadBrowserTab = useCallback(
+    (tabId: string) => {
+      void reloadBrowserTab(tabId).catch(reportRuntimeError);
+    },
+    [reloadBrowserTab, reportRuntimeError],
+  );
+
+  const handleSplitPane = useCallback(
+    (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second" }) => {
+      void splitPane(tabId, leafId, direction, options).catch(reportRuntimeError);
+    },
+    [reportRuntimeError, splitPane],
+  );
+
+  const handleClosePane = useCallback(
+    (tabId: string, leafId: string) => {
+      void closePane(tabId, leafId).catch(reportRuntimeError);
+    },
+    [closePane, reportRuntimeError],
+  );
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void onCloseTabMenu(() => {
+      const activeTabId = stateRef.current.layout.activeTabId;
+      if (activeTabId) handleCloseTab(activeTabId);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleCloseTab]);
 
   const shortcutHandlers = useMemo(
     () => ({
       "tab.newTerminal": handleAddTerminalTab,
-      "tab.newBrowser": () => void createBrowserTab("http://localhost:3000").catch(reportRuntimeError),
+      "tab.newBrowser": () => void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError),
       "tab.close": () => {
-        if (state.layout.activeTabId) handleCloseTab(state.layout.activeTabId);
+        const activeTabId = stateRef.current.layout.activeTabId;
+        if (activeTabId) handleCloseTab(activeTabId);
       },
       "tab.next": () => handleCycleTab(1),
       "tab.previous": () => handleCycleTab(-1),
@@ -489,8 +789,8 @@ export function App() {
       "terminal.focusPrevious": () => handleCyclePaneFocus(-1),
       "terminal.search": handleOpenTerminalSearch,
       "sidebar.left.toggle": toggleSidebar,
-      "commandPalette.open": () => setIsCommandPaletteOpen(true),
-      "settings.toggle": () => setIsSettingsOpen((current) => !current),
+      "commandPalette.open": handleOpenCommandPalette,
+      "settings.toggle": handleToggleSettings,
       "zoom.in": handleZoomIn,
       "zoom.out": handleZoomOut,
       "zoom.reset": handleZoomReset,
@@ -501,16 +801,17 @@ export function App() {
       handleCloseTab,
       handleCyclePaneFocus,
       handleCycleTab,
+      handleOpenCommandPalette,
       handleOpenTerminalSearch,
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
+      handleToggleSettings,
       handleUnsplitActive,
       handleZoomIn,
       handleZoomOut,
       handleZoomReset,
       reportRuntimeError,
-      state.layout.activeTabId,
       toggleSidebar,
     ],
   );
@@ -530,13 +831,11 @@ export function App() {
           unreadWorktreePaths={state.unreadWorktreePaths}
           activityByWorktreePath={worktreeActivity}
           onSelectProject={handleSelectProject}
-          onAddProject={() => setIsAddProjectOpen(true)}
+          onAddProject={handleOpenAddProject}
           onSelectWorktree={handleSelectWorktree}
-          onCreateWorktree={() => setIsCreateOpen(true)}
-          onRefreshWorktreeStatus={handleRefreshWorktreeStatus}
+          onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
-          onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
-          onOpenSettings={() => setIsSettingsOpen(true)}
+          onOpenSettings={handleOpenSettings}
           onToggle={toggleSidebar}
         />
       ) : (
@@ -559,7 +858,7 @@ export function App() {
             sessions={state.sessions}
             unreadTabIds={state.unreadTabIds}
             activityByTabId={tabActivity}
-            onTitleChange={(tabId, title, sessionId) => updateSessionTitleActivity(tabId, title, sessionId)}
+            onTitleChange={updateSessionTitleActivity}
             onActivateTab={handleSelectTerminalTab}
             onCloseTab={handleCloseTab}
             onCloseOtherTabs={handleCloseOtherTabs}
@@ -572,47 +871,72 @@ export function App() {
             onRenameTab={renameTab}
             onToggleTabPin={setTabPinned}
             onAddTab={handleAddTerminalTab}
-            onAddBrowserTab={(url) => void createBrowserTab(url ?? "http://localhost:3000").catch(reportRuntimeError)}
-            onNavigateBrowserTab={(tabId, url) => void navigateBrowserTab(tabId, url).catch(reportRuntimeError)}
-            onReloadBrowserTab={(tabId) => void reloadBrowserTab(tabId).catch(reportRuntimeError)}
-            onSplitPane={(tabId, leafId, direction, options) => splitPane(tabId, leafId, direction, options).catch(reportRuntimeError)}
-            onClosePane={(tabId, leafId) => closePane(tabId, leafId).catch(reportRuntimeError)}
+            onAddBrowserTab={handleAddBrowserTab}
+            onOpenSettings={handleOpenSettings}
+            agents={launchableAgents}
+            onLaunchAgent={handleLaunchAgent}
+            defaultAgentId={agentSettings.defaultAgentId}
+            onNavigateBrowserTab={handleNavigateBrowserTab}
+            onReloadBrowserTab={handleReloadBrowserTab}
+            onSplitPane={handleSplitPane}
+            onClosePane={handleClosePane}
             onSetRatio={setPaneRatio}
             onSetGroupRatio={setTabGroupRatio}
             onSwapPanes={swapPanes}
             onFocusPane={focusPane}
             searchLeafId={searchLeafId}
-            onCloseSearch={() => setSearchLeafId(null)}
+            onCloseSearch={handleCloseSearch}
             leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
           />
         ) : (
-          <div className="flex h-full flex-1 items-center justify-center bg-[#23262d] text-xs text-muted-foreground">
+          <div className="flex h-full flex-1 items-center justify-center bg-background text-xs text-muted-foreground">
             {runtimeError ? `Workspace unavailable (${runtimeError.code})` : "No workspace available"}
           </div>
         )}
       </main>
 
-      <CommandPalette
-        open={isCommandPaletteOpen}
-        worktrees={state.worktrees}
-        tabs={state.layout.tabs}
-        onSelectWorktree={handleSelectWorktree}
-        onSelectTab={handleSelectTerminalTab}
-        onClose={() => setIsCommandPaletteOpen(false)}
-      />
-      <SettingsDialog open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      {isCommandPaletteOpen ? (
+        <CommandPalette
+          open={true}
+          worktrees={state.worktrees}
+          tabs={state.layout.tabs}
+          onSelectWorktree={handleSelectWorktree}
+          onSelectTab={handleSelectTerminalTab}
+          onClose={handleCloseCommandPalette}
+        />
+      ) : null}
+      {isSettingsOpen ? (
+        <Suspense fallback={null}>
+          <SettingsDialog
+            open
+            onClose={handleCloseSettings}
+            projects={projects}
+            activeProjectId={activeProject.workspaceId}
+            activeWorktree={activeWorktree}
+            onSelectProject={handleSelectProject}
+            onAddProject={handleOpenAddProject}
+            onAddWorktree={handleOpenCreateWorktree}
+          />
+        </Suspense>
+      ) : null}
       {isAddProjectOpen ? (
         <AddProjectDialog
           projects={projects}
-          onClose={() => setIsAddProjectOpen(false)}
+          onClose={handleCloseAddProject}
           onRegistered={handleRegisteredProject}
         />
       ) : null}
       {isCreateOpen ? (
         <AddWorktreeDialog
-          project={activeProject}
-          onClose={() => setIsCreateOpen(false)}
+          project={createTargetProject ?? activeProject}
+          onClose={handleCloseCreateWorktree}
           onCreated={async (worktree) => {
+            const owner = createTargetProject ?? activeProject;
+            if (owner.workspaceId !== activeProject.workspaceId) {
+              handleSelectProject(owner);
+              setPendingWorktreePath(worktree.path);
+              return;
+            }
             await refreshWorktrees();
             await ensureTabForWorktree(worktree).catch(reportRuntimeError);
           }}
@@ -622,7 +946,7 @@ export function App() {
         <WorktreeDeleteDialog
           workspaceId={activeProject.workspaceId}
           worktree={deleteTarget}
-          onClose={() => setDeleteTarget(null)}
+          onClose={handleCloseDeleteTarget}
           onDeleted={() => {
             setWorktreeStatuses((current) => {
               const next = { ...current };
@@ -631,6 +955,13 @@ export function App() {
             });
             void refreshWorktrees();
           }}
+        />
+      ) : null}
+      {pendingTabClose ? (
+        <ConfirmCloseTabDialog
+          tabLabel={pendingTabClose.label}
+          onCancel={handleCancelTabClose}
+          onConfirm={handleConfirmTabClose}
         />
       ) : null}
 

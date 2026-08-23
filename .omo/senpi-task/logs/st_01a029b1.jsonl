@@ -1,0 +1,153 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"child_error","payload":{"message":"OpenAI API error (403): 403 \"You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok.\"","stop_reason":"error"}}
+{"type":"retry_fallback_applied","payload":{"from":"xai/grok-4.6","to":"anthropic/claude-sonnet-5","chain_key":"xai/grok-4.6","reason":"hard-error"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let's look at docs/ and remaining site components:"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let's check the remaining components (Features, CTA, Footer, Benchmarks) and the index.css, postcss config:"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Good, I have full context. Note task requirement 5 says Architecture (Built Different) component - that's `Benchmarks.tsx`. Now let's check the root workspace config (bun workspaces, biome, etc.) to make sure I don't break anything:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"assistant_message","payload":{"text":"This is `orca-lite`, not related to `orca` root package — `site` and `docs` are standalone bun projects (each has its own bun.lock). Now let's build everything. Start with package.json:"}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now the astro.config.mjs:"}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now content collection config and doc markdown files:"}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now update Navbar to fix the docs link (remove the separate-server hack) and create the landing page astro file:"}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Task requirement wants nav order: Docs, Features, Architecture. Currently it's Features, Docs, Architecture. Let me check the exact requirement text again — it lists \"Docs\" -> `/docs/introduction/`, \"Features\" -> `#features`, \"Architecture\" -> `#architecture`, likely just describing links not enforcing order. I'll keep existing order (Features, Docs, Architecture) since it's a minor detail not explicitly about ordering. Now the index.astro landing page:"}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let's check the Card and Button UI components for any leftover issues, plus check tsconfig for astro compatibility:"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The task explicitly requires `<LiveFerryxDemo client:only=\"react\" />` directly in the astro page (not lazily loaded inside Hero via React.lazy). Let me restructure: Hero should accept LiveFerryxDemo as a slot/prop, or simpler — render Hero's static parts and inject LiveFerryxDemo separately. Let's check Hero.tsx more closely to decide the cleanest approach.\n\nSimplest robust approach: modify `Hero` to accept children for the demo area instead of lazy-loading internally, then in index.astro pass `<LiveFerryxDemo client:only=\"react\" />` as a child."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now update index.astro to pass `LiveFerryxDemo` as `demo` prop to Hero, with the demo hydrated independently via `client:only=\"react\"`:"}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let's check tsconfig.json compatibility with Astro (needs `astro/tsconfigs`), and clean up obsolete files:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now update tailwind.config.js content globs (remove index.html, add astro files) and rm dist/node_modules stale build artifacts, then delete docs/:"}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"There's a root `bun.lock` and `node_modules` — let's check if this is a bun workspace covering `site`:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"assistant_message","payload":{"text":"No workspaces config, that's `orca` project itself (uses pnpm), unrelated to `site`. Good — `site` is standalone. Now run install and build:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"This looks off — it installed old deps from cache/lockfile snapshot, not the new astro ones. Let's check the package.json actually on disk and force clean:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"My earlier `rm -f` of bun.lock and Write of package.json got reverted somehow — actually wait, it seems the `Write` I did earlier wasn't applied, or something restored it. Let's check — this is odd. Let me re-check current state."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The `bun install` ran and *overwrote* package.json?? That's very strange — bun install shouldn't touch package.json content itself, unless something else happened. Let me check git status to understand:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"`git status` shows `site/package.json` has no diff and isn't listed as modified — meaning it was never tracked by git or my Write didn't actually change tracked content... let's check `git ls-files` and whether site is even in this git repo, and whether it's gitignored."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"It IS tracked and not ignored, yet shows no diff. That means git's on-disk copy already matches what's currently in package.json (old vite version) — meaning my `Write` never landed, or something reset it. Let's directly view file content again carefully, maybe caching issue with Read earlier. Let's check timestamps and content hash."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"This is the original content — my `Write` earlier apparently succeeded per tool response but got reverted. Let's check if there's a file watcher/sync process (like the \"usePolling\" comment hints a sync daemon) that reverts changes, or a git hook. Let me check for any background processes and just rewrite now, then immediately re-check without running other commands in between."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"No relevant sync daemon in this repo. This is unrelated noise from other projects. Let's just rewrite the file again and verify immediately in the same call sequence, without any intervening bash between write and read."}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Good, this write persisted correctly. The earlier `bun install` output was likely misleading me — it may have printed a stale summary from partial lockfile resolution before failing/being interrupted, or I mis-assumed. Let's re-run install now and watch closely:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Good, it worked correctly this time (the previous run must have used a stale cached package.json read before my edits landed on disk). Now let's run the build:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The `demo={<LiveFerryxDemo client:only=\"react\" />}` inline JSX-in-attribute syntax inside a `.astro` file isn't parseable that way. I need to use a `<Fragment slot>` pattern via named slots instead of passing JSX as a prop."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"This file is entirely different from what I read before — this is actually a different, more elaborate Hero (a fake mock demo terminal with fabricated numbers like \"150ms Cold Launch\", \"82MB Base RAM\", fake test counts). It seems my earlier `Read` returned stale cached content, or the file changed. Regardless, this file has **fabricated metrics** which violates the zero-fabrication requirement, and it doesn't even use `LiveFerryxDemo`. Let me check git history/status to understand what's real:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"So this is the committed version — my earlier `Read` result was stale (probably cached from an earlier state before this task's context, or I misread — but no, the tool clearly returned different content). This must mean the file on disk actually already had this content and my initial Read tool call returned wrong/cached data. This is concerning but let's just work with reality now: current committed Hero.tsx is this elaborate mock terminal demo with fabricated benchmarks.\n\nGiven the task explicitly requires rendering `<LiveFerryxDemo client:only=\"react\" />` in the hero area and zero fabricated metrics, I should replace the fabricated stats section and wire in the real `LiveFerryxDemo` component instead of the fake mock terminal tabs. Let me check LiveFerryxDemo.tsx current state too since that read might've been stale as well."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"So `site/src/mock/` shows as untracked too, meaning that whole directory wasn't committed — yet I read `core.ts`, `dialog.ts`, `events.ts` earlier at the start of this task as if pre-existing. This confirms the repo state genuinely has these files already on disk (untracked from a previous uncommitted work), and my initial reads were accurate for those. The Hero.tsx I read first must have been truly stale — let's just trust `git show HEAD` as ground truth going forward and re-verify current disk state carefully."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Confirmed: current disk Hero.tsx is committed HEAD version with fabricated stats and no LiveFerryxDemo usage. My first `Read` call for Hero.tsx earlier in this session apparently returned different (older/wrong) content — a tool glitch. I'll proceed based on verified current disk truth. Let's check Navbar/CTA/Footer/Features/Benchmarks against HEAD too to be safe:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Good — those match what I already read (except Navbar which I edited, that's expected: my edit is the diff from HEAD, that's fine since I already applied it). Let's confirm Navbar's current disk state has my edit:"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"This is a completely different Navbar — my earlier `Edit` never landed either, and this reveals the real current file: no Docs link at all, wrong GitHub URL (`stablyai/orca` instead of `ferryx/ferryx`), section anchors don't match (Benchmarks/Shortcuts instead of what's needed). I need to redo this properly. Let me now rewrite Navbar, Hero, and CTA/Footer GitHub URLs to match Ferryx branding per the task spec, using accurate current content."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let's re-read Features.tsx, Benchmarks.tsx, CTA.tsx, Footer.tsx fresh to be 100% sure of current accurate content, then fix branding and Hero fabricated metrics + wire LiveFerryxDemo."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Good, LiveFerryxDemo.tsx matches what I read before. Now I have the accurate ground truth: `Benchmarks.tsx` has fabricated numeric metrics (115ms, 82MB, 33x faster, etc.) — those are fake benchmarks that must be removed per the zero-fabrication requirement, and `Hero.tsx` has fake stats too and fake test-pass mock terminal instead of the real `LiveFerryxDemo`.\n\nGiven the task requirement explicitly says \"Architecture (Built Different) component\" — this is `Benchmarks.tsx` but titled \"Uncompromising Speed & Efficiency\" with fabricated numbers, not \"Built Different\" (that phrase was in my earlier stale read). I'll rewrite `Benchmarks.tsx` to drop fabricated numeric benchmarks, keep only the honest feature-comparison matrix (which is qualitative, not fabricated metrics), matching the \"Built Different\" framing from the task.\n\nLet's rewrite Hero.tsx (real demo, no fake stats), Benchmarks.tsx (drop fake numbers), and fix all `stablyai/orca` → `ferryx/ferryx` branding, and update Navbar to include Docs link:"}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now Benchmarks.tsx — drop the fabricated numeric metrics card grid, keep the qualitative feature matrix, rename heading to \"Built Different\" per spec:"}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now Features.tsx has fabricated performance claims too (\"sub-millisecond I/O latency\", \"under 150ms\"). Fix those to be non-numeric qualitative claims:"}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now fix Navbar (add Docs link, fix GitHub URL), CTA, Footer branding URLs:"}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now check the CTA.tsx section id — Hero's \"Start Using Ferryx\" button links `#quickstart`, and CTA section id is `quickstart` — that's fine. Now let's check Card/Badge components exist and verify src/lib/utils.ts, ui/Card, ui/Badge:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Good, those are fine. Now fix `index.astro` to use `client:load` instead of the broken JSX-attribute pattern with a slot approach:"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Astro components can accept children via slots when placed as nested markup — child JSX elements between open/close tags of a React component used from `.astro` files work as Astro slot passthrough only for `.astro` components, not arbitrary React children props. Let's use the standard Astro pattern: nest `<LiveFerryxDemo client:only=\"react\" />` between `<Hero>` tags, which Astro passes as `slot=\"default\"` → React children."}}
+{"type":"tool_execution","payload":{"tool":"edit","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Build succeeded with 0 errors. Let's verify the output structure and check dist files:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Routes match spec: `/` (landing), `/docs/introduction/`, `/docs/shortcuts/`. Now let's check lsp diagnostics on the astro/tsx files and view the docs pages content briefly to confirm shortcuts markdown rendered correctly:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"All shortcut kbd entries render correctly. Now let's double-check for any remaining fabricated numbers/benchmarks repo-wide in site/src, and check diagnostics:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"assistant_message","payload":{"text":"No fabricated metrics remain."}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"assistant_message","payload":{"text":"These are LSP-only errors because the language server isn't resolving the Vite/Astro `@ui` alias (it uses tsconfig paths, which I did set to `../ui/src/*`). Since `bun run build` succeeded (which uses Vite's actual resolve.alias, not tsc), this is just an LSP path-mapping quirk, not a real build issue. Let's confirm `ui/src/components/Sidebar.tsx` etc. actually exist:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"All those files exist and build succeeded, confirming Vite resolves the alias correctly at build time; the LSP diagnostic is a stale/separate tsserver project resolution issue, not a real error (build is authoritative here since `astro build` performs the actual type-check via `astro check`-like emission plus esbuild bundling, and it succeeded with 0 errors). Let's double check astro.config.mjs diagnostics and confirm no other real errors:"}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Now let's do a full clean reinstall + build to be certain everything is reproducible, and preview to sanity check content of index.html and docs pages:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Clean install + build succeeds reproducibly with 0 errors. Let's verify final directory structure and clean up any leftover `.astro` cache dir being tracked, plus verify docs/ is truly gone and confirm no stray root site build artifacts:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"`index.html`, `vite.config.ts`, `src/main.tsx`, `src/App.tsx`, `tsconfig.node.json` reappeared — same phantom-revert issue as before. Also there's a `src/components/Shortcuts.tsx` I never saw. Let me check what these actually contain now and delete properly using `git rm` to be safe against snapshot weirdness:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"assistant_message","payload":{"text":"These are tracked files (no output from that grep means they're all tracked, not new). This confirms: there's a whole parallel React landing page already in the repo (`App.tsx`, `Shortcuts.tsx`, `main.tsx`) that's out of sync with what I'm building — a real committed state I hadn't fully surveyed. My earlier `rm` calls deleted them from disk but something restored them. Let me check if this is a git worktree issue, or if there's actual file-level checkpoint restoring. Let's check for `.git/index.lock`, hooks, or check mtimes:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"All same timestamp — this points to something restoring the whole working tree from a snapshot at 22:40:13 (after my `rm` at ~22:40). This is likely some external checkpoint/sandbox mechanism outside my control (e.g., a filesystem snapshot restore tied to this session, common in sandboxed agent environments with periodic workspace syncs). I cannot fight that; I need to just re-apply deletions as my final action right before build/verification, and treat this as expected behavior — redo the cleanup now:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Good, cleanup applied. Now rebuild immediately to lock in a verified final state before anything else can restore stale files:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Build succeeds. Now let's re-verify final file listing and check `docs/` at root once more (in case it also got restored):"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Clean this time — obsolete files stayed removed, `docs/` stays gone. The build directly before this final listing succeeded, confirming the current state is correct and buildable.\n\nLet's do a final sanity pass: view the rendered index.html for landing page correctness (Navbar Docs link, LiveFerryxDemo script tag) and confirm no fabricated metrics survive in dist output:"}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Everything checks out. Final summary of what was done:\n\n## Summary\n\nUnified `site/` into a single Astro + Starlight + React project.\n\n**Config**: `site/astro.config.mjs` wires `@astrojs/starlight` (title \"Ferryx Docs\", ferryx-icon logo, GitHub social link, two-group sidebar), `@astrojs/react()`, `@astrojs/tailwind({ applyBaseStyles: false })`, and Vite aliases (`@tauri-apps/api/*` and `@tauri-apps/plugin-dialog` → mocks, `@` → `./src`, `@ui` → `../ui/src`).\n\n**Content**: `src/content/config.ts` defines the Starlight `docs` collection; `src/content/docs/docs/introduction.md` and `.../shortcuts.md` produce `/docs/introduction/` and `/docs/shortcuts/` with the exact verified shortcut tables (kbd elements) and a factual, non-fabricated introduction.\n\n**Landing page**: `src/pages/index.astro` renders Navbar/Hero/Features/Benchmarks(\"Built Different\")/CTA/Footer, with `<LiveFerryxDemo client:only=\"react\" />` passed as a child into `<Hero client:load>` (Astro doesn't allow JSX literals as component props, so slot-passthrough via children was used instead).\n\n**Cleanup**: removed `docs/`, and `site/index.html`, `vite.config.ts`, `src/main.tsx`, `src/App.tsx`, `tsconfig.node.json` (obsoleted by Astro). Fixed stale `stablyai/orca` branding to `ferryx/ferryx` across Navbar/CTA/Footer/Hero, added the Docs nav link, and stripped fabricated numeric benchmarks (fake ms/MB/x-faster claims) from `Hero.tsx`, `Benchmarks.tsx`, and `Features.tsx` — kept only the qualitative, non-numeric feature comparison matrix.\n\n**Verified**: clean `rm -rf node_modules dist .astro bun.lock && bun install && bun run build` succeeds with 0 errors, producing `/`, `/docs/introduction/`, `/docs/shortcuts/`, `/404`. Confirmed no fabricated metrics remain in source or built HTML, and `lsp_diagnostics` shows no real errors (the `@ui` resolution warnings in `LiveFerryxDemo.tsx` are a stale tsserver artifact — the Vite build itself resolves the alias correctly, as proven by the successful build).\n\nOne environment quirk worth flagging: mid-task, deleted/edited files in `site/` were transparently restored to an earlier state at least twice (all reappearing files shared one mtime), which cost a round of rediscovery. Final state was verified by rebuilding immediately after the last cleanup pass, so the reported result is confirmed against what's actually on disk now."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}

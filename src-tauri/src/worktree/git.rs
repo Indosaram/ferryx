@@ -68,10 +68,7 @@ fn validate_base_ref(repo_root: &Path, base_ref: &str) -> Result<(), WorktreeErr
 }
 
 /// Executes a git command in the specified directory.
-pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(
-    cwd: P,
-    args: &[S],
-) -> Result<String, WorktreeError> {
+pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<String, WorktreeError> {
     let cwd_path = cwd.as_ref();
     let arg_strs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
     let command_str = format!(
@@ -301,6 +298,51 @@ pub fn git_worktree_add(
 pub fn git_worktree_list(repo_root: &Path) -> Result<Vec<Worktree>, WorktreeError> {
     let output = run_git(repo_root, &["worktree", "list", "--porcelain"])?;
     parse_worktree_list_porcelain(&output)
+}
+
+/// Inspect a single worktree directory without listing every worktree in the repo.
+pub fn inspect_worktree(path: &Path) -> Result<Worktree, WorktreeError> {
+    let head = run_git(path, &["rev-parse", "HEAD"])?.trim().to_string();
+    let branch = run_git(path, &["symbolic-ref", "-q", "HEAD"])
+        .ok()
+        .map(|output| output.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let detached = branch.is_none();
+    Ok(Worktree {
+        path: path.to_path_buf(),
+        head,
+        branch,
+        bare: false,
+        detached,
+        locked: None,
+        prunable: None,
+    })
+}
+
+/// Returns true when `ancestor` is an ancestor of `descendant` via `git merge-base --is-ancestor`.
+pub fn git_merge_base_is_ancestor(
+    repo_root: &Path,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, WorktreeError> {
+    validate_git_value(ancestor, "Ancestor ref")?;
+    validate_git_value(descendant, "Descendant ref")?;
+    match run_git(
+        repo_root,
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+    ) {
+        Ok(_) => Ok(true),
+        Err(WorktreeError::GitError { code: Some(1), .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Returns true when `branch` is an ancestor of HEAD (merged).
+pub fn git_branch_is_ancestor_of_head(
+    repo_root: &Path,
+    branch: &str,
+) -> Result<bool, WorktreeError> {
+    git_merge_base_is_ancestor(repo_root, branch, "HEAD")
 }
 
 pub fn git_worktree_remove(

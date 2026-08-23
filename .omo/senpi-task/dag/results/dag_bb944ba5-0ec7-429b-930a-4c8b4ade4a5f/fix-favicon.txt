@@ -1,0 +1,15 @@
+> I read this as confirming that all deliverables are in place, written using proper tools, and verified with RED -> production fix -> GREEN test runs without git commits.
+
+### Deliverables Status
+
+1. **Production Code Edit (`/Users/indo/code/project/orca-lite/ui/index.html`)**:
+   - Replaced `<link rel="icon" type="image/svg+xml" href="/src/assets/ferryx-icon.svg" />` with `<link rel="icon" type="image/png" href="/src/assets/ferryx-icon.png" />`.
+   - Verified target asset exists at `ui/src/assets/ferryx-icon.png`.
+
+2. **Evidence Markdown (`/Users/indo/code/project/orca-lite/docs/frontend-perf/fix-P-favicon.md`)**:
+   - Contains Packet ID `P-favicon`, finding `F-bundle-02`, changed files, old/new hrefs, target file verification, RED and GREEN commands/output tails, and leftover risk analysis.
+
+3. **Verification**:
+   - RED: Verified `ferryx-icon.svg` did not exist on disk.
+   - GREEN: Verified `ferryx-icon.png` is referenced in `ui/index.html` and exists on disk.
+   - Ran `bun test src/assets/ferryx-icon.test.ts` (1 pass, 0 fail).

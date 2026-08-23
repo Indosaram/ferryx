@@ -1,0 +1,79 @@
+> I read this as research/investigation - inspect scoped frontend test files for project/worktree switching and session persistence, then provide a minimal deterministic RED-first regression test design for independent multi-worktree restore across app restarts.
+
+### 1. Test File to Extend
+* **Target File:** `ui/src/lib/sessionPersistence.test.ts` (or integration level in `ui/src/App.test.tsx`)
+  * **Primary / Smallest Target:** `ui/src/lib/sessionPersistence.test.ts` provides the smallest, fastest, zero-DOM deterministic unit surface for state serialization and restore across restarts.
+  * **Integration Target:** `ui/src/App.test.tsx` (around lines 506–543) for end-to-end restart re-spawning across multiple worktrees.
+
+---
+
+### 2. Fixtures and Helpers to Reuse
+* `workspaceState()` helper (`ui/src/lib/sessionPersistence.test.ts:7–66`):
+  * Extend `worktrees` array to contain two distinct worktree entries:
+    1. Primary worktree: `{ path: "/workspace/main", branch: "main", head: "111", bare: false, detached: false, locked: null, prunable: null }`
+    2. Secondary worktree: `{ path: "/workspace/feat", branch: "refs/heads/orca/default/feat", head: "222", bare: false, detached: false, locked: null, prunable: null }`
+  * Add distinct sessions across both worktrees:
+    * `sess-main`: `{ id: "sess-main", cwd: "/workspace/main", worktreePath: "/workspace/main", workspaceId: "default", worktree: null, backendSessionId: "backend-1", lifecycle: "working" }`
+    * `sess-feat`: `{ id: "sess-feat", cwd: "/workspace/feat", worktreePath: "/workspace/feat", workspaceId: "default", worktree: { wsId: "default", slug: "feat" }, backendSessionId: "backend-2", lifecycle: "working" }`
+  * Add tabs referencing each session (`tab-main` -> `sess-main`, `tab-feat` -> `sess-feat`).
+* `serializeWorkspaceState` & `deserializeWorkspaceState` (`ui/src/lib/sessionPersistence.test.ts:5, 69, 141`):
+  * Pass an empty live set `new Set()` to `deserializeWorkspaceState` to model full app restart (all native PTYs dead).
+
+---
+
+### 3. Concrete Test Design & Failing Assertions
+
+```ts
+it("preserves independent worktree paths, cwds, and worktree metadata across serialization and restart deserialization for multiple distinct worktrees", () => {
+  const state = workspaceState();
+  // 1. Configure two distinct worktrees and isolated sessions/tabs
+  state.worktrees = [
+    { path: "/workspace/main", branch: "main", head: "111", bare: false, detached: false, locked: null, prunable: null },
+    { path: "/workspace/feat", branch: "refs/heads/orca/default/feat", head: "222", bare: false, detached: false, locked: null, prunable: null },
+  ];
+  state.sessions["sess-feat"] = {
+    id: "sess-feat",
+    cwd: "/workspace/feat",
+    worktreePath: "/workspace/feat",
+    workspaceId: "default",
+    worktree: { wsId: "default", slug: "feat" },
+    backendSessionId: "backend-2",
+    lifecycle: "working",
+  };
+  state.layout.tabs.push({ id: "tab-2", label: "feat", sessionId: "sess-feat" });
+  state.layout.layoutsByTabId["tab-2"] = {
+    root: { type: "leaf", leafId: "leaf-feat" },
+    activeLeafId: "leaf-feat",
+    expandedLeafId: null,
+    sessionIdsByLeafId: { "leaf-feat": "sess-feat" },
+  };
+
+  // 2. Serialize and restore across restart (dead backend sessions)
+  const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+  const restored = deserializeWorkspaceState("default", serialized, new Set());
+
+  // 3. Expected assertions verifying both worktrees survived independently
+  expect(restored).not.toBeNull();
+  expect(restored!.sessions["sess-1"].worktreePath).toBe("/workspace/main");
+  expect(restored!.sessions["sess-1"].cwd).toBe("/workspace/main/packages/api");
+  expect(restored!.sessions["sess-1"].worktree).toBeNull();
+
+  expect(restored!.sessions["sess-feat"].worktreePath).toBe("/workspace/feat");
+  expect(restored!.sessions["sess-feat"].cwd).toBe("/workspace/feat");
+  expect(restored!.sessions["sess-feat"].worktree).toEqual({ wsId: "default", slug: "feat" });
+  expect(restored!.sessions["sess-feat"].backendSessionId).toBeNull(); // Dead session marked for re-spawn
+});
+```
+
+---
+
+### 4. Mechanism Failure Explanation (Why Red vs. Incidental)
+* **Mechanism:** When multiple worktrees exist under a single registered project workspace, serialization and deserialization must retain the distinct `worktreePath`, working directories (`cwd`), and parsed worktree slugs `{ wsId, slug }` for every terminal session rather than collapsing them to `repoRoot` / active worktree path.
+* **Non-incidental assertion:** Asserting `restored.sessions["sess-feat"].worktreePath === "/workspace/feat"` and `restored.sessions["sess-feat"].worktree === { wsId: "default", slug: "feat" }` directly validates that worktree identity scoping survives independently of the main branch worktree without relying on UI timing or DOM order.
+
+---
+
+### 5. Literal Bun Command
+```bash
+bun test ui/src/lib/sessionPersistence.test.ts
+```

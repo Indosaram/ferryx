@@ -1,0 +1,154 @@
+[
+  {
+    "scenario": "terminal-tab-to-right-pane-edge",
+    "paneCount": 2,
+    "splitCount": 1,
+    "groupSplitCount": 0,
+    "panes": [
+      {
+        "x": 25,
+        "y": 105,
+        "width": 695,
+        "height": 846
+      },
+      {
+        "x": 721,
+        "y": 105,
+        "width": 694,
+        "height": 846
+      }
+    ],
+    "tabLabels": [
+      "main",
+      "Browser"
+    ]
+  },
+  {
+    "scenario": "browser-tab-to-left-pane-edge",
+    "paneCount": 1,
+    "splitCount": 0,
+    "groupSplitCount": 1,
+    "groups": [
+      {
+        "x": 25,
+        "y": 73,
+        "width": 695,
+        "height": 878
+      },
+      {
+        "x": 721,
+        "y": 73,
+        "width": 694,
+        "height": 878
+      }
+    ],
+    "tabLabels": [
+      "Browser",
+      "main",
+      "main (2)"
+    ],
+    "browserViewportCount": 1
+  },
+  {
+    "scenario": "browser-tab-to-right-pane-edge",
+    "paneCount": 1,
+    "splitCount": 0,
+    "groupSplitCount": 1,
+    "groups": [
+      {
+        "x": 25,
+        "y": 73,
+        "width": 695,
+        "height": 878
+      },
+      {
+        "x": 721,
+        "y": 73,
+        "width": 694,
+        "height": 878
+      }
+    ],
+    "tabLabels": [
+      "main",
+      "main (2)",
+      "Browser"
+    ],
+    "browserViewportCount": 1
+  },
+  {
+    "scenario": "browser-tab-to-top-pane-edge",
+    "paneCount": 1,
+    "splitCount": 0,
+    "groupSplitCount": 1,
+    "groups": [
+      {
+        "x": 25,
+        "y": 73,
+        "width": 1390,
+        "height": 439
+      },
+      {
+        "x": 25,
+        "y": 513,
+        "width": 1390,
+        "height": 438
+      }
+    ],
+    "tabLabels": [
+      "Browser",
+      "main",
+      "main (2)"
+    ],
+    "browserViewportCount": 1
+  },
+  {
+    "scenario": "browser-tab-to-bottom-pane-edge",
+    "paneCount": 1,
+    "splitCount": 0,
+    "groupSplitCount": 1,
+    "groups": [
+      {
+        "x": 25,
+        "y": 73,
+        "width": 1390,
+        "height": 439
+      },
+      {
+        "x": 25,
+        "y": 513,
+        "width": 1390,
+        "height": 438
+      }
+    ],
+    "tabLabels": [
+      "main",
+      "main (2)",
+      "Browser"
+    ],
+    "browserViewportCount": 1
+  },
+  {
+    "scenario": "browser-tab-right-then-top",
+    "groupSplitCount": 1,
+    "groups": [
+      {
+        "x": 25,
+        "y": 73,
+        "width": 1390,
+        "height": 439
+      },
+      {
+        "x": 25,
+        "y": 513,
+        "width": 1390,
+        "height": 438
+      }
+    ],
+    "tabLabels": [
+      "Browser",
+      "main",
+      "main (2)"
+    ],
+    "browserViewportCount": 1
+  }
+]

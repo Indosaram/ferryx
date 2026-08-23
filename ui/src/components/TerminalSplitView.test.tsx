@@ -1,7 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import * as TerminalSplitViewModule from "./TerminalSplitView";
 import { TerminalSplitView } from "./TerminalSplitView";
 
 vi.mock("./TerminalPane", () => ({
@@ -310,5 +313,123 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(screen.getByTestId("terminal-pane")).toHaveAttribute("data-search-open", "false");
     rerender(<TerminalSplitView layout={layout} sessions={sessions} searchLeafId="leaf-1" />);
     expect(screen.getByTestId("terminal-pane")).toHaveAttribute("data-search-open", "true");
+  });
+
+  describe("F-terminal-05 and F-terminal-06 perf optimizations", () => {
+    it("F-terminal-05: source check proves collisionDetection does not call droppableContainers.find inside filter/sort", () => {
+      const sourcePath = resolve(__dirname, "TerminalSplitView.tsx");
+      const source = readFileSync(sourcePath, "utf-8");
+
+      // Verify that droppableContainers.find is not present in collision detection
+      expect(source).not.toMatch(/droppableContainers\.find/);
+      // Verify Map is constructed for droppable lookups in collision detection
+      expect(source).toMatch(/containerDataById/);
+    });
+
+    it("F-terminal-05: workspaceCollisionDetection builds an O(1) container map and does not call find() on droppableContainers during sort/filter", () => {
+      const workspaceCollisionDetection = (TerminalSplitViewModule as Record<string, any>).workspaceCollisionDetection;
+      expect(typeof workspaceCollisionDetection).toBe("function");
+
+      const droppableContainers = [
+        {
+          id: "group-edge:top:group-1",
+          data: {
+            current: {
+              type: "group-edge" as const,
+              groupId: "group-1",
+              edge: "top" as const,
+            },
+          },
+          rect: { current: { top: 0, left: 0, right: 100, bottom: 10, width: 100, height: 10 } },
+          disabled: false,
+          node: { current: null },
+        },
+        {
+          id: "group-body:group-1",
+          data: {
+            current: {
+              type: "group-body" as const,
+              groupId: "group-1",
+            },
+          },
+          rect: { current: { top: 10, left: 0, right: 100, bottom: 100, width: 100, height: 90 } },
+          disabled: false,
+          node: { current: null },
+        },
+      ];
+
+      const findSpy = vi.spyOn(droppableContainers, "find");
+
+      const active = {
+        id: "tab:tab-1",
+        data: {
+          current: {
+            type: "tab" as const,
+            tabId: "tab-1",
+            groupId: "group-2",
+          },
+        },
+        rect: { current: { initial: null, translated: null } },
+      };
+
+      const result = workspaceCollisionDetection({
+        active: active as any,
+        droppableContainers: droppableContainers as any,
+        pointerCoordinates: { x: 50, y: 5 },
+        collisionRect: { top: 0, left: 0, right: 100, bottom: 100, width: 100, height: 100 },
+        droppableRects: new Map(),
+      });
+
+      expect(findSpy).not.toHaveBeenCalled();
+      expect(Array.isArray(result)).toBe(true);
+    });
+
+    it("F-terminal-06: source check proves stable module-level FALLBACK_SESSION is defined and used in PaneRenderer", () => {
+      const sourcePath = resolve(__dirname, "TerminalSplitView.tsx");
+      const source = readFileSync(sourcePath, "utf-8");
+
+      // Verify module-level FALLBACK_SESSION definition
+      expect(source).toMatch(/export const FALLBACK_SESSION: TerminalSession =/);
+      // Verify PaneRenderer uses FALLBACK_SESSION rather than inline object allocation
+      expect(source).toMatch(/sessions\[sessionId\] \?\? FALLBACK_SESSION/);
+      expect(source).not.toMatch(/lifecycle: "working" as const/);
+    });
+
+    it("F-terminal-06: exports stable FALLBACK_SESSION and maintains reference identity when session is missing", () => {
+      const FALLBACK_SESSION = (TerminalSplitViewModule as Record<string, any>).FALLBACK_SESSION;
+      expect(FALLBACK_SESSION).toBeDefined();
+      expect(FALLBACK_SESSION.id).toBe("");
+      expect(FALLBACK_SESSION.lifecycle).toBe("working");
+
+      const layout = singleTabLayout("tab-1", "missing-session", "leaf-1");
+      // Render without providing sessions[sessionId]
+      render(<TerminalSplitView layout={layout} sessions={{}} />);
+      const pane = screen.getByTestId("terminal-pane");
+      expect(pane).toBeInTheDocument();
+    });
+  });
+
+  it("forwards defaultAgentId so the usable default is first with a Default label", () => {
+    const onLaunchAgent = vi.fn();
+    const agents = [
+      { name: "claude", command: "claude", args: "" },
+      { name: "aider", command: "aider", args: "" },
+    ];
+    render(
+      <TerminalSplitView
+        layout={singleTabLayout()}
+        sessions={{ "session-1": session("session-1", "backend-1") }}
+        agents={agents}
+        onLaunchAgent={onLaunchAgent}
+        defaultAgentId="aider"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    const buttons = within(screen.getByText("AGENTS").parentElement as HTMLElement).getAllByRole("button");
+    expect(buttons[0]).toHaveTextContent("Aider");
+    expect(within(buttons[0]).getByText("Default")).toBeVisible();
+    fireEvent.click(screen.getByText("Claude"));
+    expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
   });
 });

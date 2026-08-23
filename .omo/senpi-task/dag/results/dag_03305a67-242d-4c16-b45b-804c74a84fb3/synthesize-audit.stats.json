@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_03305a67-242d-4c16-b45b-804c74a84fb3","nodeId":"synthesize-audit","runStats":{"runtime_ms":44090,"turns":5,"tool_calls":11,"output_tokens":1779,"total_tokens":242709,"generation_ms":4160,"tokens_per_second":428,"cost_usd":0,"cache_hit_rate_last":0.9566814476591884,"cache_hit_rate_run":0.6613663719752625}}

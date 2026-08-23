@@ -1,0 +1,37 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I read this as merging the six frontend-perf audit reports into a prioritized, disjoint fix-packet ledger - compile and write `docs/frontend-perf/PRIORITIZED.md`."}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The six frontend-performance audit reports have been merged and structured into `/Users/indo/code/project/orca-lite/docs/frontend-perf/PRIORITIZED.md`.\n\n### Summary of Ledger\n- **Packets Created (9 disjoint packets)**:\n  - `P-settings-runtime-bridge` (`ui/src/lib/settingsRuntimeBridge.ts`): Remove global document subtree MutationObserver.\n  - `P-terminal-backlog-buffer` (`ui/src/lib/terminalEvents.ts`): Replace monolithic 512KB string concatenation with chunked buffer.\n  - `P-terminal-base64-decode` (`ui/src/lib/terminalOutput.ts`): Vectorize/optimize base64 decode loop for PTY output bursts.\n  - `P-root-code-splitting` (`ui/src/main.tsx`): Code-split `App` and `RemoteApp` with `React.lazy` and `Suspense`.\n  - `P-workspace-app-store` (`ui/src/state/workspaceStore.ts`, `ui/src/App.tsx`, `ui/src/components/SettingsDialog.tsx`): Memoize selectors, stabilize window close guard & shortcut listener dependencies, and lazy-load `SettingsDialog`.\n  - `P-tab-bar-memo` (`ui/src/components/TabBar.tsx`, `ui/src/components/tab-dnd/SortableTab.tsx`): Memoize `SortableTab` and tab list context to eliminate tab strip re-render churn.\n  - `P-sidebar-worktree-list` (`ui/src/components/Sidebar.tsx`, `ui/src/components/WorktreeList.tsx`): Pre-index active agents to $O(1)$ and eliminate per-render allocations.\n  - `P-terminal-pane-lifecycle` (`ui/src/components/TerminalPane.tsx`, `ui/src/lib/terminalHostManager.ts`, `ui/src/lib/terminalSettings.ts`): Consolidate ResizeObservers and eliminate chained rAF double-fit passes.\n  - `P-terminal-split-dnd` (`ui/src/components/TerminalSplitView.tsx`): Replace $O(K \\cdot \\log K \\cdot N)$ droppable lookups in drag collision detection with $O(1)$ container map.\n\n- **Deferred**:\n  - `F-shell-04`: CommandPalette unvirtualized list (ephemeral modal with small item counts).\n  - `F-remote-02`: RemoteTerminal `new TextEncoder()` per keystroke in `sendKey` (micro-allocation).\n  - `F-bundle-02`: Dead SVG favicon link in `ui/index.html` (non-blocking 404 in dev mode).\n  - Vite `server.watch.usePolling`: Development-only file-watcher configuration (accepted).\n  - Baseline pre-existing test suite failures (accepted per constraints).\n\n- **Dropped**: None (all findings verified in codebase)."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"revived","payload":{"run_epoch":1}}
+{"type":"tool_execution","payload":{"tool":"write","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"`/Users/indo/code/project/orca-lite/docs/frontend-perf/PRIORITIZED.md` has been written with the prioritized, disjoint fix-packet ledger covering all High and Medium findings across the six audit lanes, with exclusive write scopes, proofs, invariants, deferred items, and dropped items."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a029e9/sessions/st_01a029e9/2026-08-22T14-33-59-250Z_01a029e4-8cd2-7f4f-b436-13c0d71a4601.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}

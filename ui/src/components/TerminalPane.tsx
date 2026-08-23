@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import { terminalHostManager, type TerminalInstance } from "../lib/terminalHostManager";
+import { terminalHostManager } from "../lib/terminalHostManager";
+import { fitTerminal } from "../lib/terminalInstanceFactory";
 import { useTerminalSettings } from "../lib/terminalSettings";
 import type { TerminalSession } from "../lib/types";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
@@ -14,32 +15,18 @@ type TerminalPaneProps = {
   onCloseSearch?: () => void;
 };
 
-function fitMountedTerminal(container: HTMLDivElement, instance: TerminalInstance) {
-  if (!container.isConnected || !container.contains(instance.element)) return false;
-  const rect = container.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return false;
-
-  Object.assign(instance.element.style, {
-    position: "absolute",
-    inset: "0px",
-    width: "100%",
-    height: "100%",
-    minWidth: "0px",
-    minHeight: "0px",
-    overflow: "hidden",
-  });
-  instance.fitAddon.fit();
-  return true;
-}
-
 export function TerminalPane({ session, active, onBell, onTitleChange, searchOpen, onCloseSearch }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const { settings } = useTerminalSettings();
 
   useEffect(() => {
-    terminalHostManager.applySettings(settings);
-  }, [settings]);
+    return terminalHostManager.registerVisible(session.id);
+  }, [session.id]);
+
+  useEffect(() => {
+    terminalHostManager.applyInstanceSettings(session.id, settings);
+  }, [session.id, settings]);
 
   useEffect(() => {
     terminalHostManager.updateSession(session.id, session);
@@ -50,31 +37,6 @@ export function TerminalPane({ session, active, onBell, onTitleChange, searchOpe
     if (!container) return;
 
     let cancelled = false;
-    let firstFitFrame = 0;
-    let secondFitFrame = 0;
-    let resizeObserver: ResizeObserver | null = null;
-
-    const cancelScheduledFit = () => {
-      if (firstFitFrame) cancelAnimationFrame(firstFitFrame);
-      if (secondFitFrame) cancelAnimationFrame(secondFitFrame);
-      firstFitFrame = 0;
-      secondFitFrame = 0;
-    };
-
-    const scheduleStableFit = (instance: TerminalInstance, focus = false) => {
-      cancelScheduledFit();
-      firstFitFrame = requestAnimationFrame(() => {
-        firstFitFrame = 0;
-        if (cancelled) return;
-        const fitted = fitMountedTerminal(container, instance);
-        if (focus && fitted) instance.terminal.focus();
-        secondFitFrame = requestAnimationFrame(() => {
-          secondFitFrame = 0;
-          if (cancelled) return;
-          fitMountedTerminal(container, instance);
-        });
-      });
-    };
 
     void terminalHostManager
       .getOrCreate(session, active, onBell, onTitleChange)
@@ -83,14 +45,15 @@ export function TerminalPane({ session, active, onBell, onTitleChange, searchOpe
         if (!container.contains(instance.element)) {
           container.replaceChildren(instance.element);
         }
-
-        resizeObserver = new ResizeObserver(() => scheduleStableFit(instance));
-        resizeObserver.observe(container);
-        scheduleStableFit(instance, active);
+        if (active) {
+          instance.terminal.focus();
+        }
 
         const fontsReady = typeof document !== "undefined" ? document.fonts?.ready : undefined;
         void fontsReady?.then(() => {
-          if (!cancelled) scheduleStableFit(instance);
+          if (!cancelled && instance.element.clientWidth > 0 && instance.element.clientHeight > 0) {
+            fitTerminal(instance.terminal, instance.fitAddon);
+          }
         });
       })
       .catch((err: unknown) => {
@@ -100,27 +63,31 @@ export function TerminalPane({ session, active, onBell, onTitleChange, searchOpe
 
     return () => {
       cancelled = true;
-      resizeObserver?.disconnect();
-      cancelScheduledFit();
     };
   }, [session.id]);
 
   useEffect(() => {
     const instance = terminalHostManager.getInstance(session.id);
-    const container = containerRef.current;
     if (instance) {
       instance.active = active;
-      if (active && container) {
-        requestAnimationFrame(() => {
-          if (fitMountedTerminal(container, instance)) instance.terminal.focus();
-        });
+      if (active) {
+        instance.terminal.focus();
       }
     }
   }, [active, session.id]);
 
   return (
-    <div className="relative h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal">
-      <div ref={containerRef} data-testid="terminal-mount" className="relative h-full w-full min-h-0 min-w-0 overflow-hidden" />
+    <div
+      data-testid="terminal-pane-surface"
+      className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
+      style={{ backgroundColor: settings.theme.background }}
+    >
+      <div
+        ref={containerRef}
+        data-testid="terminal-mount"
+        className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
+        style={{ backgroundColor: settings.theme.background }}
+      />
       {searchOpen ? (
         <TerminalSearchOverlay
           instance={terminalHostManager.getInstance(session.id)}

@@ -1,0 +1,21 @@
+The Tauri daemon bridge implementation and IPC layer updates are complete:
+
+### Key Changes
+1. **`src-tauri/src/lib.rs`**:
+   - Removed direct GUI-managed `PtyManager`, `TerminalOutputHub`, and `TerminalService`.
+   - Managed `DaemonClient` (`Arc<DaemonClient>`) exclusively for terminal routing.
+   - Added `cmd_terminal_attach` to Tauri `generate_handler!`.
+
+2. **`src-tauri/src/ipc/terminal.rs`**:
+   - Routed all terminal operations (`cmd_terminal_spawn`, `cmd_terminal_attach`, `cmd_terminal_get_cwd`, `cmd_terminal_write`, `cmd_terminal_resize`, `cmd_terminal_signal`, `cmd_terminal_close`, `cmd_terminal_list`) through `DaemonClient`.
+   - Workspace resolution and validation precede daemon spawn calls.
+   - Added `cmd_terminal_attach` returning base64 history with decimal-string sequence fields (`daemonEpoch`, `historyStartSequence`, `historyEndSequence`, `gap`).
+   - Implemented a single managed attachment pump per session that batches bursts, suppresses duplicate pumps on reattach, and emits sequenced `terminal_output` and `terminal_lifecycle` events.
+
+3. **`src-tauri/src/ipc/tests.rs`**:
+   - Updated mock Tauri application tests to use isolated daemon server instances via `DaemonClient`.
+   - Added test coverage for `cmd_terminal_attach` verifying base64 decoding and decimal-string sequences.
+
+### Verification Results
+- `cargo test --manifest-path src-tauri/Cargo.toml ipc:: --lib`: **20 passed; 0 failed**
+- `cargo check --manifest-path src-tauri/Cargo.toml`: **Passed cleanly**

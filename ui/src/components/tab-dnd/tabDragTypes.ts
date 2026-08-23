@@ -12,7 +12,9 @@ export type TabDragData = {
 export type PaneDragData = {
   type: "pane";
   tabId: string;
-  leafId: string;
+  sourcePaneId?: string;
+  sourceSessionId?: string;
+  leafId?: string;
 };
 
 export type GroupBodyDropData = {
@@ -32,8 +34,15 @@ export type PaneLeafDropData = {
   leafId: string;
 };
 
+export type PaneEdgeDropData = {
+  type: "pane-edge";
+  tabId: string;
+  leafId: string;
+  edge: TabDropEdge;
+};
+
 export type WorkspaceDragData = TabDragData | PaneDragData;
-export type WorkspaceDropData = TabDragData | GroupBodyDropData | GroupEdgeDropData | PaneLeafDropData;
+export type WorkspaceDropData = TabDragData | GroupBodyDropData | GroupEdgeDropData | PaneLeafDropData | PaneEdgeDropData;
 
 export type WorkspaceDropCommand =
   | {
@@ -46,6 +55,23 @@ export type WorkspaceDropCommand =
       type: "move-tab-to-split";
       tabId: string;
       targetGroupId: string;
+      direction: PaneDirection;
+      position: "first" | "second";
+    }
+  | {
+      type: "move-tab-to-pane-split";
+      sourceTabId: string;
+      targetTabId: string;
+      targetLeafId: string;
+      direction: PaneDirection;
+      position: "first" | "second";
+    }
+  | {
+      type: "move-pane-to-pane-split";
+      sourceTabId: string;
+      sourceLeafId: string;
+      targetTabId: string;
+      targetLeafId: string;
       direction: PaneDirection;
       position: "first" | "second";
     }
@@ -65,28 +91,58 @@ export type WorkspaceDropCommand =
 
 export function isWorkspaceDragData(value: unknown): value is WorkspaceDragData {
   if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<WorkspaceDragData>;
-  if (candidate.type === "tab") {
-    return typeof candidate.tabId === "string" && typeof candidate.groupId === "string" && typeof candidate.index === "number";
+  if (!("type" in value)) return false;
+  const type = value.type;
+  if (type === "tab") {
+    return (
+      "tabId" in value &&
+      typeof value.tabId === "string" &&
+      "groupId" in value &&
+      typeof value.groupId === "string" &&
+      "index" in value &&
+      typeof value.index === "number"
+    );
   }
-  if (candidate.type === "pane") {
-    return typeof candidate.tabId === "string" && typeof candidate.leafId === "string";
+  if (type === "pane") {
+    return (
+      "tabId" in value &&
+      typeof value.tabId === "string" &&
+      (("sourcePaneId" in value && typeof value.sourcePaneId === "string") ||
+        ("leafId" in value && typeof value.leafId === "string"))
+    );
   }
   return false;
 }
 
 export function isWorkspaceDropData(value: unknown): value is WorkspaceDropData {
   if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<WorkspaceDropData>;
-  switch (candidate.type) {
+  if (!("type" in value)) return false;
+  const type = value.type;
+  switch (type) {
     case "tab":
-      return typeof candidate.tabId === "string" && typeof candidate.groupId === "string" && typeof candidate.index === "number";
+      return (
+        "tabId" in value &&
+        typeof value.tabId === "string" &&
+        "groupId" in value &&
+        typeof value.groupId === "string" &&
+        "index" in value &&
+        typeof value.index === "number"
+      );
     case "group-body":
-      return typeof candidate.groupId === "string";
+      return "groupId" in value && typeof value.groupId === "string";
     case "group-edge":
-      return typeof candidate.groupId === "string" && isTabDropEdge(candidate.edge);
+      return "groupId" in value && typeof value.groupId === "string" && "edge" in value && isTabDropEdge(value.edge);
     case "pane-leaf":
-      return typeof candidate.tabId === "string" && typeof candidate.leafId === "string";
+      return "tabId" in value && typeof value.tabId === "string" && "leafId" in value && typeof value.leafId === "string";
+    case "pane-edge":
+      return (
+        "tabId" in value &&
+        typeof value.tabId === "string" &&
+        "leafId" in value &&
+        typeof value.leafId === "string" &&
+        "edge" in value &&
+        isTabDropEdge(value.edge)
+      );
     default:
       return false;
   }
@@ -100,6 +156,17 @@ export function resolveWorkspaceDropCommand(
 
   if (active.type === "tab") {
     switch (over.type) {
+      case "pane-edge": {
+        const { direction, position } = edgeToSplit(over.edge);
+        return {
+          type: "move-tab-to-pane-split",
+          sourceTabId: active.tabId,
+          targetTabId: over.tabId,
+          targetLeafId: over.leafId,
+          direction,
+          position,
+        };
+      }
       case "group-edge": {
         const { direction, position } = edgeToSplit(over.edge);
         return {
@@ -130,12 +197,26 @@ export function resolveWorkspaceDropCommand(
   }
 
   if (active.type === "pane") {
+    const sourceLeafId = active.sourcePaneId ?? active.leafId ?? "";
     switch (over.type) {
+      case "pane-edge": {
+        if (over.tabId === active.tabId && over.leafId === sourceLeafId) return null;
+        const { direction, position } = edgeToSplit(over.edge);
+        return {
+          type: "move-pane-to-pane-split",
+          sourceTabId: active.tabId,
+          sourceLeafId,
+          targetTabId: over.tabId,
+          targetLeafId: over.leafId,
+          direction,
+          position,
+        };
+      }
       case "tab":
         return {
           type: "detach-pane-to-tab",
           sourceTabId: active.tabId,
-          leafId: active.leafId,
+          leafId: sourceLeafId,
           targetGroupId: over.groupId,
           targetIndex: over.index + 1,
         };
@@ -143,15 +224,15 @@ export function resolveWorkspaceDropCommand(
         return {
           type: "detach-pane-to-tab",
           sourceTabId: active.tabId,
-          leafId: active.leafId,
+          leafId: sourceLeafId,
           targetGroupId: over.groupId,
         };
       case "pane-leaf":
-        if (over.tabId !== active.tabId || over.leafId === active.leafId) return null;
+        if (over.tabId !== active.tabId || over.leafId === sourceLeafId) return null;
         return {
           type: "swap-panes",
           tabId: active.tabId,
-          sourceLeafId: active.leafId,
+          sourceLeafId,
           targetLeafId: over.leafId,
         };
       case "group-edge":
@@ -164,15 +245,17 @@ export function resolveWorkspaceDropCommand(
 
 export function dropPriority(active: WorkspaceDragData, over: WorkspaceDropData): number {
   if (active.type === "tab") {
-    if (over.type === "group-edge") return over.edge === "left" || over.edge === "right" ? 0 : 1;
-    if (over.type === "tab") return 2;
-    if (over.type === "group-body") return 3;
+    if (over.type === "pane-edge") return over.edge === "left" || over.edge === "right" ? 0 : 1;
+    if (over.type === "group-edge") return over.edge === "left" || over.edge === "right" ? 2 : 3;
+    if (over.type === "tab") return 4;
+    if (over.type === "group-body") return 5;
     return 100;
   }
 
-  if (over.type === "tab") return 0;
-  if (over.type === "group-body") return 1;
-  if (over.type === "pane-leaf") return 2;
+  if (over.type === "pane-edge") return over.edge === "left" || over.edge === "right" ? 0 : 1;
+  if (over.type === "tab") return 2;
+  if (over.type === "group-body") return 3;
+  if (over.type === "pane-leaf") return 4;
   return 100;
 }
 

@@ -36,7 +36,10 @@ impl BrowserManager {
         }
     }
 
-    pub fn register_session(&self, req: CreateBrowserRequest) -> Result<BrowserState, BrowserError> {
+    pub fn register_session(
+        &self,
+        req: CreateBrowserRequest,
+    ) -> Result<BrowserState, BrowserError> {
         let valid_url = validate_url(&req.url)?;
         if let Some(ref bounds) = req.bounds {
             if !bounds.is_valid() {
@@ -207,6 +210,10 @@ impl BrowserManager {
             load_error: s.load_error.clone(),
             visible: s.visible,
         })
+    }
+
+    pub fn has_sessions(&self) -> bool {
+        !self.sessions.read().is_empty()
     }
 
     pub fn remove_session(&self, browser_id: &str) -> Option<ManagedBrowserSession> {

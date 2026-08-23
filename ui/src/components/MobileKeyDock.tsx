@@ -138,7 +138,7 @@ function KeyButton({
           ? "bg-primary border-primary text-primary-foreground shadow-sm"
           : highlight
           ? "border-border text-foreground bg-secondary hover:bg-secondary/80"
-          : "bg-secondary/60 border-border text-foreground hover:bg-secondary hover:text-white"
+          : "bg-secondary/60 border-border text-foreground hover:bg-secondary hover:text-foreground"
       } ${className}`}
     >
       {icon || label}

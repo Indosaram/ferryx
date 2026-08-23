@@ -1,0 +1,26 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"steered","payload":{"delivered":"steer","run_epoch":0}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"cancelled","residency_state":"resident"}}
+{"type":"cancelled","payload":{"previous_status":"running","reason":"Independent source and full regression verification are complete; audit worker did not return promptly."}}
+{"type":"late_transition_ignored","payload":{"type":"late_transition_ignored","attempted_status":"cancelled","current_status":"cancelled"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"cancelled","residency_state":"disposed"}}
+{"type":"destroyed","payload":{"cause":"cancel"}}

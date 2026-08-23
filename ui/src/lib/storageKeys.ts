@@ -6,8 +6,8 @@ export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedP
 export const TERMINAL_SETTINGS_STORAGE_KEY = "ferryx.terminal.settings";
 export const NOTIFICATION_SETTINGS_STORAGE_KEY = "ferryx.settings.notifications:v1";
 export const APPEARANCE_SETTINGS_STORAGE_KEY = "ferryx.settings.appearance";
-export const QUICK_COMMANDS_STORAGE_KEY = "ferryx.settings.quickCommands";
 export const BROWSER_SETTINGS_STORAGE_KEY = "ferryx.settings.browser";
+export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],
@@ -17,6 +17,7 @@ export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY]: ["rorca.sidebar.collapsedProjects", "orca.sidebar.collapsedProjects"],
   [TERMINAL_SETTINGS_STORAGE_KEY]: ["orca.terminal.settings", "rorca.terminal.settings"],
   [NOTIFICATION_SETTINGS_STORAGE_KEY]: ["rorca:settings:notifications:v1", "orca:settings:notifications:v1"],
+  [GENERAL_SETTINGS_STORAGE_KEY]: ["rorca.settings.general", "orca.settings.general"],
 };
 
 export function getMigratedItem(

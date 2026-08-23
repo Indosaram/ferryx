@@ -1,0 +1,48 @@
+I read this as implementation - session-only Remote restart is now explicit, tested RED then GREEN, and formatted.
+
+## Policy
+
+Enabling a listener is **process-scoped**. A new `RemoteGatewayState` never restores or auto-starts a network listener. Port / `allowControl` and paired devices still persist.
+
+## Source behavior
+
+`src-tauri/src/remote/state.rs`
+- Added `RemoteRestartPolicy::SessionOnly` (`config.restart_policy()`).
+- `persist_config()` writes `mode: off` plus `restartPolicy: sessionOnly`. Live in-memory mode can stay `localNetwork` while the process is enabled.
+- `new_with_paths` still loads port/`allowControl`, then forces `mode = Off`, `is_running = false`. Stale `localNetwork` files cannot look enabled.
+
+`src-tauri/src/ipc/remote.rs`
+- Status: `enabled` is only `is_running`; after relaunch `mode` is `off`; `restartPolicy` is `sessionOnly`.
+- Enable/disable persist the session-only snapshot (no-op when there is no config path).
+
+Auth persistence is unchanged (`remote-auth.json`).
+
+## Tests
+
+**RED** (before production changes)
+
+`cd src-tauri && cargo test --lib remote::state::tests -- --nocapture`
+
+```
+test remote::state::tests::stale_enabled_config_file_does_not_look_enabled ... FAILED
+test remote::state::tests::enabled_gateway_does_not_restore_listener_after_reopen ... FAILED
+  left: LocalNetwork / String("localNetwork")
+ right: Off / "off"
+```
+
+`cd src-tauri && cargo test --lib remote_status_after_reopen_is_disabled_session_only -- --nocapture`
+
+```
+test ipc::tests::remote_status_after_reopen_is_disabled_session_only ... FAILED
+  left: LocalNetwork
+ right: Off
+```
+
+**GREEN** (after)
+
+`cd src-tauri && cargo test --lib remote::state::tests -- --nocapture` — 2 passed  
+`cd src-tauri && cargo test --lib remote_status_after_reopen_is_disabled_session_only -- --nocapture` — 1 passed  
+`cd src-tauri && cargo test --lib remote:: -- --nocapture` — 9 passed (includes auth persistence)
+
+`cargo fmt -- src/remote/state.rs src/ipc/remote.rs src/ipc/tests.rs`  
+LSP: no diagnostics on the three files.

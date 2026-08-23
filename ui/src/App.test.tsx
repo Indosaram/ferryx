@@ -1,16 +1,44 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { JSDOM } from "jsdom";
 
-import {
+if (typeof window === "undefined") {
+  const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", { url: "http://localhost:3000" });
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  globalThis.navigator = dom.window.navigator;
+  globalThis.localStorage = dom.window.localStorage;
+  globalThis.sessionStorage = dom.window.sessionStorage;
+  globalThis.HTMLElement = dom.window.HTMLElement;
+  globalThis.Element = dom.window.Element;
+  globalThis.Node = dom.window.Node;
+  globalThis.Event = dom.window.Event;
+  globalThis.CustomEvent = dom.window.CustomEvent;
+  globalThis.MouseEvent = dom.window.MouseEvent;
+  globalThis.KeyboardEvent = dom.window.KeyboardEvent;
+  globalThis.dispatchEvent = dom.window.dispatchEvent.bind(dom.window);
+  globalThis.addEventListener = dom.window.addEventListener.bind(dom.window);
+  globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
+}
+
+const { readFileSync } = await import("node:fs");
+const { resolve } = await import("node:path");
+
+const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
+const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
+await import("./test/setup");
+
+const { saveBrowserSettings } = await import("./lib/browserSettings");
+const { saveAgentSettings } = await import("./lib/agentsSettings");
+const {
   ACTIVE_PROJECT_STORAGE_KEY,
   PROJECTS_STORAGE_KEY,
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
   SIDEBAR_OPEN_STORAGE_KEY,
-} from "./lib/storageKeys";
+} = await import("./lib/storageKeys");
 
-const native = vi.hoisted(() => ({
+const native = {
   createWorktree: vi.fn(),
   getWorktreeStatus: vi.fn(),
+  getInitialProject: vi.fn().mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }),
   listProjectBranches: vi.fn(),
   registerProject: vi.fn(),
   signalTerminal: vi.fn(),
@@ -19,13 +47,22 @@ const native = vi.hoisted(() => ({
   clearSession: vi.fn().mockResolvedValue(undefined),
   listTerminalSessions: vi.fn().mockResolvedValue([]),
   spawnTerminal: vi.fn().mockResolvedValue("mock-spawn-id"),
+  detectAgents: vi.fn().mockResolvedValue([]),
+  writeTerminal: vi.fn().mockResolvedValue(undefined),
+  isTauriRuntime: vi.fn(() => true),
   onNewTerminalTabMenu: vi.fn(),
+  onCloseTabMenu: vi.fn(),
   onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
   onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
   menuHandler: null as null | (() => void),
-}));
+  closeMenuHandler: null as null | (() => void),
+  publishFocusedTerminal: vi.fn().mockResolvedValue(undefined),
+  setBadgeCount: vi.fn().mockResolvedValue({ supported: true, count: 0 }),
+  onRemoteSelectionRequested: vi.fn(),
+  remoteSelectionHandler: null as null | ((payload: any) => void),
+};
 
-const workspace = vi.hoisted(() => ({
+const workspace = {
   activateTab: vi.fn(),
   activatePrimary: vi.fn(),
   closeTab: vi.fn(),
@@ -39,6 +76,8 @@ const workspace = vi.hoisted(() => ({
   refreshWorktrees: vi.fn(),
   syncWorktrees: vi.fn(),
   restoreWorkspace: vi.fn(),
+  createBrowserTab: vi.fn().mockResolvedValue("browser-tab-1"),
+  reportRuntimeError: vi.fn(),
   storeState: {
     activeWorktreePath: "/repo/main",
     layout: {
@@ -65,8 +104,9 @@ const workspace = vi.hoisted(() => ({
       { path: "/repo/bugfix", branch: "refs/heads/bugfix" },
       { path: "/repo/docs", branch: "refs/heads/docs" },
     ],
+    unreadTabIds: {} as Record<string, boolean>,
   },
-}));
+};
 
 vi.mock("./lib/tauri", () => ({
   DEFAULT_WORKSPACE_ID: "default",
@@ -74,7 +114,12 @@ vi.mock("./lib/tauri", () => ({
   getTerminalPreferences: () => Promise.resolve({}),
   createWorktree: native.createWorktree,
   getWorktreeStatus: native.getWorktreeStatus,
+  previewWorktreeDelete: vi.fn(),
+  deleteWorktree: vi.fn(),
+  deleteWorktreeDestructive: vi.fn(),
+  getInitialProject: native.getInitialProject,
   listProjectBranches: native.listProjectBranches,
+  listWorktrees: vi.fn().mockResolvedValue([]),
   registerProject: native.registerProject,
   signalTerminal: native.signalTerminal,
   saveSession: native.saveSession,
@@ -82,34 +127,32 @@ vi.mock("./lib/tauri", () => ({
   clearSession: native.clearSession,
   listTerminalSessions: native.listTerminalSessions,
   spawnTerminal: native.spawnTerminal,
+  closeTerminal: vi.fn(),
+  getTerminalCwd: vi.fn(),
+  resizeTerminal: vi.fn(),
+  waitForTerminalExit: vi.fn(),
+  detectAgents: native.detectAgents,
+  writeTerminal: native.writeTerminal,
+  isTauriRuntime: native.isTauriRuntime,
   onNewTerminalTabMenu: native.onNewTerminalTabMenu,
+  onCloseTabMenu: native.onCloseTabMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
   onTerminalOutput: native.onTerminalOutput,
+  publishFocusedTerminal: native.publishFocusedTerminal,
+  setBadgeCount: native.setBadgeCount,
+  onRemoteSelectionRequested: native.onRemoteSelectionRequested,
+  onWorktreeChanged: vi.fn().mockResolvedValue(() => {}),
   toIpcError: (error: unknown) => error,
+  isStructuredIpcError: (_error: unknown) => false,
 }));
 
-vi.mock("./state/workspaceStore", () => ({
-  useWorkspaceStore: () => ({
-    state: workspace.storeState,
-    agents: [],
-    activateTab: workspace.activateTab,
-    closeTab: workspace.closeTab,
-    splitPane: workspace.splitPane,
-    closePane: workspace.closePane,
-    focusPane: workspace.focusPane,
-    setPaneRatio: workspace.setPaneRatio,
-    swapPanes: workspace.swapPanes,
-    ensureTabForWorktree: workspace.ensureTabForWorktree,
-    openTab: workspace.openTab,
-    syncWorktrees: workspace.syncWorktrees,
-    restoreWorkspace: workspace.restoreWorkspace,
-  }),
-}));
+const workspaceStoreModule = await import("./state/workspaceStore");
+let storeSpy: any;
 
 vi.mock("./state/workspaceRuntime", () => ({
   useWorkspaceRuntime: () => ({
     refreshWorktrees: workspace.refreshWorktrees,
-    reportRuntimeError: vi.fn(),
+    reportRuntimeError: workspace.reportRuntimeError,
     runtimeError: null,
   }),
 }));
@@ -123,16 +166,18 @@ vi.mock("./components/Sidebar", () => ({
     onSelectProject,
     onSelectWorktree,
     onToggle,
+    onOpenSettings,
     projects = [],
     worktrees = [],
     activeProjectId,
   }: {
     open?: boolean;
     onAddProject?: () => void;
-    onCreateWorktree: () => void;
+    onCreateWorktree: (project?: { workspaceId: string }) => void;
     onSelectProject?: (project: { workspaceId: string }) => void;
     onSelectWorktree?: (worktree: { path: string }) => void;
     onToggle?: () => void;
+    onOpenSettings?: () => void;
     projects?: Array<{ workspaceId: string }>;
     worktrees?: Array<{ path: string }>;
     activeProjectId?: string;
@@ -141,13 +186,13 @@ vi.mock("./components/Sidebar", () => ({
       <button type="button" onClick={onToggle}>
         {open ? "Hide sidebar" : "Show sidebar"}
       </button>
+      <button type="button" onClick={() => onOpenSettings?.()}>
+        Open settings
+      </button>
       {open ? (
         <>
           <button type="button" onClick={() => onAddProject?.()}>
             Add project
-          </button>
-          <button type="button" onClick={onCreateWorktree}>
-            Add worktree
           </button>
           <span>Active project {activeProjectId}</span>
           {/* Mirrors the real nested tree: every project row, with the active project's worktrees under it. */}
@@ -155,6 +200,9 @@ vi.mock("./components/Sidebar", () => ({
             <div key={project.workspaceId}>
               <button type="button" onClick={() => onSelectProject?.(project)}>
                 Project {project.workspaceId}
+              </button>
+              <button type="button" onClick={() => onCreateWorktree(project)}>
+                Add worktree to {project.workspaceId}
               </button>
               {project.workspaceId === activeProjectId
                 ? worktrees.map((worktree) => (
@@ -171,51 +219,155 @@ vi.mock("./components/Sidebar", () => ({
   ),
 }));
 
-vi.mock("./components/CommandPalette", () => ({ CommandPalette: () => null }));
+vi.mock("./components/CommandPalette", () => ({
+  CommandPalette: ({ open }: { open: boolean }) =>
+    open ? <div data-testid="command-palette" /> : null,
+}));
 vi.mock("./components/SettingsDialog", () => ({
-  SettingsDialog: ({ open, onClose }: { open: boolean; onClose: () => void }) =>
+  SettingsDialog: ({ open, onClose, projects, activeProjectId, activeWorktree, onSelectProject, onAddProject, onAddWorktree }: any) =>
     open ? (
-      <div data-testid="settings-dialog">
+      <div data-testid="settings-dialog" data-projects={JSON.stringify(projects)} data-active-project-id={activeProjectId} data-active-worktree={activeWorktree?.path ?? ""} data-has-select-project={String(Boolean(onSelectProject))} data-has-add-project={String(Boolean(onAddProject))} data-has-add-worktree={String(Boolean(onAddWorktree))}>
         <button onClick={onClose}>Close settings</button>
       </div>
     ) : null,
 }));
-vi.mock("./components/TerminalSplitView", () => ({
-  TerminalSplitView: ({ searchLeafId }: { searchLeafId?: string | null }) => (
-    <div data-testid="terminal-split-view" data-search-leaf-id={searchLeafId ?? ""} />
-  ),
-}));
+vi.mock("./components/TerminalSplitView", async () => {
+  const { useState } = await import("react");
+  const { NewTabPopover } = await import("./components/NewTabPopover");
+  return {
+    TerminalSplitView: ({
+      searchLeafId,
+      agents,
+      onLaunchAgent,
+      onAddBrowserTab,
+      defaultAgentId,
+    }: {
+      searchLeafId?: string | null;
+      agents?: Array<{ name: string; command: string; args: string }>;
+      onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+      onAddBrowserTab?: (url?: string) => void;
+      defaultAgentId?: string | null;
+    }) => {
+      const [open, setOpen] = useState(false);
+      return (
+        <div data-testid="terminal-split-view" data-search-leaf-id={searchLeafId ?? ""}>
+          <button type="button" onClick={() => setOpen(true)}>
+            New tab
+          </button>
+          <NewTabPopover
+            open={open}
+            onClose={() => setOpen(false)}
+            onNewTerminal={() => setOpen(false)}
+            onNewBrowser={(url) => {
+              setOpen(false);
+              onAddBrowserTab?.(url);
+            }}
+            agents={agents}
+            onLaunchAgent={onLaunchAgent}
+            defaultAgentId={defaultAgentId}
+          />
+          {agents?.map((agent) => (
+            <button key={agent.name} type="button" onClick={() => onLaunchAgent?.(agent)}>
+              Launch {agent.name}
+            </button>
+          ))}
+        </div>
+      );
+    },
+  };
+});
 vi.mock("./components/WorktreeDeleteDialog", () => ({ WorktreeDeleteDialog: () => null }));
 
-import { App } from "./App";
+const { App } = await import("./App");
+const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  storeSpy?.mockRestore();
+});
 
 describe("App project workspace flow", () => {
   beforeEach(() => {
+    resetWorkspaceRestore();
+    storeSpy = vi.spyOn(workspaceStoreModule, "useWorkspaceStore").mockImplementation((() => ({
+      state: workspace.storeState,
+      recoveredFromHmr: false,
+      agents: [],
+      activateTab: workspace.activateTab,
+      closeTab: workspace.closeTab,
+      splitPane: workspace.splitPane,
+      closePane: workspace.closePane,
+      focusPane: workspace.focusPane,
+      setPaneRatio: workspace.setPaneRatio,
+      swapPanes: workspace.swapPanes,
+      ensureTabForWorktree: workspace.ensureTabForWorktree,
+      openTab: workspace.openTab,
+      syncWorktrees: workspace.syncWorktrees,
+      restoreWorkspace: workspace.restoreWorkspace,
+      createBrowserTab: workspace.createBrowserTab,
+    })) as any);
     localStorage.clear();
     native.createWorktree.mockReset();
     native.getWorktreeStatus.mockReset();
+    native.getInitialProject.mockReset();
+    native.getInitialProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
     native.listProjectBranches.mockReset();
     native.registerProject.mockReset();
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
     native.signalTerminal.mockReset();
+    native.loadSession.mockReset();
+    native.loadSession.mockResolvedValue(null);
     native.listTerminalSessions.mockReset();
     native.listTerminalSessions.mockResolvedValue([]);
+    native.spawnTerminal.mockReset();
+    native.spawnTerminal.mockResolvedValue("mock-spawn-id");
     native.onNewTerminalTabMenu.mockReset();
+    native.onCloseTabMenu.mockReset();
     native.menuHandler = null;
+    native.closeMenuHandler = null;
     native.onNewTerminalTabMenu.mockImplementation(async (handler: () => void) => {
       native.menuHandler = handler;
       return () => {
         if (native.menuHandler === handler) native.menuHandler = null;
       };
     });
+    native.onCloseTabMenu.mockImplementation(async (handler: () => void) => {
+      native.closeMenuHandler = handler;
+      return () => {
+        if (native.closeMenuHandler === handler) native.closeMenuHandler = null;
+      };
+    });
+    native.onRemoteSelectionRequested.mockReset();
+    native.remoteSelectionHandler = null;
+    native.onRemoteSelectionRequested.mockImplementation(async (handler: (payload: any) => void) => {
+      native.remoteSelectionHandler = handler;
+      return () => {
+        if (native.remoteSelectionHandler === handler) native.remoteSelectionHandler = null;
+      };
+    });
+    native.publishFocusedTerminal.mockReset();
+    native.publishFocusedTerminal.mockResolvedValue(undefined);
+    native.setBadgeCount.mockReset();
+    native.setBadgeCount.mockResolvedValue({ supported: true, count: 0 });
+    workspace.reportRuntimeError.mockReset();
     workspace.openTab.mockReset();
     workspace.openTab.mockResolvedValue("tab-new");
+    workspace.closeTab.mockReset();
+    workspace.closeTab.mockResolvedValue(undefined);
     workspace.activatePrimary.mockReset();
     workspace.ensureTabForWorktree.mockReset();
     workspace.ensureTabForWorktree.mockResolvedValue(undefined);
     workspace.refreshWorktrees.mockReset();
+    workspace.restoreWorkspace.mockReset();
+    workspace.restoreWorkspace.mockResolvedValue(undefined);
+    workspace.createBrowserTab.mockReset();
+    workspace.createBrowserTab.mockResolvedValue("browser-tab-1");
+    native.detectAgents.mockReset();
+    native.detectAgents.mockResolvedValue([]);
+    native.writeTerminal.mockReset();
+    native.writeTerminal.mockResolvedValue(undefined);
+    native.isTauriRuntime.mockReset();
+    native.isTauriRuntime.mockReturnValue(false);
   });
 
   it("routes the native Cmd+T menu accelerator through the normal new-terminal callback", async () => {
@@ -228,6 +380,98 @@ describe("App project workspace flow", () => {
     await waitFor(() =>
       expect(workspace.openTab).toHaveBeenCalledWith(expect.objectContaining({ path: "/repo/main" })),
     );
+  });
+
+  it("routes the native Cmd+W menu accelerator to close the active tab", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(native.onCloseTabMenu).toHaveBeenCalledOnce());
+    expect(native.closeMenuHandler).toBeTypeOf("function");
+    native.closeMenuHandler?.();
+
+    await waitFor(() => expect(workspace.closeTab).toHaveBeenCalledWith("tab-1"));
+  });
+
+  it("routes the native Cmd+W menu accelerator to close an active browser tab", async () => {
+    const prevLayout = workspace.storeState.layout;
+    workspace.storeState.layout = {
+      ...prevLayout,
+      activeTabId: "browser-tab-1",
+      tabs: [
+        {
+          id: "browser-tab-1",
+          kind: "browser",
+          label: "Ferryx Docs",
+          url: "https://example.com",
+          browserId: "browser-1",
+        },
+        ...prevLayout.tabs,
+      ],
+    } as any;
+
+    try {
+      render(<App />);
+
+      await waitFor(() => expect(native.onCloseTabMenu).toHaveBeenCalledOnce());
+      expect(native.closeMenuHandler).toBeTypeOf("function");
+      native.closeMenuHandler?.();
+
+      await waitFor(() => expect(workspace.closeTab).toHaveBeenCalledWith("browser-tab-1"));
+    } finally {
+      workspace.storeState.layout = prevLayout;
+    }
+  });
+
+  it("shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm", async () => {
+    localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: true }));
+    render(<App />);
+
+    await waitFor(() => expect(native.onCloseTabMenu).toHaveBeenCalledOnce());
+    native.closeMenuHandler?.();
+
+    // Dialog appears
+    const dialog = await screen.findByRole("dialog", { name: /close tab/i });
+    expect(dialog).toBeInTheDocument();
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+
+    // Cancel does not close
+    const cancelButton = screen.getByRole("button", { name: /cancel/i });
+    fireEvent.click(cancelButton);
+    expect(screen.queryByRole("dialog", { name: /close tab/i })).not.toBeInTheDocument();
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+
+    // Trigger again and confirm
+    native.closeMenuHandler?.();
+    const dialog2 = await screen.findByRole("dialog", { name: /close tab/i });
+    expect(dialog2).toBeInTheDocument();
+
+    const confirmButton = within(dialog2).getByRole("button", { name: /close tab/i });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(workspace.closeTab).toHaveBeenCalledWith("tab-1"));
+  });
+
+  it("uses the canonical folder-derived project on an empty native startup", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+
+    render(<App />);
+
+    await waitFor(() => expect(native.getInitialProject).toHaveBeenCalledOnce());
+    expect(await screen.findByText("Active project orca-lite")).toBeInTheDocument();
+    expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite");
+  });
+
+  it("migrates the legacy default placeholder to the canonical native project", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "." }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project orca-lite")).toBeInTheDocument();
+    expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite");
   });
 
   it("migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10)", async () => {
@@ -281,11 +525,76 @@ describe("App project workspace flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
 
     await waitFor(() => expect(screen.getByText("Project rorca")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Add worktree" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to rorca" }));
 
     expect(screen.getByRole("form", { name: "Add Worktree" })).toBeInTheDocument();
     await waitFor(() => expect(native.listProjectBranches).toHaveBeenCalledWith("rorca"));
     expect(screen.getByRole("combobox", { name: "Base branch" })).toBeInTheDocument();
+  });
+
+  it("opens worktree creation for the clicked non-active project", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+    }));
+    native.listProjectBranches.mockResolvedValue([{ name: "beta-main", isCurrent: true }]);
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to beta" }));
+
+    expect(await screen.findByRole("heading", { name: "Add Worktree · beta" })).toBeInTheDocument();
+    await waitFor(() => expect(native.listProjectBranches).toHaveBeenCalledWith("beta"));
+  });
+
+  it("switches to the non-active project before opening its created worktree", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta" },
+    ];
+    const betaWorktree = { path: "/repos/beta/.orca-worktrees/beta/new-worktree", branch: "refs/heads/orca/beta/new-worktree" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+    }));
+    native.listProjectBranches.mockResolvedValue([{ name: "beta-main", isCurrent: true }]);
+    native.createWorktree.mockResolvedValue(betaWorktree);
+    workspace.refreshWorktrees.mockImplementation(() => {
+      if (!workspace.storeState.worktrees.some((worktree: { path: string }) => worktree.path === betaWorktree.path)) {
+        workspace.storeState.worktrees.push(betaWorktree);
+      }
+    });
+
+    try {
+      render(<App />);
+      fireEvent.click(screen.getByRole("button", { name: "Add worktree to beta" }));
+      await screen.findByRole("heading", { name: "Add Worktree · beta" });
+
+      fireEvent.change(screen.getByRole("textbox", { name: "Worktree slug" }), { target: { value: "new-worktree" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+
+      await waitFor(() =>
+        expect(native.createWorktree).toHaveBeenCalledWith({
+          workspaceId: "beta",
+          worktree: { wsId: "beta", slug: "new-worktree" },
+          baseRef: "beta-main",
+        }),
+      );
+      expect(await screen.findByText("Active project beta")).toBeInTheDocument();
+      await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(betaWorktree));
+    } finally {
+      workspace.storeState.worktrees = workspace.storeState.worktrees.filter(
+        (worktree: { path: string }) => worktree.path !== betaWorktree.path,
+      );
+    }
   });
 
   it("switches the active project when selecting a project row in the nested tree", async () => {
@@ -504,7 +813,7 @@ describe("App project workspace flow", () => {
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
   });
 
-  it("re-spawns dead terminal sessions when restoring after app restart", async () => {
+  it("retains missing backend sessions as exited without auto-respawning on app restart", async () => {
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
     native.listTerminalSessions.mockResolvedValue([]);
     native.spawnTerminal.mockResolvedValue("new-spawned-session-id");
@@ -515,7 +824,7 @@ describe("App project workspace flow", () => {
       activeWorkspaceId: "default",
       workspaces: {
         default: {
-          workspaceId: "default",
+          workspaceId: "orca-lite",
           repoRoot: ".",
           worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
           activeWorktreePath: "/repo/main",
@@ -541,8 +850,67 @@ describe("App project workspace flow", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(native.spawnTerminal).toHaveBeenCalled());
-    expect(workspace.restoreWorkspace).toHaveBeenCalled();
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+
+    const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
+    expect(restoredState).toBeDefined();
+    expect(restoredState.sessions["dead-sess-1"]).toMatchObject({
+      id: "dead-sess-1",
+      backendSessionId: null,
+      lifecycle: "exited",
+      cwd: "/repo/main",
+    });
+  });
+
+  it("restores persisted terminal sessions only once when restored state changes effect dependencies", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    native.listTerminalSessions.mockResolvedValue([]);
+    native.spawnTerminal.mockResolvedValue("new-spawned-session-id");
+    native.loadSession.mockResolvedValue({
+      version: 1,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: ".",
+          worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "none",
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [{ id: "tab-1", sessionId: "dead-sess-1", label: "main", worktreePath: "/repo/main" }],
+          },
+          terminalSessions: {
+            "dead-sess-1": {
+              sessionId: "dead-sess-1",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    });
+
+    const { rerender } = render(<App />);
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalledTimes(1));
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+
+    workspace.storeState.layout = { ...workspace.storeState.layout, tabs: [...workspace.storeState.layout.tabs] };
+    workspace.storeState.sessions = { ...workspace.storeState.sessions };
+    rerender(<App />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(native.loadSession).toHaveBeenCalledTimes(1);
+    expect(workspace.restoreWorkspace).toHaveBeenCalledTimes(1);
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
   });
 
   it("preserves live backend sessions when restoring during dev/HMR", async () => {
@@ -586,7 +954,7 @@ describe("App project workspace flow", () => {
     expect(native.spawnTerminal).not.toHaveBeenCalled();
   });
 
-  it("re-spawns only dead sessions when restoring with mixed live and dead sessions across split panes", async () => {
+  it("reconciles live and missing sessions across split panes without auto-respawning dead sessions", async () => {
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
     native.listTerminalSessions.mockResolvedValue([{ sessionId: "live-sess-1", worktreePath: "/repo/main" }]);
     native.spawnTerminal.mockClear();
@@ -646,10 +1014,99 @@ describe("App project workspace flow", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(native.spawnTerminal).toHaveBeenCalledTimes(1));
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId: "default",
-    }));
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+
+    const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
+    expect(restoredState).toBeDefined();
+    expect(restoredState.sessions["live-sess-1"]).toMatchObject({
+      id: "live-sess-1",
+      backendSessionId: "live-sess-1",
+      lifecycle: "working",
+    });
+    expect(restoredState.sessions["dead-sess-2"]).toMatchObject({
+      id: "dead-sess-2",
+      backendSessionId: null,
+      lifecycle: "exited",
+    });
+  });
+
+  it("reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    native.listTerminalSessions.mockResolvedValue([
+      { sessionId: "live-backend-1", daemonEpoch: "epoch-10" },
+      { sessionId: "live-backend-2", daemonEpoch: "epoch-10" },
+    ]);
+    native.spawnTerminal.mockClear();
+
+    const savedSession = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: ".",
+          worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [
+              { id: "tab-1", sessionId: "sess-matching", label: "main", kind: "terminal" as const },
+              { id: "tab-2", sessionId: "sess-mismatch", label: "feat", kind: "terminal" as const },
+            ],
+          },
+          terminalSessions: {
+            "sess-matching": {
+              localSessionId: "sess-matching",
+              backendSessionId: "live-backend-1",
+              daemonEpoch: "epoch-10",
+              lastOutputSequence: "777",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+            "sess-mismatch": {
+              localSessionId: "sess-mismatch",
+              backendSessionId: "live-backend-2",
+              daemonEpoch: "epoch-OLD",
+              lastOutputSequence: "100",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+    native.loadSession.mockResolvedValue(savedSession as any);
+
+    render(<App />);
+
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+
+    const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
+    expect(restoredState).toBeDefined();
+    // Matching epoch + live backend ID -> preserved
+    expect(restoredState.sessions["sess-matching"]).toMatchObject({
+      id: "sess-matching",
+      backendSessionId: "live-backend-1",
+      lifecycle: "working",
+      daemonEpoch: "epoch-10",
+      lastOutputSequence: "777",
+    });
+    // Mismatching epoch -> exited / lost
+    expect(restoredState.sessions["sess-mismatch"]).toMatchObject({
+      id: "sess-mismatch",
+      backendSessionId: null,
+      lifecycle: "exited",
+      daemonEpoch: null,
+      lastOutputSequence: null,
+    });
   });
 
   it("toggles the settings dialog with Cmd+,", async () => {
@@ -659,10 +1116,10 @@ describe("App project workspace flow", () => {
     expect(screen.queryByTestId("settings-dialog")).not.toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: ",", metaKey: true });
-    expect(screen.getByTestId("settings-dialog")).toBeInTheDocument();
+    expect(await screen.findByTestId("settings-dialog")).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: ",", metaKey: true });
-    expect(screen.queryByTestId("settings-dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).not.toBeInTheDocument());
   });
 
   it("activates in-terminal search on active pane with Cmd+F", async () => {
@@ -709,5 +1166,664 @@ describe("App project workspace flow", () => {
 
     // Restore storeState
     workspace.storeState.layout = prevLayout;
+  });
+
+  it("detects agents on mount and launches agent via spawnTerminal and writeTerminal", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([
+      { name: "claude", available: true },
+      { name: "codex", available: false },
+    ]);
+    native.spawnTerminal.mockResolvedValue("spawn-claude-session");
+
+    render(<App />);
+
+    await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() => {
+      expect(native.spawnTerminal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceId: "orca-lite",
+          cwd: "/repo/main",
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(workspace.openTab).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "/repo/main" }),
+        "Claude",
+        "spawn-claude-session",
+      );
+    });
+
+    await waitFor(() => {
+      expect(native.writeTerminal).toHaveBeenCalledWith({
+        sessionId: "spawn-claude-session",
+        data: "claude\r",
+      });
+    });
+  });
+
+  it("surfaces the stored defaultAgentId first with a Default label in the New Tab agent list", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([
+      { name: "claude", available: true },
+      { name: "aider", available: true },
+    ]);
+    saveAgentSettings({ version: 1, defaultAgentId: "aider", overrides: {} });
+
+    render(<App />);
+
+    await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch aider" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    const buttons = within(screen.getByText("AGENTS").parentElement as HTMLElement).getAllByRole("button");
+    expect(buttons[0]).toHaveTextContent("Aider");
+    expect(within(buttons[0]).getByText("Default")).toBeVisible();
+    expect(buttons[1]).toHaveTextContent("Claude");
+    expect(within(buttons[1]).queryByText("Default")).not.toBeInTheDocument();
+  });
+
+  it("opens a browser tab at the configured homepage from the new-tab menu", async () => {
+    saveBrowserSettings({ homePage: "https://example.com/start" });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New tab" }));
+    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
+
+    await waitFor(() => {
+      expect(workspace.createBrowserTab).toHaveBeenCalledWith("https://example.com/start");
+    });
+  });
+
+  it("opens a blank browser tab from the new-tab menu when no homepage is set", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New tab" }));
+    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
+
+    await waitFor(() => {
+      expect(workspace.createBrowserTab).toHaveBeenCalledWith("about:blank");
+    });
+  });
+
+  it("preserves every registered workspace when saving session instead of clobbering inactive workspaces", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "beta");
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+    }));
+
+    const preloadedSession = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "alpha",
+      workspaces: {
+        alpha: {
+          workspaceId: "alpha",
+          repoRoot: "/repos/alpha",
+          worktrees: [{ path: "/repos/alpha", branch: "main", head: "111", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repos/alpha",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-alpha-1",
+            secondaryTabId: null,
+            activeTabId: "tab-alpha-1",
+            tabs: [{ id: "tab-alpha-1", sessionId: "sess-alpha-1", label: "main", worktreePath: "/repos/alpha" }],
+          },
+          terminalSessions: {
+            "sess-alpha-1": {
+              localSessionId: "sess-alpha-1",
+              backendSessionId: "backend-alpha-1",
+              worktreePath: "/repos/alpha",
+              cwd: "/repos/alpha",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+    native.loadSession.mockResolvedValue(preloadedSession as any);
+    native.saveSession.mockClear();
+
+    const { flushCloseGuards } = await import("./lib/updater");
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project beta")).toBeInTheDocument();
+
+    await act(async () => {
+      await flushCloseGuards();
+    });
+
+    expect(native.saveSession).toHaveBeenCalled();
+    const lastSaved = native.saveSession.mock.lastCall?.[0];
+    expect(lastSaved?.workspaces).toHaveProperty("alpha");
+    expect(lastSaved?.workspaces).toHaveProperty("beta");
+  });
+
+  it("passes live workspace state and project callbacks to SettingsDialog", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "beta");
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    const dialog = await screen.findByTestId("settings-dialog");
+    expect(dialog.dataset.projects).toBe(JSON.stringify(projects));
+    expect(dialog.dataset.activeProjectId).toBe("beta");
+    expect(dialog.dataset.activeWorktree).toBe("/repo/main");
+    expect(dialog.dataset.hasSelectProject).toBe("true");
+    expect(dialog.dataset.hasAddProject).toBe("true");
+    expect(dialog.dataset.hasAddWorktree).toBe("true");
+  });
+
+  it("conditionally mounts SettingsDialog and CommandPalette only when open", () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    render(<App />);
+
+    expect(screen.queryByTestId("settings-dialog")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("command-palette")).not.toBeInTheDocument();
+  });
+
+  it("lazy-loads SettingsDialog via React.lazy with Suspense", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname ?? ".", "App.tsx"), "utf-8");
+    expect(appSource).toMatch(/lazy\(\s*\(\)\s*=>\s*import\(\s*["']\.\/components\/SettingsDialog["']\s*\)/);
+    expect(appSource).not.toMatch(/^import\s+\{[^}]*SettingsDialog[^}]*\}\s+from\s+["']\.\/components\/SettingsDialog["']/m);
+  });
+
+  it("does not list state in registerWindowCloseGuard effect dependencies", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname ?? ".", "App.tsx"), "utf-8");
+    const match = appSource.match(/registerWindowCloseGuard[\s\S]*?\},[\s\S]*?\[([\s\S]*?)\]\);/);
+    expect(match).toBeTruthy();
+    const deps = match ? match[1] : "";
+    expect(deps).not.toMatch(/\bstate\b/);
+  });
+
+  it("does not pass inline arrow functions for onOpenSettings or onCloseSearch", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname ?? ".", "App.tsx"), "utf-8");
+    expect(appSource).not.toMatch(/onOpenSettings=\{\(\)\s*=>/);
+    expect(appSource).not.toMatch(/onCloseSearch=\{\(\)\s*=>/);
+  });
+
+  it("preserves layout ownership and marks dead sessions exited across active and parked layouts without auto-respawning", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+    native.listTerminalSessions.mockResolvedValue([]);
+    const spawnedSessions: Record<string, string> = {
+      "/repo/main/backend": "respawned-main-pty",
+      "/repo/feature/packages/ui": "respawned-feature-pty",
+    };
+    native.spawnTerminal.mockImplementation(async ({ cwd }: { cwd: string }) => {
+      return spawnedSessions[cwd] ?? "respawned-fallback-pty";
+    });
+
+    let resolveSession!: (session: any) => void;
+    const sessionPromise = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+    native.loadSession.mockImplementation(() => sessionPromise);
+
+    const persistedSession = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: "/repo/main",
+          worktrees: [
+            { path: "/repo/main", branch: "refs/heads/main", head: "111", isMain: true, isLocked: false },
+            { path: "/repo/feature", branch: "refs/heads/orca/default/feature-branch", head: "222", isMain: false, isLocked: false },
+          ],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-main",
+            secondaryTabId: null,
+            activeTabId: "tab-main",
+            tabs: [
+              {
+                id: "tab-main",
+                label: "main-term",
+                kind: "terminal" as const,
+                terminal: {
+                  primarySessionId: "sess-main-dead",
+                  paneTree: { type: "leaf" as const, leafId: "leaf-main" },
+                  sessionIdsByLeafId: { "leaf-main": "sess-main-dead" },
+                  activeLeafId: "leaf-main",
+                  expandedLeafId: null,
+                },
+              },
+            ],
+          },
+          worktreeLayouts: {
+            "/repo/feature": {
+              splitMode: "none" as const,
+              primaryTabId: "tab-feature",
+              secondaryTabId: null,
+              activeTabId: "tab-feature",
+              tabs: [
+                {
+                  id: "tab-feature",
+                  label: "feature-term",
+                  kind: "terminal" as const,
+                  terminal: {
+                    primarySessionId: "sess-feature-dead",
+                    paneTree: { type: "leaf" as const, leafId: "leaf-feature" },
+                    sessionIdsByLeafId: { "leaf-feature": "sess-feature-dead" },
+                    activeLeafId: "leaf-feature",
+                    expandedLeafId: null,
+                  },
+                },
+              ],
+            },
+          },
+          terminalSessions: {
+            "sess-main-dead": {
+              localSessionId: "sess-main-dead",
+              backendSessionId: null,
+              worktreePath: "/repo/main",
+              cwd: "/repo/main/backend",
+              createdAt: Date.now(),
+            },
+            "sess-feature-dead": {
+              localSessionId: "sess-feature-dead",
+              backendSessionId: null,
+              worktreePath: "/repo/feature",
+              cwd: "/repo/feature/packages/ui",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+
+    render(<App />);
+
+    // Establish exact baseline after non-restore mount effects settle
+    await waitFor(() => expect(native.registerProject).toHaveBeenCalled());
+    native.spawnTerminal.mockClear();
+    workspace.restoreWorkspace.mockClear();
+
+    // Trigger the controlled restore seam
+    resolveSession(persistedSession);
+
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalledTimes(1));
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+
+    const finalRestoreCall = workspace.restoreWorkspace.mock.calls[0]?.[0];
+    expect(finalRestoreCall).toBeDefined();
+    expect(finalRestoreCall.activeWorktreePath).toBe("/repo/main");
+
+    // Verify layout ownership is preserved across active and parked layouts
+    expect(finalRestoreCall.layout.tabs[0].id).toBe("tab-main");
+    expect(finalRestoreCall.layout.layoutsByTabId["tab-main"].sessionIdsByLeafId).toEqual({
+      "leaf-main": "sess-main-dead",
+    });
+    expect(finalRestoreCall.worktreeLayouts["/repo/feature"].tabs[0].id).toBe("tab-feature");
+    expect(finalRestoreCall.worktreeLayouts["/repo/feature"].layoutsByTabId["tab-feature"].sessionIdsByLeafId).toEqual({
+      "leaf-feature": "sess-feature-dead",
+    });
+
+    // Verify both dead sessions were preserved with null backendSessionId and exited lifecycle without respawn
+    expect(finalRestoreCall.sessions["sess-main-dead"]).toMatchObject({
+      id: "sess-main-dead",
+      cwd: "/repo/main/backend",
+      worktreePath: "/repo/main",
+      worktree: null,
+      backendSessionId: null,
+      lifecycle: "exited",
+    });
+    expect(finalRestoreCall.sessions["sess-feature-dead"]).toMatchObject({
+      id: "sess-feature-dead",
+      cwd: "/repo/feature/packages/ui",
+      worktreePath: "/repo/feature",
+      worktree: { wsId: "default", slug: "feature-branch" },
+      backendSessionId: null,
+      lifecycle: "exited",
+    });
+  });
+
+  it("successfully completes session restore under React StrictMode double-mount without skipping", async () => {
+    const { StrictMode } = await import("react");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    native.listTerminalSessions.mockResolvedValue([]);
+    native.spawnTerminal.mockClear();
+
+    let resolveSession!: (session: any) => void;
+    const sessionPromise = new Promise((resolve) => {
+      resolveSession = resolve;
+    });
+    native.loadSession.mockImplementation(() => sessionPromise);
+
+    const savedSession = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: ".",
+          worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [{ id: "tab-1", sessionId: "sess-1", label: "main", kind: "terminal" as const }],
+          },
+          terminalSessions: {
+            "sess-1": {
+              localSessionId: "sess-1",
+              backendSessionId: null,
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    // In StrictMode, mount 1 starts async loadSession, cleanup cancels mount 1, mount 2 starts.
+    // When loadSession resolves, mount 2 must complete restore and invoke restoreWorkspace.
+    resolveSession(savedSession);
+
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+  });
+
+  it("skips native disk session restore when store was hydrated from HMR handoff", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+    native.loadSession.mockClear();
+    workspace.restoreWorkspace.mockClear();
+
+    storeSpy.mockImplementation((() => ({
+      state: workspace.storeState,
+      recoveredFromHmr: true,
+      agents: [],
+      activateTab: workspace.activateTab,
+      closeTab: workspace.closeTab,
+      splitPane: workspace.splitPane,
+      closePane: workspace.closePane,
+      focusPane: workspace.focusPane,
+      setPaneRatio: workspace.setPaneRatio,
+      swapPanes: workspace.swapPanes,
+      ensureTabForWorktree: workspace.ensureTabForWorktree,
+      openTab: workspace.openTab,
+      syncWorktrees: workspace.syncWorktrees,
+      restoreWorkspace: workspace.restoreWorkspace,
+      createBrowserTab: workspace.createBrowserTab,
+    })) as any);
+
+    render(<App />);
+
+    await waitFor(() => expect(native.registerProject).toHaveBeenCalled());
+    expect(native.loadSession).not.toHaveBeenCalled();
+    expect(workspace.restoreWorkspace).not.toHaveBeenCalled();
+  });
+
+  describe("Ferryx desktop focused-terminal publisher and remote selection listener", () => {
+    it("derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const sampleState: any = {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          focusedGroupId: "group-2",
+          tabGroups: {
+            "group-1": { id: "group-1", tabIds: ["tab-1"], activeTabId: "tab-1" },
+            "group-2": { id: "group-2", tabIds: ["tab-2", "tab-3"], activeTabId: "tab-3" },
+          },
+          activeTabId: "tab-1",
+          tabs: [
+            { id: "tab-1", label: "main", sessionId: "sess-1" },
+            { id: "tab-2", label: "feature", sessionId: "sess-2" },
+            { id: "tab-3", label: "split-term", sessionId: "sess-3" },
+          ],
+          layoutsByTabId: {
+            "tab-3": {
+              root: {
+                type: "split",
+                direction: "horizontal",
+                first: { type: "leaf", leafId: "leaf-left" },
+                second: { type: "leaf", leafId: "leaf-right" },
+                ratio: 0.5,
+              },
+              activeLeafId: "leaf-right",
+              expandedLeafId: null,
+              sessionIdsByLeafId: {
+                "leaf-left": "sess-3a",
+                "leaf-right": "sess-3b",
+              },
+            },
+          },
+        },
+        sessions: {
+          "sess-1": { id: "sess-1", backendSessionId: "backend-pty-1", cwd: "/repo/main", worktreePath: "/repo/main" },
+          "sess-2": { id: "sess-2", backendSessionId: "backend-pty-2", cwd: "/repo/feature", worktreePath: "/repo/feature" },
+          "sess-3a": { id: "sess-3a", backendSessionId: "backend-pty-3a", cwd: "/repo/main", worktreePath: "/repo/main" },
+          "sess-3b": { id: "sess-3b", backendSessionId: "backend-pty-3b", cwd: "/repo/feature", worktreePath: "/repo/feature" },
+        },
+        worktrees: [
+          { path: "/repo/main", branch: "refs/heads/main" },
+          { path: "/repo/feature", branch: "refs/heads/orca/orca-lite/feature-branch" },
+        ],
+      };
+
+      const result = deriveFocusedTerminal("orca-lite", sampleState);
+      expect(result).toEqual({
+        workspaceId: "orca-lite",
+        worktreeSlug: "feature-branch",
+        worktreeLabel: "orca/orca-lite/feature-branch",
+        backendSessionId: "backend-pty-3b",
+      });
+
+      // Verify no absolute paths in derived result
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain("/repo/");
+    });
+
+    it("clears active terminal (returns null) when active tab is a browser tab", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const sampleState: any = {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "browser-tab-1",
+          tabs: [
+            { id: "tab-1", label: "main", sessionId: "sess-1" },
+            { id: "browser-tab-1", label: "Web Preview", kind: "browser", browserId: "b-1", url: "http://localhost:3000" },
+          ],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-1": { id: "sess-1", backendSessionId: "backend-pty-1", cwd: "/repo/main" },
+        },
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+      };
+
+      const result = deriveFocusedTerminal("orca-lite", sampleState);
+      expect(result).toBeNull();
+    });
+
+    it("publishes focused terminal to native IPC on mount and layout changes", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+      const storeWithSession = {
+        ...workspace.storeState,
+        sessions: {
+          "sess-1": {
+            id: "sess-1",
+            backendSessionId: "pty-focused-live",
+            cwd: "/repo/main",
+            worktreePath: "/repo/main",
+          },
+        },
+      };
+
+      storeSpy.mockImplementation((() => ({
+        state: storeWithSession,
+        recoveredFromHmr: false,
+        agents: [],
+        activateTab: workspace.activateTab,
+        closeTab: workspace.closeTab,
+        splitPane: workspace.splitPane,
+        closePane: workspace.closePane,
+        focusPane: workspace.focusPane,
+        setPaneRatio: workspace.setPaneRatio,
+        swapPanes: workspace.swapPanes,
+        ensureTabForWorktree: workspace.ensureTabForWorktree,
+        openTab: workspace.openTab,
+        syncWorktrees: workspace.syncWorktrees,
+        restoreWorkspace: workspace.restoreWorkspace,
+        createBrowserTab: workspace.createBrowserTab,
+      })) as any);
+
+      render(<App />);
+
+      await waitFor(() => expect(native.publishFocusedTerminal).toHaveBeenCalled());
+      const lastCall = native.publishFocusedTerminal.mock.calls.at(-1)?.[0];
+      expect(lastCall).toEqual({
+        workspaceId: "orca-lite",
+        worktreeSlug: "main",
+        worktreeLabel: "main",
+        backendSessionId: "pty-focused-live",
+      });
+      // Absolute path must not leak
+      expect(JSON.stringify(lastCall)).not.toContain("/repo/");
+    });
+
+    it("handles native remote_selection_requested and activates requested worktree context", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      render(<App />);
+
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+      expect(native.remoteSelectionHandler).toBeTypeOf("function");
+
+      // Dispatch remote selection for worktree slug 'feature'
+      act(() => {
+        native.remoteSelectionHandler!({
+          workspaceId: "orca-lite",
+          worktreeSlug: "feature",
+        });
+      });
+
+      await waitFor(() => {
+        expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/repo/feature" }),
+        );
+      });
+    });
+
+    it("handles cross-project remote selection by switching project and then activating worktree", async () => {
+      localStorage.setItem(
+        PROJECTS_STORAGE_KEY,
+        JSON.stringify([
+          { workspaceId: "project-1", repoRoot: "/repo/p1" },
+          { workspaceId: "project-2", repoRoot: "/repo/p2" },
+        ]),
+      );
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "project-1");
+
+      render(<App />);
+
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+
+      act(() => {
+        native.remoteSelectionHandler!({
+          workspaceId: "project-2",
+        });
+      });
+
+      await waitFor(() => {
+        expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("project-2");
+      });
+    });
+  });
+
+  describe("badge count synchronization", () => {
+    it("synchronizes badge count from unique true unreadTabIds in workspace state", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      storeSpy.mockImplementation(() => ({
+        state: {
+          ...workspace.storeState,
+          unreadTabIds: { "tab-1": true, "tab-2": true, "tab-3": false },
+        },
+        dispatch: vi.fn(),
+        openTab: workspace.openTab,
+        ensureTabForWorktree: workspace.ensureTabForWorktree,
+        activateTab: workspace.activateTab,
+        closeTab: workspace.closeTab,
+        splitPane: workspace.splitPane,
+        closePane: workspace.closePane,
+        focusPane: workspace.focusPane,
+        setPaneRatio: workspace.setPaneRatio,
+        swapPanes: workspace.swapPanes,
+        syncWorktrees: workspace.syncWorktrees,
+        restoreWorkspace: workspace.restoreWorkspace,
+        createBrowserTab: workspace.createBrowserTab,
+      }));
+
+      render(<App />);
+
+      await waitFor(() => expect(native.setBadgeCount).toHaveBeenCalledWith(2));
+    });
+
+    it("routes native badge synchronization errors to reportRuntimeError", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+      const badgeError = new Error("Native badge unsupported");
+      native.setBadgeCount.mockRejectedValue(badgeError);
+
+      storeSpy.mockImplementation(() => ({
+        state: {
+          ...workspace.storeState,
+          unreadTabIds: { "tab-1": true },
+        },
+        dispatch: vi.fn(),
+        openTab: workspace.openTab,
+        ensureTabForWorktree: workspace.ensureTabForWorktree,
+        activateTab: workspace.activateTab,
+        closeTab: workspace.closeTab,
+        splitPane: workspace.splitPane,
+        closePane: workspace.closePane,
+        focusPane: workspace.focusPane,
+        setPaneRatio: workspace.setPaneRatio,
+        swapPanes: workspace.swapPanes,
+        syncWorktrees: workspace.syncWorktrees,
+        restoreWorkspace: workspace.restoreWorkspace,
+        createBrowserTab: workspace.createBrowserTab,
+      }));
+
+      render(<App />);
+
+      await waitFor(() => expect(workspace.reportRuntimeError).toHaveBeenCalledWith(badgeError));
+    });
   });
 });

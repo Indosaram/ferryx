@@ -6,20 +6,20 @@ const native = vi.hoisted(() => ({
   getTerminalPreferences: vi.fn(),
 }));
 
-vi.mock(import("./tauri"), async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...actual,
-    getTerminalPreferences: native.getTerminalPreferences,
-  };
-});
+vi.mock("./tauri", () => ({
+  DEFAULT_TERMINAL_FONT_STACK: 'MesloLGS NF, "Noto Sans KR", monospace',
+  getTerminalPreferences: native.getTerminalPreferences,
+}));
 
 import {
   DEFAULT_TERMINAL_SETTINGS,
+  TERMINAL_BACKGROUND_STORAGE_KEY,
   TERMINAL_SETTINGS_STORAGE_KEY,
+  applyCachedTerminalBackground,
   applyTerminalSettings,
   loadTerminalSettings,
   resolveTerminalSettings,
+  syncTerminalBackground,
   useTerminalSettings,
 } from "./terminalSettings";
 
@@ -59,6 +59,7 @@ const ghosttyPreferences = {
 
 beforeEach(() => {
   localStorage.clear();
+  document.documentElement.style.removeProperty("--terminal");
   native.getTerminalPreferences.mockReset();
   native.getTerminalPreferences.mockResolvedValue(ghosttyPreferences);
 });
@@ -130,5 +131,26 @@ describe("terminal settings", () => {
       scrollback: 10_000,
       cursorStyle: "block",
     });
+  });
+
+  it("restores the cached xterm background before terminal settings finish loading", () => {
+    localStorage.setItem(TERMINAL_BACKGROUND_STORAGE_KEY, "#282c34");
+
+    expect(applyCachedTerminalBackground()).toBe("#282c34");
+    expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#282c34");
+  });
+
+  it("synchronizes the terminal surface token and cached first-paint background", () => {
+    syncTerminalBackground("#282c34");
+
+    expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#282c34");
+    expect(localStorage.getItem(TERMINAL_BACKGROUND_STORAGE_KEY)).toBe("#282c34");
+  });
+
+  it("updates the shared terminal surface after native preferences resolve", async () => {
+    renderHook(() => useTerminalSettings());
+
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#282c34"));
+    expect(localStorage.getItem(TERMINAL_BACKGROUND_STORAGE_KEY)).toBe("#282c34");
   });
 });

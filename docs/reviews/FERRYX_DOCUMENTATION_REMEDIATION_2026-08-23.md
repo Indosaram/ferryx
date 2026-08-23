@@ -79,4 +79,5 @@ This review documents the verification and remediation of stale public URLs, dev
 
 ## Remaining Risk
 
-- Live GitHub Pages deployment occurs on push to `main`; this remediation validates local site build and static HTML output, but public deployment will execute via the GitHub Actions runner upon commit push.
+- Resolved: GitHub Pages workflow run `32639142470` built and deployed published revision `873749a` successfully. Live HTML at <https://indosaram.github.io/ferryx/> now contains the canonical repository and clone target, and no stale repository namespace or dead License URL.
+- Residual: `cargo check` emits pre-existing Rust dead-code warnings; no warning is introduced or suppressed by this documentation and Pages remediation.

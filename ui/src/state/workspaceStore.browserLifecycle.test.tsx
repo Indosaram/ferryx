@@ -1,13 +1,14 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Worktree } from "../lib/types";
 import { useWorkspaceStore, type WorkspaceServices } from "./workspaceStore";
 
 const browserMocks = vi.hoisted(() => ({
   createBrowser: vi.fn(),
-  navigateBrowser: vi.fn(async () => undefined),
-  reloadBrowser: vi.fn(async () => undefined),
-  closeBrowser: vi.fn(async () => undefined),
+  navigateBrowser: vi.fn(),
+  reloadBrowser: vi.fn(),
+  closeBrowser: vi.fn(),
 }));
 
 vi.mock("../lib/browserTauri", () => browserMocks);
@@ -20,12 +21,23 @@ const services: WorkspaceServices = {
   waitForTerminalExit: vi.fn(async () => undefined),
 };
 
+const worktree: Worktree = {
+  path: "/repo/main",
+  head: "abc",
+  branch: "refs/heads/orca/workspace-1/main",
+  bare: false,
+  detached: false,
+  locked: null,
+  prunable: null,
+};
+
 describe("useWorkspaceStore browser lifecycle", () => {
   beforeEach(() => {
     browserMocks.createBrowser.mockReset();
-    browserMocks.navigateBrowser.mockClear();
-    browserMocks.reloadBrowser.mockClear();
-    browserMocks.closeBrowser.mockClear();
+    browserMocks.navigateBrowser.mockReset();
+    browserMocks.reloadBrowser.mockReset();
+    browserMocks.closeBrowser.mockReset();
+
     browserMocks.createBrowser.mockResolvedValue({
       browserId: "browser-1",
       webviewLabel: "browser-webview-1",
@@ -42,11 +54,14 @@ describe("useWorkspaceStore browser lifecycle", () => {
       loadError: null,
       visible: true,
     });
+    browserMocks.navigateBrowser.mockResolvedValue(undefined);
+    browserMocks.reloadBrowser.mockResolvedValue(undefined);
+    browserMocks.closeBrowser.mockResolvedValue(undefined);
   });
 
   it("closes the native child webview before removing its React tab", async () => {
     const { result } = renderHook(() =>
-      useWorkspaceStore({ workspaceId: "workspace-1", services }),
+      useWorkspaceStore({ workspaceId: "workspace-1", initialWorktrees: [worktree], services }),
     );
 
     let tabId = "";
@@ -61,6 +76,14 @@ describe("useWorkspaceStore browser lifecycle", () => {
     });
 
     expect(browserMocks.closeBrowser).toHaveBeenCalledWith("browser-1");
-    expect(result.current.state.layout.tabs).toHaveLength(0);
+    expect(result.current.state.layout.tabs).toHaveLength(1);
+    const replacementTab = result.current.state.layout.tabs[0];
+    expect(replacementTab.kind).not.toBe("browser");
+    if (replacementTab.kind !== "browser") {
+      expect(replacementTab.sessionId).toBeDefined();
+      const session = result.current.state.sessions[replacementTab.sessionId];
+      expect(session).toBeDefined();
+      expect(session.backendSessionId).toBeDefined();
+    }
   });
 });

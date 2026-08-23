@@ -1,0 +1,45 @@
+> I read this as research/audit - inspect `src-tauri/tests/session_persistence_integration.rs` and referenced native session persistence modules to produce a concise contract audit report.
+
+# Native Session Restart Persistence Contract Audit
+
+### 1. Native Commands & State Files Involved
+
+- **Tauri IPC Commands** (`src-tauri/src/ipc/session.rs:18-37`, registered in `src-tauri/src/lib.rs:136-138`):
+  - `cmd_session_save`: Persists `PersistedWorkspaceSession` payloads asynchronously via `run_blocking` (`src-tauri/src/ipc/session.rs:18-24`).
+  - `cmd_session_load`: Retrieves `Option<PersistedWorkspaceSession>` (`src-tauri/src/ipc/session.rs:26-31`).
+  - `cmd_session_clear`: Deletes the persisted session state file (`src-tauri/src/ipc/session.rs:33-37`).
+
+- **State Files & Paths** (`src-tauri/src/session/mod.rs` & `src-tauri/src/ipc/session.rs`):
+  - **Target session file**: `<app_data_dir>/session_state.json` resolved via `app.path().app_data_dir()` (`src-tauri/src/ipc/session.rs:8-16`).
+  - **Staging atomic write file**: `session_state.json.tmp` written and fsynced before atomic rename to `session_state.json` with parent directory fsync (`src-tauri/src/session/mod.rs:77-112`).
+  - **Corruption backup file**: `session_state.json.corrupted` created upon JSON deserialization failure before returning `Ok(None)` (`src-tauri/src/session/mod.rs:133-138`).
+
+---
+
+### 2. Assertions in `src-tauri/tests/session_persistence_integration.rs`
+
+The test `test_session_lifecycle_integration` validates the full save/load/clear lifecycle against a mock directory:
+1. `assert!(loaded.is_none());` (`line 52`): Verifies `load_session_from_path` returns `Ok(None)` when the state file does not exist.
+2. `assert!(session_file.exists());` (`line 55`): Verifies `save_session_to_path` durably creates the file on disk.
+3. `assert_eq!(loaded.version, 1);` (`line 58`): Verifies version schema integrity round-trips as `1`.
+4. `assert_eq!(loaded.active_workspace_id, "default");` (`line 59`): Verifies the active workspace pointer string is preserved.
+5. `assert_eq!(loaded.workspaces["default"].repo_root, PathBuf::from("/tmp/repo"));` (`lines 60-63`): Verifies workspace dictionary lookup by ID and deserialization of `repo_root`.
+6. `assert!(!session_file.exists());` (`line 66`): Verifies `clear_session_from_path` removes the state file from disk.
+
+---
+
+### 3. Mismatch with Per-Worktree State Ownership
+
+- **Hierarchy Flattening**: The native schema (`src-tauri/src/session/mod.rs:49-64`) models state ownership at the **workspace** root (`PersistedWorkspace`), nesting a single global `layout: PersistedLayout` (`lines 29-36`) containing all tabs (`Vec<PersistedTab>`), one `split_mode`, and one active tab pointer (`primary_tab_id` / `active_tab_id`).
+- **Worktrees as Metadata vs. State Containers**: In the native contract, `PersistedWorktree` (`lines 8-14`) is an array of git metadata records (`worktrees: Vec<PersistedWorktree>`) rather than an isolation boundary owning its own layout or tab-set.
+- **Tab Ownership vs. Layout Ownership**: While individual `PersistedTab` items include a `worktree_path: String` field (`line 20`), the layout ordering, active tab, and split arrangement are stored at the workspace level. If the frontend models per-worktree isolation (independent tab lists and active layouts per worktree), the native backend contract will store a single unified tab vector and workspace-level active tab, requiring frontend reconciliation to partition tabs by `worktree_path`.
+
+---
+
+### 4. Command to Validate Regression
+
+Run from repository root:
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --test session_persistence_integration
+```
+*(Or from within `src-tauri`: `cargo test --test session_persistence_integration`)*

@@ -1,10 +1,15 @@
-import { normalizeLayout } from "../state/layout";
-import { collectLeafIds, createLeafNode } from "../state/paneTree";
+import { createLayoutState, normalizeLayout } from "../state/layout";
+import { collectLeafIds, createLeafNode, removeLeaf } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
+import { loadBrowserSettings } from "./browserSettings";
 import {
+  createBrowserPaneContent,
+  createTerminalPaneContent,
   worktreeIdentity,
+  type BrowserPaneState,
   type BrowserTab,
   type LayoutState,
+  type PaneContent,
   type PersistedLayout,
   type PersistedTab,
   type PersistedTerminalSession,
@@ -12,6 +17,7 @@ import {
   type PersistedWorkspaceSession,
   type PersistedWorktree,
   type TabGroup,
+  type TerminalLifecycle,
   type TerminalSession,
   type TerminalTab,
   type WorkspaceTab,
@@ -24,8 +30,11 @@ export function serializeWorkspaceState(
   workspaceId: string,
   repoRoot: string,
   state: WorkspaceState,
+  existingSession?: PersistedWorkspaceSession | null,
 ): PersistedWorkspaceSession {
-  const normalizedLayout = normalizeLayout(state.layout);
+  const browserSettings = loadBrowserSettings();
+  const restoreBrowserTabs = browserSettings.restoreTabsOnLaunch;
+
   const persistedWorktrees: PersistedWorktree[] = state.worktrees.map((wt) => ({
     path: wt.path,
     branch: wt.branch ?? "",
@@ -34,72 +43,173 @@ export function serializeWorkspaceState(
     isLocked: Boolean(wt.locked),
   }));
 
-  const persistedTabs: PersistedTab[] = normalizedLayout.tabs.map((tab) => {
-    if (tab.kind === "browser") {
-      return {
+  function serializeLayout(layoutState: LayoutState): PersistedLayout {
+    const normalizedLayout = normalizeLayout(layoutState);
+    const persistedTabs: PersistedTab[] = [];
+    for (const tab of normalizedLayout.tabs) {
+      if (tab.kind === "browser") {
+        if (!restoreBrowserTabs) continue;
+        persistedTabs.push({
+          id: tab.id,
+          kind: "browser",
+          label: tab.label,
+          pinned: Boolean(tab.pinned),
+          browser: {
+            browserId: tab.browserId,
+            url: tab.url,
+            title: tab.title ?? null,
+            loading: tab.loading,
+            canGoBack: tab.canGoBack,
+            canGoForward: tab.canGoForward,
+            profileId: tab.profileId,
+            worktreePath: tab.worktreePath,
+            worktreeLabel: tab.worktreeLabel,
+          },
+        });
+        continue;
+      }
+
+      const tabLayout = normalizedLayout.layoutsByTabId[tab.id];
+      let effectiveRoot = tabLayout?.root ?? createLeafNode(`leaf-persisted:${tab.id}`);
+      let effectiveContents = tabLayout?.contentsByLeafId;
+
+      if (!restoreBrowserTabs && tabLayout && effectiveContents) {
+        for (const [leafId, content] of Object.entries(effectiveContents)) {
+          if (content.kind === "browser") {
+            const nextRoot = removeLeaf(effectiveRoot, leafId);
+            if (!nextRoot) {
+              effectiveRoot = null as any;
+              break;
+            }
+            effectiveRoot = nextRoot;
+          }
+        }
+        if (!effectiveRoot) continue;
+      }
+
+      const leafIds = collectLeafIds(effectiveRoot);
+      const contentsByLeafId: Record<string, PaneContent> = {};
+      const sessionIdsByLeafId: Record<string, string> = {};
+
+      for (const leafId of leafIds) {
+        const content = effectiveContents?.[leafId];
+        if (content) {
+          if (content.kind === "browser") {
+            const rawBrowser = content.browser ?? (content as any);
+            contentsByLeafId[leafId] = createBrowserPaneContent({
+              browserId: rawBrowser.browserId ?? "",
+              url: rawBrowser.url ?? "",
+              title: rawBrowser.title ?? null,
+              loading: rawBrowser.loading ?? false,
+              canGoBack: rawBrowser.canGoBack ?? false,
+              canGoForward: rawBrowser.canGoForward ?? false,
+              profileId: rawBrowser.profileId,
+              worktreePath: rawBrowser.worktreePath,
+              worktreeLabel: rawBrowser.worktreeLabel,
+            });
+            sessionIdsByLeafId[leafId] = "";
+          } else {
+            contentsByLeafId[leafId] = createTerminalPaneContent(content.sessionId);
+            sessionIdsByLeafId[leafId] = content.sessionId;
+          }
+        } else {
+          const sessId = tabLayout?.sessionIdsByLeafId?.[leafId] ?? tab.sessionId;
+          contentsByLeafId[leafId] = createTerminalPaneContent(sessId);
+          sessionIdsByLeafId[leafId] = sessId;
+        }
+      }
+
+      const activeLeafId =
+        tabLayout?.activeLeafId && leafIds.includes(tabLayout.activeLeafId)
+          ? tabLayout.activeLeafId
+          : leafIds[0] ?? null;
+      const expandedLeafId =
+        tabLayout?.expandedLeafId && leafIds.includes(tabLayout.expandedLeafId)
+          ? tabLayout.expandedLeafId
+          : null;
+
+      persistedTabs.push({
         id: tab.id,
-        kind: "browser",
+        kind: "terminal",
         label: tab.label,
         pinned: Boolean(tab.pinned),
-        browser: {
-          browserId: tab.browserId,
-          url: tab.url,
-          title: tab.title ?? null,
-          loading: tab.loading,
-          canGoBack: tab.canGoBack,
-          canGoForward: tab.canGoForward,
+        terminal: {
+          primarySessionId: tab.sessionId,
+          paneTree: effectiveRoot,
+          sessionIdsByLeafId,
+          contentsByLeafId,
+          activeLeafId,
+          expandedLeafId,
         },
-      };
+      });
     }
 
-    const tabLayout = normalizedLayout.layoutsByTabId[tab.id];
-    return {
-      id: tab.id,
-      kind: "terminal",
-      label: tab.label,
-      pinned: Boolean(tab.pinned),
-      terminal: tabLayout
-        ? {
-            primarySessionId: tab.sessionId,
-            paneTree: tabLayout.root,
-            sessionIdsByLeafId: { ...tabLayout.sessionIdsByLeafId },
-            activeLeafId: tabLayout.activeLeafId,
-            expandedLeafId: tabLayout.expandedLeafId,
-          }
-        : {
-            primarySessionId: tab.sessionId,
-            paneTree: createLeafNode(`leaf-persisted:${tab.id}`),
-            sessionIdsByLeafId: { [`leaf-persisted:${tab.id}`]: tab.sessionId },
-            activeLeafId: `leaf-persisted:${tab.id}`,
-            expandedLeafId: null,
-          },
-    };
-  });
+    const tabIds = new Set(persistedTabs.map((t) => t.id));
+    const activeTabId =
+      normalizedLayout.activeTabId && tabIds.has(normalizedLayout.activeTabId)
+        ? normalizedLayout.activeTabId
+        : (persistedTabs[0]?.id ?? null);
+    const primaryTabId =
+      normalizedLayout.primaryTabId && tabIds.has(normalizedLayout.primaryTabId)
+        ? normalizedLayout.primaryTabId
+        : (persistedTabs[0]?.id ?? null);
 
-  const persistedLayout: PersistedLayout = {
-    splitMode: normalizedLayout.split ?? "none",
-    primaryTabId: normalizedLayout.primaryTabId ?? null,
-    secondaryTabId: normalizedLayout.secondaryTabId ?? null,
-    activeTabId: normalizedLayout.activeTabId ?? null,
-    tabs: persistedTabs,
-    tabGroups: Object.values(normalizedLayout.tabGroups ?? {}).map((group) => ({
-      id: group.id,
-      tabIds: [...group.tabIds],
-      activeTabId: group.activeTabId,
-    })),
-    tabGroupLayout: normalizedLayout.tabGroupLayout ?? null,
-    focusedGroupId: normalizedLayout.focusedGroupId ?? null,
-  };
+    return {
+      splitMode: normalizedLayout.split ?? "none",
+      primaryTabId,
+      secondaryTabId: normalizedLayout.secondaryTabId ?? null,
+      activeTabId,
+      tabs: persistedTabs,
+      tabGroups: Object.values(normalizedLayout.tabGroups ?? {}).map((group) => ({
+        id: group.id,
+        tabIds: group.tabIds.filter((id) => tabIds.has(id)),
+        activeTabId: group.activeTabId && tabIds.has(group.activeTabId) ? group.activeTabId : null,
+      })),
+      tabGroupLayout: normalizedLayout.tabGroupLayout ?? null,
+      focusedGroupId: normalizedLayout.focusedGroupId ?? null,
+    };
+  }
+
+  const persistedLayout = serializeLayout(state.layout);
+  const persistedWorktreeLayouts: Record<string, PersistedLayout> = {};
+  for (const [wtPath, layout] of Object.entries(state.worktreeLayouts ?? {})) {
+    if (layout) {
+      persistedWorktreeLayouts[wtPath] = serializeLayout(layout);
+    }
+  }
+
+  const allPersistedLayouts = [persistedLayout, ...Object.values(persistedWorktreeLayouts)];
+  const referencedSessionIds = new Set<string>();
+  for (const layout of allPersistedLayouts) {
+    for (const tab of layout.tabs) {
+      if (tab.kind === "browser") continue;
+      const terminal = tab.terminal;
+      if (terminal?.contentsByLeafId) {
+        for (const content of Object.values(terminal.contentsByLeafId)) {
+          if (content && content.kind === "terminal" && content.sessionId) {
+            referencedSessionIds.add(content.sessionId);
+          }
+        }
+      } else {
+        if (terminal?.primarySessionId) referencedSessionIds.add(terminal.primarySessionId);
+        for (const sessionId of Object.values(terminal?.sessionIdsByLeafId ?? {})) {
+          if (sessionId) referencedSessionIds.add(sessionId);
+        }
+      }
+    }
+  }
 
   const persistedTerminalSessions: Record<string, PersistedTerminalSession> = {};
   const createdAt = Date.now();
   for (const [id, sess] of Object.entries(state.sessions)) {
-    if (!sess) continue;
+    if (!sess || !referencedSessionIds.has(id)) continue;
     persistedTerminalSessions[id] = {
       localSessionId: sess.id,
       backendSessionId: sess.backendSessionId,
       worktreePath: sess.worktreePath ?? sess.cwd,
       cwd: sess.cwd,
+      daemonEpoch: sess.daemonEpoch != null ? String(sess.daemonEpoch) : null,
+      lastOutputSequence: sess.lastOutputSequence != null ? String(sess.lastOutputSequence) : null,
       createdAt,
     };
   }
@@ -110,31 +220,88 @@ export function serializeWorkspaceState(
     worktrees: persistedWorktrees,
     activeWorktreePath: state.activeWorktreePath,
     layout: persistedLayout,
+    ...(Object.keys(persistedWorktreeLayouts).length > 0 ? { worktreeLayouts: persistedWorktreeLayouts } : {}),
     terminalSessions: persistedTerminalSessions,
+  };
+
+  const workspaces = {
+    ...(existingSession?.workspaces ?? {}),
+    [workspaceId]: workspace,
   };
 
   return {
     version: WORKSPACE_SESSION_VERSION,
     timestamp: Date.now(),
     activeWorkspaceId: workspaceId,
-    workspaces: {
-      [workspaceId]: workspace,
-    },
+    workspaces,
   };
 }
 
 export function deserializeWorkspaceState(
   workspaceId: string,
   persistedSession: PersistedWorkspaceSession,
-  liveBackendSessionIds?: Iterable<string> | null,
+  liveBackendSessionIds?:
+    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null }>
+    | {
+        epoch?: string | null;
+        daemonEpoch?: string | null;
+        sessionIds?: Iterable<string>;
+        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null }>;
+      }
+    | null,
 ): WorkspaceState | null {
   const ws = persistedSession.workspaces?.[workspaceId];
   if (!ws) return null;
   const isV2 = (persistedSession.version ?? 1) >= 2;
 
-  const liveSet = liveBackendSessionIds
-    ? (liveBackendSessionIds instanceof Set ? liveBackendSessionIds : new Set(liveBackendSessionIds))
-    : null;
+  const browserSettings = loadBrowserSettings();
+  const restoreBrowser = browserSettings.restoreTabsOnLaunch;
+  const knownProfiles = new Set(browserSettings.profiles.map((p) => p.id));
+  const fallbackProfileId = browserSettings.defaultProfileId;
+
+  let globalLiveEpoch: string | null = null;
+  const liveSessionMap = new Map<string, { daemonEpoch: string | null }>();
+  const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined;
+
+  if (hasLiveSessionQuery && liveBackendSessionIds) {
+    if (
+      typeof liveBackendSessionIds === "object" &&
+      !("length" in liveBackendSessionIds) &&
+      !liveBackendSessionIds[Symbol.iterator as keyof typeof liveBackendSessionIds]
+    ) {
+      const container = liveBackendSessionIds as {
+        epoch?: string | null;
+        daemonEpoch?: string | null;
+        sessionIds?: Iterable<string>;
+        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null }>;
+      };
+      const rawEpoch = container.epoch ?? container.daemonEpoch;
+      if (rawEpoch != null) {
+        globalLiveEpoch = String(rawEpoch);
+      }
+      const sessionList = container.sessions ?? container.sessionIds ?? [];
+      for (const item of sessionList) {
+        if (typeof item === "string") {
+          liveSessionMap.set(item, { daemonEpoch: globalLiveEpoch });
+        } else if (item && typeof item === "object" && "sessionId" in item) {
+          const itemEpoch = item.daemonEpoch != null ? String(item.daemonEpoch) : globalLiveEpoch;
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch });
+        }
+      }
+    } else {
+      for (const item of liveBackendSessionIds as Iterable<any>) {
+        if (typeof item === "string") {
+          liveSessionMap.set(item, { daemonEpoch: null });
+        } else if (item && typeof item === "object" && "sessionId" in item) {
+          const itemEpoch = item.daemonEpoch != null ? String(item.daemonEpoch) : null;
+          if (itemEpoch !== null && globalLiveEpoch === null) {
+            globalLiveEpoch = itemEpoch;
+          }
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch });
+        }
+      }
+    }
+  }
 
   const worktrees: Worktree[] = (ws.worktrees || []).map((wt) => ({
     path: wt.path,
@@ -151,9 +318,53 @@ export function deserializeWorkspaceState(
     const localSessionId = sess.localSessionId || mapKey || sess.sessionId || "";
     if (!localSessionId) continue;
     const persistedBackendSessionId = isV2 ? (sess.backendSessionId ?? null) : (sess.backendSessionId ?? sess.sessionId ?? null);
-    const backendSessionId = liveSet
-      ? (persistedBackendSessionId && liveSet.has(persistedBackendSessionId) ? persistedBackendSessionId : null)
-      : persistedBackendSessionId;
+    const persistedEpoch = sess.daemonEpoch != null ? String(sess.daemonEpoch) : null;
+    const persistedSequence = sess.lastOutputSequence != null ? String(sess.lastOutputSequence) : null;
+
+    let backendSessionId: string | null = null;
+    let daemonEpoch: string | null = null;
+    let lastOutputSequence: string | null = null;
+    let lifecycle: TerminalLifecycle = "exited";
+
+    if (!hasLiveSessionQuery) {
+      const isLive = Boolean(persistedBackendSessionId);
+      backendSessionId = isLive ? persistedBackendSessionId : null;
+      daemonEpoch = isLive ? persistedEpoch : null;
+      lastOutputSequence = isLive ? persistedSequence : null;
+      lifecycle = isLive ? "working" : "exited";
+    } else {
+      if (!persistedBackendSessionId || !liveSessionMap.has(persistedBackendSessionId)) {
+        backendSessionId = null;
+        daemonEpoch = null;
+        lastOutputSequence = null;
+        lifecycle = "exited";
+      } else {
+        const liveInfo = liveSessionMap.get(persistedBackendSessionId);
+        const effectiveLiveEpoch = liveInfo?.daemonEpoch ?? globalLiveEpoch;
+
+        let epochMatches = true;
+        if (effectiveLiveEpoch !== null && persistedEpoch !== null) {
+          epochMatches = effectiveLiveEpoch === persistedEpoch;
+        } else if (effectiveLiveEpoch !== null && persistedEpoch === null) {
+          epochMatches = false;
+        } else if (effectiveLiveEpoch === null && persistedEpoch !== null) {
+          epochMatches = true;
+        }
+
+        if (epochMatches) {
+          backendSessionId = persistedBackendSessionId;
+          daemonEpoch = persistedEpoch ?? effectiveLiveEpoch ?? null;
+          lastOutputSequence = persistedSequence;
+          lifecycle = "working";
+        } else {
+          backendSessionId = null;
+          daemonEpoch = null;
+          lastOutputSequence = null;
+          lifecycle = "exited";
+        }
+      }
+    }
+
     const worktreePath = sess.worktreePath || sess.cwd;
     const matchingWorktree = worktrees.find((wt) => wt.path === worktreePath);
     sessions[localSessionId] = {
@@ -163,99 +374,217 @@ export function deserializeWorkspaceState(
       workspaceId,
       worktree: matchingWorktree ? worktreeIdentity(matchingWorktree) : null,
       backendSessionId,
-      lifecycle: backendSessionId ? "working" : "exited",
+      lifecycle,
+      daemonEpoch,
+      lastOutputSequence,
     };
   }
 
-  const tabs: WorkspaceTab[] = (ws.layout?.tabs || []).map((persistedTab): WorkspaceTab => {
-    if (persistedTab.kind === "browser" || persistedTab.browser) {
-      const browser = persistedTab.browser;
-      const tab: BrowserTab = {
+  function deserializeLayout(persistedLayout: PersistedLayout | undefined): LayoutState {
+    if (!persistedLayout) return createLayoutState();
+
+    const tabs: WorkspaceTab[] = [];
+    for (const persistedTab of persistedLayout.tabs || []) {
+      if (persistedTab.kind === "browser" || persistedTab.browser) {
+        if (!restoreBrowser) continue;
+        const browser = persistedTab.browser;
+        const rawProfileId = browser?.profileId;
+        const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
+        const tab: BrowserTab = {
+          id: persistedTab.id,
+          kind: "browser",
+          label: persistedTab.label,
+          browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
+          url: browser?.url ?? "about:blank",
+          title: browser?.title ?? persistedTab.label,
+          canGoBack: browser?.canGoBack ?? false,
+          canGoForward: browser?.canGoForward ?? false,
+          loading: browser?.loading ?? false,
+          pinned: Boolean(persistedTab.pinned),
+          profileId,
+          worktreePath: browser?.worktreePath ?? persistedTab.worktreePath,
+          worktreeLabel: browser?.worktreeLabel,
+        };
+        tabs.push(tab);
+        continue;
+      }
+
+      const primarySessionId = persistedTab.terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
+      const tab: TerminalTab = {
         id: persistedTab.id,
-        kind: "browser",
+        kind: "terminal",
+        sessionId: primarySessionId,
         label: persistedTab.label,
-        browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
-        url: browser?.url ?? "about:blank",
-        title: browser?.title ?? persistedTab.label,
-        canGoBack: browser?.canGoBack ?? false,
-        canGoForward: browser?.canGoForward ?? false,
-        loading: browser?.loading ?? false,
         pinned: Boolean(persistedTab.pinned),
       };
-      return tab;
+      tabs.push(tab);
     }
 
-    const primarySessionId = persistedTab.terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
-    const tab: TerminalTab = {
-      id: persistedTab.id,
-      kind: "terminal",
-      sessionId: primarySessionId,
-      label: persistedTab.label,
-      pinned: Boolean(persistedTab.pinned),
-    };
-    return tab;
-  });
+    const layoutsByTabId: LayoutState["layoutsByTabId"] = {};
+    for (const persistedTab of persistedLayout.tabs || []) {
+      if (persistedTab.kind === "browser" || persistedTab.browser) {
+        if (!restoreBrowser) continue;
+        const browser = persistedTab.browser;
+        const rawProfileId = browser?.profileId;
+        const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
+        const leafId = `leaf-browser:${persistedTab.id}`;
+        const browserState: BrowserPaneState = {
+          browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
+          url: browser?.url ?? "about:blank",
+          title: browser?.title ?? persistedTab.label,
+          canGoBack: browser?.canGoBack ?? false,
+          canGoForward: browser?.canGoForward ?? false,
+          loading: browser?.loading ?? false,
+          profileId,
+          worktreePath: browser?.worktreePath ?? persistedTab.worktreePath,
+          worktreeLabel: browser?.worktreeLabel,
+        };
+        layoutsByTabId[persistedTab.id] = {
+          root: createLeafNode(leafId),
+          activeLeafId: leafId,
+          expandedLeafId: null,
+          sessionIdsByLeafId: { [leafId]: "" },
+          contentsByLeafId: { [leafId]: createBrowserPaneContent(browserState) },
+        };
+        continue;
+      }
 
-  const layoutsByTabId: LayoutState["layoutsByTabId"] = {};
-  for (const persistedTab of ws.layout?.tabs || []) {
-    if (persistedTab.kind === "browser" || persistedTab.browser) {
-      const leafId = `leaf-browser:${persistedTab.id}`;
+      const terminal = persistedTab.terminal;
+      const legacyTabLayout = persistedLayout.layoutsByTabId?.[persistedTab.id];
+      const paneTree = terminal?.paneTree ?? persistedTab.paneTree ?? legacyTabLayout?.root;
+      const primarySessionId = terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
+      let root = paneTree ?? createLeafNode(`leaf-restored:${persistedTab.id}`);
+      const persistedContents = terminal?.contentsByLeafId ?? persistedTab.contentsByLeafId;
+      const persistedMapping =
+        terminal?.sessionIdsByLeafId ?? persistedTab.sessionIdsByLeafId ?? legacyTabLayout?.sessionIdsByLeafId;
+
+      if (!restoreBrowser && persistedContents) {
+        for (const [leafId, content] of Object.entries(persistedContents)) {
+          if (content && content.kind === "browser") {
+            const nextRoot = removeLeaf(root, leafId);
+            if (!nextRoot) {
+              root = null as any;
+              break;
+            }
+            root = nextRoot;
+          }
+        }
+        if (!root) continue;
+      }
+
+      const leafIds = collectLeafIds(root);
+      const contentsByLeafId: Record<string, PaneContent> = {};
+      const sessionIdsByLeafId: Record<string, string> = {};
+
+      for (const leafId of leafIds) {
+        const rawContent = persistedContents?.[leafId];
+        if (rawContent) {
+          if (rawContent.kind === "browser") {
+            const rawBrowser = rawContent.browser ?? (rawContent as any);
+            const rawProfileId = rawBrowser.profileId;
+            const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
+            contentsByLeafId[leafId] = createBrowserPaneContent({
+              browserId: rawBrowser.browserId || `restored-browser:${persistedTab.id}:${leafId}`,
+              url: rawBrowser.url || "about:blank",
+              title: rawBrowser.title ?? null,
+              loading: Boolean(rawBrowser.loading),
+              canGoBack: Boolean(rawBrowser.canGoBack),
+              canGoForward: Boolean(rawBrowser.canGoForward),
+              profileId,
+              worktreePath: rawBrowser.worktreePath,
+              worktreeLabel: rawBrowser.worktreeLabel,
+            });
+            sessionIdsByLeafId[leafId] = "";
+          } else {
+            const sessId = rawContent.sessionId || persistedMapping?.[leafId] || primarySessionId;
+            contentsByLeafId[leafId] = createTerminalPaneContent(sessId);
+            sessionIdsByLeafId[leafId] = sessId;
+          }
+        } else {
+          const sessId = persistedMapping?.[leafId] || primarySessionId;
+          contentsByLeafId[leafId] = createTerminalPaneContent(sessId);
+          sessionIdsByLeafId[leafId] = sessId;
+        }
+      }
+
+      const requestedActiveLeafId =
+        terminal?.activeLeafId ?? persistedTab.activeLeafId ?? legacyTabLayout?.activeLeafId ?? null;
+      const requestedExpandedLeafId =
+        terminal?.expandedLeafId ?? persistedTab.expandedLeafId ?? legacyTabLayout?.expandedLeafId ?? null;
       layoutsByTabId[persistedTab.id] = {
-        root: createLeafNode(leafId),
-        activeLeafId: leafId,
-        expandedLeafId: null,
-        sessionIdsByLeafId: { [leafId]: "" },
+        root,
+        activeLeafId: requestedActiveLeafId && leafIds.includes(requestedActiveLeafId) ? requestedActiveLeafId : leafIds[0] ?? null,
+        expandedLeafId:
+          requestedExpandedLeafId && leafIds.includes(requestedExpandedLeafId) ? requestedExpandedLeafId : null,
+        sessionIdsByLeafId,
+        contentsByLeafId,
       };
-      continue;
     }
 
-    const terminal = persistedTab.terminal;
-    const paneTree = terminal?.paneTree ?? persistedTab.paneTree;
-    const primarySessionId = terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
-    const root = paneTree ?? createLeafNode(`leaf-restored:${persistedTab.id}`);
-    const leafIds = collectLeafIds(root);
-    const persistedMapping = terminal?.sessionIdsByLeafId ?? persistedTab.sessionIdsByLeafId;
-    const sessionIdsByLeafId = persistedMapping && Object.keys(persistedMapping).length > 0
-      ? Object.fromEntries(leafIds.map((leafId) => [leafId, persistedMapping[leafId] ?? primarySessionId]))
-      : Object.fromEntries(leafIds.map((leafId) => [leafId, primarySessionId]));
-    const requestedActiveLeafId = terminal?.activeLeafId ?? persistedTab.activeLeafId ?? null;
-    const requestedExpandedLeafId = terminal?.expandedLeafId ?? persistedTab.expandedLeafId ?? null;
-    layoutsByTabId[persistedTab.id] = {
-      root,
-      activeLeafId: requestedActiveLeafId && leafIds.includes(requestedActiveLeafId) ? requestedActiveLeafId : leafIds[0] ?? null,
-      expandedLeafId:
-        requestedExpandedLeafId && leafIds.includes(requestedExpandedLeafId) ? requestedExpandedLeafId : null,
-      sessionIdsByLeafId,
-    };
+    const tabGroups: Record<string, TabGroup> | undefined = persistedLayout.tabGroups?.length
+      ? Object.fromEntries(
+          persistedLayout.tabGroups.map((group) => [
+            group.id,
+            { id: group.id, tabIds: [...group.tabIds], activeTabId: group.activeTabId },
+          ]),
+        )
+      : undefined;
+
+    return normalizeLayout({
+      tabs,
+      primaryTabId: persistedLayout.primaryTabId || (tabs[0]?.id ?? null),
+      secondaryTabId: persistedLayout.secondaryTabId || null,
+      activeTabId: persistedLayout.activeTabId || (tabs[0]?.id ?? null),
+      split: (persistedLayout.splitMode as LayoutState["split"]) || "none",
+      nestedSplit: null,
+      layoutsByTabId,
+      tabGroups,
+      tabGroupLayout: persistedLayout.tabGroupLayout ?? null,
+      focusedGroupId: persistedLayout.focusedGroupId ?? null,
+    });
   }
 
-  const tabGroups: Record<string, TabGroup> | undefined = ws.layout?.tabGroups?.length
-    ? Object.fromEntries(
-        ws.layout.tabGroups.map((group) => [
-          group.id,
-          { id: group.id, tabIds: [...group.tabIds], activeTabId: group.activeTabId },
-        ]),
-      )
-    : undefined;
+  const activeLayout = deserializeLayout(ws.layout);
+  const worktreeLayouts: Record<string, LayoutState> = {};
+  if (ws.worktreeLayouts) {
+    for (const [wtPath, persistedWtLayout] of Object.entries(ws.worktreeLayouts)) {
+      if (persistedWtLayout) {
+        worktreeLayouts[wtPath] = deserializeLayout(persistedWtLayout);
+      }
+    }
+  }
 
-  const layout = normalizeLayout({
-    tabs,
-    primaryTabId: ws.layout?.primaryTabId || (tabs[0]?.id ?? null),
-    secondaryTabId: ws.layout?.secondaryTabId || null,
-    activeTabId: ws.layout?.activeTabId || (tabs[0]?.id ?? null),
-    split: (ws.layout?.splitMode as LayoutState["split"]) || "none",
-    nestedSplit: null,
-    layoutsByTabId,
-    tabGroups,
-    tabGroupLayout: ws.layout?.tabGroupLayout ?? null,
-    focusedGroupId: ws.layout?.focusedGroupId ?? null,
-  });
+  const allLayouts = [activeLayout, ...Object.values(worktreeLayouts)];
+  const referencedSessionIds = new Set<string>();
+  for (const layout of allLayouts) {
+    for (const tab of layout.tabs) {
+      if (tab.kind === "browser") continue;
+      const tabLayout = layout.layoutsByTabId[tab.id];
+      if (tabLayout?.contentsByLeafId) {
+        for (const content of Object.values(tabLayout.contentsByLeafId)) {
+          if (content && content.kind === "terminal" && content.sessionId) {
+            referencedSessionIds.add(content.sessionId);
+          }
+        }
+      } else {
+        if (tab.sessionId) referencedSessionIds.add(tab.sessionId);
+        for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
+          if (sessionId) referencedSessionIds.add(sessionId);
+        }
+      }
+    }
+  }
+
+  const referencedSessions = Object.fromEntries(
+    Object.entries(sessions).filter(([sessionId]) => referencedSessionIds.has(sessionId)),
+  );
 
   return {
     worktrees,
     activeWorktreePath: ws.activeWorktreePath || (worktrees[0]?.path ?? null),
-    sessions,
-    layout,
+    sessions: referencedSessions,
+    layout: activeLayout,
+    worktreeLayouts,
     unreadTabIds: {},
     unreadWorktreePaths: {},
     activityBySessionId: {},

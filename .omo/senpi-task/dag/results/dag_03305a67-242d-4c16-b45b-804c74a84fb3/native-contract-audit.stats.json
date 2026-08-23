@@ -1,0 +1,1 @@
+{"schemaVersion":1,"runId":"dag_03305a67-242d-4c16-b45b-804c74a84fb3","nodeId":"native-contract-audit","runStats":{"runtime_ms":122400,"turns":11,"tool_calls":10,"output_tokens":1430,"total_tokens":177587,"generation_ms":2933,"cost_usd":0,"cache_hit_rate_last":0.8397809574280163,"cache_hit_rate_run":0.4858393365009622}}

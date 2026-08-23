@@ -1,0 +1,28 @@
+I read this as Verification and Completion - updating regression tests to avoid brittle spies, verifying GREEN across all 16 TabBar tests, writing evidence documentation, and stopping.
+
+### Changes Summary
+
+1. **`ui/src/components/TabBar.test.tsx`**:
+   - Replaced module-level function spies with direct structural and contract assertions for:
+     - `SortableTab` exported as `memo(...)`.
+     - `handleCancelRename` defined via `useCallback` and passed to `onCancelRename` (no inline closures).
+     - `sortableItems` memoized via `useMemo` and passed to `SortableContext`.
+   - Maintained all 13 existing functional RTL tests.
+
+2. **`ui/src/components/tab-dnd/SortableTab.tsx`**:
+   - Wrapped in `memo(function SortableTab(...) { ... })`.
+   - Memoized `sortableData` with `useMemo`.
+
+3. **`ui/src/components/TabBar.tsx`**:
+   - Stabilized `handleCancelRename`, `handleContextMenu`, and `handleCommitRename` with `useCallback`.
+   - Memoized `sortableItems` with `useMemo`.
+
+4. **`docs/frontend-perf/fix-P-tabbar.md`**:
+   - Updated with exact commands, RED failure traces, GREEN output, and production line references.
+
+### Final Verification
+
+```bash
+cd /Users/indo/code/project/orca-lite/ui && bun run test src/components/TabBar.test.tsx
+```
+Output: `✓ src/components/TabBar.test.tsx (16 tests) — 16 passed (16)`

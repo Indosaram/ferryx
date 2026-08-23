@@ -1,0 +1,106 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"assistant_message","payload":{"text":"I read this as verification of Settings and Remote reliability - inspect producer changes and run the required tests without editing anything."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The plan file and Settings/Remote sources are the next read so I can map claimed changes to actual code."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Producer reports are next, then I’ll independently read the claimed Settings and Remote changes."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I’ll inspect the producer-owned files and search for the claimed tokens in parallel."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"I have token hits; next I’ll read the implementations and check whether Default Agent and Quick Commands actually match the claims."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Default Agent consumption and Remote copy still need a source check before I can score those criteria."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"App already loads agent settings; I’ll check whether the New Terminal picker actually uses `defaultAgentId`."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Source review is enough to start the required tests, build, and diagnostics while I finish the remaining file checks."}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The first commands ran from the wrong directories. I’m rerunning the focused UI tests, native filters, and `cd ui && npm run build`."}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"The previous runs used the repo root. I’m executing the exact `cd ui` / `cd src-tauri` commands now."}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":true}}
+{"type":"assistant_message","payload":{"text":"Focused UI cases passed; I’ll run the remaining native filter, recheck LSP, and confirm whether the Ghostty failures are pre-existing."}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"lsp_diagnostics","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"read","is_error":false}}
+{"type":"tool_execution","payload":{"tool":"bash","is_error":false}}
+{"type":"assistant_message","payload":{"text":"Verification is complete. No source files were changed.\n\n## Verdict: **FAIL**\n\nSix of seven requested behaviors hold. **Default Agent meaning is still untrue**: the UI describes a New Terminal preselection and a default-agent action that nothing consumes.\n\n## Evidence table\n\n| Criterion | Result | Evidence |\n|---|---|---|\n| Settings persistence seam | **PASS** | `AppearanceSettings` uses `useAppearanceSettings` / `saveAppearanceSettings` (`SettingsDialog.tsx` 280–341). Remount test writes theme/accent/density, asserts `loadAppearanceSettings()` + `APPEARANCE_SETTINGS_EVENT`, remounts, and rereads the selects. `settingsRuntime.test.ts` remount/bridge test also passed. |\n| Click-to-copy pairing PIN | **PASS** | Enabled PIN is a `button` with `data-testid=\"remote-pairing-code\"`; click calls `navigator.clipboard.writeText(pairingCode)` and shows `Copied` (`SettingsDialog.tsx` 1276–1289). Test clicked enable, found the button, asserted `writeText(\"482916\")` and `/copied/i`. |\n| Session-only Remote restart | **PASS** | Native: `persist_config()` writes `mode: off` + `restartPolicy: sessionOnly`; `new_with_paths` forces `mode = Off`, `is_running = false`. Status `enabled` is only `is_running`. UI copy: “The gateway stops when Ferryx quits and must be enabled again after relaunch.” Rust: 2 + 1 + 9 passed. UI copy test passed. |\n| Truthful Default Agent meaning | **FAIL** | Copy still says it is the “agent preselected in the New Terminal agent picker and launched by the default agent action.” `defaultAgentId` is only stored in Settings. `NewTabPopover` lists agents with no preselection. `handleLaunchAgent` launches only the clicked agent. No default-agent action/shortcut exists. Producer report itself: “Launcher still does not consume it.” The new test only pins that copy. |\n| No Quick Commands UI/storage flow | **PASS** (residual unused key) | Settings nav/section/helpers are gone. Absence test passed. No load/save of `ferryx.settings.quickCommands`. Unused export remains: `QUICK_COMMANDS_STORAGE_KEY` in `ui/src/lib/storageKeys.ts`. Hits under `ui/original-dist/` are leftover original-Orca assets, not current UI. |\n| Live workspace props from App | **PASS** | `App.tsx` 848–856 passes `projects`, `activeProjectId`, `activeWorktree`, `onSelectProject`, `onAddProject`, `onAddWorktree`. `WorkspaceSettings` renders registered projects and the active worktree path. App test + `SettingsDialog.workspace.test.tsx` passed. |\n| General is non-empty | **PASS** | `GeneralSettings` renders `data-testid=\"settings-general-overview\"` with desktop + section cards; no Appearance controls. Test passed. |\n| Focused frontend suite (file-level) | **FAIL (pre-existing, out of scope)** | 2 Ghostty/terminal tests still fail: `getTerminalPreferences` spy never called. Same assertion exists on HEAD; not part of the 7 requested behaviors. |\n| `cd ui && npm run build` | **PASS** | `tsc && vite build` succeeded (4.77s). |\n| LSP on changed UI sources | **PASS** | `SettingsDialog.tsx` and `App.tsx`: no diagnostics. Test-file LSP timed out (twice). `tsc` in the UI build is the typecheck. |\n| Failing-first | **Not independently reproduced** | Implementation is already in tree. Producer logs claim RED then GREEN. Current tests exist and would fail if the new code were removed, except Default Agent, which never tested real consumption. |\n\n## Commands\n\n**Frontend** — `cd ui && npx vitest run src/components/SettingsDialog.test.tsx src/lib/settingsRuntime.test.ts src/App.test.tsx src/components/SettingsDialog.workspace.test.tsx --maxWorkers=1`\n\n```\nTest Files  1 failed | 3 passed (4)\n     Tests  2 failed | 62 passed (64)\n```\n\nPassed among the requested cases:\n- `persists Appearance through the appearanceSettings API across remount`\n- `copies the enabled Remote pairing PIN and shows copied feedback`\n- `states that Remote Access stops when Ferryx quits and must be enabled again after relaunch`\n- `describes Default Agent as the New Terminal picker and default agent action preference` (copy only)\n- `does not expose Quick Commands navigation or section`\n- `renders a non-empty General overview that does not duplicate Appearance controls`\n- `reapplies persisted appearance through the runtime bridge after remount`\n- `passes live workspace state and project callbacks to SettingsDialog`\n- `renders live project/worktree state and wires workspace actions`\n- `App.test.tsx` 33/33, `settingsRuntime.test.ts` 7/7, workspace file 2/2\n\nFailed (pre-existing Ghostty mock):\n- `fetches Ghostty preferences and shows the effective terminal value/source` — `expected \"spy\" to be called at least once` at `SettingsDialog.test.tsx:227`\n- `persists explicit local terminal overrides above Ghostty` — same at line 237\n\n**Native**\n\n`cd src-tauri && cargo test --lib remote::state::tests -- --nocapture`\n\n```\ntest remote::state::tests::stale_enabled_config_file_does_not_look_enabled ... ok\ntest remote::state::tests::enabled_gateway_does_not_restore_listener_after_reopen ... ok\ntest result: ok. 2 passed; 0 failed; 135 filtered out\n```\n\n`cd src-tauri && cargo test --lib remote_status_after_reopen_is_disabled_session_only -- --nocapture`\n\n```\ntest ipc::tests::remote_status_after_reopen_is_disabled_session_only ... ok\ntest result: ok. 1 passed; 0 failed; 136 filtered out\n```\n\n`cd src-tauri && cargo test --lib remote:: -- --nocapture`\n\n```\ntest result: ok. 9 passed; 0 failed; 128 filtered out\n```\n\n**Build** — `cd ui && npm run build`\n\n```\n> ui@0.1.0 build\n> tsc && vite build\n✓ 1714 modules transformed.\n✓ built in 4.77s\n```\n\n**LSP**\n- `ui/src/components/SettingsDialog.tsx`: no diagnostics\n- `ui/src/App.tsx`: no diagnostics\n- `SettingsDialog.test.tsx`, `settingsRuntime.test.ts`, `App.test.tsx`: timed out waiting for fresh diagnostics\n\n## Default Agent (why FAIL)\n\nSettings copy (`SettingsDialog.tsx` 1474):\n\n> Stored preference for the agent preselected in the New Terminal agent picker and launched by the default agent action.\n\n`defaultAgentId` is written only in Settings. `App` loads `agentSettings` for `mergeDetections` / `getLaunchableAgents` (enabled + overrides), never `defaultAgentId`. `NewTabPopover` has no selected/default agent. There is no default-agent action. The new test only asserts that copy, so it cannot catch the lie.\n\n## Residuals (do not flip the other criteria)\n\n- Unused `QUICK_COMMANDS_STORAGE_KEY` in `ui/src/lib/storageKeys.ts`\n- UI `RemoteGatewayStatus` still has no `restartPolicy` field; session-only is hardcoded copy, which matches native\n- Two Ghostty Settings tests fail via mock/`getTerminalPreferences` identity; same shape on HEAD\n\nNo source, test, config, or doc files were edited. Desktop UI was not driven."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"reload"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a36/sessions/st_01a02a36/2026-08-22T15-51-38-142Z_01a02a2b-a39e-75c6-85bf-ba22eeaf3a29.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"quit"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a02a36/sessions/st_01a02a36/2026-08-22T15-51-38-142Z_01a02a2b-a39e-75c6-85bf-ba22eeaf3a29.jsonl"}}

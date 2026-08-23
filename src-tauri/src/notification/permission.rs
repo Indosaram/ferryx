@@ -175,16 +175,15 @@ pub mod macos {
             }
 
             let (tx, rx) = mpsc::sync_channel::<Result<bool, String>>(1);
-            let handler = RcBlock::new(
-                move |granted: objc2::runtime::Bool, error: *mut NSError| {
+            let handler =
+                RcBlock::new(move |granted: objc2::runtime::Bool, error: *mut NSError| {
                     let outcome = if error.is_null() {
                         Ok(granted.as_bool())
                     } else {
                         Err(unsafe { (*error).localizedDescription() }.to_string())
                     };
                     let _ = tx.try_send(outcome);
-                },
-            );
+                });
 
             let options = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
             let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {

@@ -1,0 +1,30 @@
+### Verification & Status
+
+1. **Explicit Bounded Pending-Output Policy (`MAX_PENDING_OUTPUT_CHARS = 128 * 1024`)**:
+   - `attachScheduledOutputSubscription` tracks accumulated chunk characters (`outputBufferChars += text.length`).
+   - Normal outputs below `MAX_PENDING_OUTPUT_CHARS` batch until the next `requestAnimationFrame` (zero immediate write).
+   - If accumulated characters reach or exceed `MAX_PENDING_OUTPUT_CHARS`, `flushOutput()` is called synchronously, which cancels any pending rAF handle (`cancelAnimationFrame(outputFrame); outputFrame = 0;`), resets the character count and buffer, and immediately issues one coalesced `terminal.write` call preserving original arrival order.
+   - Subsequent chunks arriving after the cap flush correctly schedule a new rAF handle.
+
+2. **Strict Public API & Type Safety**:
+   - Eliminated all `as any` and optional-call test escapes, using strict typed manager methods (`terminalHostManager.setWarmCacheLimit`, `terminalHostManager.registerVisible`).
+
+---
+
+### Command Transcript
+
+```console
+$ bun run --cwd ui test -- terminalHostManager
+$ vitest run --maxWorkers=1 terminalHostManager
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/terminalHostManager.test.ts (11 tests) 165ms
+
+ Test Files  1 passed (1)
+      Tests  11 passed (11)
+   Start at  01:45:19
+   Duration  1.89s (transform 348ms, setup 202ms, collect 282ms, tests 165ms, environment 552ms, prepare 38ms)
+```
+
+TypeScript typecheck (`ui/node_modules/.bin/tsc --noEmit --project ui/tsconfig.json`) completed with 0 errors.

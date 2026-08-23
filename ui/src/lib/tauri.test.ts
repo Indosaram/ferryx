@@ -13,19 +13,26 @@ vi.mock("@tauri-apps/api/core", () => core);
 vi.mock("@tauri-apps/api/event", () => events);
 
 import {
+  attachTerminal,
   createWorktree,
   deleteWorktree,
   deleteWorktreeDestructive,
+  getInitialProject,
   getTerminalPreferences,
   getWorktreeStatus,
   listProjectBranches,
   listTerminalSessions,
   onNewTerminalTabMenu,
+  onCloseTabMenu,
   listWorktrees,
   previewWorktreeDelete,
   registerProject,
   signalTerminal,
   spawnTerminal,
+  publishFocusedTerminal,
+  onRemoteSelectionRequested,
+  normalizeBadgeCount,
+  setBadgeCount,
   toIpcError,
 } from "./tauri";
 
@@ -34,6 +41,13 @@ describe("Tauri IPC wrapper contract", () => {
     core.invoke.mockReset();
     events.listen.mockReset();
     core.isTauri.mockReturnValue(true);
+  });
+
+  it("gets the native initial project without a request", async () => {
+    core.invoke.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+    await expect(getInitialProject()).resolves.toEqual({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_project_initial", undefined);
   });
 
   it("registers projects and lists real local branches through typed native DTOs", async () => {
@@ -175,6 +189,24 @@ describe("Tauri IPC wrapper contract", () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
+  it("bridges the native Cmd+W menu event into the frontend callback", async () => {
+    const unlisten = vi.fn();
+    let listener: ((event: { payload: void }) => void) | null = null;
+    events.listen.mockImplementation(async (eventName: string, callback: (event: { payload: void }) => void) => {
+      expect(eventName).toBe("menu_close_tab");
+      listener = callback;
+      return unlisten;
+    });
+    const handler = vi.fn();
+
+    await expect(onCloseTabMenu(handler)).resolves.toBe(unlisten);
+    expect(listener).toBeTypeOf("function");
+    if (typeof listener === "function") {
+      (listener as (event: { payload: void }) => void)({ payload: undefined });
+    }
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
   it("normalizes rejected command invocations at the wrapper boundary", async () => {
     core.invoke.mockRejectedValue("backend exploded");
 
@@ -197,5 +229,130 @@ describe("Tauri IPC wrapper contract", () => {
       message: "Unknown IPC error",
       details: {},
     });
+  });
+
+  it("attaches to a terminal session with typed protocol-v2 DTO and optional resume sequence", async () => {
+    const mockAttachResponse = {
+      sessionId: "term-session-1",
+      daemonEpoch: "epoch-100",
+      historyStartSequence: "1",
+      historyEndSequence: "42",
+      history: "aGVsbG8gd29ybGQ=",
+      gap: null,
+    };
+    core.invoke.mockResolvedValue(mockAttachResponse);
+
+    const result = await attachTerminal({ sessionId: "term-session-1", afterSequence: "10" });
+    expect(result).toEqual(mockAttachResponse);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_attach", {
+      sessionId: "term-session-1",
+      afterSequence: "10",
+    });
+
+    // Also supports string sessionId overload
+    await attachTerminal("term-session-1");
+    expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_attach", {
+      sessionId: "term-session-1",
+      afterSequence: null,
+    });
+  });
+
+  it("handles non-tauri runtime fallback for attachTerminal", async () => {
+    core.isTauri.mockReturnValue(false);
+
+    const result = await attachTerminal({ sessionId: "preview-sess", afterSequence: "5" });
+    expect(result).toEqual({
+      sessionId: "preview-sess",
+      daemonEpoch: null,
+      historyStartSequence: null,
+      historyEndSequence: null,
+      history: "",
+      gap: null,
+    });
+  });
+
+  it("publishes focused terminal payload to native IPC", async () => {
+    core.invoke.mockResolvedValue(undefined);
+
+    await publishFocusedTerminal({
+      workspaceId: "orca-lite",
+      worktreeSlug: "main",
+      worktreeLabel: "main",
+      backendSessionId: "pty-1",
+    });
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_remote_set_active_selection", {
+      request: {
+        workspaceId: "orca-lite",
+        worktreeSlug: "main",
+        worktreeLabel: "main",
+        sessionId: "pty-1",
+      },
+    });
+
+    // Clear active selection (null payload)
+    await publishFocusedTerminal(null);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_remote_set_active_selection", {
+      request: {
+        workspaceId: null,
+        worktreeSlug: null,
+        worktreeLabel: null,
+        sessionId: null,
+      },
+    });
+  });
+
+  it("listens for remote selection requests and triggers callback", async () => {
+    const unlisten = vi.fn();
+    let listener: ((event: { payload: any }) => void) | null = null;
+    events.listen.mockImplementation(async (eventName: string, callback: (event: { payload: any }) => void) => {
+      expect(eventName).toBe("remote_selection_requested");
+      listener = callback;
+      return unlisten;
+    });
+    const handler = vi.fn();
+
+    await expect(onRemoteSelectionRequested(handler)).resolves.toBe(unlisten);
+    expect(listener).toBeTypeOf("function");
+    if (typeof listener === "function") {
+      (listener as (event: { payload: any }) => void)({
+        payload: { workspaceId: "orca-lite", worktreeSlug: "feature-1" },
+      });
+    }
+    expect(handler).toHaveBeenCalledWith({ workspaceId: "orca-lite", worktreeSlug: "feature-1" });
+  });
+
+  it("sets native app badge count with normalized integer payload", async () => {
+    core.invoke.mockResolvedValue({ supported: true, count: 5, badgeLabel: "5" });
+
+    const result = await setBadgeCount(5);
+    expect(result).toEqual({ supported: true, count: 5, badgeLabel: "5" });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_notification_set_badge_count", {
+      count: 5,
+    });
+  });
+
+  it("normalizes boundary badge counts safely within u32 bounds", async () => {
+    expect(normalizeBadgeCount(0)).toBe(0);
+    expect(normalizeBadgeCount(3.8)).toBe(3);
+    expect(normalizeBadgeCount(-10)).toBe(0);
+    expect(normalizeBadgeCount(Number.NaN)).toBe(0);
+    expect(normalizeBadgeCount(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(normalizeBadgeCount(Number.NEGATIVE_INFINITY)).toBe(0);
+    expect(normalizeBadgeCount(5_000_000_000)).toBe(4_294_967_295);
+
+    core.invoke.mockResolvedValue({ supported: true, count: 4_294_967_295 });
+    await setBadgeCount(5_000_000_000);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_notification_set_badge_count", {
+      count: 4_294_967_295,
+    });
+  });
+
+  it("handles non-tauri fallback for setBadgeCount", async () => {
+    core.isTauri.mockReturnValue(false);
+
+    const result = await setBadgeCount(2);
+    expect(result).toEqual({ supported: false, count: 2 });
+    expect(core.invoke).not.toHaveBeenCalled();
   });
 });

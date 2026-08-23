@@ -7,11 +7,12 @@
 
 use crate::ipc::{run_blocking, IpcError};
 use crate::notification::{
-    open_system_notification_settings, picked_audio_file, DispatchNotificationRequest,
-    DispatchNotificationResult, NativeNotificationBackend, NotificationAudioPlayer,
-    NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
-    NotificationProbeResult, NotificationService, OpenSystemSettingsResult, PickedAudioFile,
-    PlaySoundResult, SUPPORTED_AUDIO_EXTENSIONS,
+    format_badge_label, open_system_notification_settings, picked_audio_file,
+    DispatchNotificationRequest, DispatchNotificationResult, NativeNotificationBackend,
+    NotificationAudioPlayer, NotificationContent, NotificationPermissionRequestDto,
+    NotificationPermissionStatusDto, NotificationProbeResult, NotificationService,
+    OpenSystemSettingsResult, PickedAudioFile, PlaySoundResult, SetBadgeCountResult,
+    SUPPORTED_AUDIO_EXTENSIONS,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -147,6 +148,57 @@ pub async fn cmd_notification_pick_audio<R: Runtime>(
         .map_err(|error| IpcError::internal(format!("invalid audio selection: {error}")))?;
 
     Ok(Some(picked_audio_file(path)))
+}
+
+/// Set or clear the application badge count on the host platform.
+///
+/// Accepts a numerical unread count derived by the frontend. Formats the badge
+/// as a decimal label when count > 0, and clears it when count == 0. On unsupported
+/// platforms (Windows / Linux), returns a structured `supported = false` outcome
+/// without failing. User-controlled strings are never accepted over IPC.
+#[tauri::command]
+pub async fn cmd_notification_set_badge_count<R: Runtime>(
+    app: AppHandle<R>,
+    count: u32,
+) -> Result<SetBadgeCountResult, IpcError> {
+    #[cfg(target_os = "macos")]
+    {
+        let label = format_badge_label(count);
+        let label_clone = label.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        app.run_on_main_thread(move || {
+            let res = crate::notification::badge::macos_impl::apply_dock_badge_label(
+                label_clone.as_deref(),
+            );
+            let _ = tx.send(res);
+        })
+        .map_err(|error| {
+            IpcError::internal(format!(
+                "failed to schedule badge update on main thread: {error}"
+            ))
+        })?;
+
+        let outcome = rx
+            .await
+            .map_err(|_| IpcError::internal("main-thread badge update channel dropped"))?;
+
+        match outcome {
+            Ok(()) => Ok(SetBadgeCountResult::macos(count, label)),
+            Err(error) => {
+                tracing::warn!("failed to apply macOS dock badge: {error}");
+                Err(IpcError::internal(format!(
+                    "failed to set macOS dock badge: {error}"
+                )))
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(SetBadgeCountResult::unsupported(count))
+    }
 }
 
 #[cfg(test)]
@@ -340,5 +392,121 @@ mod tests {
                 "picker filter offers undecodable extension: {extension}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn set_badge_count_command_returns_structured_result() {
+        // Given: a mock app and an unread count
+        let app = mock_app();
+        let count = 42;
+
+        // When: invoking the badge count command with AppHandle
+        let result = cmd_notification_set_badge_count(app.handle().clone(), count).await;
+
+        // Then: the structured result reflects the host platform capability and main-thread safety
+        #[cfg(target_os = "macos")]
+        {
+            match result {
+                Ok(outcome) => {
+                    assert!(outcome.supported);
+                    assert_eq!(outcome.count, 42);
+                    assert_eq!(outcome.badge_label.as_deref(), Some("42"));
+                }
+                Err(error) => {
+                    // In mock test runner threads, MockRuntime dispatches off the OS main thread.
+                    // Accurate error reporting is verified.
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("must be called on the macOS main thread")
+                            || error
+                                .to_string()
+                                .contains("failed to schedule badge update")
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let outcome = result.expect("command resolves on non-macos as unsupported no-op");
+            assert!(!outcome.supported);
+            assert_eq!(outcome.count, 42);
+            assert!(outcome.badge_label.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn set_badge_count_command_clears_badge_at_zero() {
+        // Given: a mock app and count = 0 to clear
+        let app = mock_app();
+        let count = 0;
+
+        // When: invoking the badge count command with AppHandle
+        let result = cmd_notification_set_badge_count(app.handle().clone(), count).await;
+
+        // Then: badge_label is None when successful, or structured error if off main thread
+        #[cfg(target_os = "macos")]
+        {
+            match result {
+                Ok(outcome) => {
+                    assert!(outcome.supported);
+                    assert_eq!(outcome.count, 0);
+                    assert!(outcome.badge_label.is_none());
+                }
+                Err(error) => {
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("must be called on the macOS main thread")
+                            || error
+                                .to_string()
+                                .contains("failed to schedule badge update")
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let outcome = result.expect("command resolves on non-macos as unsupported no-op");
+            assert!(!outcome.supported);
+            assert_eq!(outcome.count, 0);
+            assert!(outcome.badge_label.is_none());
+        }
+    }
+
+    #[test]
+    fn set_badge_count_result_round_trips_across_ipc_boundary() {
+        // Given: a macOS badge result with positive count
+        let result = crate::notification::SetBadgeCountResult::macos(7, Some("7".into()));
+
+        // When: encoding and decoding through JSON
+        let encoded = serde_json::to_string(&result).expect("encode");
+        let decoded: crate::notification::SetBadgeCountResult =
+            serde_json::from_str(&encoded).expect("decode");
+
+        // Then: deserialized matches original
+        assert_eq!(decoded, result);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({
+                "supported": true,
+                "count": 7,
+                "badgeLabel": "7"
+            })
+        );
+
+        // Given: a cleared badge result
+        let cleared = crate::notification::SetBadgeCountResult::macos(0, None);
+        let encoded_cleared = serde_json::to_string(&cleared).expect("encode");
+        let decoded_cleared: crate::notification::SetBadgeCountResult =
+            serde_json::from_str(&encoded_cleared).expect("decode");
+        assert_eq!(decoded_cleared, cleared);
+        assert_eq!(
+            serde_json::to_value(&cleared).unwrap(),
+            json!({
+                "supported": true,
+                "count": 0
+            })
+        );
     }
 }

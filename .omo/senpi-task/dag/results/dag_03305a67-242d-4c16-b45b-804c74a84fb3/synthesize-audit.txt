@@ -1,0 +1,55 @@
+> I read this as Investigation - inspect the Ferryx tab/session persistence surface and deliver a five-bullet repair-ready root-cause verdict with exact citations.
+
+* **Confirmed mechanism**:
+  * `ui/src/lib/sessionPersistence.ts:100-108`: `serializeWorkspaceState` builds a new `PersistedWorkspaceSession` with `workspaces: { [workspaceId]: workspace }`, completely dropping all other registered workspace entries when written to disk via `saveSession` in `ui/src/App.tsx:199,206`.
+  * `ui/src/state/workspaceStore.ts:109` & `ui/src/App.tsx:110-120`: `useWorkspaceStore` initializes in-memory state via `useReducer` on mount. Switching projects via `handleSelectProject` (`ui/src/App.tsx:384-394`) changes `activeProject.workspaceId`, but when `loadSession` encounters the overwritten session file, `deserializeWorkspaceState` returns `null` (`ui/src/lib/sessionPersistence.ts:121-122`), preventing `restoreWorkspace` (`ui/src/App.tsx:137`) and leaving the prior project's worktrees, tabs, and sessions active in state.
+  * `ui/src/App.tsx:140-160`: On restart, dead sessions are respawned against `foundWorktree ? worktreeIdentity(foundWorktree) : null` (`ui/src/App.tsx:146-150`). If workspace isolation broke prior to restart, respawned backend PTYs bind to leaked worktree paths and cwd contexts.
+
+* **Minimal files to edit**:
+  * `ui/src/lib/sessionPersistence.ts` (accept and merge into existing `PersistedWorkspaceSession` map instead of replacing `workspaces` wholesale).
+  * `ui/src/App.tsx` (pass current/loaded session map into serialization/save calls and ensure clean workspace state re-initialization/restore on project switch).
+  * `ui/src/state/workspaceStore.ts` (provide clean reset/re-initialization when switching `workspaceId`).
+
+* **Exact RED test file/name/assertion**:
+  * **File**: `ui/src/lib/sessionPersistence.test.ts`
+  * **Test name**: `"preserves multi-workspace session state and isolates tabs per worktree without clobbering other workspaces on serialize"`
+  * **Assertion**:
+    ```typescript
+    // In ui/src/lib/sessionPersistence.test.ts:
+    const existingSession: PersistedWorkspaceSession = {
+      version: 2,
+      timestamp: 1000,
+      activeWorkspaceId: "alpha",
+      workspaces: {
+        alpha: {
+          workspaceId: "alpha",
+          repoRoot: "/repo/alpha",
+          worktrees: [{ path: "/repo/alpha", branch: "main", head: "111", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/alpha",
+          layout: { splitMode: "none", primaryTabId: "tab-a", secondaryTabId: null, activeTabId: "tab-a", tabs: [{ id: "tab-a", label: "main", sessionId: "sess-a" }] },
+          terminalSessions: { "sess-a": { localSessionId: "sess-a", backendSessionId: null, worktreePath: "/repo/alpha", cwd: "/repo/alpha", createdAt: 1000 } },
+        },
+      },
+    };
+    const stateBeta = {
+      ...workspaceState(),
+      activeWorktreePath: "/repo/beta",
+      worktrees: [{ path: "/repo/beta", head: "222", branch: "main", bare: false, detached: false, locked: null, prunable: null }],
+    };
+    const serialized = serializeWorkspaceState("beta", "/repo/beta", stateBeta, existingSession);
+    expect(serialized.workspaces.alpha).toBeDefined();
+    expect(serialized.workspaces.beta).toBeDefined();
+    expect(serialized.workspaces.alpha.layout.tabs.map((t) => t.id)).toEqual(["tab-a"]);
+    expect(serialized.workspaces.beta.layout.tabs.map((t) => t.id)).not.toContain("tab-a");
+    ```
+
+* **Regression commands**:
+  * `bun run --cwd ui test` (or `npx vitest run ui/src/lib/sessionPersistence.test.ts ui/src/App.test.tsx ui/src/state/projectWorkspaceScope.test.tsx`)
+  * `cargo test --test session_persistence_integration`
+
+* **Risks to preserve**:
+  * **v1 migration compatibility**: Legacy v1 unversioned payloads with flat session IDs and legacy tab schemas must continue migrating smoothly (`ui/src/lib/sessionPersistence.ts:130,140,175-182` and `ui/src/lib/sessionPersistence.test.ts:167-248`).
+  * **Live PTY reconciliation**: Live native PTY matching by `backendSessionId` during dev/HMR restart must avoid unnecessary terminal process respawns (`ui/src/lib/sessionPersistence.ts:141-144`, `ui/src/App.tsx:135-160`, `ui/src/lib/sessionPersistence.test.ts:114-124`).
+  * **Browser tab isolation**: Pinned and unpinned browser tabs must retain webview metadata (`browserId`, `url`, `canGoBack`, `canGoForward`) and never be mapped to terminal PTY sessions (`ui/src/lib/sessionPersistence.ts:33-47,158-174`, `ui/src/lib/sessionPersistence.test.ts:136-165`).
+  * **Split-pane leaf ownership & TabGroupLayout**: Multi-leaf terminal tab layouts (`sessionIdsByLeafId`) and group split topologies must remain preserved across project and restart cycles (`ui/src/lib/sessionPersistence.ts:40-84`, `ui/src/state/layout.ts:311-370`, `ui/src/lib/sessionPersistence.test.ts:47-112`).
+  * **Last-tab replacement guard**: Closing the final active tab in a worktree must respawn a default tab instead of collapsing the workspace layout into an empty state (`ui/src/state/workspaceStore.ts:272-286`, `ui/src/state/layout.ts:112-123`).

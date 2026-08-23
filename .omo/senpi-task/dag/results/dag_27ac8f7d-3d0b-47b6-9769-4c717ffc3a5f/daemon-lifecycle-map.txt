@@ -1,0 +1,117 @@
+> I read this as producing an implementation-ready architectural and file map for daemon-owned Ferryx terminal session persistence across GUI restarts without modifying source files - inspecting current code paths, mapping security and protocol bottlenecks, defining minimal disjoint write sets, and detailing failing test specifications and verification commands.
+
+### 1. Current Daemon Launch Path & In-Process Coupling
+
+* **Observed Code:**
+  * **GUI-only Binary Entry Point (`src-tauri/src/main.rs:1-6`):** `main()` unconditionally delegates to `ferryx_lib::run()` without CLI argument parsing or `--daemon` branching.
+  * **GUI State Ownership of PTY Subsystem (`src-tauri/src/lib.rs:98-111, 125-127`):** `create_app()` instantiates `Arc<PtyManager>`, `Arc<TerminalOutputHub>`, and `Arc<TerminalService>` directly inside the Tauri application lifecycle and exposes them via `.manage(...)`.
+  * **In-Process Server Fallback in Client (`src-tauri/src/daemon/client.rs:60-78`):** When `DaemonClient::connect_or_spawn()` fails to connect to `/tmp/rorca-{uid}/daemon.sock`, it invokes `tokio::spawn(async move { let _ = server_clone.run_server().await; });` (`src-tauri/src/daemon/client.rs:71-73`), running the daemon server inside the GUI process.
+  * **Launchd Configuration Disconnect (`src-tauri/src/daemon/launchd.rs:17-38`):** `generate_launchd_plist()` configures launchd with ProgramArguments `["<exe>", "--daemon"]`, but `main.rs` ignores this argument.
+
+* **Proposed Design:**
+  * Parse CLI flags in `src-tauri/src/main.rs`. If `--daemon` is passed, run `DaemonServer::new().run_server().await` directly in a detached headless runtime.
+  * Remove `PtyManager` and `TerminalService` ownership from `src-tauri/src/lib.rs`; register `DaemonClient` as the sole terminal transport manager.
+  * Replace the in-process background fallback in `DaemonClient::connect_or_spawn()` with an explicit launchd kick (`launchctl start` / `bootstrap`) or external detached process fork.
+
+---
+
+### 2. Protocol Request/Response Limitations
+
+* **Observed Code:**
+  * **Protocol Version (`src-tauri/src/daemon/protocol.rs:7`):** `pub const DAEMON_PROTOCOL_VERSION: u32 = 1;`
+  * **Missing Monotonic Sequence & Idempotency in Requests (`src-tauri/src/daemon/protocol.rs:31-64`):** `DaemonRequest::Spawn` contains `{ workspace_id, worktree, cols, rows }` but lacks `client_request_id`. `DaemonRequest::Attach` contains only `{ session_id }` with no `after_sequence` resumption parameter.
+  * **Missing Sequence Metadata in Responses & Streams (`src-tauri/src/daemon/protocol.rs:83-86, 98-114`):** `DaemonResponse::AttachOk` returns `history: Vec<u8>` without `history_start_sequence` or `history_end_sequence`. `DaemonStreamMessage::Output` provides `session_id` and `data: Cow<'a, [u8]>` with no `sequence: u64`.
+  * **Connection Monopolization on Attach (`src-tauri/src/daemon/server.rs:219-232`):** `handle_client()` delegates `write_half` directly to `Self::pump_stream(...).await` and returns immediately. This converts the single control socket into a dedicated streaming sink, preventing subsequent `Write`, `Resize`, `Signal`, or `Close` commands on that connection.
+
+* **Proposed Design (Protocol v2):**
+  * Bump `DAEMON_PROTOCOL_VERSION` to `2`.
+  * Update `DaemonRequest::Spawn` to include `client_request_id: String`.
+  * Update `DaemonRequest::Attach` to include `after_sequence: Option<u64>`.
+  * Update `DaemonResponse::AttachOk` to include `attachment_id: String`, `history_start_sequence: u64`, `history_end_sequence: u64`, and `history: Vec<u8>`.
+  * Update `DaemonStreamMessage::Output` to include `sequence: u64`.
+  * Establish separate dedicated stream connections per attachment (e.g. `AttachStream { attachment_id }`) or multiplex frame types to keep the control connection responsive.
+
+---
+
+### 3. Direct Fallback Behavior & Process Destruction
+
+* **Observed Code:**
+  * **GUI-bound PTY Allocation (`src-tauri/src/lib.rs:98-103`):** `PtyManager::new()` and `TerminalService::new(...)` run in Tauri GUI heap space.
+  * **In-Process Background Server (`src-tauri/src/daemon/client.rs:71-74`):** Fallback execution runs as an asynchronous task inside the Tokio runtime of the GUI process.
+  * **Fate on GUI Shutdown:** When the user exits the GUI (`Cmd+Q`) or the webview process terminates, the host process exits. All POSIX file descriptors (PTY masters) and child process groups owned by the GUI process receive `SIGHUP` and are cleaned up by the kernel.
+
+* **Proposed Design:**
+  * Terminate in-process fallback in production. If the daemon socket cannot be reached and cannot be spawned as an independent background daemon process, return an explicit error to the UI instead of falling back to in-process PTY allocation.
+
+---
+
+### 4. Socket & Lock Security Seams
+
+* **Observed Code:**
+  * **Runtime Directory Creation (`src-tauri/src/daemon/server.rs:20-30`):** `get_runtime_dir()` creates `/tmp/rorca-{uid}` using `libc::getuid()` and sets permissions to `0700`.
+  * **Symlink / Ownership Verification Gap (`src-tauri/src/daemon/server.rs:23-28, 110-112`):** `get_runtime_dir()` and `run_server()` call `fs::remove_file(&socket_path)` without verifying whether `/tmp/rorca-{uid}` or `daemon.sock` is a symlink or whether the directory is owned by the current effective UID before unlinking.
+  * **Legacy Namespace Drift (`src-tauri/src/daemon/server.rs:22, 42, 56`, `src-tauri/src/daemon/launchd.rs:5`):** Runtime socket paths use `/tmp/rorca-{uid}`, session files use `.rorca/session_state.json`, and LaunchAgent labels use `com.rorca.daemon`.
+  * **Unauthenticated Shutdown (`src-tauri/src/daemon/server.rs:271-273`):** `DaemonRequest::Shutdown` executes `std::process::exit(0)` on any command received over the socket.
+
+* **Proposed Design:**
+  * Add canonical path and `lstat` checks ensuring runtime paths are not symlinks and `st_uid == libc::getuid()`.
+  * Standardize paths and LaunchAgent identifiers to Ferryx namespaces or explicitly document migration paths.
+
+---
+
+### 5. Minimal Disjoint Write Set
+
+```text
+src-tauri/
+├── src/
+│   ├── main.rs                  [A: CLI argument parser for --daemon headless launch]
+│   ├── lib.rs                   [B: Remove direct PtyManager/TerminalService; inject DaemonClient]
+│   └── daemon/
+│       ├── protocol.rs          [C: Bump version to 2; add sequence fields & clientRequestId]
+│       ├── server.rs            [D: Separate control/stream loops; output sequence ring; symlink checks]
+│       ├── client.rs            [E: Remove in-process fallback; implement stream receiver & reconnect]
+│       └── launchd.rs           [F: Production daemon agent bootstrap/bootout hooks]
+└── tests/
+    └── daemon_persistence_contract.rs [G: Integration tests for process survival & sequence replay]
+```
+
+* **File Disjoint Responsibilities:**
+  1. `src-tauri/src/main.rs`: Entry point bifurcation (daemon vs. GUI).
+  2. `src-tauri/src/lib.rs`: Tauri command router adaptation to `DaemonClient`.
+  3. `src-tauri/src/daemon/protocol.rs`: Data schema definitions for protocol v2.
+  4. `src-tauri/src/daemon/server.rs`: UDS connection handling, ring buffer sequencing, idempotency cache.
+  5. `src-tauri/src/daemon/client.rs`: Client UDS pooling and auto-spawning external daemon.
+  6. `src-tauri/src/daemon/launchd.rs`: Service plist generation and system registration.
+  7. `src-tauri/tests/daemon_persistence_contract.rs`: Multi-process lifecycle and replay assertions.
+
+---
+
+### 6. Verification Plan: Failing Tests Before Fix & Verification Commands
+
+#### A. Target Tests to Add in `src-tauri/tests/daemon_persistence_contract.rs`
+
+1. **`test_session_survives_client_kill_and_reattaches`**
+   * *Behavior:* Spawns a daemon server in a separate process, connects `DaemonClient A`, spawns a shell (`Spawn`), retrieves PID, disconnects/drops `DaemonClient A`, connects `DaemonClient B`, lists sessions (`ListSessions`), attaches (`Attach`), and verifies the shell process is still active and responsive.
+   * *Current Failure:* Fails because `DaemonClient` spawns in-process (`src-tauri/src/daemon/client.rs:71`), so dropping the process terminates the shell.
+
+2. **`test_protocol_v2_ordered_sequence_output`**
+   * *Behavior:* Spawns a terminal session, issues multiple writes, and checks that `DaemonStreamMessage::Output` messages carry strictly monotonically increasing `sequence` IDs with valid chunk indexing.
+   * *Current Failure:* Fails to compile/parse against protocol v1 (`src-tauri/src/daemon/protocol.rs:98-114`) due to missing `sequence` fields.
+
+3. **`test_spawn_idempotency_with_request_id`**
+   * *Behavior:* Dispatches two consecutive `DaemonRequest::Spawn` calls with the same `client_request_id`. Expects identical `session_id` returned with only one shell process created.
+   * *Current Failure:* Fails because `DaemonRequest::Spawn` currently lacks `client_request_id` (`src-tauri/src/daemon/protocol.rs:37-42`).
+
+#### B. Exact Verification Commands to Run Post-Implementation
+
+```bash
+# 1. Run cargo unit tests across protocol, server, and client modules
+cargo test --manifest-path src-tauri/Cargo.toml daemon::
+
+# 2. Run full integration persistence contract suite
+cargo test --manifest-path src-tauri/Cargo.toml --test daemon_persistence_contract
+
+# 3. Check clean compilation and linting across all targets
+cargo check --manifest-path src-tauri/Cargo.toml --tests
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+```

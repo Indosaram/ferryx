@@ -9,7 +9,8 @@ type RemoteTerminalProps = {
   sessionId: string;
   token: string;
   title?: string;
-  onBack: () => void;
+  onBack?: () => void;
+  embedded?: boolean;
 };
 
 export const RemoteTerminal: React.FC<RemoteTerminalProps> = ({
@@ -17,6 +18,7 @@ export const RemoteTerminal: React.FC<RemoteTerminalProps> = ({
   token,
   title,
   onBack,
+  embedded = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -149,7 +151,7 @@ export const RemoteTerminal: React.FC<RemoteTerminalProps> = ({
       if (rAfId !== null) cancelAnimationFrame(rAfId);
       rAfId = requestAnimationFrame(() => {
         rAfId = null;
-        if (window.visualViewport && rootRef.current) {
+        if (!embedded && window.visualViewport && rootRef.current) {
           rootRef.current.style.height = `${window.visualViewport.height}px`;
         }
         if (fitRef.current && containerRef.current && containerRef.current.clientWidth > 0 && termRef.current) {
@@ -193,7 +195,7 @@ export const RemoteTerminal: React.FC<RemoteTerminalProps> = ({
         terminalInstance.dispose();
       }
     };
-  }, [sessionId, token]);
+  }, [embedded, sessionId, token]);
 
   // Synchronize settings changes dynamically
   useEffect(() => {
@@ -251,37 +253,40 @@ export const RemoteTerminal: React.FC<RemoteTerminalProps> = ({
   };
 
   return (
-    <div ref={rootRef} className="flex flex-col h-[100dvh] bg-terminal text-foreground overflow-hidden">
-      {/* High-polish Orca Topbar */}
-      <div className="flex justify-between items-center px-3 py-1.5 bg-card border-b border-border shrink-0">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onBack}
-            className="text-xs px-2 py-1 bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-border rounded font-medium transition-colors"
-          >
-            ← Workspace
-          </button>
-          <span className="font-medium text-xs text-foreground truncate max-w-[180px]">
-            {title || `Terminal (${sessionId.substring(0, 8)})`}
+    <div
+      ref={rootRef}
+      className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-foreground ${
+        embedded ? "h-full flex-1" : "h-[100dvh]"
+      }`}
+    >
+      <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card px-2">
+        <div className="flex min-w-0 items-center gap-2">
+          {!embedded && onBack ? (
+            <button
+              type="button"
+              onClick={onBack}
+              className="rounded-md border border-border bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              Back
+            </button>
+          ) : null}
+          <span className="truncate font-mono text-xs text-muted-foreground">
+            {title ?? "Desktop terminal"}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5" role="status" aria-live="polite">
           <span
-            className={`w-2 h-2 rounded-full ${
-              connected ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" : "bg-amber-500 animate-pulse"
+            className={`size-2 rounded-full ${
+              connected ? "bg-status-success ring-2 ring-status-success/25" : "animate-pulse bg-status-warning"
             }`}
           />
-          <span className="text-[10px] font-mono text-muted-foreground">
+          <span className="font-mono text-[10px] text-muted-foreground">
             {connected ? "Live" : "Connecting"}
           </span>
         </div>
       </div>
 
-      {/* xterm.js Terminal Container */}
-      <div ref={containerRef} className="flex-1 p-1 bg-terminal overflow-hidden" />
-
-      {/* Touch-First Mobile KeyDock */}
+      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden bg-terminal p-1" />
       <MobileKeyDock onSendKey={sendKey} />
     </div>
   );

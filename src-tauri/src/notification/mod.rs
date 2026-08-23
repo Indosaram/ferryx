@@ -5,11 +5,13 @@
 //! user-event dedupe deliberately stay out of this module.
 
 pub mod audio;
+pub mod badge;
 pub mod model;
 pub mod permission;
 pub mod service;
 
 pub use audio::*;
+pub use badge::*;
 pub use model::*;
 pub use permission::*;
 pub use service::*;

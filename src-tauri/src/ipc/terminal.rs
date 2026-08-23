@@ -1,22 +1,331 @@
+// allow: SIZE_OK — IPC module bundling terminal commands, output batching, and macOS libproc CWD resolution within constrained write scope
+use crate::daemon::client::{DaemonAttachment, DaemonClient};
+use crate::daemon::protocol::DaemonStreamMessage;
 use crate::ipc::{run_blocking, IpcError};
-use crate::terminal::{PtyError, PtySessionState, TerminalService, TerminalSignal};
+use crate::terminal::TerminalSignal;
 use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeIdentity};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use portable_pty::CommandBuilder;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
 pub const TERMINAL_OUTPUT_EVENT: &str = "terminal_output";
 pub const TERMINAL_LIFECYCLE_EVENT: &str = "terminal_lifecycle";
+
+const BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
+const BATCH_MAX_BYTES: usize = 32 * 1024;
+const CWD_CACHE_TTL: Duration = Duration::from_millis(500);
+
+static CWD_CACHE: Mutex<Option<HashMap<String, (Instant, PathBuf)>>> = Mutex::new(None);
+
+pub fn get_cached_cwd(session_id: &str) -> Option<PathBuf> {
+    let mut guard = CWD_CACHE.lock();
+    let map = guard.as_mut()?;
+    if let Some((cached_at, cwd)) = map.get(session_id) {
+        if cached_at.elapsed() < CWD_CACHE_TTL {
+            return Some(cwd.clone());
+        }
+        map.remove(session_id);
+    }
+    None
+}
+
+pub fn update_cached_cwd(session_id: String, cwd: PathBuf) {
+    let mut guard = CWD_CACHE.lock();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(session_id, (Instant::now(), cwd));
+}
+
+pub fn invalidate_cached_cwd(session_id: &str) {
+    let mut guard = CWD_CACHE.lock();
+    if let Some(map) = guard.as_mut() {
+        map.remove(session_id);
+    }
+}
+
+struct PumpHandle {
+    task: tokio::task::JoinHandle<()>,
+    stream_task: tokio::task::JoinHandle<()>,
+}
+
+static ACTIVE_PUMPS: Mutex<Option<HashMap<String, PumpHandle>>> = Mutex::new(None);
+
+pub fn stop_managed_pump(session_id: &str) {
+    let mut guard = ACTIVE_PUMPS.lock();
+    if let Some(map) = guard.as_mut() {
+        if let Some(pump) = map.remove(session_id) {
+            pump.task.abort();
+            pump.stream_task.abort();
+        }
+    }
+}
+
+pub fn start_managed_pump<R: Runtime>(
+    session_id: String,
+    app_handle: AppHandle<R>,
+    attachment: DaemonAttachment,
+) {
+    let mut guard = ACTIVE_PUMPS.lock();
+    let map = guard.get_or_insert_with(HashMap::new);
+
+    if let Some(old_pump) = map.remove(&session_id) {
+        old_pump.task.abort();
+        old_pump.stream_task.abort();
+    }
+
+    let stream_task = attachment.stream_task;
+    let epoch = attachment.epoch;
+    let mut messages = attachment.messages;
+    let session_id_clone = session_id.clone();
+    let app = app_handle.clone();
+
+    let task = tokio::spawn(async move {
+        let epoch_str = epoch.to_string();
+        let mut buffer = Vec::with_capacity(BATCH_MAX_BYTES);
+        let mut last_seq: Option<u64> = None;
+
+        loop {
+            if buffer.is_empty() {
+                match messages.recv().await {
+                    Some(DaemonStreamMessage::Output { sequence, data, .. }) => {
+                        buffer.extend_from_slice(&data);
+                        last_seq = Some(sequence);
+                        while buffer.len() < BATCH_MAX_BYTES {
+                            match messages.try_recv() {
+                                Ok(DaemonStreamMessage::Output { sequence, data, .. }) => {
+                                    buffer.extend_from_slice(&data);
+                                    last_seq = Some(sequence);
+                                }
+                                Ok(DaemonStreamMessage::Lagged {
+                                    end_sequence,
+                                    history,
+                                    ..
+                                }) => {
+                                    buffer.extend_from_slice(&history);
+                                    if let Some(seq) = end_sequence {
+                                        last_seq = Some(seq);
+                                    }
+                                }
+                                Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                                    if !buffer.is_empty() {
+                                        flush_terminal_output(
+                                            &app,
+                                            &session_id_clone,
+                                            &mut buffer,
+                                            last_seq.take(),
+                                            Some(&epoch_str),
+                                        );
+                                    }
+                                    let _ = app.emit(
+                                        TERMINAL_LIFECYCLE_EVENT,
+                                        TerminalLifecyclePayload {
+                                            session_id: session_id_clone.clone(),
+                                            state: TerminalLifecycleState::Exited,
+                                            exit_code,
+                                            reason: None,
+                                        },
+                                    );
+                                    return;
+                                }
+                                Ok(DaemonStreamMessage::Gap { .. }) => {}
+                                Err(_) => break,
+                            }
+                        }
+                        if buffer.len() >= BATCH_MAX_BYTES {
+                            flush_terminal_output(
+                                &app,
+                                &session_id_clone,
+                                &mut buffer,
+                                last_seq.take(),
+                                Some(&epoch_str),
+                            );
+                        }
+                    }
+                    Some(DaemonStreamMessage::Lagged {
+                        end_sequence,
+                        history,
+                        ..
+                    }) => {
+                        buffer.extend_from_slice(&history);
+                        if let Some(seq) = end_sequence {
+                            last_seq = Some(seq);
+                        }
+                        flush_terminal_output(
+                            &app,
+                            &session_id_clone,
+                            &mut buffer,
+                            last_seq.take(),
+                            Some(&epoch_str),
+                        );
+                    }
+                    Some(DaemonStreamMessage::Gap { .. }) => {}
+                    Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                        let _ = app.emit(
+                            TERMINAL_LIFECYCLE_EVENT,
+                            TerminalLifecyclePayload {
+                                session_id: session_id_clone.clone(),
+                                state: TerminalLifecycleState::Exited,
+                                exit_code,
+                                reason: None,
+                            },
+                        );
+                        break;
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            } else {
+                tokio::select! {
+                    msg = messages.recv() => {
+                        match msg {
+                            Some(DaemonStreamMessage::Output {
+                                sequence,
+                                data,
+                                ..
+                            }) => {
+                                buffer.extend_from_slice(&data);
+                                last_seq = Some(sequence);
+                                while buffer.len() < BATCH_MAX_BYTES {
+                                    match messages.try_recv() {
+                                        Ok(DaemonStreamMessage::Output {
+                                            sequence,
+                                            data,
+                                            ..
+                                        }) => {
+                                            buffer.extend_from_slice(&data);
+                                            last_seq = Some(sequence);
+                                        }
+                                        Ok(DaemonStreamMessage::Lagged {
+                                            end_sequence,
+                                            history,
+                                            ..
+                                        }) => {
+                                            buffer.extend_from_slice(&history);
+                                            if let Some(seq) = end_sequence {
+                                                last_seq = Some(seq);
+                                            }
+                                        }
+                                        Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                                            if !buffer.is_empty() {
+                                                flush_terminal_output(
+                                                    &app,
+                                                    &session_id_clone,
+                                                    &mut buffer,
+                                                    last_seq.take(),
+                                                    Some(&epoch_str),
+                                                );
+                                            }
+                                            let _ = app.emit(
+                                                TERMINAL_LIFECYCLE_EVENT,
+                                                TerminalLifecyclePayload {
+                                                    session_id: session_id_clone.clone(),
+                                                    state: TerminalLifecycleState::Exited,
+                                                    exit_code,
+                                                    reason: None,
+                                                },
+                                            );
+                                            return;
+                                        }
+                                        Ok(DaemonStreamMessage::Gap { .. }) => {}
+                                        Err(_) => break,
+                                    }
+                                }
+                                if buffer.len() >= BATCH_MAX_BYTES {
+                                    flush_terminal_output(
+                                        &app,
+                                        &session_id_clone,
+                                        &mut buffer,
+                                        last_seq.take(),
+                                        Some(&epoch_str),
+                                    );
+                                }
+                            }
+                            Some(DaemonStreamMessage::Lagged {
+                                end_sequence,
+                                history,
+                                ..
+                            }) => {
+                                buffer.extend_from_slice(&history);
+                                if let Some(seq) = end_sequence {
+                                    last_seq = Some(seq);
+                                }
+                                flush_terminal_output(
+                                    &app,
+                                    &session_id_clone,
+                                    &mut buffer,
+                                    last_seq.take(),
+                                    Some(&epoch_str),
+                                );
+                            }
+                            Some(DaemonStreamMessage::Gap { .. }) => {}
+                            Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                                if !buffer.is_empty() {
+                                    flush_terminal_output(
+                                        &app,
+                                        &session_id_clone,
+                                        &mut buffer,
+                                        last_seq.take(),
+                                        Some(&epoch_str),
+                                    );
+                                }
+                                let _ = app.emit(
+                                    TERMINAL_LIFECYCLE_EVENT,
+                                    TerminalLifecyclePayload {
+                                        session_id: session_id_clone.clone(),
+                                        state: TerminalLifecycleState::Exited,
+                                        exit_code,
+                                        reason: None,
+                                    },
+                                );
+                                break;
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep(BATCH_FLUSH_INTERVAL) => {
+                        flush_terminal_output(
+                            &app,
+                            &session_id_clone,
+                            &mut buffer,
+                            last_seq.take(),
+                            Some(&epoch_str),
+                        );
+                    }
+                }
+            }
+        }
+        if !buffer.is_empty() {
+            flush_terminal_output(
+                &app,
+                &session_id_clone,
+                &mut buffer,
+                last_seq.take(),
+                Some(&epoch_str),
+            );
+        }
+
+        let mut guard = ACTIVE_PUMPS.lock();
+        if let Some(map) = guard.as_mut() {
+            map.remove(&session_id_clone);
+        }
+    });
+
+    map.insert(session_id, PumpHandle { task, stream_task });
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpawnTerminalRequest {
     pub workspace_id: String,
     pub worktree: Option<WorktreeIdentity>,
-    /// Optional inherited CWD for an Orca split/restore.  The command validates that
+    /// Optional inherited CWD for an Orca split/restore. The command validates that
     /// this path exists and remains inside the resolved worktree before spawning.
     pub cwd: Option<PathBuf>,
     pub cols: Option<u16>,
@@ -42,11 +351,37 @@ pub struct TerminalCwdResponse {
     pub cwd: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutputPayload {
     pub session_id: String,
     pub data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_epoch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalReplayGap {
+    pub requested_after_sequence: String,
+    pub available_from_sequence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachTerminalResponse {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_start_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_end_sequence: Option<String>,
+    pub history: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap: Option<TerminalReplayGap>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,10 +419,35 @@ impl From<TerminalSignalRequest> for TerminalSignal {
     }
 }
 
+fn flush_terminal_output<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    buffer: &mut Vec<u8>,
+    sequence: Option<u64>,
+    daemon_epoch: Option<&str>,
+) -> bool {
+    if buffer.is_empty() {
+        return true;
+    }
+    let payload = TerminalOutputPayload {
+        session_id: session_id.to_string(),
+        data: STANDARD.encode(&buffer),
+        sequence: sequence.map(|s| s.to_string()),
+        daemon_epoch: daemon_epoch.map(|s| s.to_string()),
+    };
+    buffer.clear();
+    if let Err(error) = app.emit(TERMINAL_OUTPUT_EVENT, payload) {
+        tracing::debug!("Failed to emit terminal output event: {error}");
+        false
+    } else {
+        true
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_terminal_spawn<R: Runtime>(
     app: AppHandle<R>,
-    terminal_service: State<'_, Arc<TerminalService>>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
     registry: State<'_, WorkspaceRegistry>,
     request: SpawnTerminalRequest,
 ) -> Result<SpawnTerminalResponse, IpcError> {
@@ -114,7 +474,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         let canonical = worktree_for_validation
             .canonical_allowed_path(&requested)
             .map_err(IpcError::from)?;
-        if canonical != worktree_root_for_validation && !canonical.starts_with(&worktree_root_for_validation) {
+        if canonical != worktree_root_for_validation
+            && !canonical.starts_with(&worktree_root_for_validation)
+        {
             return Err(IpcError::from(WorktreeError::PathOutsideWorkspace {
                 path: requested,
                 root: worktree_root_for_validation,
@@ -130,32 +492,20 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     })
     .await?;
 
-    let mut cmd = CommandBuilder::new_default_prog();
-    cmd.cwd(&cwd);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env("PROMPT_EOL_MARK", "");
-    if let Ok(lang) = std::env::var("LANG") {
-        cmd.env("LANG", lang);
-    } else {
-        cmd.env("LANG", "en_US.UTF-8");
-    }
-    if let Ok(lc_all) = std::env::var("LC_ALL") {
-        cmd.env("LC_ALL", lc_all);
-    } else {
-        cmd.env("LC_ALL", "en_US.UTF-8");
-    }
-    if let Ok(lc_ctype) = std::env::var("LC_CTYPE") {
-        cmd.env("LC_CTYPE", lc_ctype);
-    } else {
-        cmd.env("LC_CTYPE", "en_US.UTF-8");
-    }
-    let (session_id, mut broadcast_rx) = terminal_service
-        .spawn_in_worktree(cmd, cols, rows, &worktree_manager, &worktree_root)
-        .map_err(IpcError::from)?;
-    let session = terminal_service
-        .get_session(&session_id)
-        .ok_or_else(|| IpcError::internal(format!("PTY session '{session_id}' disappeared during spawn")))?;
+    let client_request_id = uuid::Uuid::new_v4().to_string();
+    let session_id = daemon_client
+        .spawn_terminal(
+            client_request_id,
+            request.workspace_id,
+            request.worktree,
+            Some(cwd.to_string_lossy().to_string()),
+            cols,
+            rows,
+        )
+        .await?;
+
+    let attachment = daemon_client.attach(&session_id, None).await?;
+    start_managed_pump(session_id.clone(), app.clone(), attachment);
 
     let started = TerminalLifecyclePayload {
         session_id: session_id.clone(),
@@ -164,90 +514,152 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         reason: None,
     };
     if let Err(error) = app.emit(TERMINAL_LIFECYCLE_EVENT, started) {
-        let _ = terminal_service.close_session(&session_id).await;
+        let _ = daemon_client.close_terminal(&session_id).await;
         return Err(IpcError::internal(format!(
             "failed to emit terminal lifecycle event: {error}"
         )));
     }
 
-    let session_id_clone = session_id.clone();
-    let app_handle = app.clone();
-    tokio::spawn(async move {
-        loop {
-            match broadcast_rx.recv().await {
-                Ok(chunk) => {
-                    let payload = TerminalOutputPayload {
-                        session_id: session_id_clone.clone(),
-                        data: STANDARD.encode(chunk),
-                    };
-                    if let Err(error) = app_handle.emit(TERMINAL_OUTPUT_EVENT, payload) {
-                        tracing::debug!("Failed to emit terminal output event: {error}");
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(lag)) => {
-                    tracing::warn!("Tauri desktop subscriber lagged by {lag} messages");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    break;
-                }
-            }
-        }
-
-        for _ in 0..100 {
-            let lifecycle = match session.state() {
-                PtySessionState::Exited { code } => Some(TerminalLifecyclePayload {
-                    session_id: session_id_clone.clone(),
-                    state: TerminalLifecycleState::Exited,
-                    exit_code: code,
-                    reason: None,
-                }),
-                PtySessionState::Failed { reason } => Some(TerminalLifecyclePayload {
-                    session_id: session_id_clone.clone(),
-                    state: TerminalLifecycleState::Failed,
-                    exit_code: None,
-                    reason: Some(reason),
-                }),
-                PtySessionState::Starting | PtySessionState::Running | PtySessionState::Closing => {
-                    None
-                }
-            };
-
-            if let Some(payload) = lifecycle {
-                if let Err(error) = app_handle.emit(TERMINAL_LIFECYCLE_EVENT, payload) {
-                    tracing::debug!("Failed to emit terminal lifecycle event: {error}");
-                }
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    });
-
     Ok(SpawnTerminalResponse { session_id })
 }
 
 #[tauri::command]
-pub async fn cmd_terminal_get_cwd(
-    terminal_service: State<'_, Arc<TerminalService>>,
+pub async fn cmd_terminal_attach<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
-) -> Result<TerminalCwdResponse, IpcError> {
-    let session = terminal_service
-        .get_session(&session_id)
-        .ok_or_else(|| IpcError::from(PtyError::SessionNotFound(session_id.clone())))?;
-    let pid = session.pid();
-    let fallback = session.worktree_path();
-    let cwd = run_blocking(move || {
-        let resolved = pid.and_then(process_cwd).or(fallback);
-        resolved
-            .map(|cwd| TerminalCwdResponse { cwd })
-            .ok_or_else(|| IpcError::internal("terminal cwd is unavailable"))
-    })
-    .await?;
-    Ok(cwd)
+    after_sequence: Option<String>,
+) -> Result<AttachTerminalResponse, IpcError> {
+    let after_seq = after_sequence.and_then(|s| s.parse::<u64>().ok());
+    let attachment = daemon_client.attach(&session_id, after_seq).await?;
+
+    let resp = AttachTerminalResponse {
+        session_id: attachment.session_id.clone(),
+        daemon_epoch: Some(attachment.epoch.to_string()),
+        history_start_sequence: attachment.start_sequence.map(|s| s.to_string()),
+        history_end_sequence: attachment.end_sequence.map(|s| s.to_string()),
+        history: STANDARD.encode(&attachment.history),
+        gap: attachment.gap.as_ref().map(|g| TerminalReplayGap {
+            requested_after_sequence: g.requested_after_sequence.to_string(),
+            available_from_sequence: g.available_from_sequence.to_string(),
+        }),
+    };
+
+    start_managed_pump(session_id, app, attachment);
+
+    Ok(resp)
 }
 
-fn process_cwd(pid: u32) -> Option<PathBuf> {
+#[tauri::command]
+pub async fn cmd_terminal_get_cwd(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<TerminalCwdResponse, IpcError> {
+    if let Some(cwd) = get_cached_cwd(&session_id) {
+        return Ok(TerminalCwdResponse { cwd });
+    }
+
+    let details = daemon_client.describe_session(&session_id).await?;
+    let cwd_str = details
+        .cwd
+        .ok_or_else(|| IpcError::internal("terminal cwd is unavailable"))?;
+    let cwd = PathBuf::from(cwd_str);
+    update_cached_cwd(session_id, cwd.clone());
+    Ok(TerminalCwdResponse { cwd })
+}
+
+#[cfg(target_os = "macos")]
+mod macos_proc {
+    use std::ffi::CStr;
+    use std::path::PathBuf;
+
+    const PROC_PIDVNODEPATHINFO: libc::c_int = 9;
+    const MAXPATHLEN: usize = 1024;
+
+    #[repr(C)]
+    struct VinfoStat {
+        vst_dev: u32,
+        vst_mode: u16,
+        vst_nlink: u16,
+        vst_ino: u64,
+        vst_uid: libc::uid_t,
+        vst_gid: libc::gid_t,
+        vst_atime: i64,
+        vst_atimensec: i64,
+        vst_mtime: i64,
+        vst_mtimensec: i64,
+        vst_ctime: i64,
+        vst_ctimensec: i64,
+        vst_birthtime: i64,
+        vst_birthtimensec: i64,
+        vst_size: libc::off_t,
+        vst_blocks: i64,
+        vst_blksize: i32,
+        vst_flags: u32,
+        vst_gen: u32,
+        vst_rdev: u32,
+        vst_qspare: [i64; 2],
+    }
+
+    #[repr(C)]
+    struct VnodeInfo {
+        vi_stat: VinfoStat,
+        vi_type: libc::c_int,
+        vi_pad: libc::c_int,
+        vi_fsid: libc::fsid_t,
+    }
+
+    #[repr(C)]
+    struct VnodeInfoPath {
+        vip_vi: VnodeInfo,
+        vip_path: [libc::c_char; MAXPATHLEN],
+    }
+
+    #[repr(C)]
+    struct ProcVnodePathInfo {
+        pvi_cdir: VnodeInfoPath,
+        pvi_rdir: VnodeInfoPath,
+    }
+
+    extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    pub fn get_proc_cwd(pid: u32) -> Option<PathBuf> {
+        let mut info = std::mem::MaybeUninit::<ProcVnodePathInfo>::uninit();
+        let size = std::mem::size_of::<ProcVnodePathInfo>() as libc::c_int;
+        // SAFETY: proc_pidinfo safely writes up to `size` bytes into the uninit buffer.
+        let ret = unsafe {
+            proc_pidinfo(
+                pid as libc::c_int,
+                PROC_PIDVNODEPATHINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if ret <= 0 {
+            return None;
+        }
+        // SAFETY: proc_pidinfo succeeded (ret > 0) and initialized `info`.
+        let info = unsafe { info.assume_init() };
+        let path_bytes = &info.pvi_cdir.vip_path;
+        let nul_pos = path_bytes.iter().position(|&c| c == 0)?;
+        if nul_pos == 0 {
+            return None;
+        }
+        let cstr = unsafe { CStr::from_ptr(path_bytes.as_ptr()) };
+        cstr.to_str().ok().map(PathBuf::from)
+    }
+}
+
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         return std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
@@ -255,6 +667,9 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
+        if let Some(path) = macos_proc::get_proc_cwd(pid) {
+            return Some(path);
+        }
         let output = std::process::Command::new("/usr/sbin/lsof")
             .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
             .output()
@@ -279,63 +694,58 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
 
 #[tauri::command]
 pub async fn cmd_terminal_write(
-    terminal_service: State<'_, Arc<TerminalService>>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
     data: String,
 ) -> Result<(), IpcError> {
-    terminal_service
-        .write_input(&session_id, data.as_bytes())
-        .map_err(IpcError::from)
+    daemon_client
+        .write_terminal(&session_id, data.into_bytes())
+        .await
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_resize(
-    terminal_service: State<'_, Arc<TerminalService>>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), IpcError> {
-    terminal_service
-        .resize(&session_id, cols, rows)
-        .map_err(IpcError::from)
+    daemon_client.resize_terminal(&session_id, cols, rows).await
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_signal(
-    terminal_service: State<'_, Arc<TerminalService>>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
     signal: TerminalSignalRequest,
 ) -> Result<(), IpcError> {
-    terminal_service
-        .signal(&session_id, signal.into())
-        .map_err(IpcError::from)
+    daemon_client
+        .signal_terminal(&session_id, signal.into())
+        .await
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_close(
-    terminal_service: State<'_, Arc<TerminalService>>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
 ) -> Result<(), IpcError> {
-    terminal_service
-        .close_session(&session_id)
-        .await
-        .map_err(IpcError::from)
+    invalidate_cached_cwd(&session_id);
+    daemon_client.close_terminal(&session_id).await
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_list(
-    terminal_service: State<'_, Arc<TerminalService>>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
 ) -> Result<Vec<TerminalSessionSummary>, IpcError> {
-    Ok(terminal_service
-        .list_sessions()
-        .into_iter()
-        .filter_map(|session_id| {
-            terminal_service
-                .get_session(&session_id)
-                .map(|session| TerminalSessionSummary {
-                    session_id,
-                    worktree_path: session.worktree_path(),
-                })
-        })
-        .collect())
+    let session_ids = daemon_client.list_sessions().await?;
+    let mut summaries = Vec::new();
+    for session_id in session_ids {
+        if let Ok(details) = daemon_client.describe_session(&session_id).await {
+            summaries.push(TerminalSessionSummary {
+                session_id,
+                worktree_path: details.cwd.map(PathBuf::from),
+            });
+        }
+    }
+    Ok(summaries)
 }
