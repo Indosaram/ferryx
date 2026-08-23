@@ -34,6 +34,10 @@ jobs:
         working-directory: ./site
         run: bun install --frozen-lockfile
 
+      - name: Install UI dependencies
+        working-directory: ./ui
+        run: bun install --frozen-lockfile
+
       - name: Configure GitHub Pages
         id: pages
         uses: actions/configure-pages@v5
