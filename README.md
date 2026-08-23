@@ -28,6 +28,7 @@ When running locally, explore the site at:
 - [Bun](https://bun.sh/) (v1.1 or higher)
 - [Rust](https://www.rust-lang.org/) (Cargo 1.80 or higher)
 - [Node.js](https://nodejs.org/) (v20 or higher)
+- [Tauri CLI](https://v2.tauri.app/start/prerequisites/) (v2)
 
 ## Quick Start
 

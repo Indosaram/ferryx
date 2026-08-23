@@ -26,7 +26,7 @@ export function CTA() {
 
           <div className="mt-8 max-w-md mx-auto">
             <CopySnippet
-              code="git clone https://github.com/Indosaram/ferryx.git && cd ferryx && cd src-tauri && cargo tauri dev"
+              code="git clone https://github.com/Indosaram/ferryx.git && cd ferryx && bun install --cwd ui && bun install --cwd site && cd src-tauri && cargo tauri dev"
               className="text-left"
             />
           </div>
@@ -51,9 +51,6 @@ export function CTA() {
             <span className="flex items-center gap-1.5">
               <Terminal className="h-3.5 w-3.5 text-zinc-400" /> Rust + Tauri v2
             </span>
-            <span>•</span>
-            <span>Apache 2.0 / MIT License</span>
-            <span>•</span>
             <span>100% Open Source</span>
           </div>
         </div>

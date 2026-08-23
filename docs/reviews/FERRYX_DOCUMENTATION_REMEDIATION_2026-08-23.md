@@ -28,7 +28,7 @@ This review documents the verification and remediation of stale public URLs, dev
 - **Remediation**:
   - Replaced all stale `https://github.com/ferryx/ferryx` instances with canonical `https://github.com/Indosaram/ferryx`.
   - Replaced release targets with `https://github.com/Indosaram/ferryx/releases`.
-  - Updated clone snippets in Hero and CTA components to `git clone https://github.com/Indosaram/ferryx.git && cd ferryx && cd src-tauri && cargo tauri dev`, matching the Tauri configuration's automatic UI dev-server startup while preserving visual layout and styling.
+  - Updated clone snippets in Hero and CTA components to install both workspaces before `cargo tauri dev`, matching the Tauri configuration's automatic UI dev-server startup while preserving visual layout and styling.
   - Removed 404 License anchor link (`https://github.com/Indosaram/ferryx/blob/main/LICENSE`) from `Footer.tsx` entirely since no repository license file exists.
 - **GREEN Validation**:
   - `git grep -nE 'github.com/ferryx/ferryx|Indosaram/ferryx/blob/main/LICENSE' -- site README.md docs .github` returns 0 results.
@@ -61,7 +61,7 @@ This review documents the verification and remediation of stale public URLs, dev
 - **Remediation**:
   - Updated README development instructions to use `cd src-tauri && cargo tauri dev`; the Tauri configuration starts the UI dev server automatically.
   - Updated README validation commands to: `bun run --cwd ui test`, `bun run --cwd site build`, and `cd src-tauri && cargo check`.
-  - Removed dead relative file link `./LICENSE` from the License section while keeping the MIT/Apache 2.0 dual license statement.
+  - Removed the dead relative file link and unverified dual-license claim rather than inventing a license file or legal terms.
 - **GREEN Validation**:
   - README uses portable explicit commands.
   - No dead `./LICENSE` link in README.

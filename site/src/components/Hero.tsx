@@ -19,7 +19,7 @@ export function Hero({ children }: { children?: ReactNode }) {
 
         <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4 max-w-md mx-auto">
           <CopySnippet
-            code="git clone https://github.com/Indosaram/ferryx.git && cd ferryx && cd src-tauri && cargo tauri dev"
+            code="git clone https://github.com/Indosaram/ferryx.git && cd ferryx && bun install --cwd ui && bun install --cwd site && cd src-tauri && cargo tauri dev"
             className="w-full text-left"
           />
         </div>
