@@ -136,12 +136,24 @@ if (-not (Test-Path $manifestTemplate)) {
 }
 
 $manifestContent = Get-Content $manifestTemplate -Raw
-$manifestContent = $manifestContent -replace 'Version="[0-9\.]+"', "Version=""$msixVersion"""
-$manifestContent = $manifestContent -replace 'Name="[^"]+"', "Name=""$PackageName"""
-$manifestContent = $manifestContent -replace 'Publisher="[^"]+"', "Publisher=""$Publisher"""
+
+# Scope substitutions to the <Identity /> element only. Naive global regexes would
+# also corrupt TargetDeviceFamily@Name, Capability@Name, and MinVersion/MaxVersionTested.
+$identityRegex = [regex]'<Identity[^>]*>'
+$identityMatch = $identityRegex.Match($manifestContent)
+if (-not $identityMatch.Success) {
+    throw "ERROR: <Identity> element not found in manifest template"
+}
+$newIdentity = $identityMatch.Value `
+    -replace 'Name="[^"]*"', "Name=""$PackageName""" `
+    -replace 'Publisher="[^"]*"', "Publisher=""$Publisher""" `
+    -replace 'Version="[0-9.]*"', "Version=""$msixVersion"""
+$manifestContent = $manifestContent.Substring(0, $identityMatch.Index) + $newIdentity + $manifestContent.Substring($identityMatch.Index + $identityMatch.Length)
 
 $manifestPath = "$layoutDir\AppxManifest.xml"
-Set-Content -Path $manifestPath -Value $manifestContent -Encoding UTF8
+# Write UTF-8 WITHOUT BOM: MakeAppx rejects a byte-order mark preceding the xml declaration.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($manifestPath, $manifestContent, $utf8NoBom)
 Write-Host "[5/6] Generated AppxManifest.xml with version $msixVersion"
 
 # Pack MSIX
