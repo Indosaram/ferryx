@@ -109,6 +109,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           ENABLE_CODE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        shell: bash
         run: |
           if [ "${{ matrix.os_name }}" = "macos" ] && [ -z "${{ secrets.APPLE_CERTIFICATE }}" ]; then
             echo "Skipping macOS codesigning (no certificate secret configured in repository)."
