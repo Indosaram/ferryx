@@ -2,6 +2,10 @@
 name = "ferryx"
 version = "0.1.0"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
+authors = ["Ferryx Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ferryx/ferryx"
+homepage = "https://ferryx.app"
 edition = "2021"
 
 [lib]
@@ -35,6 +39,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 rand = "0.8"
 sha2 = "0.10"
 futures-util = "0.3"
+cookie = "0.18"
+time = "0.3"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 rodio = { version = "0.22", default-features = false, features = [
@@ -60,6 +66,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSError",
     "NSString",
 ] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebView", "WKNavigation"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
     "block2",

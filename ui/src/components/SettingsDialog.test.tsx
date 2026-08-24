@@ -333,8 +333,7 @@ describe("SettingsDialog", () => {
   it("keeps General free of the duplicate appearance summary", () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
 
-    expect(screen.getByText("Ferryx · local desktop")).toBeInTheDocument();
-    expect(screen.queryByText(/rorca · local desktop/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/local desktop/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Color scheme")).not.toBeInTheDocument();
     expect(screen.queryByText("Density")).not.toBeInTheDocument();
   });

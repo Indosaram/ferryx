@@ -7,6 +7,8 @@ export const TERMINAL_SETTINGS_STORAGE_KEY = "ferryx.terminal.settings";
 export const NOTIFICATION_SETTINGS_STORAGE_KEY = "ferryx.settings.notifications:v1";
 export const APPEARANCE_SETTINGS_STORAGE_KEY = "ferryx.settings.appearance";
 export const BROWSER_SETTINGS_STORAGE_KEY = "ferryx.settings.browser";
+export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
+export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabled";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {

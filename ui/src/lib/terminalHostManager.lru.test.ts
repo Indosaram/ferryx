@@ -6,7 +6,7 @@ import {
   mocks,
   setupTerminalHostTestEnv,
 } from "./terminalHostManagerTestHelper";
-import { terminalEventBus } from "./terminalEvents";
+import * as tauri from "./tauri";
 import { terminalHostManager } from "./terminalHostManager";
 
 describe("terminalHostManager LRU eviction & inactive output suspension", () => {
@@ -67,57 +67,46 @@ describe("terminalHostManager LRU eviction & inactive output suspension", () => 
     terminalHostManager.destroy("sess-inact-3");
   });
 
-  it("suspends inactive output without background writes and replays in correct order upon reactivation", async () => {
+  it("suspends inactive output and resumes from the last sequence without resetting a warm renderer", async () => {
     const session = createSession("sess-suspend", "backend-suspend");
     const unreg = terminalHostManager.registerVisible("sess-suspend");
     await terminalHostManager.getOrCreate(session, true);
+    await Promise.resolve();
 
-    // Initial output while visible
+    // Initial sequenced output while visible.
     mocks.terminalWrites.length = 0;
-    mocks.emitSessionOutput("backend-suspend", "vis-1");
+    mocks.emitSessionOutput("backend-suspend", "vis-1", "1", "epoch-1");
     flushAnimationFrames();
     expect(mocks.terminalWrites).toEqual(["vis-1"]);
+    expect(session.lastOutputSequence).toBe("1");
 
-    // Unmount / suspend session
+    // Unmount / suspend session. Output emitted through the test bus while inactive has no xterm subscriber.
     unreg();
-
-    // Clear write logs
     mocks.terminalWrites.length = 0;
-
-    // Output emitted while inactive: TerminalEventBus processes it, but xterm does NOT write
-    const backlogChunks = ["vis-1"];
-    vi.spyOn(terminalEventBus, "subscribeOutput").mockImplementation((sessionId: string, cb: (text: string) => void) => {
-      let set = mocks.outputListeners.get(sessionId);
-      if (!set) {
-        set = new Set();
-        mocks.outputListeners.set(sessionId, set);
-      }
-      set.add(cb);
-      // Replay full backlog
-      cb(backlogChunks.join(""));
-      return vi.fn(() => {
-        set?.delete(cb);
-        if (set?.size === 0) mocks.outputListeners.delete(sessionId);
-      });
-    });
-
-    mocks.emitSessionOutput("backend-suspend", "inact-2");
-    backlogChunks.push("inact-2");
+    mocks.emitSessionOutput("backend-suspend", "inact-2", "2", "epoch-1");
     flushAnimationFrames();
-
-    // No direct background writes while suspended
     expect(mocks.terminalWrites).toHaveLength(0);
 
-    // Reactivate session
+    // Reattachment asks the daemon only for output after the last rendered sequence.
+    const attachSpy = vi.spyOn(tauri, "attachTerminal").mockResolvedValueOnce({
+      sessionId: "backend-suspend",
+      daemonEpoch: "epoch-1",
+      historyStartSequence: "2",
+      historyEndSequence: "2",
+      history: btoa("inact-2"),
+      gap: null,
+    });
+
     const unreg2 = terminalHostManager.registerVisible("sess-suspend");
     await terminalHostManager.getOrCreate(session, true);
+    await Promise.resolve();
 
-    // Terminal must be reset before replaying backlog so stale output is not duplicated
-    expect(mocks.terminalReset).toHaveBeenCalled();
+    expect(attachSpy).toHaveBeenCalledWith({ sessionId: "backend-suspend", afterSequence: "1" });
+    expect(mocks.terminalReset).not.toHaveBeenCalled();
 
     flushAnimationFrames();
-    // Replay delivers complete backlog in order
-    expect(mocks.terminalWrites).toContain("vis-1inact-2");
+    expect(mocks.terminalWrites).toContain("inact-2");
+    expect(session.lastOutputSequence).toBe("2");
 
     unreg2();
     terminalHostManager.destroy("sess-suspend");

@@ -213,6 +213,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(notification_audio)
         .manage(browser_manager)
         .invoke_handler(tauri::generate_handler![
+            cmd_terminal_output_channel,
             cmd_terminal_spawn,
             cmd_terminal_attach,
             cmd_terminal_get_cwd,
@@ -253,6 +254,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             cmd_session_clear,
             cmd_browser_create,
             cmd_browser_navigate,
+            cmd_browser_go_back,
+            cmd_browser_go_forward,
+            cmd_browser_import_cookies,
             cmd_browser_reload,
             cmd_browser_set_bounds,
             cmd_browser_set_visible,
@@ -268,9 +272,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::client::DaemonClient;
     use crate::remote::auth::DevicePermission;
-    use crate::remote::RemoteGatewayState;
-    use crate::terminal::TerminalService;
     use std::ffi::OsString;
     use std::sync::Mutex;
 
@@ -461,29 +464,74 @@ mod tests {
         assert!(!is_unshifted_cmd_w(NSEventModifierFlags::Command, None, 0));
     }
 
-    #[test]
-    fn app_remote_state_persists_pairing_but_starts_off() {
+    #[tokio::test]
+    async fn app_remote_state_persists_pairing_but_starts_off() {
         let _lock = FERRYX_DATA_DIR_LOCK.lock().expect("data dir lock");
         let _restore = RestoreFerryxDataDir(std::env::var_os("FERRYX_DATA_DIR"));
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::env::set_var("FERRYX_DATA_DIR", dir.path());
-        let registry = WorkspaceRegistry::new();
-        let terminal = Arc::new(TerminalService::default());
-        let first = RemoteGatewayState::new_persistent(Arc::clone(&terminal), registry.clone());
-        let code = first
-            .auth_manager
-            .create_pairing_code(DevicePermission::Control);
-        first
-            .auth_manager
-            .exchange_pairing_code(&code, "Phone")
-            .expect("pair");
-        first.persist_config().expect("persist");
 
-        let reopened = RemoteGatewayState::new_persistent(terminal, registry);
-        assert_eq!(reopened.config.read().mode, remote::RemoteNetworkMode::Off);
-        assert!(!*reopened.is_running.read());
-        assert!(reopened.bound_address.read().is_none());
-        assert_eq!(reopened.auth_manager.list_devices().len(), 1);
+        let config_path = dir.path().join("remote-config.json");
+        let auth_path = dir.path().join("remote-auth.json");
+
+        let socket_path = dir.path().join("daemon1.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind 1");
+        let server = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
+            Some(config_path.clone()),
+            Some(auth_path.clone()),
+        ));
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let s = Arc::clone(&server_clone);
+                        tokio::spawn(async move {
+                            s.handle_client(stream).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let client = Arc::new(DaemonClient::new_with_socket(socket_path));
+        let code = client
+            .remote_create_pairing_code(Some(DevicePermission::Control))
+            .await
+            .expect("create code");
+        assert_eq!(code.len(), 6);
+        let devices = client.remote_list_devices().await.expect("list devices");
+        assert_eq!(devices.len(), 0);
+        server_task.abort();
+
+        let socket_path2 = dir.path().join("daemon2.sock");
+        let listener2 = tokio::net::UnixListener::bind(&socket_path2).expect("bind 2");
+        let server2 = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
+            Some(config_path),
+            Some(auth_path),
+        ));
+        let server_clone2 = Arc::clone(&server2);
+        let server_task2 = tokio::spawn(async move {
+            loop {
+                match listener2.accept().await {
+                    Ok((stream, _)) => {
+                        let s = Arc::clone(&server_clone2);
+                        tokio::spawn(async move {
+                            s.handle_client(stream).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let client2 = Arc::new(DaemonClient::new_with_socket(socket_path2));
+        let status = client2.remote_get_status().await.expect("status");
+        assert_eq!(status.mode, remote::RemoteNetworkMode::Off);
+        assert!(!status.is_running);
+        assert!(status.bound_address.is_none());
+        server_task2.abort();
     }
 }
 

@@ -19,8 +19,8 @@ export class MockTerminal {
   reset = vi.fn(() => {
     terminalReset();
   });
-  write = vi.fn((text: string) => {
-    terminalWrites.push(text);
+  write = vi.fn((data: string | Uint8Array) => {
+    terminalWrites.push(typeof data === "string" ? data : new TextDecoder().decode(data));
   });
   writeln = vi.fn((text: string) => {
     terminalWrites.push(`${text}\n`);
@@ -50,7 +50,22 @@ export class MockSearchAddon {
   clearDecorations = vi.fn();
 }
 
-export const outputListeners = new Map<string, Set<(text: string, sequence?: string | null, daemonEpoch?: string | null) => void>>();
+type RuntimeReplayGap = {
+  requestedAfterSequence: string;
+  availableFromSequence: string;
+  startSequence?: string | null;
+  endSequence?: string | null;
+  history: string;
+  daemonEpoch?: string | null;
+};
+
+type OutputCallback = {
+  bivarianceHack(data: string | Uint8Array, sequence?: string | null, daemonEpoch?: string | null): void;
+}["bivarianceHack"];
+type ReplayGapCallback = (gap: RuntimeReplayGap) => void;
+
+export const outputListeners = new Map<string, Set<OutputCallback>>();
+export const replayGapListeners = new Map<string, Set<ReplayGapCallback>>();
 
 export const mocks = {
   MockTerminal,
@@ -61,12 +76,18 @@ export const mocks = {
   terminalReset,
   searchAddonDisposed,
   outputListeners,
+  replayGapListeners,
   triggerBell: () => bellHandler?.(),
   triggerTitleChange: (title: string) => titleHandler?.(title),
   triggerData: (data: string) => dataHandler?.(data),
   emitSessionOutput: (sessionId: string, text: string, sequence?: string | null, daemonEpoch?: string | null) => {
     for (const cb of outputListeners.get(sessionId) ?? []) {
       cb(text, sequence, daemonEpoch);
+    }
+  },
+  emitSessionReplayGap: (sessionId: string, gap: RuntimeReplayGap) => {
+    for (const cb of replayGapListeners.get(sessionId) ?? []) {
+      cb(gap);
     }
   },
   resetTerminalMocks: () => {
@@ -78,6 +99,7 @@ export const mocks = {
     terminalReset.mockClear();
     searchAddonDisposed.mockClear();
     outputListeners.clear();
+    replayGapListeners.clear();
   },
 };
 
@@ -202,7 +224,7 @@ export function setupTerminalHostTestEnv(): void {
   vi.stubGlobal("cancelAnimationFrame", (id: number) => {
     frameCallbacks.delete(id);
   });
-  vi.spyOn(terminalEventBus, "subscribeOutput").mockImplementation((sessionId: string, cb: (text: string, sequence?: string | null, daemonEpoch?: string | null) => void) => {
+  vi.spyOn(terminalEventBus, "subscribeOutput").mockImplementation((sessionId: string, cb: OutputCallback) => {
     let set = mocks.outputListeners.get(sessionId);
     if (!set) {
       set = new Set();
@@ -212,6 +234,18 @@ export function setupTerminalHostTestEnv(): void {
     return vi.fn(() => {
       set?.delete(cb);
       if (set?.size === 0) mocks.outputListeners.delete(sessionId);
+    });
+  });
+  vi.spyOn(terminalEventBus, "subscribeReplayGap").mockImplementation((sessionId: string, cb: ReplayGapCallback) => {
+    let set = mocks.replayGapListeners.get(sessionId);
+    if (!set) {
+      set = new Set();
+      mocks.replayGapListeners.set(sessionId, set);
+    }
+    set.add(cb);
+    return vi.fn(() => {
+      set?.delete(cb);
+      if (set?.size === 0) mocks.replayGapListeners.delete(sessionId);
     });
   });
 }

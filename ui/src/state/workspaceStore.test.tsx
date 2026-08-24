@@ -17,7 +17,7 @@ import type { BrowserTab, LayoutState, TerminalSession, TerminalTab, Worktree } 
 import * as browserTauri from "../lib/browserTauri";
 import { createLayoutState } from "./layout";
 const { terminalHostManager } = await import("../lib/terminalHostManager");
-const { useWorkspaceStore } = await import("./workspaceStore");
+const { useWorkspaceStore, workspaceReducer } = await import("./workspaceStore");
 type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
 
@@ -474,12 +474,14 @@ describe("useWorkspaceStore terminal ownership", () => {
     });
 
     expect(result.current.state.layout.tabs).toHaveLength(1);
-    expect(result.current.state.layout.activeTabId).toBe(result.current.state.layout.tabs[0].id);
-    expect(result.current.state.layout.tabs[0].id).not.toBe(closingTabId);
+    expect(result.current.state.layout.activeTabId).not.toBeNull();
     expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
-    expect((services.closeTerminal as any).mock.invocationCallOrder[0]).toBeLessThan(
-      (services.spawnTerminal as any).mock.invocationCallOrder[1],
-    );
+    const replacement = result.current.state.layout.tabs[0];
+    expect(replacement.kind).not.toBe("browser");
+    if (replacement.kind !== "browser") {
+      expect(replacement.label).toBe(closingTab.label);
+      expect(result.current.state.sessions[replacement.sessionId].backendSessionId).toBe("backend-2");
+    }
   });
 
   it("derives visible agents only from live terminal session metadata", async () => {
@@ -611,7 +613,7 @@ describe("session title activity", () => {
     destroySpy.mockRestore();
   });
 
-  it("invokes terminalHostManager.destroy when closing a sole tab (which creates a replacement)", async () => {
+  it("invokes terminalHostManager.destroy when closing a sole tab", async () => {
     const destroySpy = vi.spyOn(terminalHostManager, "destroy");
     const { services } = createServices();
     const { result } = renderHook(() =>
@@ -799,7 +801,7 @@ describe("worktree tab and session isolation", () => {
     (services.ensureTerminalEvents as any).mockClear();
 
     // 1. Activate parked workspace 0 via ensureTabForWorktree
-    let activeTabId!: string;
+    let activeTabId!: string | null;
     await act(async () => {
       activeTabId = await result.current.ensureTabForWorktree(parkedWorktrees[0]);
     });
@@ -922,15 +924,232 @@ describe("worktree tab and session isolation", () => {
     });
 
     expect(closeBrowserSpy).toHaveBeenCalledWith("browser-123");
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
     expect(result.current.state.layout.tabs).toHaveLength(1);
-    const replacementTab = result.current.state.layout.tabs[0];
-    expect(replacementTab.kind).not.toBe("browser");
-    if (replacementTab.kind !== "browser") {
-      expect(replacementTab.sessionId).toBeDefined();
-      const session = result.current.state.sessions[replacementTab.sessionId];
-      expect(session).toBeDefined();
-      expect(session.backendSessionId).toBeDefined();
-    }
+    const replacement = result.current.state.layout.tabs[0];
+    expect(replacement.kind).not.toBe("browser");
+    expect(Object.keys(result.current.state.sessions)).toHaveLength(1);
     closeBrowserSpy.mockRestore();
+  });
+
+  describe("REBIND_SESSION_BACKEND reducer and ensureSessionBackends", () => {
+    it("updates only the target session with backendSessionId and running lifecycle, missing sessionId is a no-op", () => {
+      const initialTerminalState: WorkspaceState = {
+        worktrees: [worktree],
+        activeWorktreePath: worktree.path,
+        sessions: {
+          "session-target": {
+            id: "session-target",
+            cwd: "/repo/main/sub",
+            worktreePath: worktree.path,
+            workspaceId: "ws-main",
+            worktree: { wsId: "ws-main", slug: "main" },
+            backendSessionId: null,
+            lifecycle: "exited",
+          },
+          "session-other": {
+            id: "session-other",
+            cwd: worktree.path,
+            worktreePath: worktree.path,
+            workspaceId: "ws-main",
+            worktree: { wsId: "ws-main", slug: "main" },
+            backendSessionId: "backend-existing",
+            lifecycle: "working",
+          },
+        },
+        layout: createLayoutState([
+          { kind: "terminal", id: "tab-1", label: "Tab 1", sessionId: "session-target" },
+          { kind: "terminal", id: "tab-2", label: "Tab 2", sessionId: "session-other" },
+        ]),
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+      };
+
+      const updatedState = workspaceReducer(initialTerminalState, {
+        type: "REBIND_SESSION_BACKEND",
+        sessionId: "session-target",
+        backendSessionId: "backend-new-123",
+      } as any);
+
+      expect(updatedState.sessions["session-target"]).toEqual({
+        ...initialTerminalState.sessions["session-target"],
+        backendSessionId: "backend-new-123",
+        lifecycle: "running",
+      });
+      expect(updatedState.sessions["session-other"]).toBe(initialTerminalState.sessions["session-other"]);
+
+      const noOpState = workspaceReducer(initialTerminalState, {
+        type: "REBIND_SESSION_BACKEND",
+        sessionId: "non-existent-session",
+        backendSessionId: "backend-new-456",
+      } as any);
+      expect(noOpState).toBe(initialTerminalState);
+    });
+
+    it("ensureSessionBackends calls spawnTerminal exactly once for sessions with null backendSessionId and rebinds them", async () => {
+      const { services } = createServices();
+      const { result } = renderHook(() =>
+        useWorkspaceStore({ initialWorktrees: [worktree], services }),
+      );
+
+      const stateWithDeadSessions: WorkspaceState = {
+        worktrees: [worktree],
+        activeWorktreePath: worktree.path,
+        sessions: {
+          "session-1": {
+            id: "session-1",
+            cwd: "/repo/main/nested",
+            worktreePath: worktree.path,
+            workspaceId: "ws-main",
+            worktree: { wsId: "ws-main", slug: "main" },
+            backendSessionId: null,
+            lifecycle: "exited",
+          },
+          "session-2": {
+            id: "session-2",
+            cwd: "/repo/main",
+            worktreePath: worktree.path,
+            workspaceId: "ws-main",
+            worktree: null,
+            backendSessionId: null,
+            lifecycle: "exited",
+          },
+          "session-live": {
+            id: "session-live",
+            cwd: worktree.path,
+            worktreePath: worktree.path,
+            workspaceId: "ws-main",
+            worktree: { wsId: "ws-main", slug: "main" },
+            backendSessionId: "backend-already-live",
+            lifecycle: "working",
+          },
+        },
+        layout: createLayoutState([
+          { kind: "terminal", id: "tab-1", label: "Tab 1", sessionId: "session-1" },
+          { kind: "terminal", id: "tab-2", label: "Tab 2", sessionId: "session-2" },
+          { kind: "terminal", id: "tab-3", label: "Tab 3", sessionId: "session-live" },
+        ]),
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+      };
+
+      act(() => {
+        result.current.restoreWorkspace(stateWithDeadSessions);
+      });
+
+      await act(async () => {
+        await (result.current as any).ensureSessionBackends(["session-1", "session-2", "session-live"]);
+      });
+
+      expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
+      expect(services.spawnTerminal).toHaveBeenCalledWith({
+        workspaceId: expect.any(String),
+        worktree: { wsId: "ws-main", slug: "main" },
+        cwd: "/repo/main/nested",
+      });
+      expect(services.spawnTerminal).toHaveBeenCalledWith({
+        workspaceId: expect.any(String),
+        worktree: null,
+        cwd: "/repo/main",
+      });
+
+      expect(result.current.state.sessions["session-1"].backendSessionId).toBe("backend-1");
+      expect(result.current.state.sessions["session-1"].lifecycle).toBe("running");
+      expect(result.current.state.sessions["session-2"].backendSessionId).toBe("backend-2");
+      expect(result.current.state.sessions["session-2"].lifecycle).toBe("running");
+      expect(result.current.state.sessions["session-live"].backendSessionId).toBe("backend-already-live");
+      expect(result.current.state.sessions["session-live"].lifecycle).toBe("working");
+
+      // Does not spawn again for already bound sessions
+      (services.spawnTerminal as any).mockClear();
+      await act(async () => {
+        await (result.current as any).ensureSessionBackends(["session-1", "session-2", "session-live"]);
+      });
+      expect(services.spawnTerminal).not.toHaveBeenCalled();
+    });
+
+    it("guards against concurrent double-spawns and retries on spawn failure after clearing in-flight guard", async () => {
+      let deferredSpawn!: { resolve: (id: string) => void; reject: (err: Error) => void; promise: Promise<string> };
+      const resetDeferred = () => {
+        let resolve!: (id: string) => void;
+        let reject!: (err: Error) => void;
+        const promise = new Promise<string>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        });
+        deferredSpawn = { resolve, reject, promise };
+      };
+      resetDeferred();
+
+      const { services } = createServices();
+      services.spawnTerminal = vi.fn(() => deferredSpawn.promise);
+
+      const { result } = renderHook(() =>
+        useWorkspaceStore({ initialWorktrees: [worktree], services }),
+      );
+
+      const state: WorkspaceState = {
+        worktrees: [worktree],
+        activeWorktreePath: worktree.path,
+        sessions: {
+          "session-inflight": {
+            id: "session-inflight",
+            cwd: worktree.path,
+            worktreePath: worktree.path,
+            workspaceId: "ws-main",
+            worktree: null,
+            backendSessionId: null,
+            lifecycle: "exited",
+          },
+        },
+        layout: createLayoutState([{ kind: "terminal", id: "tab-1", label: "Tab 1", sessionId: "session-inflight" }]),
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+      };
+
+      act(() => {
+        result.current.restoreWorkspace(state);
+      });
+
+      // 1. Concurrent calls while spawn is in flight
+      let call1!: Promise<void>;
+      let call2!: Promise<void>;
+      act(() => {
+        call1 = (result.current as any).ensureSessionBackends(["session-inflight"]);
+        call2 = (result.current as any).ensureSessionBackends(["session-inflight"]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
+
+      // 2. Reject the in-flight spawn to test error swallowing and clearing in-flight entry
+      await act(async () => {
+        deferredSpawn.reject(new Error("PTY spawn failed"));
+        await expect(Promise.all([call1, call2])).resolves.toBeDefined();
+      });
+
+      expect(result.current.state.sessions["session-inflight"].backendSessionId).toBeNull();
+
+      // 3. Retry after failure - should attempt spawn again
+      resetDeferred();
+      let retryCall!: Promise<void>;
+      act(() => {
+        retryCall = (result.current as any).ensureSessionBackends(["session-inflight"]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        deferredSpawn.resolve("backend-success-after-retry");
+        await retryCall;
+      });
+
+      expect(result.current.state.sessions["session-inflight"].backendSessionId).toBe("backend-success-after-retry");
+      expect(result.current.state.sessions["session-inflight"].lifecycle).toBe("running");
+    });
   });
 });

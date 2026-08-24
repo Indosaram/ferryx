@@ -92,6 +92,13 @@ type DeleteWorktreeRequest = WorktreeStatusRequest & {
   deleteBranch?: boolean | null;
 };
 
+export type SpawnTerminalRequest = {
+  workspaceId: string;
+  worktree: WorktreeIdentity | null;
+  cwd?: string | null;
+  clientRequestId?: string | null;
+};
+
 export function isTauriRuntime() {
   return isTauri();
 }
@@ -206,14 +213,10 @@ export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) 
   });
 }
 
-export async function spawnTerminal(request: {
-  workspaceId: string;
-  worktree: WorktreeIdentity | null;
-  cwd?: string | null;
-}) {
+export async function spawnTerminal(request: SpawnTerminalRequest) {
   if (!isTauri()) return `preview:${request.workspaceId}:${request.worktree?.slug ?? "root"}:${crypto.randomUUID()}`;
   const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", {
-    request: { ...request, cwd: request.cwd ?? null },
+    request: { ...request, cwd: request.cwd ?? null, clientRequestId: request.clientRequestId ?? null },
   });
   return response.sessionId;
 }

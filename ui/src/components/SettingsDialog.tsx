@@ -160,7 +160,6 @@ function SettingsDialogBody({
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote Access" onClick={() => setSection("remote")} />
           </nav>
         </div>
-        <div className="mt-auto border-t border-border px-5 py-3 text-[10px] text-muted-foreground/55">Ferryx · local desktop</div>
       </aside>
 
       <main className="min-w-0 flex-1 overflow-y-auto bg-background scrollbar-sleek">

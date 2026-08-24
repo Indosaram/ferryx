@@ -37,6 +37,8 @@ describe("useWorkspaceStore browser lifecycle", () => {
     browserMocks.navigateBrowser.mockReset();
     browserMocks.reloadBrowser.mockReset();
     browserMocks.closeBrowser.mockReset();
+    vi.mocked(services.spawnTerminal).mockReset();
+    vi.mocked(services.spawnTerminal).mockResolvedValue("backend-unused");
 
     browserMocks.createBrowser.mockResolvedValue({
       browserId: "browser-1",
@@ -59,7 +61,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
     browserMocks.closeBrowser.mockResolvedValue(undefined);
   });
 
-  it("closes the native child webview before removing its React tab", async () => {
+  it("closes the native child webview before replacing the sole browser tab with a terminal", async () => {
     const { result } = renderHook(() =>
       useWorkspaceStore({ workspaceId: "workspace-1", initialWorktrees: [worktree], services }),
     );
@@ -76,14 +78,35 @@ describe("useWorkspaceStore browser lifecycle", () => {
     });
 
     expect(browserMocks.closeBrowser).toHaveBeenCalledWith("browser-1");
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
     expect(result.current.state.layout.tabs).toHaveLength(1);
-    const replacementTab = result.current.state.layout.tabs[0];
-    expect(replacementTab.kind).not.toBe("browser");
-    if (replacementTab.kind !== "browser") {
-      expect(replacementTab.sessionId).toBeDefined();
-      const session = result.current.state.sessions[replacementTab.sessionId];
-      expect(session).toBeDefined();
-      expect(session.backendSessionId).toBeDefined();
+    expect(result.current.state.layout.tabs[0].kind).not.toBe("browser");
+    expect(result.current.state.layout.activeTabId).toBe(result.current.state.layout.tabs[0].id);
+  });
+
+  it("reuses the same clientRequestId when one logical terminal spawn retries after an ambiguous renderer transport failure", async () => {
+    vi.mocked(services.spawnTerminal)
+      .mockRejectedValueOnce({ code: "UNKNOWN", message: "lost Tauri response", details: {} })
+      .mockResolvedValueOnce("backend-retried");
+
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ workspaceId: "workspace-1", initialWorktrees: [worktree], services }),
+    );
+
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
+    const firstRequest = vi.mocked(services.spawnTerminal).mock.calls[0]?.[0] as Record<string, unknown>;
+    const secondRequest = vi.mocked(services.spawnTerminal).mock.calls[1]?.[0] as Record<string, unknown>;
+    expect(firstRequest.clientRequestId).toEqual(expect.any(String));
+    expect(secondRequest.clientRequestId).toBe(firstRequest.clientRequestId);
+    expect(result.current.state.layout.tabs).toHaveLength(1);
+    const tab = result.current.state.layout.tabs[0];
+    expect(tab.kind).not.toBe("browser");
+    if (tab.kind !== "browser") {
+      expect(result.current.state.sessions[tab.sessionId].backendSessionId).toBe("backend-retried");
     }
   });
 });

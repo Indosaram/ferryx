@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 pub(crate) const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const TERM_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
+const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct PtyManager {
@@ -256,6 +258,24 @@ impl PtyManager {
         }
     }
 
+    async fn poll_reap_bounded(
+        session: &Arc<PtySession>,
+        timeout: Duration,
+    ) -> Result<Option<i32>, PtyError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match session.poll_exit_code()? {
+                Some(code) => return Ok(Some(code)),
+                None if session.is_reaped() => return Ok(None),
+                None => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            tokio::time::sleep(LIFECYCLE_POLL_INTERVAL.min(Duration::from_millis(50))).await;
+        }
+    }
+
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
         let Some(session) = self.get_session(session_id) else {
             return Ok(());
@@ -292,12 +312,54 @@ impl PtyManager {
             }
         };
 
-        if exit_code.is_none() {
+        if exit_code.is_none() && !session.is_reaped() {
             if let Err(signal_error) = session.signal(TerminalSignal::Terminate) {
-                if let Err(kill_error) = session.kill() {
-                    first_error = Some(PtyError::KillError(format!(
-                        "{signal_error}; fallback kill failed: {kill_error}"
-                    )));
+                // TERM is a best-effort graceful phase. A process-group signal can become
+                // unavailable after job-control transitions (for example, immediately after
+                // VINTR/SIGINT), but Close still has a mandatory KILL+reap fallback below.
+                // Do not report the graceful-phase error if escalation succeeds.
+                tracing::debug!(
+                    "PTY TERM signal failed for {}; escalating: {}",
+                    session_id,
+                    signal_error
+                );
+            } else {
+                match Self::poll_reap_bounded(&session, TERM_GRACE_TIMEOUT).await {
+                    Ok(Some(code)) => exit_code = Some(code),
+                    Ok(None) => {}
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+
+        if exit_code.is_none() && !session.is_reaped() {
+            if let Err(signal_error) = session
+                .signal(TerminalSignal::Kill)
+                .or_else(|_| session.kill())
+            {
+                if first_error.is_none() {
+                    first_error = Some(signal_error);
+                }
+            } else {
+                match Self::poll_reap_bounded(&session, KILL_REAP_TIMEOUT).await {
+                    Ok(Some(code)) => exit_code = Some(code),
+                    Ok(None) if session.is_reaped() => {}
+                    Ok(None) => {
+                        if first_error.is_none() {
+                            first_error = Some(PtyError::Other(format!(
+                                "Timed out reaping killed PTY session '{session_id}'"
+                            )));
+                        }
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
                 }
             }
         }
@@ -305,30 +367,8 @@ impl PtyManager {
         session.close_io();
 
         if let Err(reader_error) = Self::join_reader_bounded(&session).await {
-            let _ = session
-                .signal(TerminalSignal::Kill)
-                .or_else(|_| session.kill());
             if first_error.is_none() {
                 first_error = Some(reader_error);
-            }
-        }
-
-        if exit_code.is_none() && !session.is_reaped() {
-            let session_for_wait = Arc::clone(&session);
-            match tokio::task::spawn_blocking(move || session_for_wait.wait_and_reap()).await {
-                Ok(Ok(code)) => exit_code = code,
-                Ok(Err(error)) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(PtyError::Other(format!(
-                            "PTY child reap task failed: {error}"
-                        )));
-                    }
-                }
             }
         }
 
@@ -398,5 +438,75 @@ impl PtyManager {
             .get_session(session_id)
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
         Ok(session.is_alive())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn close_escalates_term_ignoring_process_group_and_reaps_bounded_without_touching_sibling() {
+        let manager = PtyManager::new();
+
+        let mut stubborn_cmd = CommandBuilder::new("/bin/sh");
+        stubborn_cmd.arg("-c");
+        stubborn_cmd.arg("trap '' TERM; sleep 30");
+        let (stubborn_id, _stubborn_rx) = manager
+            .spawn(stubborn_cmd, 80, 24)
+            .expect("spawn TERM-resistant session");
+        let stubborn_session = manager
+            .get_session(&stubborn_id)
+            .expect("stubborn session registered");
+
+        let mut sibling_cmd = CommandBuilder::new("/bin/sh");
+        sibling_cmd.arg("-c");
+        sibling_cmd.arg("sleep 30");
+        let (sibling_id, _sibling_rx) = manager
+            .spawn(sibling_cmd, 80, 24)
+            .expect("spawn sibling session");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = tokio::time::Instant::now();
+        let close_result = tokio::time::timeout(
+            Duration::from_secs(6),
+            manager.close_session(&stubborn_id),
+        )
+        .await
+        .expect("close must be bounded");
+        close_result.expect("TERM-resistant close should escalate and succeed");
+
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(stubborn_session.is_reaped(), "closed child must be reaped");
+        assert!(!manager.has_session(&stubborn_id));
+        assert!(manager.has_session(&sibling_id));
+        assert!(manager.is_alive(&sibling_id).expect("sibling state"));
+
+        manager
+            .close_session(&sibling_id)
+            .await
+            .expect("cleanup sibling session");
+    }
+
+    #[tokio::test]
+    async fn close_after_interrupt_still_succeeds_via_escalation_and_reap() {
+        let manager = PtyManager::new();
+        let (session_id, _rx) = manager.spawn_shell(80, 24).expect("spawn shell");
+        let session = manager
+            .get_session(&session_id)
+            .expect("shell session registered");
+
+        manager
+            .signal(&session_id, TerminalSignal::Interrupt)
+            .expect("send interrupt through PTY");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        tokio::time::timeout(Duration::from_secs(6), manager.close_session(&session_id))
+            .await
+            .expect("close after interrupt must be bounded")
+            .expect("close after interrupt must succeed after escalation");
+
+        assert!(session.is_reaped(), "closed shell must be reaped");
+        assert!(!manager.has_session(&session_id));
     }
 }

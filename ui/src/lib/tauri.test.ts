@@ -89,11 +89,15 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_preferences", undefined);
   });
 
-  it("spawns terminals with workspace/worktree identity and an optional cwd slot", async () => {
+  it("spawns terminals with caller-stable clientRequestId, workspace/worktree identity, and an optional cwd slot", async () => {
     core.invoke.mockResolvedValue({ sessionId: "backend-session-1" });
 
     await expect(
-      spawnTerminal({ workspaceId: "workspace-main", worktree: { wsId: "ws-main", slug: "main" } }),
+      spawnTerminal({
+        workspaceId: "workspace-main",
+        worktree: { wsId: "ws-main", slug: "main" },
+        clientRequestId: "spawn-logical-action-1",
+      }),
     ).resolves.toBe("backend-session-1");
 
     expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_spawn", {
@@ -101,6 +105,7 @@ describe("Tauri IPC wrapper contract", () => {
         workspaceId: "workspace-main",
         worktree: { wsId: "ws-main", slug: "main" },
         cwd: null,
+        clientRequestId: "spawn-logical-action-1",
       },
     });
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");

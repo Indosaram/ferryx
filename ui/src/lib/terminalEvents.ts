@@ -1,19 +1,46 @@
-import type { TerminalLifecyclePayload, TerminalOutputPayload } from "./types";
-import { onTerminalLifecycle, onTerminalOutput } from "./tauri";
-import { TerminalOutputDecoderRegistry } from "./terminalOutput";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 
-const MAX_BACKLOG_CHARS = 512 * 1024;
+import { onTerminalLifecycle, onTerminalOutput } from "./tauri";
+import {
+  decodeBase64,
+  decodeTerminalOutputFrame,
+  type DecodedTerminalOutputFrame,
+  TerminalOutputDecoderRegistry,
+} from "./terminalOutput";
+import type { TerminalLifecyclePayload, TerminalOutputPayload } from "./types";
+
+const MAX_BACKLOG_BYTES = 512 * 1024;
 const MAX_OSC_TITLE_CHARS = 8 * 1024;
 const OSC_TITLE_START_RE = /\u001b\](?:0|1|2);/g;
 const OSC_PARTIAL_PREFIXES = ["\u001b", "\u001b]", "\u001b]0", "\u001b]1", "\u001b]2"] as const;
 
-type OutputListener = (text: string, sequence?: string | null, daemonEpoch?: string | null) => void;
+export type TerminalOutputChunk = Uint8Array | string;
+type OutputListener = (data: TerminalOutputChunk, sequence?: string | null, daemonEpoch?: string | null) => void;
 type LifecycleListener = (payload: TerminalLifecyclePayload) => void;
 type TitleListener = (sessionId: string, title: string) => void;
 
+type TerminalControlPayload = TerminalOutputPayload & {
+  kind?: "output" | "replayGap";
+  requestedAfterSequence?: string | null;
+  availableFromSequence?: string | null;
+  startSequence?: string | null;
+  endSequence?: string | null;
+};
+
+export type TerminalRuntimeReplayGap = {
+  requestedAfterSequence: string;
+  availableFromSequence: string;
+  startSequence?: string | null;
+  endSequence?: string | null;
+  history: string;
+  daemonEpoch?: string | null;
+};
+
+type ReplayGapListener = (gap: TerminalRuntimeReplayGap) => void;
+
 type SessionBacklog = {
-  chunks: string[];
-  totalChars: number;
+  chunks: Uint8Array[];
+  totalBytes: number;
 };
 
 export type OscTitleScanResult = {
@@ -70,21 +97,36 @@ function findPartialOscPrefix(source: string): string {
   return "";
 }
 
+function concatByteChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
+  if (chunks.length === 0) return new Uint8Array();
+  if (chunks.length === 1) return chunks[0] ?? new Uint8Array();
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
 class TerminalEventBus {
   private readonly decoderRegistry = new TerminalOutputDecoderRegistry();
   private readonly outputListeners = new Map<string, Set<OutputListener>>();
+  private readonly replayGapListeners = new Map<string, Set<ReplayGapListener>>();
   private readonly lifecycleListeners = new Set<LifecycleListener>();
   private readonly titleListeners = new Set<TitleListener>();
   private readonly backlog = new Map<string, SessionBacklog>();
   private readonly titleCarry = new Map<string, string>();
   private readonly lastTitle = new Map<string, string>();
+  private binaryOutputChannel: Channel<ArrayBuffer> | null = null;
   private startPromise: Promise<void> | null = null;
 
   ensureStarted(): Promise<void> {
     if (this.startPromise) return this.startPromise;
     this.startPromise = Promise.all([
-      onTerminalOutput((payload) => this.handleOutput(payload)),
+      onTerminalOutput((payload) => this.handleControlOutput(payload)),
       onTerminalLifecycle((payload) => this.handleLifecycle(payload)),
+      this.ensureBinaryOutputChannel(),
     ]).then(() => undefined);
     return this.startPromise;
   }
@@ -96,8 +138,8 @@ class TerminalEventBus {
 
     if (replay) {
       const existing = this.backlog.get(sessionId);
-      if (existing && existing.totalChars > 0) {
-        listener(existing.chunks.join(""));
+      if (existing && existing.totalBytes > 0) {
+        listener(concatByteChunks(existing.chunks, existing.totalBytes));
       }
     }
 
@@ -105,6 +147,17 @@ class TerminalEventBus {
       const current = this.outputListeners.get(sessionId);
       current?.delete(listener);
       if (current?.size === 0) this.outputListeners.delete(sessionId);
+    };
+  }
+
+  subscribeReplayGap(sessionId: string, listener: ReplayGapListener) {
+    const listeners = this.replayGapListeners.get(sessionId) ?? new Set<ReplayGapListener>();
+    listeners.add(listener);
+    this.replayGapListeners.set(sessionId, listeners);
+    return () => {
+      const current = this.replayGapListeners.get(sessionId);
+      current?.delete(listener);
+      if (current?.size === 0) this.replayGapListeners.delete(sessionId);
     };
   }
 
@@ -130,6 +183,7 @@ class TerminalEventBus {
     this.decoderRegistry.reset(sessionId);
     this.backlog.delete(sessionId);
     this.outputListeners.delete(sessionId);
+    this.replayGapListeners.delete(sessionId);
     this.titleCarry.delete(sessionId);
     this.lastTitle.delete(sessionId);
   }
@@ -141,41 +195,88 @@ class TerminalEventBus {
       return {
         sessions: 1,
         chunks: entry.chunks.length,
-        chars: entry.totalChars,
+        chars: entry.totalBytes,
       };
     }
     let totalChunks = 0;
-    let totalChars = 0;
+    let totalBytes = 0;
     for (const entry of this.backlog.values()) {
       totalChunks += entry.chunks.length;
-      totalChars += entry.totalChars;
+      totalBytes += entry.totalBytes;
     }
     return {
       sessions: this.backlog.size,
       chunks: totalChunks,
-      chars: totalChars,
+      chars: totalBytes,
     };
   }
 
-  private handleOutput(payload: TerminalOutputPayload) {
-    const text = this.decoderRegistry.decode(payload.sessionId, payload.data);
-    if (text) this.publishOutput(payload.sessionId, text, payload.sequence, payload.daemonEpoch);
+  private async ensureBinaryOutputChannel(): Promise<void> {
+    if (!isTauri() || this.binaryOutputChannel) return;
+
+    const channel = new Channel<ArrayBuffer>((frame) => {
+      try {
+        this.handleBinaryOutput(decodeTerminalOutputFrame(frame));
+      } catch (error) {
+        console.error("Failed to decode terminal output channel frame", error);
+      }
+    });
+
+    try {
+      await invoke<void>("cmd_terminal_output_channel", { channel });
+      this.binaryOutputChannel = channel;
+    } catch (error) {
+      // The Rust side keeps the legacy terminal_output event as a no-loss fallback.
+      console.warn("Failed to register terminal output channel; using event fallback", error);
+    }
+  }
+
+  private handleControlOutput(payload: TerminalControlPayload) {
+    if (payload.kind === "replayGap") {
+      this.decoderRegistry.reset(payload.sessionId);
+      this.backlog.delete(payload.sessionId);
+      this.titleCarry.delete(payload.sessionId);
+      this.lastTitle.delete(payload.sessionId);
+      const gap: TerminalRuntimeReplayGap = {
+        requestedAfterSequence: payload.requestedAfterSequence ?? "0",
+        availableFromSequence: payload.availableFromSequence ?? "0",
+        startSequence: payload.startSequence ?? null,
+        endSequence: payload.endSequence ?? null,
+        history: payload.data,
+        daemonEpoch: payload.daemonEpoch ?? null,
+      };
+      for (const listener of this.replayGapListeners.get(payload.sessionId) ?? []) {
+        listener(gap);
+      }
+      return;
+    }
+
+    // Compatibility/failure fallback from Rust. Normal stdout arrives on the binary channel.
+    this.handleBinaryOutput({
+      sessionId: payload.sessionId,
+      data: decodeBase64(payload.data),
+      sequence: payload.sequence,
+      daemonEpoch: payload.daemonEpoch,
+    });
+  }
+
+  private handleBinaryOutput(payload: DecodedTerminalOutputFrame) {
+    const decodedText = this.decoderRegistry.decode(payload.sessionId, payload.data);
+    if (decodedText) this.trackTitles(payload.sessionId, decodedText);
+    if (payload.data.byteLength > 0) {
+      this.publishOutput(payload.sessionId, payload.data, payload.sequence, payload.daemonEpoch);
+    }
   }
 
   private handleLifecycle(payload: TerminalLifecyclePayload) {
     if (payload.state === "exited" || payload.state === "failed") {
       const tail = this.decoderRegistry.finish(payload.sessionId);
-      if (tail) this.publishOutput(payload.sessionId, tail);
+      if (tail) this.trackTitles(payload.sessionId, tail);
     }
     for (const listener of this.lifecycleListeners) listener(payload);
   }
 
-  private publishOutput(
-    sessionId: string,
-    text: string,
-    sequence?: string | null,
-    daemonEpoch?: string | null,
-  ) {
+  private trackTitles(sessionId: string, text: string) {
     const scan = scanTerminalOscTitles(text, this.titleCarry.get(sessionId) ?? "");
     if (scan.carry) this.titleCarry.set(sessionId, scan.carry);
     else this.titleCarry.delete(sessionId);
@@ -185,34 +286,41 @@ class TerminalEventBus {
       this.lastTitle.set(sessionId, title);
       for (const listener of this.titleListeners) listener(sessionId, title);
     }
+  }
 
-    if (text.length > 0) {
+  private publishOutput(
+    sessionId: string,
+    data: Uint8Array,
+    sequence?: string | null,
+    daemonEpoch?: string | null,
+  ) {
+    if (data.byteLength > 0) {
       let entry = this.backlog.get(sessionId);
       if (!entry) {
-        entry = { chunks: [], totalChars: 0 };
+        entry = { chunks: [], totalBytes: 0 };
         this.backlog.set(sessionId, entry);
       }
 
-      entry.chunks.push(text);
-      entry.totalChars += text.length;
+      entry.chunks.push(data);
+      entry.totalBytes += data.byteLength;
 
-      while (entry.totalChars > MAX_BACKLOG_CHARS && entry.chunks.length > 0) {
+      while (entry.totalBytes > MAX_BACKLOG_BYTES && entry.chunks.length > 0) {
         const oldest = entry.chunks[0];
         if (oldest === undefined) break;
-        const overflow = entry.totalChars - MAX_BACKLOG_CHARS;
-        if (oldest.length <= overflow) {
+        const overflow = entry.totalBytes - MAX_BACKLOG_BYTES;
+        if (oldest.byteLength <= overflow) {
           entry.chunks.shift();
-          entry.totalChars -= oldest.length;
+          entry.totalBytes -= oldest.byteLength;
         } else {
-          entry.chunks[0] = oldest.slice(overflow);
-          entry.totalChars -= overflow;
+          entry.chunks[0] = oldest.subarray(overflow);
+          entry.totalBytes -= overflow;
           break;
         }
       }
     }
 
     for (const listener of this.outputListeners.get(sessionId) ?? []) {
-      listener(text, sequence, daemonEpoch);
+      listener(data, sequence, daemonEpoch);
     }
   }
 }

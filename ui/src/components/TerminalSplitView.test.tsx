@@ -87,6 +87,8 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(screen.getByTestId("tab-strip")).toBeInTheDocument();
     expect(screen.getByTestId("pane-leaf")).toBeInTheDocument();
     expect(screen.getByTestId("pane-toolbar")).toBeInTheDocument();
+    expect(screen.getByTestId("pane-toolbar-hotspot")).toHaveClass("h-4");
+    expect(screen.getByTestId("pane-toolbar-hotspot")).toHaveClass("pointer-events-none");
     expect(screen.getByRole("button", { name: "Split pane right" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Split pane down" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close split view" })).not.toBeInTheDocument();
@@ -431,5 +433,37 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(within(buttons[0]).getByText("Default")).toBeVisible();
     fireEvent.click(screen.getByText("Claude"));
     expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
+  });
+
+  it("narrows pane toolbar hover hotspot to h-4 (16px) and toggles toolbar on top hover", () => {
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
+
+    const hotspot = screen.getByTestId("pane-toolbar-hotspot");
+    const toolbar = screen.getByTestId("pane-toolbar");
+    const paneLeaf = screen.getByTestId("pane-leaf");
+
+    expect(hotspot).toHaveClass("h-4");
+    expect(toolbar).toHaveClass("pointer-events-none");
+
+    // Mock bounding rect for pane-leaf
+    vi.spyOn(paneLeaf, "getBoundingClientRect").mockReturnValue({
+      top: 100,
+      left: 0,
+      right: 500,
+      bottom: 600,
+      width: 500,
+      height: 500,
+      x: 0,
+      y: 100,
+      toJSON: () => {},
+    });
+
+    // Move mouse within top 16px (e.g. clientY = 108, relativeY = 8)
+    fireEvent.mouseMove(paneLeaf, { clientY: 108 });
+    expect(toolbar).toHaveClass("pointer-events-auto");
+
+    // Move mouse below 16px (e.g. clientY = 150, relativeY = 50)
+    fireEvent.mouseMove(paneLeaf, { clientY: 150 });
+    expect(toolbar).toHaveClass("pointer-events-none");
   });
 });

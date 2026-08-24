@@ -2,10 +2,10 @@ use crate::daemon::client::DaemonClient;
 use crate::daemon::server::DaemonServer;
 use crate::ipc::terminal::{get_cached_cwd, process_cwd};
 use crate::ipc::*;
-use crate::remote::{RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy};
-use crate::terminal::TerminalService;
+use crate::remote::{RemoteNetworkMode, RemoteRestartPolicy};
 use crate::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Listener, Manager};
 use tempfile::TempDir;
@@ -25,6 +25,33 @@ fn setup_workspace() -> (TempDir, WorkspaceRegistry) {
         .register("workspace-test", repo.path())
         .expect("register");
     (repo, registry)
+}
+
+async fn setup_test_daemon_with_remote_paths(
+    config_path: Option<PathBuf>,
+    auth_path: Option<PathBuf>,
+) -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHandle<()>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("test_daemon.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
+    let server = Arc::new(DaemonServer::new_with_paths(config_path, auth_path));
+    let server_clone = Arc::clone(&server);
+    let server_task = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let s = Arc::clone(&server_clone);
+                    tokio::spawn(async move {
+                        s.handle_client(stream).await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket_path));
+    (dir, client, server_task)
 }
 
 async fn setup_test_daemon() -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHandle<()>) {
@@ -85,6 +112,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
             cwd: None,
             cols: Some(80),
             rows: Some(24),
+            client_request_id: None,
         },
     )
     .await
@@ -148,6 +176,12 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
 
     let client_state = app.state::<Arc<DaemonClient>>();
     let registry_state = app.state::<WorkspaceRegistry>();
+    let (tx, mut rx_event) = tokio::sync::mpsc::channel::<TerminalOutputPayload>(16);
+    app.listen(TERMINAL_OUTPUT_EVENT, move |event: tauri::Event| {
+        if let Ok(payload) = serde_json::from_str::<TerminalOutputPayload>(event.payload()) {
+            let _ = tx.try_send(payload);
+        }
+    });
 
     let spawned = cmd_terminal_spawn(
         app.handle().clone(),
@@ -159,6 +193,7 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
             cwd: None,
             cols: Some(80),
             rows: Some(24),
+            client_request_id: None,
         },
     )
     .await
@@ -172,8 +207,16 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
     .await
     .expect("write");
 
-    // Wait a brief moment for output to be processed by daemon
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let mut collected = Vec::new();
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        while !String::from_utf8_lossy(&collected).contains("initial_attach_test") {
+            let payload = rx_event.recv().await.expect("output event");
+            assert_eq!(payload.session_id, spawned.session_id);
+            collected.extend_from_slice(&STANDARD.decode(payload.data).expect("base64"));
+        }
+    })
+    .await
+    .expect("initial output timeout");
 
     let attach_res = cmd_terminal_attach(
         app.handle().clone(),
@@ -327,6 +370,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
             cwd: None,
             cols: Some(80),
             rows: Some(24),
+            client_request_id: None,
         },
     )
     .await
@@ -401,6 +445,7 @@ async fn terminal_cwd_cache_and_resolution_contract() {
             cwd: None,
             cols: Some(80),
             rows: Some(24),
+            client_request_id: None,
         },
     )
     .await
@@ -457,6 +502,7 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
             cwd: None,
             cols: Some(80),
             rows: Some(24),
+            client_request_id: None,
         },
     )
     .await
@@ -509,27 +555,18 @@ async fn remote_status_after_reopen_persists_config_mode_until_started() {
     )
     .expect("write stale enabled config");
 
-    let terminal = Arc::new(TerminalService::default());
-    let registry = WorkspaceRegistry::new();
-    let first = RemoteGatewayState::new_with_paths(
-        Arc::clone(&terminal),
-        registry.clone(),
-        Some(config_path.clone()),
-        Some(auth_path.clone()),
-    );
-    first.config.write().mode = RemoteNetworkMode::LocalNetwork;
-    first.config.write().port = 45678;
-    first.config.write().allow_control = false;
-    first.persist_config().expect("persist enabled session");
-
-    let reopened = Arc::new(RemoteGatewayState::new_with_paths(
-        terminal,
-        registry,
+    let (_daemon_dir, daemon_client, server_task) = setup_test_daemon_with_remote_paths(
         Some(config_path),
         Some(auth_path),
+    )
+    .await;
+
+    let remote_manager = Arc::new(RemoteGatewayManager::from_daemon(
+        Arc::clone(&daemon_client),
     ));
     let app = tauri::test::mock_builder()
-        .manage(Arc::new(RemoteGatewayManager::new(reopened)))
+        .manage(Arc::clone(&daemon_client))
+        .manage(remote_manager)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
 
@@ -542,6 +579,8 @@ async fn remote_status_after_reopen_persists_config_mode_until_started() {
     assert_eq!(status.port, 45678);
     assert!(status.bound_address.is_none());
     assert_eq!(status.restart_policy, RemoteRestartPolicy::RestoreListener);
+
+    server_task.abort();
 }
 
 #[test]
@@ -604,6 +643,7 @@ async fn test_project_registration_then_daemon_spawn() {
             cwd: None,
             cols: Some(80),
             rows: Some(24),
+            client_request_id: None,
         },
     )
     .await

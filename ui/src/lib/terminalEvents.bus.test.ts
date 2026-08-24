@@ -18,13 +18,21 @@ vi.mock("./tauri", () => ({
   }),
 }));
 
-import { getBacklogMetricsForTest, terminalEventBus } from "./terminalEvents";
+import {
+  getBacklogMetricsForTest,
+  terminalEventBus,
+  type TerminalOutputChunk,
+} from "./terminalEvents";
 
 function encodeOutput(text: string) {
   const bytes = new TextEncoder().encode(text);
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
+}
+
+function outputChunkToText(chunk: TerminalOutputChunk): string {
+  return typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
 }
 
 describe("terminalEventBus title tracking", () => {
@@ -84,7 +92,6 @@ describe("terminalEventBus backlog buffer", () => {
     const metrics = getBacklogMetricsForTest(sessionId);
     expect(metrics.sessions).toBe(1);
     expect(metrics.chars).toBe(chunkCount * 100);
-    // On chunk-ring implementation, chunks must be preserved (>1) rather than collapsed into a single monolithic string
     expect(metrics.chunks).toBeGreaterThan(1);
     expect(metrics.chunks).toBe(chunkCount);
 
@@ -95,7 +102,7 @@ describe("terminalEventBus backlog buffer", () => {
     await terminalEventBus.ensureStarted();
     const sessionId = "backend-overflow";
     const chunkSize = 10000;
-    const chunkCount = 60; // 600,000 chars > 512 * 1024 (524,288)
+    const chunkCount = 60;
     const tailMarker = "TAIL_SENTINEL_2026";
 
     for (let index = 0; index < chunkCount; index += 1) {
@@ -110,8 +117,8 @@ describe("terminalEventBus backlog buffer", () => {
     }
 
     let replayed = "";
-    const unsubscribe = terminalEventBus.subscribeOutput(sessionId, (text) => {
-      replayed = text;
+    const unsubscribe = terminalEventBus.subscribeOutput(sessionId, (chunk) => {
+      replayed = outputChunkToText(chunk);
     }, true);
 
     const maxBacklog = 512 * 1024;
@@ -159,15 +166,13 @@ describe("terminalEventBus backlog buffer", () => {
       data: encodeOutput(initialPrefix),
     });
 
-    // Send OSC title update while no output renderer is subscribed
     callbacks.output?.({
       sessionId,
       data: encodeOutput("\x1b]0;background task running\x07"),
     });
 
-    // Send large volume exceeding maxBacklog to trigger retention truncation
     const chunkSize = 10000;
-    const chunkCount = 60; // 600,000 chars > 512 * 1024 (524,288)
+    const chunkCount = 60;
     for (let index = 0; index < chunkCount; index += 1) {
       callbacks.output?.({
         sessionId,
@@ -175,36 +180,31 @@ describe("terminalEventBus backlog buffer", () => {
       });
     }
 
-    // Send another title update while unsubscribed from output
     callbacks.output?.({
       sessionId,
       data: encodeOutput("\x1b]0;background task complete\x07"),
     });
 
-    // Assert title listener caught both title events despite no output listener being subscribed
     expect(titles).toEqual([
       [sessionId, "background task running"],
       [sessionId, "background task complete"],
     ]);
 
-    // Now subscribe an output listener and verify replay behavior
     const receivedChunks: string[] = [];
     const unsubscribeOutput = terminalEventBus.subscribeOutput(
       sessionId,
       (chunk) => {
-        receivedChunks.push(chunk);
+        receivedChunks.push(outputChunkToText(chunk));
       },
       true,
     );
 
-    // Initial replayed chunk must be bounded to MAX_BACKLOG_CHARS and contain the suffix, not the dropped prefix
     expect(receivedChunks).toHaveLength(1);
     const replayedBacklog = receivedChunks[0]!;
     expect(replayedBacklog.length).toBe(maxBacklog);
     expect(replayedBacklog.includes(initialPrefix)).toBe(false);
     expect(replayedBacklog.includes("chunk-0059:")).toBe(true);
 
-    // Emit live output after subscribing
     const liveChunk1 = "LIVE_CHUNK_ALPHA\n";
     const liveChunk2 = "LIVE_CHUNK_BETA\n";
     callbacks.output?.({
@@ -216,7 +216,6 @@ describe("terminalEventBus backlog buffer", () => {
       data: encodeOutput(liveChunk2),
     });
 
-    // Assert retained chunk was received first, followed by live output in exact order
     expect(receivedChunks).toEqual([
       replayedBacklog,
       liveChunk1,
@@ -235,8 +234,8 @@ describe("terminalEventBus backlog buffer", () => {
 
     const unsubscribe = terminalEventBus.subscribeOutput(
       sessionId,
-      (text, sequence, daemonEpoch) => {
-        delivered.push({ text, sequence, daemonEpoch });
+      (chunk, sequence, daemonEpoch) => {
+        delivered.push({ text: outputChunkToText(chunk), sequence, daemonEpoch });
       },
       false,
     );

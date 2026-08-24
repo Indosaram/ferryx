@@ -3,11 +3,11 @@ import {
   closeTerminal,
   listTerminalSessions,
   onTerminalLifecycle,
-  onTerminalOutput,
   resizeTerminal,
   signalTerminal,
   writeTerminal,
 } from "../tauri";
+import { terminalEventBus } from "../terminalEvents";
 import { decodeBase64 } from "../terminalOutput";
 import type { TerminalAttachment, TerminalTransport, Unsubscribe } from "./types";
 
@@ -52,27 +52,10 @@ export class TauriTerminalTransport implements TerminalTransport {
   }
 
   onOutput(sessionId: string, listener: (data: string | Uint8Array) => void): Unsubscribe {
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-
-    onTerminalOutput((payload) => {
-      if (payload.sessionId === sessionId) {
-        listener(decodeBase64(payload.data));
-      }
-    }).then((fn) => {
-      if (cancelled) {
-        fn();
-      } else {
-        unlisten = fn;
-      }
+    void terminalEventBus.ensureStarted().catch((error) => {
+      console.warn("Failed to start terminal output event bus", error);
     });
-
-    return () => {
-      cancelled = true;
-      if (unlisten) {
-        unlisten();
-      }
-    };
+    return terminalEventBus.subscribeOutput(sessionId, listener, false);
   }
 
   onLifecycle(listener: (event: { sessionId: string; state: string; exitCode?: number | null }) => void): Unsubscribe {

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Runtime, State};
 
 pub const TERMINAL_OUTPUT_EVENT: &str = "terminal_output";
@@ -19,8 +20,13 @@ pub const TERMINAL_LIFECYCLE_EVENT: &str = "terminal_lifecycle";
 const BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const BATCH_MAX_BYTES: usize = 32 * 1024;
 const CWD_CACHE_TTL: Duration = Duration::from_millis(500);
+const TERMINAL_OUTPUT_FRAME_VERSION: u8 = 1;
+const TERMINAL_OUTPUT_FRAME_FIXED_BYTES: usize = 20;
+const TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE: u8 = 1 << 0;
+const TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH: u8 = 1 << 1;
 
 static CWD_CACHE: Mutex<Option<HashMap<String, (Instant, PathBuf)>>> = Mutex::new(None);
+static TERMINAL_OUTPUT_CHANNEL: Mutex<Option<Channel<Response>>> = Mutex::new(None);
 
 pub fn get_cached_cwd(session_id: &str) -> Option<PathBuf> {
     let mut guard = CWD_CACHE.lock();
@@ -89,225 +95,178 @@ pub fn start_managed_pump<R: Runtime>(
         let mut last_seq: Option<u64> = None;
 
         loop {
-            if buffer.is_empty() {
-                match messages.recv().await {
-                    Some(DaemonStreamMessage::Output { sequence, data, .. }) => {
-                        buffer.extend_from_slice(&data);
-                        last_seq = Some(sequence);
-                        while buffer.len() < BATCH_MAX_BYTES {
-                            match messages.try_recv() {
-                                Ok(DaemonStreamMessage::Output { sequence, data, .. }) => {
-                                    buffer.extend_from_slice(&data);
-                                    last_seq = Some(sequence);
-                                }
-                                Ok(DaemonStreamMessage::Lagged {
-                                    end_sequence,
-                                    history,
-                                    ..
-                                }) => {
-                                    buffer.extend_from_slice(&history);
-                                    if let Some(seq) = end_sequence {
-                                        last_seq = Some(seq);
-                                    }
-                                }
-                                Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
-                                    if !buffer.is_empty() {
-                                        flush_terminal_output(
-                                            &app,
-                                            &session_id_clone,
-                                            &mut buffer,
-                                            last_seq.take(),
-                                            Some(&epoch_str),
-                                        );
-                                    }
-                                    let _ = app.emit(
-                                        TERMINAL_LIFECYCLE_EVENT,
-                                        TerminalLifecyclePayload {
-                                            session_id: session_id_clone.clone(),
-                                            state: TerminalLifecycleState::Exited,
-                                            exit_code,
-                                            reason: None,
-                                        },
-                                    );
-                                    return;
-                                }
-                                Ok(DaemonStreamMessage::Gap { .. }) => {}
-                                Err(_) => break,
-                            }
-                        }
-                        if buffer.len() >= BATCH_MAX_BYTES {
-                            flush_terminal_output(
-                                &app,
-                                &session_id_clone,
-                                &mut buffer,
-                                last_seq.take(),
-                                Some(&epoch_str),
-                            );
-                        }
-                    }
-                    Some(DaemonStreamMessage::Lagged {
-                        end_sequence,
-                        history,
-                        ..
-                    }) => {
-                        buffer.extend_from_slice(&history);
-                        if let Some(seq) = end_sequence {
-                            last_seq = Some(seq);
-                        }
-                        flush_terminal_output(
-                            &app,
-                            &session_id_clone,
-                            &mut buffer,
-                            last_seq.take(),
-                            Some(&epoch_str),
-                        );
-                    }
-                    Some(DaemonStreamMessage::Gap { .. }) => {}
-                    Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
-                        let _ = app.emit(
-                            TERMINAL_LIFECYCLE_EVENT,
-                            TerminalLifecyclePayload {
-                                session_id: session_id_clone.clone(),
-                                state: TerminalLifecycleState::Exited,
-                                exit_code,
-                                reason: None,
-                            },
-                        );
-                        break;
-                    }
-                    None => {
-                        break;
-                    }
-                }
+            let next = if buffer.is_empty() {
+                messages.recv().await
             } else {
                 tokio::select! {
-                    msg = messages.recv() => {
-                        match msg {
-                            Some(DaemonStreamMessage::Output {
-                                sequence,
-                                data,
-                                ..
-                            }) => {
-                                buffer.extend_from_slice(&data);
-                                last_seq = Some(sequence);
-                                while buffer.len() < BATCH_MAX_BYTES {
-                                    match messages.try_recv() {
-                                        Ok(DaemonStreamMessage::Output {
-                                            sequence,
-                                            data,
-                                            ..
-                                        }) => {
-                                            buffer.extend_from_slice(&data);
-                                            last_seq = Some(sequence);
-                                        }
-                                        Ok(DaemonStreamMessage::Lagged {
-                                            end_sequence,
-                                            history,
-                                            ..
-                                        }) => {
-                                            buffer.extend_from_slice(&history);
-                                            if let Some(seq) = end_sequence {
-                                                last_seq = Some(seq);
-                                            }
-                                        }
-                                        Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
-                                            if !buffer.is_empty() {
-                                                flush_terminal_output(
-                                                    &app,
-                                                    &session_id_clone,
-                                                    &mut buffer,
-                                                    last_seq.take(),
-                                                    Some(&epoch_str),
-                                                );
-                                            }
-                                            let _ = app.emit(
-                                                TERMINAL_LIFECYCLE_EVENT,
-                                                TerminalLifecyclePayload {
-                                                    session_id: session_id_clone.clone(),
-                                                    state: TerminalLifecycleState::Exited,
-                                                    exit_code,
-                                                    reason: None,
-                                                },
-                                            );
-                                            return;
-                                        }
-                                        Ok(DaemonStreamMessage::Gap { .. }) => {}
-                                        Err(_) => break,
-                                    }
-                                }
-                                if buffer.len() >= BATCH_MAX_BYTES {
-                                    flush_terminal_output(
-                                        &app,
-                                        &session_id_clone,
-                                        &mut buffer,
-                                        last_seq.take(),
-                                        Some(&epoch_str),
-                                    );
-                                }
-                            }
-                            Some(DaemonStreamMessage::Lagged {
-                                end_sequence,
-                                history,
-                                ..
-                            }) => {
-                                buffer.extend_from_slice(&history);
-                                if let Some(seq) = end_sequence {
-                                    last_seq = Some(seq);
-                                }
-                                flush_terminal_output(
-                                    &app,
-                                    &session_id_clone,
-                                    &mut buffer,
-                                    last_seq.take(),
-                                    Some(&epoch_str),
-                                );
-                            }
-                            Some(DaemonStreamMessage::Gap { .. }) => {}
-                            Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
-                                if !buffer.is_empty() {
-                                    flush_terminal_output(
-                                        &app,
-                                        &session_id_clone,
-                                        &mut buffer,
-                                        last_seq.take(),
-                                        Some(&epoch_str),
-                                    );
-                                }
-                                let _ = app.emit(
-                                    TERMINAL_LIFECYCLE_EVENT,
-                                    TerminalLifecyclePayload {
-                                        session_id: session_id_clone.clone(),
-                                        state: TerminalLifecycleState::Exited,
-                                        exit_code,
-                                        reason: None,
-                                    },
-                                );
-                                break;
-                            }
-                            None => {
-                                break;
-                            }
-                        }
-                    }
+                    msg = messages.recv() => msg,
                     _ = tokio::time::sleep(BATCH_FLUSH_INTERVAL) => {
                         flush_terminal_output(
                             &app,
                             &session_id_clone,
                             &mut buffer,
                             last_seq.take(),
-                            Some(&epoch_str),
+                            Some(epoch),
+                        );
+                        continue;
+                    }
+                }
+            };
+
+            match next {
+                Some(DaemonStreamMessage::Output { sequence, data, .. }) => {
+                    buffer.extend_from_slice(&data);
+                    last_seq = Some(sequence);
+                    while buffer.len() < BATCH_MAX_BYTES {
+                        match messages.try_recv() {
+                            Ok(DaemonStreamMessage::Output { sequence, data, .. }) => {
+                                buffer.extend_from_slice(&data);
+                                last_seq = Some(sequence);
+                            }
+                            Ok(DaemonStreamMessage::Lagged {
+                                requested_after_sequence,
+                                available_from_sequence,
+                                start_sequence,
+                                end_sequence,
+                                history,
+                                ..
+                            }) => {
+                                flush_terminal_output(
+                                    &app,
+                                    &session_id_clone,
+                                    &mut buffer,
+                                    last_seq.take(),
+                                    Some(epoch),
+                                );
+                                emit_terminal_replay_gap(
+                                    &app,
+                                    &session_id_clone,
+                                    requested_after_sequence,
+                                    available_from_sequence,
+                                    start_sequence,
+                                    end_sequence,
+                                    &history,
+                                    Some(&epoch_str),
+                                );
+                            }
+                            Ok(DaemonStreamMessage::Gap {
+                                requested_after_sequence,
+                                available_from_sequence,
+                                ..
+                            }) => {
+                                flush_terminal_output(
+                                    &app,
+                                    &session_id_clone,
+                                    &mut buffer,
+                                    last_seq.take(),
+                                    Some(epoch),
+                                );
+                                emit_terminal_replay_gap(
+                                    &app,
+                                    &session_id_clone,
+                                    requested_after_sequence,
+                                    available_from_sequence,
+                                    None,
+                                    None,
+                                    &[],
+                                    Some(&epoch_str),
+                                );
+                            }
+                            Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                                flush_terminal_output(
+                                    &app,
+                                    &session_id_clone,
+                                    &mut buffer,
+                                    last_seq.take(),
+                                    Some(epoch),
+                                );
+                                emit_terminal_exit(&app, &session_id_clone, exit_code);
+                                return;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if buffer.len() >= BATCH_MAX_BYTES {
+                        flush_terminal_output(
+                            &app,
+                            &session_id_clone,
+                            &mut buffer,
+                            last_seq.take(),
+                            Some(epoch),
                         );
                     }
                 }
+                Some(DaemonStreamMessage::Lagged {
+                    requested_after_sequence,
+                    available_from_sequence,
+                    start_sequence,
+                    end_sequence,
+                    history,
+                    ..
+                }) => {
+                    flush_terminal_output(
+                        &app,
+                        &session_id_clone,
+                        &mut buffer,
+                        last_seq.take(),
+                        Some(epoch),
+                    );
+                    emit_terminal_replay_gap(
+                        &app,
+                        &session_id_clone,
+                        requested_after_sequence,
+                        available_from_sequence,
+                        start_sequence,
+                        end_sequence,
+                        &history,
+                        Some(&epoch_str),
+                    );
+                }
+                Some(DaemonStreamMessage::Gap {
+                    requested_after_sequence,
+                    available_from_sequence,
+                    ..
+                }) => {
+                    flush_terminal_output(
+                        &app,
+                        &session_id_clone,
+                        &mut buffer,
+                        last_seq.take(),
+                        Some(epoch),
+                    );
+                    emit_terminal_replay_gap(
+                        &app,
+                        &session_id_clone,
+                        requested_after_sequence,
+                        available_from_sequence,
+                        None,
+                        None,
+                        &[],
+                        Some(&epoch_str),
+                    );
+                }
+                Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
+                    flush_terminal_output(
+                        &app,
+                        &session_id_clone,
+                        &mut buffer,
+                        last_seq.take(),
+                        Some(epoch),
+                    );
+                    emit_terminal_exit(&app, &session_id_clone, exit_code);
+                    break;
+                }
+                None => break,
             }
         }
+
         if !buffer.is_empty() {
             flush_terminal_output(
                 &app,
                 &session_id_clone,
                 &mut buffer,
                 last_seq.take(),
-                Some(&epoch_str),
+                Some(epoch),
             );
         }
 
@@ -330,6 +289,7 @@ pub struct SpawnTerminalRequest {
     pub cwd: Option<PathBuf>,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,15 +311,31 @@ pub struct TerminalCwdResponse {
     pub cwd: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalOutputKind {
+    Output,
+    ReplayGap,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutputPayload {
     pub session_id: String,
+    pub kind: TerminalOutputKind,
     pub data: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_after_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_from_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_sequence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,21 +395,83 @@ impl From<TerminalSignalRequest> for TerminalSignal {
     }
 }
 
+fn encode_terminal_output_frame(
+    session_id: &str,
+    data: &[u8],
+    sequence: Option<u64>,
+    daemon_epoch: Option<u64>,
+) -> Option<Vec<u8>> {
+    let session_id = session_id.as_bytes();
+    let session_id_len = u16::try_from(session_id.len()).ok()?;
+    let mut flags = 0u8;
+    if sequence.is_some() {
+        flags |= TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE;
+    }
+    if daemon_epoch.is_some() {
+        flags |= TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH;
+    }
+
+    let mut frame = Vec::with_capacity(TERMINAL_OUTPUT_FRAME_FIXED_BYTES + session_id.len() + data.len());
+    frame.push(TERMINAL_OUTPUT_FRAME_VERSION);
+    frame.push(flags);
+    frame.extend_from_slice(&session_id_len.to_le_bytes());
+    frame.extend_from_slice(&sequence.unwrap_or_default().to_le_bytes());
+    frame.extend_from_slice(&daemon_epoch.unwrap_or_default().to_le_bytes());
+    frame.extend_from_slice(session_id);
+    frame.extend_from_slice(data);
+    Some(frame)
+}
+
+#[tauri::command]
+pub fn cmd_terminal_output_channel(channel: Channel<Response>) {
+    *TERMINAL_OUTPUT_CHANNEL.lock() = Some(channel);
+}
+
 fn flush_terminal_output<R: Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
     buffer: &mut Vec<u8>,
     sequence: Option<u64>,
-    daemon_epoch: Option<&str>,
+    daemon_epoch: Option<u64>,
 ) -> bool {
     if buffer.is_empty() {
         return true;
     }
+
+    let channel = TERMINAL_OUTPUT_CHANNEL.lock().clone();
+    if let Some(channel) = channel {
+        if let Some(frame) = encode_terminal_output_frame(session_id, buffer, sequence, daemon_epoch) {
+            match channel.send(Response::new(frame)) {
+                Ok(()) => {
+                    buffer.clear();
+                    return true;
+                }
+                Err(error) => {
+                    tracing::debug!("Failed to send terminal output channel frame: {error}");
+                    let mut guard = TERMINAL_OUTPUT_CHANNEL.lock();
+                    if guard
+                        .as_ref()
+                        .is_some_and(|current| current.id() == channel.id())
+                    {
+                        *guard = None;
+                    }
+                }
+            }
+        }
+    }
+
+    // Compatibility/failure fallback. Normal desktop runtime registers the raw-byte channel
+    // before terminals are attached, so large stdout does not take this JSON/base64 path.
     let payload = TerminalOutputPayload {
         session_id: session_id.to_string(),
+        kind: TerminalOutputKind::Output,
         data: STANDARD.encode(&buffer),
         sequence: sequence.map(|s| s.to_string()),
         daemon_epoch: daemon_epoch.map(|s| s.to_string()),
+        requested_after_sequence: None,
+        available_from_sequence: None,
+        start_sequence: None,
+        end_sequence: None,
     };
     buffer.clear();
     if let Err(error) = app.emit(TERMINAL_OUTPUT_EVENT, payload) {
@@ -442,6 +480,47 @@ fn flush_terminal_output<R: Runtime>(
     } else {
         true
     }
+}
+
+fn emit_terminal_replay_gap<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    requested_after_sequence: u64,
+    available_from_sequence: u64,
+    start_sequence: Option<u64>,
+    end_sequence: Option<u64>,
+    history: &[u8],
+    daemon_epoch: Option<&str>,
+) -> bool {
+    let payload = TerminalOutputPayload {
+        session_id: session_id.to_string(),
+        kind: TerminalOutputKind::ReplayGap,
+        data: STANDARD.encode(history),
+        sequence: end_sequence.map(|s| s.to_string()),
+        daemon_epoch: daemon_epoch.map(|s| s.to_string()),
+        requested_after_sequence: Some(requested_after_sequence.to_string()),
+        available_from_sequence: Some(available_from_sequence.to_string()),
+        start_sequence: start_sequence.map(|s| s.to_string()),
+        end_sequence: end_sequence.map(|s| s.to_string()),
+    };
+    if let Err(error) = app.emit(TERMINAL_OUTPUT_EVENT, payload) {
+        tracing::debug!("Failed to emit terminal replay-gap event: {error}");
+        false
+    } else {
+        true
+    }
+}
+
+fn emit_terminal_exit<R: Runtime>(app: &AppHandle<R>, session_id: &str, exit_code: Option<i32>) {
+    let _ = app.emit(
+        TERMINAL_LIFECYCLE_EVENT,
+        TerminalLifecyclePayload {
+            session_id: session_id.to_string(),
+            state: TerminalLifecycleState::Exited,
+            exit_code,
+            reason: None,
+        },
+    );
 }
 
 #[tauri::command]
@@ -492,7 +571,14 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     })
     .await?;
 
-    let client_request_id = uuid::Uuid::new_v4().to_string();
+    let repo_root_str = worktree_manager.repo_root().to_string_lossy().to_string();
+    daemon_client
+        .register_workspace(&request.workspace_id, &repo_root_str)
+        .await?;
+
+    let client_request_id = request
+        .client_request_id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let session_id = daemon_client
         .spawn_terminal(
             client_request_id,

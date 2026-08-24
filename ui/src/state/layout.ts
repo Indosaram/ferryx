@@ -648,6 +648,19 @@ export function defaultContentForTab(tab: WorkspaceTab, sessionIdOverride?: stri
   return createTerminalPaneContent(sessionIdOverride ?? tab.sessionId);
 }
 
+export function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPaneLayout {
+  const isBrowserTab = tab.kind === "browser";
+  const fallbackLeafId = `leaf-default-${tab.id}`;
+  const defaultContent = defaultContentForTab(tab);
+  return layout.layoutsByTabId?.[tab.id] ?? {
+    root: { type: "leaf", leafId: fallbackLeafId },
+    activeLeafId: fallbackLeafId,
+    expandedLeafId: null,
+    sessionIdsByLeafId: { [fallbackLeafId]: isBrowserTab ? "" : tab.sessionId },
+    contentsByLeafId: { [fallbackLeafId]: defaultContent },
+  };
+}
+
 function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutState {
   if (!force && isNormalizedLayoutState(state)) return state;
 

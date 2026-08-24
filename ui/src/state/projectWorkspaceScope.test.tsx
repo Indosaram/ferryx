@@ -36,6 +36,7 @@ describe("registered project workspace scope", () => {
       workspaceId: "project-a",
       worktree: { wsId: "project-a", slug: "main" },
       cwd: "/repo/main",
+      clientRequestId: expect.any(String),
     });
     expect(Object.values(result.current.state.sessions)[0]).toMatchObject({ workspaceId: "project-a" });
   });

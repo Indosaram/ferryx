@@ -13,6 +13,7 @@ import {
   saveBrowserSettings,
   searchUrlFor,
 } from "./browserSettings";
+import { BROWSER_SETTINGS_STORAGE_KEY } from "./storageKeys";
 
 beforeEach(() => {
   localStorage.clear();
@@ -33,6 +34,21 @@ describe("browser settings", () => {
     saveBrowserSettings({ homePage: "https://example.com/home" });
     expect(loadBrowserSettings().homePage).toBe("https://example.com/home");
     expect(newBrowserTabUrl()).toBe("https://example.com/home");
+  });
+
+  it("keeps the history preference independent from partial browser-settings writes", () => {
+    saveBrowserSettings({ rememberBrowsingHistory: false });
+    expect(loadBrowserSettings().rememberBrowsingHistory).toBe(false);
+
+    localStorage.setItem(BROWSER_SETTINGS_STORAGE_KEY, JSON.stringify({
+      searchEngine: "google",
+      defaultZoom: 125,
+      restoreTabsOnLaunch: true,
+    }));
+    expect(loadBrowserSettings().rememberBrowsingHistory).toBe(false);
+
+    saveBrowserSettings({ rememberBrowsingHistory: true });
+    expect(loadBrowserSettings().rememberBrowsingHistory).toBe(true);
   });
 
   it("uses one search helper for Google, Bing, DuckDuckGo, and Brave Search", () => {

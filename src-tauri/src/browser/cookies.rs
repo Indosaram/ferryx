@@ -1,5 +1,7 @@
 use crate::browser::BrowserError;
+use cookie::{Cookie, SameSite};
 use serde::Deserialize;
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedCookie {
@@ -27,7 +29,12 @@ struct JsonCookie {
     secure: bool,
     #[serde(default, alias = "http_only")]
     http_only: bool,
-    #[serde(default, alias = "expirationDate", alias = "expiration_date", alias = "expires")]
+    #[serde(
+        default,
+        alias = "expirationDate",
+        alias = "expiration_date",
+        alias = "expires"
+    )]
     expiration_date: Option<f64>,
     #[serde(default, alias = "same_site")]
     same_site: Option<String>,
@@ -36,38 +43,61 @@ struct JsonCookie {
 fn from_json_cookie(cookie: JsonCookie) -> Result<ImportedCookie, BrowserError> {
     let name = cookie.name.trim().to_string();
     if name.is_empty() {
-        return Err(BrowserError::CookieImport("cookie name cannot be empty".into()));
+        return Err(BrowserError::CookieImport(
+            "cookie name cannot be empty".into(),
+        ));
     }
     Ok(ImportedCookie {
         name,
         value: cookie.value,
-        domain: cookie.domain.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()),
-        path: cookie.path.filter(|value| value.starts_with('/')).unwrap_or_else(|| "/".into()),
+        domain: cookie
+            .domain
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        path: cookie
+            .path
+            .filter(|value| value.starts_with('/'))
+            .unwrap_or_else(|| "/".into()),
         secure: cookie.secure,
         http_only: cookie.http_only,
         expires_unix: cookie.expiration_date.and_then(|value| {
-            if value.is_finite() && value > 0.0 { Some(value.floor() as i64) } else { None }
+            if value.is_finite() && value > 0.0 {
+                Some(value.floor() as i64)
+            } else {
+                None
+            }
         }),
         same_site: cookie.same_site.map(|value| value.to_ascii_lowercase()),
     })
 }
 
 fn parse_json(input: &str) -> Result<Vec<ImportedCookie>, BrowserError> {
-    let value: serde_json::Value = serde_json::from_str(input)
-        .map_err(|error| BrowserError::CookieImport(format!("invalid JSON cookie file: {error}")))?;
+    let value: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+        BrowserError::CookieImport(format!("invalid JSON cookie file: {error}"))
+    })?;
     let cookie_values = match value {
         serde_json::Value::Array(values) => values,
         serde_json::Value::Object(mut object) => object
             .remove("cookies")
             .and_then(|value| value.as_array().cloned())
-            .ok_or_else(|| BrowserError::CookieImport("JSON must be an array or contain a cookies array".into()))?,
-        _ => return Err(BrowserError::CookieImport("JSON cookie file must contain an array".into())),
+            .ok_or_else(|| {
+                BrowserError::CookieImport(
+                    "JSON must be an array or contain a cookies array".into(),
+                )
+            })?,
+        _ => {
+            return Err(BrowserError::CookieImport(
+                "JSON cookie file must contain an array".into(),
+            ))
+        }
     };
     cookie_values
         .into_iter()
         .map(|value| {
             serde_json::from_value::<JsonCookie>(value)
-                .map_err(|error| BrowserError::CookieImport(format!("invalid cookie entry: {error}")))
+                .map_err(|error| {
+                    BrowserError::CookieImport(format!("invalid cookie entry: {error}"))
+                })
                 .and_then(from_json_cookie)
         })
         .collect()
@@ -94,14 +124,25 @@ fn parse_netscape(input: &str) -> Result<Vec<ImportedCookie>, BrowserError> {
         }
         let name = fields[5].trim();
         if name.is_empty() {
-            return Err(BrowserError::CookieImport(format!("empty cookie name on line {}", line_number + 1)));
+            return Err(BrowserError::CookieImport(format!(
+                "empty cookie name on line {}",
+                line_number + 1
+            )));
         }
-        let expires_unix = fields[4].trim().parse::<i64>().ok().filter(|value| *value > 0);
+        let expires_unix = fields[4]
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0);
         cookies.push(ImportedCookie {
             name: name.to_string(),
             value: fields[6].to_string(),
             domain: Some(fields[0].trim().to_string()).filter(|value| !value.is_empty()),
-            path: if fields[2].starts_with('/') { fields[2].to_string() } else { "/".into() },
+            path: if fields[2].starts_with('/') {
+                fields[2].to_string()
+            } else {
+                "/".into()
+            },
             secure: fields[3].eq_ignore_ascii_case("TRUE"),
             http_only,
             expires_unix,
@@ -119,7 +160,46 @@ pub fn parse_cookie_file(input: &str) -> Result<Vec<ImportedCookie>, BrowserErro
         parse_netscape(input)?
     };
     if cookies.is_empty() {
-        return Err(BrowserError::CookieImport("cookie file did not contain any cookies".into()));
+        return Err(BrowserError::CookieImport(
+            "cookie file did not contain any cookies".into(),
+        ));
     }
     Ok(cookies)
+}
+
+pub fn cookie_from_imported(cookie: ImportedCookie) -> Result<Cookie<'static>, BrowserError> {
+    let mut builder = Cookie::build((cookie.name, cookie.value))
+        .path(cookie.path)
+        .secure(cookie.secure)
+        .http_only(cookie.http_only);
+
+    if let Some(domain) = cookie.domain {
+        builder = builder.domain(domain);
+    }
+    if let Some(expires_unix) = cookie.expires_unix {
+        let expires = OffsetDateTime::from_unix_timestamp(expires_unix).map_err(|error| {
+            BrowserError::CookieImport(format!(
+                "invalid cookie expiration timestamp {expires_unix}: {error}"
+            ))
+        })?;
+        builder = builder.expires(expires);
+    }
+    if let Some(same_site) = cookie.same_site.as_deref() {
+        let parsed = match same_site {
+            "lax" => Some(SameSite::Lax),
+            "strict" => Some(SameSite::Strict),
+            "none" | "no_restriction" | "no-restriction" => Some(SameSite::None),
+            "unspecified" | "" => None,
+            other => {
+                return Err(BrowserError::CookieImport(format!(
+                    "unsupported SameSite value: {other}"
+                )))
+            }
+        };
+        if let Some(parsed) = parsed {
+            builder = builder.same_site(parsed);
+        }
+    }
+
+    Ok(builder.build())
 }

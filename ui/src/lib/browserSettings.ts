@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { BROWSER_SETTINGS_STORAGE_KEY } from "./storageKeys";
+import { BROWSER_HISTORY_ENABLED_STORAGE_KEY, BROWSER_SETTINGS_STORAGE_KEY } from "./storageKeys";
 
 export type BrowserSearchEngine = "duckduckgo" | "google" | "bing" | "brave";
 
@@ -14,6 +14,7 @@ export type BrowserSettingsState = {
   searchEngine: BrowserSearchEngine;
   defaultZoom: number;
   restoreTabsOnLaunch: boolean;
+  rememberBrowsingHistory: boolean;
   openLinksInBuiltInBrowser: boolean;
   shiftOpensSystemBrowser: boolean;
   showTerminalLinkActions: boolean;
@@ -29,6 +30,7 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   searchEngine: "duckduckgo",
   defaultZoom: 100,
   restoreTabsOnLaunch: false,
+  rememberBrowsingHistory: true,
   openLinksInBuiltInBrowser: true,
   shiftOpensSystemBrowser: true,
   showTerminalLinkActions: true,
@@ -130,6 +132,9 @@ export function normalizeBrowserSettings(value: unknown): BrowserSettingsState {
     restoreTabsOnLaunch: typeof source.restoreTabsOnLaunch === "boolean"
       ? source.restoreTabsOnLaunch
       : DEFAULT_BROWSER_SETTINGS.restoreTabsOnLaunch,
+    rememberBrowsingHistory: typeof source.rememberBrowsingHistory === "boolean"
+      ? source.rememberBrowsingHistory
+      : DEFAULT_BROWSER_SETTINGS.rememberBrowsingHistory,
     openLinksInBuiltInBrowser: typeof source.openLinksInBuiltInBrowser === "boolean"
       ? source.openLinksInBuiltInBrowser
       : DEFAULT_BROWSER_SETTINGS.openLinksInBuiltInBrowser,
@@ -149,7 +154,7 @@ export function normalizeBrowserSettings(value: unknown): BrowserSettingsState {
 
 function settingsForPersistence(settings: BrowserSettingsState): Partial<BrowserSettingsState> {
   const persisted: Partial<BrowserSettingsState> = {};
-  const scalarKeys: Array<Exclude<keyof BrowserSettingsState, "profiles">> = [
+  const scalarKeys: Array<Exclude<keyof BrowserSettingsState, "profiles" | "rememberBrowsingHistory">> = [
     "homePage",
     "searchEngine",
     "defaultZoom",
@@ -171,13 +176,24 @@ function settingsForPersistence(settings: BrowserSettingsState): Partial<Browser
   return persisted;
 }
 
+function applyHistorySettingOverride(settings: BrowserSettingsState, storage: Storage): BrowserSettingsState {
+  const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+  if (raw === "true" || raw === "false") {
+    return { ...settings, rememberBrowsingHistory: raw === "true" };
+  }
+  return settings;
+}
+
 export function loadBrowserSettings(storage: Storage | null = browserStorage()): BrowserSettingsState {
   if (!storage) return normalizeBrowserSettings(DEFAULT_BROWSER_SETTINGS);
   try {
     const raw = storage.getItem(BROWSER_SETTINGS_STORAGE_KEY);
-    return raw ? normalizeBrowserSettings(JSON.parse(raw)) : normalizeBrowserSettings(DEFAULT_BROWSER_SETTINGS);
+    const normalized = raw
+      ? normalizeBrowserSettings(JSON.parse(raw))
+      : normalizeBrowserSettings(DEFAULT_BROWSER_SETTINGS);
+    return applyHistorySettingOverride(normalized, storage);
   } catch {
-    return normalizeBrowserSettings(DEFAULT_BROWSER_SETTINGS);
+    return applyHistorySettingOverride(normalizeBrowserSettings(DEFAULT_BROWSER_SETTINGS), storage);
   }
 }
 
@@ -188,6 +204,13 @@ export function saveBrowserSettings(
   const next = normalizeBrowserSettings({ ...loadBrowserSettings(storage), ...patch });
   try {
     storage?.setItem(BROWSER_SETTINGS_STORAGE_KEY, JSON.stringify(settingsForPersistence(next)));
+    if (storage) {
+      if (next.rememberBrowsingHistory === DEFAULT_BROWSER_SETTINGS.rememberBrowsingHistory) {
+        storage.removeItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+      } else {
+        storage.setItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY, String(next.rememberBrowsingHistory));
+      }
+    }
   } catch {
     // ignore storage failures
   }
@@ -200,6 +223,7 @@ export function saveBrowserSettings(
 export function resetBrowserSettings(storage: Storage | null = browserStorage()): BrowserSettingsState {
   try {
     storage?.removeItem(BROWSER_SETTINGS_STORAGE_KEY);
+    storage?.removeItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
   } catch {
     // ignore
   }
@@ -291,7 +315,9 @@ export function useBrowserSettings() {
       setSettings(detail ? normalizeBrowserSettings(detail) : loadBrowserSettings());
     };
     const storage = (event: StorageEvent) => {
-      if (event.key === BROWSER_SETTINGS_STORAGE_KEY) setSettings(loadBrowserSettings());
+      if (event.key === BROWSER_SETTINGS_STORAGE_KEY || event.key === BROWSER_HISTORY_ENABLED_STORAGE_KEY) {
+        setSettings(loadBrowserSettings());
+      }
     };
     window.addEventListener(BROWSER_SETTINGS_EVENT, sync);
     window.addEventListener("storage", storage);

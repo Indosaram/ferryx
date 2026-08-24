@@ -44,14 +44,14 @@ export type UseWorkspaceRestoreOptions = {
 
 export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null }>> {
   if (isTauriRuntime()) {
-    const liveSummaries = await listTerminalSessions().catch(() => []);
+    const liveSummaries = await listTerminalSessions();
     return liveSummaries.map((candidate) => ({
       sessionId: candidate.sessionId,
       daemonEpoch: candidate.daemonEpoch ?? null,
       worktreePath: candidate.worktreePath ?? null,
     }));
   }
-  const liveSessions = await defaultTauriTransport.listSessions().catch(() => []);
+  const liveSessions = await defaultTauriTransport.listSessions();
   return liveSessions.map((candidate) => ({
     sessionId: candidate.sessionId,
     daemonEpoch: candidate.daemonEpoch ?? null,

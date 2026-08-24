@@ -78,7 +78,6 @@ class TerminalHostManager {
     const inst = this.instances.get(sessionId);
     if (inst) {
       if (!inst.unsubscribeOutput) {
-        inst.terminal.reset();
         if (inst.session.backendSessionId) {
           inst.unsubscribeOutput = attachScheduledOutputSubscription(inst.session.backendSessionId, inst.terminal, {
             initialSequence: inst.session.lastOutputSequence,
@@ -144,7 +143,6 @@ class TerminalHostManager {
       if (isVisible) {
         this.inactiveLruSessionIds = this.inactiveLruSessionIds.filter((id) => id !== session.id);
         if (!existing.unsubscribeOutput) {
-          existing.terminal.reset();
           if (session.backendSessionId) {
             existing.unsubscribeOutput = attachScheduledOutputSubscription(session.backendSessionId, existing.terminal, {
               initialSequence: session.lastOutputSequence,

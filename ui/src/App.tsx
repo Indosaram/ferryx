@@ -2,6 +2,7 @@ import { PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommandPalette } from "./components/CommandPalette";
+import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { AddProjectDialog, AddWorktreeDialog } from "./components/ProjectDialogs";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
@@ -852,7 +853,12 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
-        {activeWorktree ? (
+        {activeWorktree && state.layout.tabs.length === 0 ? (
+          <EmptyWorkspaceView
+            onNewTerminal={handleAddTerminalTab}
+            onNewBrowserTab={handleAddBrowserTab}
+          />
+        ) : activeWorktree ? (
           <TerminalSplitView
             layout={state.layout}
             sessions={state.sessions}

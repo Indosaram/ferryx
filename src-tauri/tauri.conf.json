@@ -30,13 +30,62 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "dmg",
+      "app",
+      "nsis",
+      "msi",
+      "appimage",
+      "deb"
+    ],
+    "publisher": "Ferryx",
+    "copyright": "Copyright © 2026 Ferryx",
+    "category": "DeveloperTool",
+    "shortDescription": "Ultra-lightweight workspace & AI agent launcher",
+    "longDescription": "Ultra-lightweight workspace and AI agent launcher powered by Tauri v2 and Rust.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "allowDowngrades": true,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Ferryx"
+      },
+      "wix": {
+        "language": "en-US",
+        "fipsCompliant": false
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
+          "libgtk-3-0",
+          "libappindicator3-1 | libayatana-appindicator3-1"
+        ],
+        "section": "devel",
+        "priority": "optional"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "hardenedRuntime": true
+    }
   }
 }

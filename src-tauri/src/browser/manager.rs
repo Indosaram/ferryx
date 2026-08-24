@@ -24,6 +24,25 @@ pub struct ManagedBrowserSession {
     pub bounds: Option<LogicalRect>,
 }
 
+fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
+    BrowserState {
+        browser_id: s.browser_id.clone(),
+        webview_label: s.webview_label.clone(),
+        workspace_id: s.workspace_id.clone(),
+        worktree_path: s.worktree_path.clone(),
+        profile_id: s.profile_id.clone(),
+        generation: s.generation,
+        url: s.url.clone(),
+        title: s.title.clone(),
+        loading: s.loading,
+        can_go_back: s.can_go_back,
+        can_go_forward: s.can_go_forward,
+        zoom_factor: s.zoom_factor,
+        load_error: s.load_error.clone(),
+        visible: s.visible,
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct BrowserManager {
     sessions: Arc<RwLock<HashMap<String, ManagedBrowserSession>>>,
@@ -58,9 +77,9 @@ impl BrowserManager {
             webview_label: webview_label.clone(),
             workspace_id: req.workspace_id,
             worktree_path: req.worktree_path,
-            profile_id: profile_id.clone(),
+            profile_id,
             generation: 1,
-            url: valid_url.clone(),
+            url: valid_url,
             title: None,
             loading: false,
             can_go_back: false,
@@ -71,23 +90,7 @@ impl BrowserManager {
             bounds: req.bounds,
         };
 
-        let state = BrowserState {
-            browser_id: session.browser_id.clone(),
-            webview_label: session.webview_label.clone(),
-            workspace_id: session.workspace_id.clone(),
-            worktree_path: session.worktree_path.clone(),
-            profile_id,
-            generation: session.generation,
-            url: session.url.clone(),
-            title: None,
-            loading: session.loading,
-            can_go_back: session.can_go_back,
-            can_go_forward: session.can_go_forward,
-            zoom_factor: session.zoom_factor,
-            load_error: None,
-            visible: session.visible,
-        };
-
+        let state = browser_state(&session);
         self.sessions.write().insert(browser_id, session);
         Ok(state)
     }
@@ -97,23 +100,40 @@ impl BrowserManager {
         let s = guard
             .get(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        Ok(browser_state(s))
+    }
 
-        Ok(BrowserState {
-            browser_id: s.browser_id.clone(),
-            webview_label: s.webview_label.clone(),
-            workspace_id: s.workspace_id.clone(),
-            worktree_path: s.worktree_path.clone(),
-            profile_id: s.profile_id.clone(),
-            generation: s.generation,
-            url: s.url.clone(),
-            title: s.title.clone(),
-            loading: s.loading,
-            can_go_back: s.can_go_back,
-            can_go_forward: s.can_go_forward,
-            zoom_factor: s.zoom_factor,
-            load_error: s.load_error.clone(),
-            visible: s.visible,
-        })
+    pub fn get_bounds(&self, browser_id: &str) -> Result<Option<LogicalRect>, BrowserError> {
+        let guard = self.sessions.read();
+        let s = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        Ok(s.bounds.clone())
+    }
+
+    pub fn is_visible(&self, browser_id: &str) -> Result<bool, BrowserError> {
+        let guard = self.sessions.read();
+        let s = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        Ok(s.visible)
+    }
+
+    pub fn get_webview_label(&self, browser_id: &str) -> Result<String, BrowserError> {
+        let guard = self.sessions.read();
+        guard
+            .get(browser_id)
+            .map(|session| session.webview_label.clone())
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))
+    }
+
+    pub fn webview_labels_for_profile(&self, profile_id: &BrowserProfileId) -> Vec<String> {
+        self.sessions
+            .read()
+            .values()
+            .filter(|session| &session.profile_id == profile_id)
+            .map(|session| session.webview_label.clone())
+            .collect()
     }
 
     pub fn update_url(&self, browser_id: &str, new_url: &str) -> Result<String, BrowserError> {
@@ -128,6 +148,17 @@ impl BrowserManager {
         s.loading = true;
         s.load_error = None;
         Ok(valid_url)
+    }
+
+    pub fn begin_history_navigation(&self, browser_id: &str) -> Result<BrowserState, BrowserError> {
+        let mut guard = self.sessions.write();
+        let s = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        s.generation += 1;
+        s.loading = true;
+        s.load_error = None;
+        Ok(browser_state(s))
     }
 
     pub fn set_bounds(&self, browser_id: &str, bounds: LogicalRect) -> Result<(), BrowserError> {
@@ -194,22 +225,7 @@ impl BrowserManager {
         }
         s.load_error = error;
 
-        Ok(BrowserState {
-            browser_id: s.browser_id.clone(),
-            webview_label: s.webview_label.clone(),
-            workspace_id: s.workspace_id.clone(),
-            worktree_path: s.worktree_path.clone(),
-            profile_id: s.profile_id.clone(),
-            generation: s.generation,
-            url: s.url.clone(),
-            title: s.title.clone(),
-            loading: s.loading,
-            can_go_back: s.can_go_back,
-            can_go_forward: s.can_go_forward,
-            zoom_factor: s.zoom_factor,
-            load_error: s.load_error.clone(),
-            visible: s.visible,
-        })
+        Ok(browser_state(s))
     }
 
     pub fn has_sessions(&self) -> bool {
@@ -228,6 +244,7 @@ impl BrowserManager {
                 browser_id: s.browser_id.clone(),
                 webview_label: s.webview_label.clone(),
                 workspace_id: s.workspace_id.clone(),
+                profile_id: s.profile_id.clone(),
                 url: s.url.clone(),
                 title: s.title.clone(),
                 visible: s.visible,

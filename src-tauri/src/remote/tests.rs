@@ -1463,3 +1463,100 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
 
     server_task.abort();
 }
+
+#[tokio::test]
+async fn test_remote_terminal_forced_lag_replays_with_explicit_gap_and_sequence_metadata() {
+    let pty = Arc::new(crate::terminal::PtyManager::new());
+    let hub = Arc::new(crate::terminal::TerminalOutputHub::new(64));
+    let terminal_service = crate::terminal::TerminalService::new(Arc::clone(&pty), Arc::clone(&hub));
+
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("sleep 30");
+    let (session_id, _pty_rx) = pty
+        .spawn(command, 80, 24)
+        .expect("spawn forced-lag session");
+    hub.register_session_with_sequence(&session_id);
+
+    let mut initial = terminal_service
+        .attach_with_sequence(&session_id, None)
+        .expect("initial sequenced attach");
+
+    for index in 0..1_100u64 {
+        hub.publish(&session_id, format!("chunk-{index:04};").into_bytes())
+            .expect("publish output");
+    }
+
+    let lag = initial.receiver.recv().await;
+    assert!(matches!(
+        lag,
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+    ));
+
+    let recovered = crate::remote::server::recover_remote_terminal_attachment(
+        &terminal_service,
+        &session_id,
+        None,
+    )
+    .expect("remote lag recovery reattach");
+    let gap = recovered.snapshot.gap.as_ref().expect("eviction must report gap");
+    assert_eq!(gap.requested_after_sequence, 0);
+    assert!(gap.available_from_sequence > 1);
+    assert!(recovered.snapshot.history_start_sequence.is_some());
+    assert!(recovered.snapshot.history_end_sequence.is_some());
+    assert!(!recovered.snapshot.history.is_empty());
+
+    let frame = crate::remote::server::encode_remote_terminal_snapshot_frame(
+        &recovered.snapshot,
+        true,
+    );
+    let prefix = b"\x1b]777;ferryx;";
+    assert!(frame.starts_with(prefix));
+    let metadata_end = frame[prefix.len()..]
+        .iter()
+        .position(|byte| *byte == 0x07)
+        .map(|offset| prefix.len() + offset)
+        .expect("OSC metadata terminator");
+    let metadata: crate::remote::server::RemoteTerminalFrameMetadata =
+        serde_json::from_slice(&frame[prefix.len()..metadata_end]).expect("frame metadata json");
+    assert_eq!(metadata.kind, "replayGap");
+    assert_eq!(metadata.requested_after_sequence.as_deref(), Some("0"));
+    let expected_available = gap.available_from_sequence.to_string();
+    assert_eq!(
+        metadata.available_from_sequence.as_deref(),
+        Some(expected_available.as_str())
+    );
+    let expected_end = recovered
+        .snapshot
+        .history_end_sequence
+        .map(|sequence| sequence.to_string());
+    assert_eq!(metadata.end_sequence.as_deref(), expected_end.as_deref());
+
+    let frame_payload = &frame[metadata_end + 1..];
+    assert!(frame_payload.starts_with(b"\x1bc"));
+    assert_eq!(&frame_payload[2..], recovered.snapshot.history.as_slice());
+
+    let live = hub
+        .publish(&session_id, b"live-after-gap".to_vec())
+        .expect("publish live output");
+    let live_frame = crate::remote::server::encode_remote_terminal_output_frame(&live);
+    let live_metadata_end = live_frame[prefix.len()..]
+        .iter()
+        .position(|byte| *byte == 0x07)
+        .map(|offset| prefix.len() + offset)
+        .expect("live metadata terminator");
+    let live_metadata: crate::remote::server::RemoteTerminalFrameMetadata =
+        serde_json::from_slice(&live_frame[prefix.len()..live_metadata_end])
+            .expect("live frame metadata json");
+    assert_eq!(live_metadata.kind, "output");
+    let expected_live_sequence = live.sequence.to_string();
+    assert_eq!(
+        live_metadata.sequence.as_deref(),
+        Some(expected_live_sequence.as_str())
+    );
+    assert_eq!(&live_frame[live_metadata_end + 1..], b"live-after-gap");
+
+    pty.close_session(&session_id)
+        .await
+        .expect("cleanup forced-lag session");
+}

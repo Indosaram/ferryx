@@ -9,5 +9,8 @@
     "ui:dev": "bun run --cwd ui dev",
     "ui:test": "bun run --cwd ui test",
     "ui:build": "bun run --cwd ui build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
   }
 }

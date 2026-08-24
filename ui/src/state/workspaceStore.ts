@@ -39,7 +39,12 @@ export type WorkspaceState = {
 
 export type WorkspaceServices = {
   ensureTerminalEvents: () => Promise<void>;
-  spawnTerminal: (request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null }) => Promise<string>;
+  spawnTerminal: (request: {
+    workspaceId: string;
+    worktree: WorktreeIdentity | null;
+    cwd?: string | null;
+    clientRequestId?: string | null;
+  }) => Promise<string>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
   closeTerminal: (sessionId: string) => Promise<void>;
   waitForTerminalExit: (sessionId: string, timeoutMs: number) => Promise<void>;
@@ -60,7 +65,7 @@ export {
 
 import { getHmrWorkspaceState, setHmrWorkspaceState } from "./hmrWorkspaceState";
 
-type WorkspaceAction =
+export type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "RESTORE_WORKSPACE"; state: WorkspaceState }
   | { type: "SELECT_WORKTREE"; path: string }
@@ -118,6 +123,7 @@ type WorkspaceAction =
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
+  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
   | { type: "MARK_TAB_UNREAD"; tabId: string }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
@@ -152,6 +158,7 @@ export function useWorkspaceStore({
   const [state, reactDispatch] = useReducer(workspaceReducer, initialRef.current.state);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const spawningSessionIdsRef = useRef(new Set<string>());
 
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
@@ -197,7 +204,7 @@ export function useWorkspaceStore({
       await services.ensureTerminalEvents();
       const backendSessionId =
         backendSessionIdOverride ??
-        (await services.spawnTerminal({
+        (await spawnTerminalForLogicalAction(services, {
           workspaceId,
           worktree: worktreeIdentity(worktree),
           cwd: worktree.path,
@@ -237,8 +244,50 @@ export function useWorkspaceStore({
     [createSpawnedTab, dispatch],
   );
 
+  const ensureSessionBackends = useCallback(
+    async (sessionIds: string[]) => {
+      const targets = sessionIds.filter((sessionId) => {
+        const session = stateRef.current.sessions[sessionId];
+        if (!session || session.backendSessionId != null) return false;
+        if (spawningSessionIdsRef.current.has(sessionId)) return false;
+        return true;
+      });
+      if (targets.length === 0) return;
+
+      for (const sessionId of targets) {
+        spawningSessionIdsRef.current.add(sessionId);
+      }
+
+      await Promise.all(
+        targets.map(async (sessionId) => {
+          try {
+            const session = stateRef.current.sessions[sessionId];
+            if (!session || session.backendSessionId != null) return;
+            await services.ensureTerminalEvents();
+            const backendSessionId = await services.spawnTerminal({
+              workspaceId,
+              worktree: session.worktree,
+              cwd: session.cwd ?? session.worktreePath,
+            });
+            dispatch({
+              type: "REBIND_SESSION_BACKEND",
+              sessionId,
+              backendSessionId,
+            });
+          } catch {
+            // Spawn failed; allow subsequent attempts
+          } finally {
+            spawningSessionIdsRef.current.delete(sessionId);
+          }
+        }),
+      );
+    },
+    [dispatch, services, workspaceId],
+  );
+
   const ensureTabForWorktree = useCallback(
-    async (worktree: Worktree) => {
+    async (worktree: Worktree, options?: { allowCreate?: boolean }) => {
+      const allowCreate = options?.allowCreate ?? true;
       const snapshot = stateRef.current;
       if (snapshot.activeWorktreePath === worktree.path) {
         const activeTab = snapshot.layout.tabs.find(
@@ -248,6 +297,7 @@ export function useWorkspaceStore({
           dispatch({ type: "ACTIVATE_TAB", tabId: activeTab.id });
           return activeTab.id;
         }
+        if (!allowCreate) return null;
         return openTab(worktree);
       }
 
@@ -304,7 +354,7 @@ export function useWorkspaceStore({
         }
       }
 
-      const backendSessionId = await services.spawnTerminal({
+      const backendSessionId = await spawnTerminalForLogicalAction(services, {
         workspaceId,
         worktree: sourceSession.worktree,
         cwd: inheritedCwd,
@@ -398,34 +448,27 @@ export function useWorkspaceStore({
 
       if (closingTab.kind === "browser") {
         if (snapshot.layout.tabs.length === 1) {
-          const closingWorktreePath = closingTab.worktreePath;
-          const worktree =
-            (closingWorktreePath && snapshot.worktrees.find((candidate) => candidate.path === closingWorktreePath)) ??
-            getActiveWorktree(snapshot);
-          if (!worktree) return;
-
-          const replacement = await createSpawnedTab(worktree);
-          await closeBrowser(closingTab.browserId);
-          dispatch({ type: "CLOSE_TAB", tabId, replacement });
-          return;
+          const worktree = snapshot.worktrees.find((candidate) => candidate.path === closingTab.worktreePath) ?? getActiveWorktree(snapshot);
+          if (worktree) {
+            const replacement = await createSpawnedTab(worktree);
+            await closeBrowser(closingTab.browserId);
+            dispatch({ type: "CLOSE_TAB", tabId, replacement });
+            return;
+          }
         }
-
         await closeBrowser(closingTab.browserId);
         dispatch({ type: "CLOSE_TAB", tabId });
         return;
       }
 
-      const closingSession = snapshot.sessions[closingTab.sessionId];
       const disposableSessions = getDisposableSessionsForTab(snapshot, tabId);
       const tabSessionIds = getTabSessionIds(snapshot, tabId);
 
       if (snapshot.layout.tabs.length === 1) {
-        const closingWorktreePath = sessionWorktreePath(closingSession);
-        const worktree =
-          (closingWorktreePath && snapshot.worktrees.find((candidate) => candidate.path === closingWorktreePath)) ??
-          getActiveWorktree(snapshot);
-        if (!worktree) return;
-
+        const closingSession = snapshot.sessions[closingTab.sessionId];
+        const worktree = snapshot.worktrees.find(
+          (candidate) => candidate.path === sessionWorktreePath(closingSession),
+        ) ?? getActiveWorktree(snapshot);
         await Promise.all(
           disposableSessions.map((session) => closeBackendSessionAndWait(session, services)),
         );
@@ -434,8 +477,12 @@ export function useWorkspaceStore({
             terminalHostManager.destroy(sessionId);
           }
         }
-        const replacement = await createSpawnedTab(worktree, closingTab.label);
-        dispatch({ type: "CLOSE_TAB", tabId, replacement });
+        if (worktree) {
+          const replacement = await createSpawnedTab(worktree, closingTab.label);
+          dispatch({ type: "CLOSE_TAB", tabId, replacement });
+        } else {
+          dispatch({ type: "CLOSE_TAB", tabId });
+        }
         return;
       }
 
@@ -655,6 +702,7 @@ export function useWorkspaceStore({
     reloadBrowserTab: reloadBrowserTabAction,
     ensureTabForWorktree,
     openWorkspacePortInBrowser,
+    ensureSessionBackends,
     closeTab,
     closeOtherTabs,
     closeTabsToRight,
@@ -699,7 +747,11 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
         task: parsed?.isAgent
           ? parsed.task
           : worktree?.branch?.replace(/^refs\/heads\//, "") ?? worktreePath,
-        state: activity ? activityStateToAgentState(activity.state) : session.lifecycle,
+        state: activity
+          ? activityStateToAgentState(activity.state)
+          : session.lifecycle === "running"
+            ? "working"
+            : session.lifecycle,
         worktree: session.worktree,
         worktreePath,
         sessionId: session.backendSessionId ?? session.id,
@@ -791,7 +843,7 @@ function createInitialState(worktrees: Worktree[]): WorkspaceState {
   };
 }
 
-function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
+export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
   switch (action.type) {
     case "RESTORE_WORKSPACE":
       return {
@@ -1177,6 +1229,21 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       }
       return nextState;
     }
+    case "REBIND_SESSION_BACKEND": {
+      const session = state.sessions[action.sessionId];
+      if (!session) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [action.sessionId]: {
+            ...session,
+            backendSessionId: action.backendSessionId,
+            lifecycle: "running",
+          },
+        },
+      };
+    }
     case "SESSION_TITLE_ACTIVITY": {
       const parsed = parseAgentTitle(action.title);
       const classified = classifyTerminalTitleActivity(action.title);
@@ -1325,6 +1392,26 @@ function clearWorktreeUnreadWhenRead(
   return { ...state, unreadWorktreePaths };
 }
 
+async function spawnTerminalForLogicalAction(
+  services: WorkspaceServices,
+  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null },
+): Promise<string> {
+  const clientRequestId = createClientRequestId();
+  const stableRequest = { ...request, clientRequestId };
+  try {
+    return await services.spawnTerminal(stableRequest);
+  } catch (error) {
+    if (!isAmbiguousRendererTransportError(error)) throw error;
+    return services.spawnTerminal(stableRequest);
+  }
+}
+
+function isAmbiguousRendererTransportError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return true;
+  const code = (error as { code?: unknown }).code;
+  return code === undefined || code === "UNKNOWN";
+}
+
 async function closeBackendSession(session: TerminalSession | undefined, services: WorkspaceServices) {
   if (!session?.backendSessionId) return;
   try {
@@ -1369,6 +1456,10 @@ function mapBackendLifecycle(payload: TerminalLifecyclePayload): TerminalLifecyc
   if (payload.state === "started") return "working";
   if (payload.state === "failed") return "failed";
   return "exited";
+}
+
+function createClientRequestId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function createId(prefix: string) {

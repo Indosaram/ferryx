@@ -5,7 +5,10 @@ use crate::remote::protocol::{
     RemoteTerminalSession, RemoteWorkspaceState,
 };
 use crate::remote::state::{RemoteGatewayState, RemoteNetworkMode};
-use crate::terminal::{PtySessionState, TerminalSignal};
+use crate::terminal::{
+    AttachmentSnapshot, OutputChunk, PtyError, PtySessionState, SessionAttachment, TerminalService,
+    TerminalSignal,
+};
 use crate::worktree::{CreateWorktreeOptions, WorktreeIdentity};
 use axum::{
     extract::{
@@ -26,6 +29,104 @@ use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 pub const REMOTE_SELECTION_REQUEST_EVENT: &str = "remote_selection_requested";
+const REMOTE_TERMINAL_METADATA_PREFIX: &[u8] = b"\x1b]777;ferryx;";
+const REMOTE_TERMINAL_METADATA_TERMINATOR: u8 = 0x07;
+const REMOTE_TERMINAL_HARD_RESET: &[u8] = b"\x1bc";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteTerminalFrameMetadata {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_after_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_from_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_sequence: Option<String>,
+}
+
+pub(crate) fn encode_remote_terminal_output_frame(chunk: &OutputChunk) -> Vec<u8> {
+    encode_remote_terminal_frame(
+        RemoteTerminalFrameMetadata {
+            kind: "output".into(),
+            sequence: Some(chunk.sequence.to_string()),
+            requested_after_sequence: None,
+            available_from_sequence: None,
+            start_sequence: None,
+            end_sequence: None,
+        },
+        &chunk.bytes,
+        false,
+    )
+}
+
+pub(crate) fn encode_remote_terminal_snapshot_frame(
+    snapshot: &AttachmentSnapshot,
+    force_boundary: bool,
+) -> Vec<u8> {
+    let gap = snapshot.gap.as_ref();
+    encode_remote_terminal_frame(
+        RemoteTerminalFrameMetadata {
+            kind: if gap.is_some() {
+                "replayGap".into()
+            } else {
+                "replay".into()
+            },
+            sequence: snapshot.history_end_sequence.map(|sequence| sequence.to_string()),
+            requested_after_sequence: gap
+                .map(|gap| gap.requested_after_sequence.to_string()),
+            available_from_sequence: gap
+                .map(|gap| gap.available_from_sequence.to_string()),
+            start_sequence: snapshot
+                .history_start_sequence
+                .map(|sequence| sequence.to_string()),
+            end_sequence: snapshot
+                .history_end_sequence
+                .map(|sequence| sequence.to_string()),
+        },
+        &snapshot.history,
+        force_boundary || gap.is_some(),
+    )
+}
+
+fn encode_remote_terminal_frame(
+    metadata: RemoteTerminalFrameMetadata,
+    payload: &[u8],
+    reset: bool,
+) -> Vec<u8> {
+    let metadata = serde_json::to_vec(&metadata).expect("remote terminal frame metadata serializes");
+    let mut frame = Vec::with_capacity(
+        REMOTE_TERMINAL_METADATA_PREFIX.len()
+            + metadata.len()
+            + 1
+            + if reset {
+                REMOTE_TERMINAL_HARD_RESET.len()
+            } else {
+                0
+            }
+            + payload.len(),
+    );
+    frame.extend_from_slice(REMOTE_TERMINAL_METADATA_PREFIX);
+    frame.extend_from_slice(&metadata);
+    frame.push(REMOTE_TERMINAL_METADATA_TERMINATOR);
+    if reset {
+        frame.extend_from_slice(REMOTE_TERMINAL_HARD_RESET);
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+pub(crate) fn recover_remote_terminal_attachment(
+    terminal_service: &TerminalService,
+    session_id: &str,
+    last_emitted_sequence: Option<u64>,
+) -> Result<SessionAttachment, PtyError> {
+    terminal_service.attach_with_sequence(session_id, Some(last_emitted_sequence.unwrap_or(0)))
+}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -557,39 +658,72 @@ async fn ws_terminal_handler(
         ));
     }
 
-    let (history, rx) = state
+    let attachment = state
         .terminal_service
-        .attach(&session_id)
+        .attach_with_sequence(&session_id, None)
         .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_terminal_socket(socket, session_id, history, rx, device, state)
+        handle_terminal_socket(socket, session_id, attachment, device, state)
     }))
 }
 
 async fn handle_terminal_socket(
     socket: WebSocket,
     session_id: String,
-    history: Vec<u8>,
-    mut rx: broadcast::Receiver<Vec<u8>>,
+    attachment: SessionAttachment,
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
 ) {
     let (mut sender, mut receiver) = socket.split();
+    let SessionAttachment {
+        snapshot,
+        receiver: mut output_rx,
+    } = attachment;
+    let mut last_emitted_sequence = None;
 
-    if !history.is_empty() && sender.send(Message::Binary(history.into())).await.is_err() {
-        return;
+    if snapshot.gap.is_some() || !snapshot.history.is_empty() {
+        let frame = encode_remote_terminal_snapshot_frame(&snapshot, snapshot.gap.is_some());
+        if sender.send(Message::Binary(frame.into())).await.is_err() {
+            return;
+        }
+        last_emitted_sequence = snapshot.history_end_sequence;
     }
 
+    let terminal_service = Arc::clone(&state.terminal_service);
+    let send_session_id = session_id.clone();
     let mut send_task = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
+            match output_rx.recv().await {
                 Ok(chunk) => {
-                    if sender.send(Message::Binary(chunk.into())).await.is_err() {
+                    if last_emitted_sequence.is_some_and(|last| chunk.sequence <= last) {
+                        continue;
+                    }
+                    let frame = encode_remote_terminal_output_frame(&chunk);
+                    if sender.send(Message::Binary(frame.into())).await.is_err() {
                         break;
                     }
+                    last_emitted_sequence = Some(chunk.sequence);
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let recovered = match recover_remote_terminal_attachment(
+                        &terminal_service,
+                        &send_session_id,
+                        last_emitted_sequence,
+                    ) {
+                        Ok(attachment) => attachment,
+                        Err(_) => break,
+                    };
+                    output_rx = recovered.receiver;
+                    let snapshot = recovered.snapshot;
+                    let frame = encode_remote_terminal_snapshot_frame(&snapshot, true);
+                    if sender.send(Message::Binary(frame.into())).await.is_err() {
+                        break;
+                    }
+                    if let Some(end_sequence) = snapshot.history_end_sequence {
+                        last_emitted_sequence = Some(end_sequence);
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }

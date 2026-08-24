@@ -27,6 +27,7 @@ pub enum PtyError {
     Other(String),
 }
 
+pub(crate) mod metrics;
 pub mod output_hub;
 pub mod preferences;
 pub mod pty;

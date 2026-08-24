@@ -70,7 +70,11 @@ enum RuntimeNodeKind {
     Socket,
 }
 
-fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Result<(), String> {
+fn validate_safe_ownership_and_type_for_uid(
+    path: &Path,
+    kind: RuntimeNodeKind,
+    expected_uid: libc::uid_t,
+) -> Result<(), String> {
     let meta = fs::symlink_metadata(path)
         .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
     if meta.file_type().is_symlink() {
@@ -79,13 +83,12 @@ fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Resul
             path.display()
         ));
     }
-    let uid = unsafe { libc::getuid() };
-    if meta.uid() != uid {
+    if meta.uid() != expected_uid {
         return Err(format!(
             "Path {} is owned by UID {} (expected current UID {})",
             path.display(),
             meta.uid(),
-            uid
+            expected_uid
         ));
     }
     let valid_type = match kind {
@@ -100,6 +103,40 @@ fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Resul
         ));
     }
     Ok(())
+}
+
+fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Result<(), String> {
+    validate_safe_ownership_and_type_for_uid(path, kind, unsafe { libc::getuid() })
+}
+
+pub(crate) fn validate_runtime_socket_path(path: &Path) -> Result<(), String> {
+    validate_runtime_socket_path_for_uid(path, unsafe { libc::getuid() })
+}
+
+pub(crate) fn validate_runtime_socket_path_for_uid(
+    path: &Path,
+    expected_uid: libc::uid_t,
+) -> Result<(), String> {
+    let runtime_dir = path
+        .parent()
+        .ok_or_else(|| format!("Daemon socket {} has no runtime directory", path.display()))?;
+    validate_safe_ownership_and_type_for_uid(
+        runtime_dir,
+        RuntimeNodeKind::Directory,
+        expected_uid,
+    )?;
+    let mode = fs::symlink_metadata(runtime_dir)
+        .map_err(|error| format!("Failed to verify {}: {error}", runtime_dir.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode != 0o700 {
+        return Err(format!(
+            "Daemon runtime directory {} has mode {mode:o}, expected 700",
+            runtime_dir.display()
+        ));
+    }
+    validate_safe_ownership_and_type_for_uid(path, RuntimeNodeKind::Socket, expected_uid)
 }
 
 fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
@@ -280,6 +317,7 @@ impl DaemonServer {
         // Flock lock for atomic bind & stale socket recovery.
         let lock_file = open_secure_lock_file(&lock_path)?;
 
+        #[cfg(unix)]
         unsafe {
             use std::os::unix::io::AsRawFd;
             let fd = lock_file.as_raw_fd();
@@ -300,6 +338,7 @@ impl DaemonServer {
 
         // Ensure 0600 mode
         validate_safe_ownership_and_type(&socket_path, RuntimeNodeKind::Socket)?;
+        #[cfg(unix)]
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("Failed to secure daemon socket: {error}"))?;
 
@@ -1132,6 +1171,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_runtime_dir_and_socket_symlink_protection() {
         let dir = tempdir().unwrap();
@@ -1148,6 +1188,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_runtime_node_modes_are_enforced() {
         let dir = tempdir().unwrap();

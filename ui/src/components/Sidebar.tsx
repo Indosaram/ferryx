@@ -282,11 +282,7 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center justify-between border-t border-worktree-sidebar-border px-2 py-1.5">
-        <div className="flex items-center gap-2 px-1 text-[10px] text-muted-foreground">
-          <span className="size-1.5 rounded-full bg-status-success" />
-          Local runtime
-        </div>
+      <div className="flex shrink-0 items-center justify-end border-t border-worktree-sidebar-border px-2 py-1.5">
         <IconButton label="Settings" size="sm" onClick={onOpenSettings}>
           <Settings2 className="size-3.5" />
         </IconButton>

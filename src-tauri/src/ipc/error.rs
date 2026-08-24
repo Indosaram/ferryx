@@ -23,12 +23,14 @@ pub enum IpcErrorCode {
     ParseError,
     SessionNotFound,
     BrowserNotFound,
+    WebviewNotFound,
     BrowserUrlInvalid,
     BrowserUrlSchemeDenied,
     BrowserBoundsInvalid,
     BrowserCreateFailed,
     BrowserNavigationFailed,
     BrowserHistoryFailed,
+    BrowserCookieImportFailed,
     BrowserCloseFailed,
     PtyCreationError,
     PtySpawnError,
@@ -186,6 +188,7 @@ impl From<crate::browser::BrowserError> for IpcError {
         let message = error.to_string();
         let code = match error {
             crate::browser::BrowserError::NotFound(_) => IpcErrorCode::BrowserNotFound,
+            crate::browser::BrowserError::WebviewNotFound(_) => IpcErrorCode::WebviewNotFound,
             crate::browser::BrowserError::InvalidUrl(_) => IpcErrorCode::BrowserUrlInvalid,
             crate::browser::BrowserError::SchemeDenied(_) => IpcErrorCode::BrowserUrlSchemeDenied,
             crate::browser::BrowserError::InvalidBounds => IpcErrorCode::BrowserBoundsInvalid,
@@ -195,6 +198,9 @@ impl From<crate::browser::BrowserError> for IpcError {
                 IpcErrorCode::BrowserNavigationFailed
             }
             crate::browser::BrowserError::HistoryFailed(_) => IpcErrorCode::BrowserHistoryFailed,
+            crate::browser::BrowserError::CookieImport(_) => {
+                IpcErrorCode::BrowserCookieImportFailed
+            }
             crate::browser::BrowserError::CloseFailed(_) => IpcErrorCode::BrowserCloseFailed,
             crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::InternalError,
             crate::browser::BrowserError::Internal(_) => IpcErrorCode::InternalError,

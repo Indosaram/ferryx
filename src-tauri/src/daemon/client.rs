@@ -2,7 +2,7 @@ use crate::daemon::protocol::{
     DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
     DAEMON_PROTOCOL_VERSION,
 };
-use crate::daemon::server::get_socket_path;
+use crate::daemon::server::{get_socket_path, validate_runtime_socket_path};
 use crate::ipc::{IpcError, IpcErrorCode};
 use crate::remote::auth::{DeviceInfo, DevicePermission};
 use crate::remote::protocol::RemoteActiveDesktopSelection;
@@ -11,7 +11,10 @@ use crate::session::PersistedWorkspaceSession;
 use crate::terminal::output_hub::ReplayGap;
 use crate::terminal::TerminalSignal;
 use crate::worktree::WorktreeIdentity;
-use std::path::PathBuf;
+use serde_json::json;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -53,46 +56,153 @@ where
     })?
 }
 
+#[derive(Debug)]
+struct RequestAttemptError {
+    error: IpcError,
+    may_have_been_delivered: bool,
+}
+
+impl RequestAttemptError {
+    fn not_delivered(error: IpcError) -> Self {
+        Self {
+            error,
+            may_have_been_delivered: false,
+        }
+    }
+
+    fn ambiguous(error: IpcError) -> Self {
+        Self {
+            error,
+            may_have_been_delivered: true,
+        }
+    }
+
+    fn into_ipc_error(self, req: &DaemonRequest, report_ambiguous: bool) -> IpcError {
+        if report_ambiguous && self.may_have_been_delivered {
+            ambiguous_delivery_error(req, &self.error)
+        } else {
+            self.error
+        }
+    }
+}
+
+fn request_is_retry_safe(req: &DaemonRequest) -> bool {
+    matches!(
+        req,
+        DaemonRequest::Handshake { .. }
+            | DaemonRequest::Ping
+            | DaemonRequest::Spawn { .. }
+            | DaemonRequest::ListSessions
+            | DaemonRequest::DescribeSession { .. }
+            | DaemonRequest::LoadSession
+    )
+}
+
+fn request_type_name(req: &DaemonRequest) -> &'static str {
+    match req {
+        DaemonRequest::Handshake { .. } => "handshake",
+        DaemonRequest::Ping => "ping",
+        DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
+        DaemonRequest::Spawn { .. } => "spawn",
+        DaemonRequest::Write { .. } => "write",
+        DaemonRequest::Resize { .. } => "resize",
+        DaemonRequest::Signal { .. } => "signal",
+        DaemonRequest::Close { .. } => "close",
+        DaemonRequest::ListSessions => "listSessions",
+        DaemonRequest::DescribeSession { .. } => "describeSession",
+        DaemonRequest::Attach { .. } => "attach",
+        DaemonRequest::SaveSession { .. } => "saveSession",
+        DaemonRequest::LoadSession => "loadSession",
+        DaemonRequest::ClearSession => "clearSession",
+        DaemonRequest::RemoteGetStatus => "remoteGetStatus",
+        DaemonRequest::RemoteConfigure { .. } => "remoteConfigure",
+        DaemonRequest::RemoteCreatePairingCode { .. } => "remoteCreatePairingCode",
+        DaemonRequest::RemoteListDevices => "remoteListDevices",
+        DaemonRequest::RemoteRevokeDevice { .. } => "remoteRevokeDevice",
+        DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
+        DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
+        DaemonRequest::Shutdown => "shutdown",
+    }
+}
+
+fn ambiguous_delivery_error(req: &DaemonRequest, cause: &IpcError) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::IoError,
+        format!(
+            "Daemon request '{}' may have been delivered before the connection failed; refusing automatic retry",
+            request_type_name(req)
+        ),
+    )
+    .with_details(json!({
+        "type": "ambiguousDelivery",
+        "requestType": request_type_name(req),
+        "causeCode": cause.code,
+        "causeMessage": cause.message,
+    }))
+}
+
+fn daemon_socket_trust_error(message: String) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::IoError,
+        format!("Refusing untrusted daemon socket: {message}"),
+    )
+    .with_details(json!({
+        "type": "daemonSocketTrustValidation",
+    }))
+}
+
 struct ActiveConnection {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
 }
 
 impl ActiveConnection {
-    async fn request(&mut self, req: &DaemonRequest) -> Result<DaemonResponse, IpcError> {
+    async fn request(
+        &mut self,
+        req: &DaemonRequest,
+    ) -> Result<DaemonResponse, RequestAttemptError> {
         let mut req_json = serde_json::to_string(req).map_err(|e| {
-            IpcError::new(
+            RequestAttemptError::not_delivered(IpcError::new(
                 IpcErrorCode::ParseError,
                 format!("Request serialization failed: {e}"),
-            )
+            ))
         })?;
         req_json.push('\n');
         self.writer
             .write_all(req_json.as_bytes())
             .await
             .map_err(|e| {
-                IpcError::new(IpcErrorCode::IoError, format!("Request write failed: {e}"))
+                RequestAttemptError::ambiguous(IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Request write failed: {e}"),
+                ))
             })?;
         self.writer.flush().await.map_err(|e| {
-            IpcError::new(IpcErrorCode::IoError, format!("Request flush failed: {e}"))
+            RequestAttemptError::ambiguous(IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Request flush failed: {e}"),
+            ))
         })?;
 
         let mut line = String::new();
         let bytes_read = self.reader.read_line(&mut line).await.map_err(|e| {
-            IpcError::new(IpcErrorCode::IoError, format!("Response read failed: {e}"))
+            RequestAttemptError::ambiguous(IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Response read failed: {e}"),
+            ))
         })?;
         if bytes_read == 0 || line.trim().is_empty() {
-            return Err(IpcError::new(
+            return Err(RequestAttemptError::ambiguous(IpcError::new(
                 IpcErrorCode::IoError,
                 "Connection closed by daemon (EOF)",
-            ));
+            )));
         }
 
         let resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
-            IpcError::new(
+            RequestAttemptError::ambiguous(IpcError::new(
                 IpcErrorCode::ParseError,
                 format!("Response parse failed: {e}"),
-            )
+            ))
         })?;
 
         Ok(resp)
@@ -144,10 +254,43 @@ impl DaemonClient {
         *self.epoch.read()
     }
 
+    fn validate_existing_socket_path(path: &Path) -> Result<(), IpcError> {
+        // `new_with_socket` is a dependency-injection hook used by tests and local harnesses
+        // with arbitrary temporary UDS paths. Section-9 trust requirements govern the fixed
+        // production runtime endpoint, so do not impose `/tmp/rorca-{uid}` directory-mode
+        // semantics on unrelated injected sockets.
+        if path != get_socket_path() {
+            return Ok(());
+        }
+        validate_runtime_socket_path(path).map_err(daemon_socket_trust_error)
+    }
+
+    #[cfg(test)]
+    fn validate_existing_socket_path_for_uid(
+        path: &Path,
+        expected_uid: libc::uid_t,
+    ) -> Result<(), IpcError> {
+        crate::daemon::server::validate_runtime_socket_path_for_uid(path, expected_uid)
+            .map_err(daemon_socket_trust_error)
+    }
+
     async fn connect_or_spawn(&self) -> Result<UnixStream, IpcError> {
-        if self.socket_path.exists() {
-            if let Ok(stream) = UnixStream::connect(&self.socket_path).await {
-                return Ok(stream);
+        match fs::symlink_metadata(&self.socket_path) {
+            Ok(_) => {
+                Self::validate_existing_socket_path(&self.socket_path)?;
+                if let Ok(stream) = UnixStream::connect(&self.socket_path).await {
+                    return Ok(stream);
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!(
+                        "Failed to inspect daemon socket {}: {error}",
+                        self.socket_path.display()
+                    ),
+                ));
             }
         }
 
@@ -179,6 +322,11 @@ impl DaemonClient {
         if let Err(error) =
             wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
         {
+            let _ = child.kill().await;
+            return Err(error);
+        }
+
+        if let Err(error) = Self::validate_existing_socket_path(&self.socket_path) {
             let _ = child.kill().await;
             return Err(error);
         }
@@ -275,18 +423,25 @@ impl DaemonClient {
 
     pub async fn send_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
         let mut conn_guard = self.connection.lock().await;
+        let retry_safe = request_is_retry_safe(&req);
 
         if let Some(conn) = conn_guard.as_mut() {
             match conn.request(&req).await {
                 Ok(resp) => return Ok(resp),
-                Err(_err) => {
+                Err(error) => {
                     *conn_guard = None;
+                    if !retry_safe {
+                        return Err(error.into_ipc_error(&req, true));
+                    }
                 }
             }
         }
 
         let mut fresh_conn = self.connect_and_handshake().await?;
-        let resp = fresh_conn.request(&req).await?;
+        let resp = match fresh_conn.request(&req).await {
+            Ok(resp) => resp,
+            Err(error) => return Err(error.into_ipc_error(&req, !retry_safe)),
+        };
         *conn_guard = Some(fresh_conn);
         Ok(resp)
     }
@@ -837,6 +992,7 @@ mod tests {
     };
     use crate::daemon::server::DaemonServer;
     use crate::remote::state::RemoteNetworkMode;
+    use std::os::unix::fs::symlink;
     use tempfile::tempdir;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
@@ -983,7 +1139,7 @@ mod tests {
             drop(write1);
             drop(reader1);
 
-            // --- Connection 2 (transparent reconnect) ---
+            // --- Connection 2 (transparent reconnect)
             let (stream2, _) = listener.accept().await.unwrap();
             let (read2, mut write2) = stream2.into_split();
             let mut reader2 = BufReader::new(read2);
@@ -1267,5 +1423,247 @@ mod tests {
         assert_eq!(fetched_sel, Some(sel));
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_mutating_request_is_not_retried_after_ambiguous_delivery() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("test_ambiguous_write.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let (stream1, _) = listener.accept().await.unwrap();
+            let (read1, mut write1) = stream1.into_split();
+            let mut reader1 = BufReader::new(read1);
+            let mut line = String::new();
+
+            reader1.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Handshake { .. }
+            ));
+            let handshake = DaemonResponse::HandshakeOk {
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                epoch: 321,
+            };
+            let mut handshake_json = serde_json::to_string(&handshake).unwrap();
+            handshake_json.push('\n');
+            write1.write_all(handshake_json.as_bytes()).await.unwrap();
+
+            line.clear();
+            reader1.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::ListSessions
+            ));
+            let mut list_json = serde_json::to_string(&DaemonResponse::ListSessionsOk {
+                epoch: 321,
+                sessions: Vec::new(),
+            })
+            .unwrap();
+            list_json.push('\n');
+            write1.write_all(list_json.as_bytes()).await.unwrap();
+
+            line.clear();
+            reader1.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Write { .. }
+            ));
+            drop(write1);
+            drop(reader1);
+
+            match tokio::time::timeout(Duration::from_millis(400), listener.accept()).await {
+                Ok(Ok((stream2, _))) => {
+                    let (read2, mut write2) = stream2.into_split();
+                    let mut reader2 = BufReader::new(read2);
+                    line.clear();
+                    reader2.read_line(&mut line).await.unwrap();
+                    assert!(matches!(
+                        serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                        DaemonRequest::Handshake { .. }
+                    ));
+                    write2.write_all(handshake_json.as_bytes()).await.unwrap();
+                    line.clear();
+                    reader2.read_line(&mut line).await.unwrap();
+                    assert!(matches!(
+                        serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                        DaemonRequest::Write { .. }
+                    ));
+                    let mut response = serde_json::to_string(&DaemonResponse::WriteOk).unwrap();
+                    response.push('\n');
+                    write2.write_all(response.as_bytes()).await.unwrap();
+                    true
+                }
+                _ => false,
+            }
+        });
+
+        let client = DaemonClient::new_with_socket(socket_path);
+        client
+            .send_request(DaemonRequest::ListSessions)
+            .await
+            .expect("prime persistent connection");
+
+        let result = client
+            .send_request(DaemonRequest::Write {
+                session_id: "ambiguous-session".into(),
+                data: b"echo once\n".to_vec(),
+            })
+            .await;
+        let resent = server_task.await.unwrap();
+        let error = result.expect_err("mutating request with lost response must be ambiguous");
+
+        assert!(
+            !resent,
+            "mutating request must not be re-sent after delivery became ambiguous"
+        );
+        assert_eq!(error.code, IpcErrorCode::IoError);
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("type"))
+                .and_then(|value| value.as_str()),
+            Some("ambiguousDelivery")
+        );
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("requestType"))
+                .and_then(|value| value.as_str()),
+            Some("write")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_safe_read_is_retried_after_ambiguous_delivery() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("test_ambiguous_read.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let (stream1, _) = listener.accept().await.unwrap();
+            let (read1, mut write1) = stream1.into_split();
+            let mut reader1 = BufReader::new(read1);
+            let mut line = String::new();
+
+            reader1.read_line(&mut line).await.unwrap();
+            let handshake = DaemonResponse::HandshakeOk {
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                epoch: 654,
+            };
+            let mut handshake_json = serde_json::to_string(&handshake).unwrap();
+            handshake_json.push('\n');
+            write1.write_all(handshake_json.as_bytes()).await.unwrap();
+
+            line.clear();
+            reader1.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::ListSessions
+            ));
+            let mut list_json = serde_json::to_string(&DaemonResponse::ListSessionsOk {
+                epoch: 654,
+                sessions: Vec::new(),
+            })
+            .unwrap();
+            list_json.push('\n');
+            write1.write_all(list_json.as_bytes()).await.unwrap();
+
+            line.clear();
+            reader1.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Ping
+            ));
+            drop(write1);
+            drop(reader1);
+
+            let (stream2, _) = listener.accept().await.unwrap();
+            let (read2, mut write2) = stream2.into_split();
+            let mut reader2 = BufReader::new(read2);
+            line.clear();
+            reader2.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Handshake { .. }
+            ));
+            write2.write_all(handshake_json.as_bytes()).await.unwrap();
+            line.clear();
+            reader2.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Ping
+            ));
+            let mut pong = serde_json::to_string(&DaemonResponse::Pong).unwrap();
+            pong.push('\n');
+            write2.write_all(pong.as_bytes()).await.unwrap();
+        });
+
+        let client = DaemonClient::new_with_socket(socket_path);
+        client
+            .send_request(DaemonRequest::ListSessions)
+            .await
+            .expect("prime persistent connection");
+        let response = client.send_request(DaemonRequest::Ping).await.unwrap();
+        assert!(matches!(response, DaemonResponse::Pong));
+        server_task.await.unwrap();
+    }
+
+    #[test]
+    fn test_client_rejects_symlinked_socket_before_connecting() {
+        let dir = tempdir().unwrap();
+        fs::set_permissions(
+            dir.path(),
+            <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let real_socket = dir.path().join("real.sock");
+        let symlinked_socket = dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&real_socket).unwrap();
+        symlink(&real_socket, &symlinked_socket).unwrap();
+        let current_uid = unsafe { libc::getuid() };
+
+        let error = DaemonClient::validate_existing_socket_path_for_uid(
+            &symlinked_socket,
+            current_uid,
+        )
+        .expect_err("symlinked daemon socket must be rejected before connect");
+        assert_eq!(error.code, IpcErrorCode::IoError);
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("type"))
+                .and_then(|value| value.as_str()),
+            Some("daemonSocketTrustValidation")
+        );
+        assert!(error.message.contains("symlink"));
+    }
+
+    #[test]
+    fn test_client_rejects_wrong_uid_runtime_dir_before_connecting() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let current_uid = unsafe { libc::getuid() };
+        let wrong_uid = current_uid.wrapping_add(1);
+
+        let error = DaemonClient::validate_existing_socket_path_for_uid(&socket_path, wrong_uid)
+            .expect_err("wrong-UID runtime directory must be rejected");
+        assert_eq!(error.code, IpcErrorCode::IoError);
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("type"))
+                .and_then(|value| value.as_str()),
+            Some("daemonSocketTrustValidation")
+        );
+        assert!(error.message.contains("owned by UID"));
     }
 }

@@ -21,7 +21,7 @@ type UseWorkspaceRuntimeOptions = {
   workspaceId?: string;
   activeWorktreePath: string | null;
   syncWorktrees: (worktrees: Worktree[]) => Promise<void>;
-  ensureTabForWorktree: (worktree: Worktree) => Promise<string>;
+  ensureTabForWorktree: (worktree: Worktree, options?: { allowCreate?: boolean }) => Promise<string | null>;
   services?: WorkspaceRuntimeServices;
 };
 
@@ -58,27 +58,36 @@ export function useWorkspaceRuntime({
     setRuntimeError(toIpcError(error));
   }, []);
 
-  const refreshWorktrees = useCallback(() => {
-    if (refreshInFlightRef.current) return refreshInFlightRef.current;
+  const refreshWorktrees = useCallback(
+    (options?: { allowCreate?: boolean }) => {
+      if (refreshInFlightRef.current) return refreshInFlightRef.current;
 
-    const refreshPromise = (async () => {
-      try {
-        const listed = await services.listWorktrees(workspaceId);
-        const worktrees = listed.length > 0 || services.isTauriRuntime() ? listed : [PREVIEW_WORKTREE];
-        await syncWorktrees(worktrees);
-        const preferred = worktrees.find((worktree) => worktree.path === activeWorktreePathRef.current) ?? worktrees[0];
-        if (preferred) await ensureTabForWorktree(preferred);
-        setRuntimeError(null);
-      } catch (error) {
-        reportRuntimeError(error);
-      }
-    })().finally(() => {
-      refreshInFlightRef.current = null;
-    });
+      const refreshPromise = (async () => {
+        try {
+          const listed = await services.listWorktrees(workspaceId);
+          const worktrees = listed.length > 0 || services.isTauriRuntime() ? listed : [PREVIEW_WORKTREE];
+          await syncWorktrees(worktrees);
+          const preferred = worktrees.find((worktree) => worktree.path === activeWorktreePathRef.current) ?? worktrees[0];
+          if (preferred) {
+            if (options && options.allowCreate !== undefined) {
+              await ensureTabForWorktree(preferred, options);
+            } else {
+              await ensureTabForWorktree(preferred);
+            }
+          }
+          setRuntimeError(null);
+        } catch (error) {
+          reportRuntimeError(error);
+        }
+      })().finally(() => {
+        refreshInFlightRef.current = null;
+      });
 
-    refreshInFlightRef.current = refreshPromise;
-    return refreshPromise;
-  }, [ensureTabForWorktree, reportRuntimeError, services, syncWorktrees, workspaceId]);
+      refreshInFlightRef.current = refreshPromise;
+      return refreshPromise;
+    },
+    [ensureTabForWorktree, reportRuntimeError, services, syncWorktrees, workspaceId],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -88,7 +97,7 @@ export function useWorkspaceRuntime({
       await services.ensureTerminalEvents();
       if (disposed) return;
       unlistenWorktreeChanged = await services.onWorktreeChanged(() => {
-        void refreshWorktrees();
+        void refreshWorktrees({ allowCreate: false });
       });
       if (disposed) {
         unlistenWorktreeChanged();
@@ -98,7 +107,7 @@ export function useWorkspaceRuntime({
     };
 
     const handleFocus = () => {
-      void refreshWorktrees();
+      void refreshWorktrees({ allowCreate: false });
     };
 
     window.addEventListener("focus", handleFocus);

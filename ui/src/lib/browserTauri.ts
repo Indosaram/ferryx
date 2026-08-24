@@ -31,12 +31,48 @@ export async function navigateBrowser(browserId: string, url: string): Promise<v
   return invoke<void>("cmd_browser_navigate", { browserId, url });
 }
 
+export async function goBackBrowser(browserId: string): Promise<void> {
+  return invoke<void>("cmd_browser_go_back", { browserId });
+}
+
+export async function goForwardBrowser(browserId: string): Promise<void> {
+  return invoke<void>("cmd_browser_go_forward", { browserId });
+}
+
 export async function reloadBrowser(browserId: string): Promise<void> {
   return invoke<void>("cmd_browser_reload", { browserId });
 }
 
-export async function setBrowserBounds(browserId: string, bounds: LogicalRect): Promise<void> {
-  return invoke<void>("cmd_browser_set_bounds", { browserId, bounds });
+function isWebviewNotFoundError(err: unknown): boolean {
+  if (!err) return false;
+  if (typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    if (obj.code === "WEBVIEW_NOT_FOUND") return true;
+    if (typeof obj.message === "string" && obj.message.includes("Webview not found")) return true;
+  }
+  if (typeof err === "string" && (err.includes("WEBVIEW_NOT_FOUND") || err.includes("Webview not found"))) {
+    return true;
+  }
+  return false;
+}
+
+export async function setBrowserBounds(
+  browserId: string,
+  bounds: LogicalRect,
+  retries = 5,
+  delayMs = 50,
+): Promise<void> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await invoke<void>("cmd_browser_set_bounds", { browserId, bounds });
+    } catch (error) {
+      if (attempt < retries && isWebviewNotFoundError(error)) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
 export function setBrowserVisible(browserId: string, visible: boolean): Promise<void> {
@@ -65,7 +101,7 @@ export async function listBrowsers(): Promise<BrowserSessionSummary[]> {
 
 export async function importBrowserCookies(profileId: string, filePath: string): Promise<number> {
   const result = await invoke<{ importedCount: number }>("cmd_browser_import_cookies", {
-    request: { browserId: profileId, filePath },
+    request: { profileId, filePath },
   });
   return result.importedCount;
 }

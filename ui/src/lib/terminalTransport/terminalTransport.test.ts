@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { TauriTerminalTransport } from "./tauriTransport";
-import { WebSocketTerminalTransport } from "./remoteTransport";
+import { terminalEventBus, type TerminalOutputChunk } from "../terminalEvents";
 import * as tauri from "../tauri";
+import { WebSocketTerminalTransport } from "./remoteTransport";
+import { TauriTerminalTransport } from "./tauriTransport";
 
 describe("TerminalTransport abstractions", () => {
   it("TauriTerminalTransport instantiates and conforms to contract", async () => {
@@ -86,31 +87,29 @@ describe("TerminalTransport abstractions", () => {
 
     const transport = new TauriTerminalTransport();
 
-    // write string
     await transport.write("s1", "ls -la\n");
     expect(writeSpy).toHaveBeenCalledWith({ sessionId: "s1", data: "ls -la\n" });
 
-    // write Uint8Array
     await transport.write("s1", new TextEncoder().encode("echo hi\n"));
     expect(writeSpy).toHaveBeenCalledWith({ sessionId: "s1", data: "echo hi\n" });
 
-    // resize
     await transport.resize("s1", 120, 40);
     expect(resizeSpy).toHaveBeenCalledWith({ sessionId: "s1", cols: 120, rows: 40 });
 
-    // signal
     await transport.signal("s1", "interrupt");
     expect(signalSpy).toHaveBeenCalledWith({ sessionId: "s1", signal: "interrupt" });
 
-    // close
     await transport.close("s1");
     expect(closeSpy).toHaveBeenCalledWith("s1");
   });
 
-  it("TauriTerminalTransport onOutput decodes base64 data for matching session", async () => {
-    let outputHandler: ((payload: tauri.TerminalOutputPayload) => void) | null = null;
+  it("TauriTerminalTransport onOutput forwards raw byte chunks from the shared event bus", async () => {
+    let outputHandler: ((data: TerminalOutputChunk) => void) | null = null;
     const unlistenFn = vi.fn();
-    vi.spyOn(tauri, "onTerminalOutput").mockImplementation(async (handler) => {
+    vi.spyOn(terminalEventBus, "ensureStarted").mockResolvedValue();
+    const subscribeSpy = vi.spyOn(terminalEventBus, "subscribeOutput").mockImplementation((sessionId, handler, replay) => {
+      expect(sessionId).toBe("sess-match");
+      expect(replay).toBe(false);
       outputHandler = handler;
       return unlistenFn;
     });
@@ -122,25 +121,15 @@ describe("TerminalTransport abstractions", () => {
     });
 
     await Promise.resolve();
-    expect(outputHandler).toBeDefined();
+    expect(subscribeSpy).toHaveBeenCalledOnce();
+    expect(outputHandler).not.toBeNull();
 
-    // Non-matching session ignored
-    if (outputHandler) {
-      (outputHandler as (payload: tauri.TerminalOutputPayload) => void)({
-        sessionId: "other-session",
-        data: btoa("ignored content"),
-      });
-    }
-    expect(received).toHaveLength(0);
+    const chunk = new TextEncoder().encode("matched content");
+    const emitOutput = outputHandler as unknown as (data: TerminalOutputChunk) => void;
+    emitOutput(chunk);
 
-    // Matching session delivered decoded
-    if (outputHandler) {
-      (outputHandler as (payload: tauri.TerminalOutputPayload) => void)({
-        sessionId: "sess-match",
-        data: btoa("matched content"),
-      });
-    }
     expect(received).toHaveLength(1);
+    expect(received[0]).toBe(chunk);
     expect(new TextDecoder().decode(received[0])).toBe("matched content");
 
     unsubscribe();

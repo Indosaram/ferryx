@@ -50,7 +50,7 @@ export type TerminalSessionSummary = {
   daemonEpoch?: string | null;
 };
 
-export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed";
+export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed" | "running";
 
 export type TerminalSession = {
   /** Frontend-local stable identity used by pane leaves and terminal renderer ownership. */

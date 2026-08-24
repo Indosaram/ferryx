@@ -30,7 +30,7 @@ import type {
   TerminalSession,
   WorkspaceTab,
 } from "../lib/types";
-import { defaultContentForTab, normalizeLayout, toPaneContent } from "../state/layout";
+import { defaultContentForTab, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import type { PaneDirection, PaneNode } from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
 import { TabBar } from "./TabBar";
@@ -681,19 +681,6 @@ function TabGroupView({
   );
 }
 
-function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPaneLayout {
-  const isBrowserTab = tab.kind === "browser";
-  const fallbackLeafId = `leaf-default-${tab.id}`;
-  const defaultContent = defaultContentForTab(tab);
-  return layout.layoutsByTabId?.[tab.id] ?? {
-    root: { type: "leaf", leafId: fallbackLeafId },
-    activeLeafId: fallbackLeafId,
-    expandedLeafId: null,
-    sessionIdsByLeafId: { [fallbackLeafId]: isBrowserTab ? "" : tab.sessionId },
-    contentsByLeafId: { [fallbackLeafId]: defaultContent },
-  };
-}
-
 function firstLeafId(node: PaneNode): string {
   let current = node;
   while (current.type === "split") current = current.first;
@@ -848,10 +835,22 @@ const PaneLeafView = React.memo(function PaneLeafView({
       data-tab-id={tab.id}
       data-dnd-type="pane-leaf"
       onClick={() => onFocusPane(tab.id, leafId)}
+      onMouseMove={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        const relativeY = event.clientY - rect.top;
+        if (relativeY <= 16) {
+          if (!isHoveredTop) setIsHoveredTop(true);
+        } else {
+          if (isHoveredTop) setIsHoveredTop(false);
+        }
+      }}
+      onMouseLeave={() => {
+        setIsHoveredTop(false);
+      }}
     >
       <PaneEdgeDropZones tabId={tab.id} leafId={leafId} />
       <div
-        className="absolute inset-x-0 top-0 z-20 h-6"
+        className="absolute inset-x-0 top-0 z-20 h-4 pointer-events-none"
         data-testid="pane-toolbar-hotspot"
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={(event) => {
@@ -864,7 +863,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         ref={draggable.setNodeRef}
         {...draggable.attributes}
         {...draggable.listeners}
-        className={`absolute inset-x-0 top-0 z-30 flex h-6 items-center justify-end border-b border-border/30 bg-background/85 backdrop-blur-md px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
+        className={`absolute inset-x-0 top-0 z-30 flex h-3 items-center justify-end border-b border-border/30 bg-background/85 backdrop-blur-md px-1 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
           isHoveredTop ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
         } ${draggable.isDragging ? "opacity-30" : ""}`}
         data-testid="pane-toolbar"
@@ -876,39 +875,39 @@ const PaneLeafView = React.memo(function PaneLeafView({
           <IconButton
             label="Split pane right"
             size="sm"
-            className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+            className="size-2.5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
               onSplitPane(tab.id, leafId, "horizontal");
             }}
           >
-            <Columns2 className="size-3" />
+            <Columns2 className="size-1.5" />
           </IconButton>
           <IconButton
             label="Split pane down"
             size="sm"
-            className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+            className="size-2.5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
               onSplitPane(tab.id, leafId, "vertical");
             }}
           >
-            <Rows2 className="size-3" />
+            <Rows2 className="size-1.5" />
           </IconButton>
           {!isOnlyLeaf ? (
             <IconButton
               label="Close split view"
               size="sm"
-              className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+              className="size-2.5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation();
                 onClosePane(tab.id, leafId);
               }}
             >
-              <X className="size-3" />
+              <X className="size-1.5" />
             </IconButton>
           ) : null}
         </div>

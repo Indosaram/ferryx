@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum BrowserError {
     #[error("Browser not found: {0}")]
     NotFound(String),
+    #[error("Webview not found for browser session: {0}")]
+    WebviewNotFound(String),
     #[error("Invalid URL: {0}")]
     InvalidUrl(String),
     #[error("Scheme denied for URL: {0} (only http, https, and about:blank allowed)")]
@@ -19,6 +21,8 @@ pub enum BrowserError {
     NavigationFailed(String),
     #[error("History navigation failed: {0}")]
     HistoryFailed(String),
+    #[error("Cookie import failed: {0}")]
+    CookieImport(String),
     #[error("Failed to close browser: {0}")]
     CloseFailed(String),
     #[error("Platform unsupported: {0}")]

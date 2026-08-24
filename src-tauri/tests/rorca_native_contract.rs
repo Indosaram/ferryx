@@ -7,11 +7,15 @@ use ferryx_lib::terminal::{
     load_terminal_preferences_from_path, parse_ghostty_config, TerminalPreferencesSource,
     TerminalPreferencesStatus, DEFAULT_TERMINAL_FONT_FAMILY,
 };
+use ferryx_lib::daemon::client::DaemonClient;
+use ferryx_lib::daemon::server::DaemonServer;
 use ferryx_lib::worktree::{run_git, WorkspaceRegistry};
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 use tauri::Manager;
 use tempfile::TempDir;
+use tokio::net::UnixListener;
 
 #[test]
 fn tauri_metadata_uses_rorca_identity_and_generated_icons() {
@@ -162,9 +166,50 @@ fn setup_git_project() -> TempDir {
     repo
 }
 
+/// Spawns an in-process daemon server on an isolated temp socket so the typed
+/// project commands can perform their daemon workspace registration.
+struct TestDaemon {
+    _dir: TempDir,
+    client: Arc<DaemonClient>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn spawn_test_daemon() -> TestDaemon {
+    let dir = TempDir::new().expect("daemon tempdir");
+    let socket_path = dir.path().join("test_daemon.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
+    let server = Arc::new(DaemonServer::new());
+    let server_clone = Arc::clone(&server);
+    let task = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let s = Arc::clone(&server_clone);
+                    tokio::spawn(async move {
+                        s.handle_client(stream).await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    TestDaemon {
+        _dir: dir,
+        client: Arc::new(DaemonClient::new_with_socket(socket_path)),
+        task,
+    }
+}
+
 #[tokio::test]
 async fn project_registration_returns_canonical_root_and_lists_local_branches() {
     let repo = setup_git_project();
+    let daemon = spawn_test_daemon().await;
     let nested = repo.path().join("nested");
     std::fs::create_dir(&nested).expect("nested dir");
     let canonical_root = repo.path().canonicalize().expect("canonical repo root");
@@ -175,12 +220,15 @@ async fn project_registration_returns_canonical_root_and_lists_local_branches() 
 
     let registry = WorkspaceRegistry::new();
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon.client))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
     let registry_state = app.state::<WorkspaceRegistry>();
+    let daemon_state = app.state::<Arc<DaemonClient>>();
 
     let registered = cmd_project_register(
+        daemon_state,
         registry_state.clone(),
         RegisterProjectRequest {
             workspace_id: "project-a".into(),
@@ -229,21 +277,24 @@ async fn project_registration_returns_canonical_root_and_lists_local_branches() 
 #[tokio::test]
 async fn project_registration_is_idempotent_for_the_same_workspace_and_root() {
     let repo = setup_git_project();
+    let daemon = spawn_test_daemon().await;
     let registry = WorkspaceRegistry::new();
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon.client))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
     let registry_state = app.state::<WorkspaceRegistry>();
+    let daemon_state = app.state::<Arc<DaemonClient>>();
     let request = RegisterProjectRequest {
         workspace_id: "project-a".into(),
         repo_path: repo.path().to_path_buf(),
     };
 
-    let first = cmd_project_register(registry_state.clone(), request.clone())
+    let first = cmd_project_register(daemon_state.clone(), registry_state.clone(), request.clone())
         .await
         .expect("first registration");
-    let repeated = cmd_project_register(registry_state, request)
+    let repeated = cmd_project_register(daemon_state, registry_state, request)
         .await
         .expect("same project registration");
 
@@ -255,14 +306,17 @@ async fn project_registration_is_idempotent_for_the_same_workspace_and_root() {
 /// second `default` alias for that same root.
 #[tokio::test]
 async fn initial_project_is_the_single_canonical_checkout_without_a_default_alias() {
+    let daemon = spawn_test_daemon().await;
     let registry = WorkspaceRegistry::new();
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon.client))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
     let registry_state = app.state::<WorkspaceRegistry>();
+    let daemon_state = app.state::<Arc<DaemonClient>>();
 
-    let initial = cmd_project_initial(registry_state.clone())
+    let initial = cmd_project_initial(daemon_state.clone(), registry_state.clone())
         .await
         .expect("initial project");
     println!("initial project: {initial:?}");
@@ -288,7 +342,7 @@ async fn initial_project_is_the_single_canonical_checkout_without_a_default_alia
         "the startup root must not be registered under a second `default` alias"
     );
 
-    let repeated = cmd_project_initial(registry_state.clone())
+    let repeated = cmd_project_initial(daemon_state, registry_state.clone())
         .await
         .expect("repeated initial project");
     assert_eq!(repeated, initial);
@@ -346,16 +400,20 @@ async fn legacy_default_workspace_id_is_never_registered_and_never_resolves() {
 #[tokio::test]
 async fn project_registration_enforces_one_workspace_id_per_canonical_root() {
     let repo = setup_git_project();
+    let daemon = spawn_test_daemon().await;
     let nested = repo.path().join("nested");
     std::fs::create_dir(&nested).expect("nested dir");
     let registry = WorkspaceRegistry::new();
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon.client))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
     let registry_state = app.state::<WorkspaceRegistry>();
+    let daemon_state = app.state::<Arc<DaemonClient>>();
 
     let first = cmd_project_register(
+        daemon_state.clone(),
         registry_state.clone(),
         RegisterProjectRequest {
             workspace_id: "project-a".into(),
@@ -373,6 +431,7 @@ async fn project_registration_enforces_one_workspace_id_per_canonical_root() {
         (LEGACY_DEFAULT_WORKSPACE_ID, nested.clone()),
     ] {
         let duplicate = cmd_project_register(
+            daemon_state.clone(),
             registry_state.clone(),
             RegisterProjectRequest {
                 workspace_id: requested_id.into(),
@@ -398,6 +457,7 @@ async fn project_registration_enforces_one_workspace_id_per_canonical_root() {
     // Distinct roots still register independently.
     let other_repo = setup_git_project();
     let other = cmd_project_register(
+        daemon_state,
         registry_state.clone(),
         RegisterProjectRequest {
             workspace_id: "project-b".into(),
@@ -444,14 +504,18 @@ fn workspace_ids_derive_safely_from_repository_folder_names() {
 #[tokio::test]
 async fn project_registration_rejects_non_git_roots_and_unregistered_branch_queries() {
     let non_repo = TempDir::new().expect("non-repo tempdir");
+    let daemon = spawn_test_daemon().await;
     let registry = WorkspaceRegistry::new();
     let app = tauri::test::mock_builder()
+        .manage(Arc::clone(&daemon.client))
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
     let registry_state = app.state::<WorkspaceRegistry>();
+    let daemon_state = app.state::<Arc<DaemonClient>>();
 
     let error = cmd_project_register(
+        daemon_state,
         registry_state.clone(),
         RegisterProjectRequest {
             workspace_id: "bad-project".into(),

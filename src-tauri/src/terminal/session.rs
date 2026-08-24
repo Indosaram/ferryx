@@ -67,6 +67,7 @@ impl PtySession {
             .expect("output sender must exist while starting reader")
             .clone();
         let reader = config.reader;
+        let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
         let reader_task = tokio::task::spawn_blocking(move || {
@@ -76,6 +77,7 @@ impl PtySession {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
                             break;
                         }

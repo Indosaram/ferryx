@@ -11,6 +11,7 @@ import {
   type BrowserProfile,
   type BrowserSettingsState,
 } from "../lib/browserSettings";
+import { clearBrowserHistory } from "../lib/browserHistory";
 import {
   focusBrowser,
   importBrowserCookies,
@@ -216,6 +217,16 @@ export function BrowserSettingsPanel() {
 
         <SettingRow label="Restore browser tabs on launch" description="Persist built-in browser tabs as part of the workspace session.">
           <Toggle label="Restore tabs on launch" checked={settings.restoreTabsOnLaunch} onChange={(value) => void update({ restoreTabsOnLaunch: value })} />
+        </SettingRow>
+        <SettingRow label="Remember browsing history" description="Keep up to 100 recently visited built-in browser pages across Ferryx restarts.">
+          <Toggle
+            label="Remember browsing history"
+            checked={settings.rememberBrowsingHistory}
+            onChange={(value) => {
+              if (!value) clearBrowserHistory();
+              void update({ rememberBrowsingHistory: value });
+            }}
+          />
         </SettingRow>
       </div>
 

@@ -26,7 +26,6 @@ fn setup_repo() -> TempDir {
 async fn setup_test_daemon() -> (
     TempDir,
     Arc<DaemonClient>,
-    Arc<DaemonServer>,
     tokio::task::JoinHandle<()>,
 ) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -49,7 +48,7 @@ async fn setup_test_daemon() -> (
     });
 
     let client = Arc::new(DaemonClient::new_with_socket(socket_path));
-    (dir, client, server, server_task)
+    (dir, client, server_task)
 }
 
 #[tokio::test]
@@ -60,14 +59,14 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .register("workspace-a", repo.path())
         .expect("register workspace");
 
-    let (_daemon_dir, daemon_client, daemon_server, server_task) = setup_test_daemon().await;
+    let (_daemon_dir, daemon_client, server_task) = setup_test_daemon().await;
     daemon_client
         .register_workspace("workspace-a", &repo.path().to_string_lossy())
         .await
         .expect("register workspace on daemon");
 
     let app = tauri::test::mock_builder()
-        .manage(daemon_client)
+        .manage(Arc::clone(&daemon_client))
         .manage(registry.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -117,17 +116,21 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
             cwd: None,
             cols: Some(80),
             rows: Some(24),
+            client_request_id: None,
         },
     )
     .await
     .expect("identity terminal spawn");
 
-    let session = daemon_server
-        .terminal_service()
-        .pty_manager()
-        .get_session(&spawned.session_id)
-        .expect("session");
-    assert_eq!(session.worktree_path(), Some(canonical_created.clone()));
+    let details = daemon_client
+        .describe_session(&spawned.session_id)
+        .await
+        .expect("session details");
+    assert_eq!(
+        details.cwd.as_deref().map(std::path::Path::new),
+        Some(canonical_created.as_path())
+    );
+    assert_eq!(details.worktree.as_ref(), Some(&identity));
     let (worktree_manager, _) = registry
         .resolve_terminal_target("workspace-a", Some(&identity))
         .expect("resolve worktree manager");
