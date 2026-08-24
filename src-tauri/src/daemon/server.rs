@@ -879,6 +879,7 @@ impl DaemonServer {
                         session_id: Cow::Borrowed(&session_id),
                         sequence: chunk.sequence,
                         data: Cow::Borrowed(&chunk.bytes),
+                        metrics_read_unix_micros: chunk.metrics_read_unix_micros,
                     };
                     let mut json = serde_json::to_string(&msg).unwrap();
                     json.push('\n');
@@ -976,6 +977,7 @@ mod tests {
         tx.send(OutputChunk {
             sequence: 1,
             bytes: b"hello pty stream\n".to_vec(),
+            metrics_read_unix_micros: None,
         })
         .unwrap();
 

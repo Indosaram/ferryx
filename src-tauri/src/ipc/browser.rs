@@ -352,17 +352,6 @@ pub async fn cmd_browser_set_bounds<R: tauri::Runtime>(
             height: bounds.height,
         }),
     });
-    // TEMP-DIAG: remove after toolbar-overlap investigation
-    if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ferryx_browser_bounds.log") {
-        use std::io::Write;
-        let native = webview.bounds();
-        let _ = writeln!(
-            log,
-            "set_bounds id={} sent=({:.1},{:.1} {:.1}x{:.1}) native={:?}",
-            browser_id, bounds.x, bounds.y, bounds.width, bounds.height,
-            native.map(|b| (b.position, b.size))
-        );
-    }
     Ok(())
 }
 

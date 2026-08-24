@@ -447,15 +447,6 @@ export function useWorkspaceStore({
       if (!closingTab || closingTab.pinned) return;
 
       if (closingTab.kind === "browser") {
-        if (snapshot.layout.tabs.length === 1) {
-          const worktree = snapshot.worktrees.find((candidate) => candidate.path === closingTab.worktreePath) ?? getActiveWorktree(snapshot);
-          if (worktree) {
-            const replacement = await createSpawnedTab(worktree);
-            await closeBrowser(closingTab.browserId);
-            dispatch({ type: "CLOSE_TAB", tabId, replacement });
-            return;
-          }
-        }
         await closeBrowser(closingTab.browserId);
         dispatch({ type: "CLOSE_TAB", tabId });
         return;
@@ -465,10 +456,6 @@ export function useWorkspaceStore({
       const tabSessionIds = getTabSessionIds(snapshot, tabId);
 
       if (snapshot.layout.tabs.length === 1) {
-        const closingSession = snapshot.sessions[closingTab.sessionId];
-        const worktree = snapshot.worktrees.find(
-          (candidate) => candidate.path === sessionWorktreePath(closingSession),
-        ) ?? getActiveWorktree(snapshot);
         await Promise.all(
           disposableSessions.map((session) => closeBackendSessionAndWait(session, services)),
         );
@@ -477,12 +464,7 @@ export function useWorkspaceStore({
             terminalHostManager.destroy(sessionId);
           }
         }
-        if (worktree) {
-          const replacement = await createSpawnedTab(worktree, closingTab.label);
-          dispatch({ type: "CLOSE_TAB", tabId, replacement });
-        } else {
-          dispatch({ type: "CLOSE_TAB", tabId });
-        }
+        dispatch({ type: "CLOSE_TAB", tabId });
         return;
       }
 
@@ -494,7 +476,7 @@ export function useWorkspaceStore({
       }
       await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services)));
     },
-    [createSpawnedTab, dispatch, services],
+    [dispatch, services],
   );
 
   const closePane = useCallback(

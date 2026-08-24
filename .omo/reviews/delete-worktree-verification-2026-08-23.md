@@ -90,6 +90,16 @@ The native test runs still emit three pre-existing dead-code warnings for `Write
 
 The full `cargo test --manifest-path src-tauri/Cargo.toml` run subsequently reached 136 passing tests but failed the unrelated in-progress daemon test `daemon::server::tests::test_pump_stream_compact_framing_and_exit`. Its assertion expects a compact stream frame containing `"sessionId":"test-session-123"`; the failure is in concurrently modified daemon protocol/server framing code, not the worktree resolver, IPC delete command, or their fixtures. The targeted deletion suites above remain clean.
 
+## Live native deletion confirmation
+
+The user manually completed the native safe-delete action for the reviewed managed worktree `orca/rorca-qa/e2e-qa` after inspecting the repaired dialog. Direct Git verification afterward confirmed:
+
+- `git worktree list --porcelain` no longer lists `.orca-worktrees/rorca-qa/e2e-qa`;
+- `git branch --list 'orca/rorca-qa/*'` returns no branch;
+- `.orca-worktrees/rorca-qa/e2e-qa` no longer exists.
+
+The empty `.orca-worktrees/rorca-qa/` parent directory is harmless; the managed child worktree and its branch were both removed. This closes the native deletion manual QA without agent desktop automation.
+
 ## Native visual QA boundary
 
 The user prohibits desktop/UI automation, so no native Tauri window was driven. The supplied screenshot was inspected directly; CSS/theme paths and dialog DOM behavior are covered by focused tests. To visually confirm the repaired surface, restart Ferryx and open Delete worktree for an upstream-less worktree: the background and panel should share the active theme, the selected path should be in its own bounded block, and divergence should say `No upstream` rather than show question marks.

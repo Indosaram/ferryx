@@ -41,8 +41,8 @@ jobs:
         include:
           - platform: 'macos-latest'
             os_name: 'macos'
-            target: 'universal-apple-darwin'
-            extra_rust_targets: 'aarch64-apple-darwin x86_64-apple-darwin'
+            target: 'aarch64-apple-darwin'
+            extra_rust_targets: 'x86_64-apple-darwin'
             tauri_args: '--target universal-apple-darwin'
           - platform: 'windows-latest'
             os_name: 'windows'

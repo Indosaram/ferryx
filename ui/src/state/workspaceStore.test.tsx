@@ -447,7 +447,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(services.closeTerminal).toHaveBeenCalledWith("restored-backend-2");
   });
 
-  it("spawns a last-tab replacement only after lifecycle-confirmed writer release", async () => {
+  it("closes the last tab only after lifecycle-confirmed writer release", async () => {
     const { services, confirmExit } = createServices({ autoConfirmExit: false });
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
@@ -473,15 +473,9 @@ describe("useWorkspaceStore terminal ownership", () => {
       await closePromise;
     });
 
-    expect(result.current.state.layout.tabs).toHaveLength(1);
-    expect(result.current.state.layout.activeTabId).not.toBeNull();
-    expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
-    const replacement = result.current.state.layout.tabs[0];
-    expect(replacement.kind).not.toBe("browser");
-    if (replacement.kind !== "browser") {
-      expect(replacement.label).toBe(closingTab.label);
-      expect(result.current.state.sessions[replacement.sessionId].backendSessionId).toBe("backend-2");
-    }
+    expect(result.current.state.layout.tabs).toHaveLength(0);
+    expect(result.current.state.layout.activeTabId).toBeNull();
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
   });
 
   it("derives visible agents only from live terminal session metadata", async () => {
@@ -875,7 +869,7 @@ describe("worktree tab and session isolation", () => {
     }
   });
 
-  it("creates a replacement terminal tab and closes browser when closing the sole browser tab", async () => {
+  it("closes browser when closing the sole browser tab", async () => {
     const closeBrowserSpy = vi.spyOn(browserTauri, "closeBrowser").mockResolvedValue(undefined);
     const { services } = createServices();
     const { result } = renderHook(() =>
@@ -924,11 +918,10 @@ describe("worktree tab and session isolation", () => {
     });
 
     expect(closeBrowserSpy).toHaveBeenCalledWith("browser-123");
-    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
-    expect(result.current.state.layout.tabs).toHaveLength(1);
-    const replacement = result.current.state.layout.tabs[0];
-    expect(replacement.kind).not.toBe("browser");
-    expect(Object.keys(result.current.state.sessions)).toHaveLength(1);
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(result.current.state.layout.tabs).toHaveLength(0);
+    expect(result.current.state.layout.activeTabId).toBeNull();
+    expect(Object.keys(result.current.state.sessions)).toHaveLength(0);
     closeBrowserSpy.mockRestore();
   });
 

@@ -1,17 +1,21 @@
+import { JSDOM } from "jsdom";
+
+if (typeof window === "undefined") {
+  const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", { url: "http://localhost:3000" });
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  globalThis.navigator = dom.window.navigator;
+  globalThis.localStorage = dom.window.localStorage;
+  globalThis.sessionStorage = dom.window.sessionStorage;
+  globalThis.HTMLElement = dom.window.HTMLElement;
+}
+
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as browserTauri from "../lib/browserTauri";
 import type { Worktree } from "../lib/types";
 import { useWorkspaceStore, type WorkspaceServices } from "./workspaceStore";
-
-const browserMocks = vi.hoisted(() => ({
-  createBrowser: vi.fn(),
-  navigateBrowser: vi.fn(),
-  reloadBrowser: vi.fn(),
-  closeBrowser: vi.fn(),
-}));
-
-vi.mock("../lib/browserTauri", () => browserMocks);
 
 const services: WorkspaceServices = {
   ensureTerminalEvents: vi.fn(async () => undefined),
@@ -33,14 +37,10 @@ const worktree: Worktree = {
 
 describe("useWorkspaceStore browser lifecycle", () => {
   beforeEach(() => {
-    browserMocks.createBrowser.mockReset();
-    browserMocks.navigateBrowser.mockReset();
-    browserMocks.reloadBrowser.mockReset();
-    browserMocks.closeBrowser.mockReset();
     vi.mocked(services.spawnTerminal).mockReset();
     vi.mocked(services.spawnTerminal).mockResolvedValue("backend-unused");
 
-    browserMocks.createBrowser.mockResolvedValue({
+    vi.spyOn(browserTauri, "createBrowser").mockResolvedValue({
       browserId: "browser-1",
       webviewLabel: "browser-webview-1",
       workspaceId: "workspace-1",
@@ -56,12 +56,12 @@ describe("useWorkspaceStore browser lifecycle", () => {
       loadError: null,
       visible: true,
     });
-    browserMocks.navigateBrowser.mockResolvedValue(undefined);
-    browserMocks.reloadBrowser.mockResolvedValue(undefined);
-    browserMocks.closeBrowser.mockResolvedValue(undefined);
+    vi.spyOn(browserTauri, "navigateBrowser").mockResolvedValue(undefined);
+    vi.spyOn(browserTauri, "reloadBrowser").mockResolvedValue(undefined);
+    vi.spyOn(browserTauri, "closeBrowser").mockResolvedValue(undefined);
   });
 
-  it("closes the native child webview before replacing the sole browser tab with a terminal", async () => {
+  it("closes the native child webview when closing the sole browser tab", async () => {
     const { result } = renderHook(() =>
       useWorkspaceStore({ workspaceId: "workspace-1", initialWorktrees: [worktree], services }),
     );
@@ -77,11 +77,10 @@ describe("useWorkspaceStore browser lifecycle", () => {
       await result.current.closeTab(tabId);
     });
 
-    expect(browserMocks.closeBrowser).toHaveBeenCalledWith("browser-1");
-    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
-    expect(result.current.state.layout.tabs).toHaveLength(1);
-    expect(result.current.state.layout.tabs[0].kind).not.toBe("browser");
-    expect(result.current.state.layout.activeTabId).toBe(result.current.state.layout.tabs[0].id);
+    expect(browserTauri.closeBrowser).toHaveBeenCalledWith("browser-1");
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(result.current.state.layout.tabs).toHaveLength(0);
+    expect(result.current.state.layout.activeTabId).toBeNull();
   });
 
   it("reuses the same clientRequestId when one logical terminal spawn retries after an ambiguous renderer transport failure", async () => {

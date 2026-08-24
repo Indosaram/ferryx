@@ -160,7 +160,7 @@ export function BrowserToolbar({
   };
 
   return (
-    <div className="relative z-10 shrink-0 bg-sidebar border-b border-border text-xs text-foreground select-none">
+    <div className="relative z-10 shrink-0 bg-[#4b4b4b] border-b border-border text-xs text-foreground select-none">
       <div className="flex items-center gap-2 px-3 py-1.5">
         <div className="flex items-center gap-1">
           <button

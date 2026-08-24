@@ -117,7 +117,7 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
   }, [tab.browserId, visible]);
 
   return (
-    <div className="flex flex-col w-full h-full bg-background overflow-hidden">
+    <div className="flex flex-col w-full h-full bg-[#4b4b4b] overflow-hidden">
       <div ref={toolbarRef}>
         <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} />
       </div>
