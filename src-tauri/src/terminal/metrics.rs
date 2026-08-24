@@ -50,6 +50,7 @@ impl LatencyHistogram {
 
 static METRICS_ENABLED: OnceLock<bool> = OnceLock::new();
 static PTY_READ_MARKS: Mutex<Option<HashMap<String, VecDeque<PtyReadMark>>>> = Mutex::new(None);
+static PENDING_BATCH_READS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 static READ_TO_CHANNEL_SEND: OnceLock<Mutex<LatencyHistogram>> = OnceLock::new();
 
 pub(crate) fn terminal_metrics_enabled() -> bool {
@@ -108,7 +109,43 @@ pub(crate) fn clear_pty_read_timestamps(session_id: &str) {
     }
 }
 
-pub(crate) fn record_read_to_channel_send(read_unix_micros: Option<u64>) {
+pub(crate) fn note_batch_read_timestamp(session_id: &str, read_unix_micros: Option<u64>) {
+    if !terminal_metrics_enabled() {
+        return;
+    }
+    let Some(read_unix_micros) = read_unix_micros else {
+        return;
+    };
+
+    let mut guard = PENDING_BATCH_READS.lock();
+    let sessions = guard.get_or_insert_with(HashMap::new);
+    sessions
+        .entry(session_id.to_string())
+        .and_modify(|existing| *existing = (*existing).min(read_unix_micros))
+        .or_insert(read_unix_micros);
+}
+
+pub(crate) fn record_channel_send_for_session(session_id: &str) {
+    if !terminal_metrics_enabled() {
+        return;
+    }
+    let read_unix_micros = PENDING_BATCH_READS
+        .lock()
+        .as_mut()
+        .and_then(|sessions| sessions.remove(session_id));
+    record_read_to_channel_send(read_unix_micros);
+}
+
+pub(crate) fn clear_pending_batch_read(session_id: &str) {
+    if !terminal_metrics_enabled() {
+        return;
+    }
+    if let Some(sessions) = PENDING_BATCH_READS.lock().as_mut() {
+        sessions.remove(session_id);
+    }
+}
+
+fn record_read_to_channel_send(read_unix_micros: Option<u64>) {
     if !terminal_metrics_enabled() {
         return;
     }

@@ -1,0 +1,106 @@
+name: CI Build & Check
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =========================================================================
+  # 1. FRONTEND UI VALIDATION
+  # =========================================================================
+  ui-check:
+    name: UI Build & Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+
+      - name: Build Frontend UI
+        run: bun run --cwd ui build
+
+  # =========================================================================
+  # 2. RUST BACKEND VALIDATION ACROSS PLATFORMS
+  # =========================================================================
+  rust-check:
+    name: Rust Check (${{ matrix.os_name }})
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            os_name: 'macos'
+            target: 'aarch64-apple-darwin'
+          - platform: 'windows-latest'
+            os_name: 'windows'
+            target: 'x86_64-pc-windows-msvc'
+          - platform: 'ubuntu-latest'
+            os_name: 'linux'
+            target: 'x86_64-unknown-linux-gnu'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Node/Bun dependencies
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+
+      - name: Build Frontend UI (required for Tauri asset embed)
+        run: bun run --cwd ui build
+
+      - name: Cargo Check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}

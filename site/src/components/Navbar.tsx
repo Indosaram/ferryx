@@ -1,6 +1,7 @@
-import { Github, Download } from "lucide-react";
+import { Github } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { DownloadMenu } from "@/components/DownloadMenu";
 import ferryxIcon from "@/assets/ferryx-icon.png";
 
 const iconSrc = typeof ferryxIcon === 'object' && ferryxIcon !== null && 'src' in ferryxIcon ? (ferryxIcon as { src: string }).src : String(ferryxIcon);
@@ -32,8 +33,11 @@ export function Navbar({ basePath }: { basePath: string }) {
           <a href="#features" className="hover:text-zinc-100 transition-colors">
             Features
           </a>
-          <a href="#architecture" className="hover:text-zinc-100 transition-colors">
-            Architecture
+          <a href="#downloads" className="hover:text-zinc-100 transition-colors">
+            Downloads
+          </a>
+          <a href="#quickstart" className="hover:text-zinc-100 transition-colors">
+            Quickstart
           </a>
         </nav>
 
@@ -48,12 +52,7 @@ export function Navbar({ basePath }: { basePath: string }) {
               <Github className="h-4 w-4" />
             </Button>
           </a>
-          <a href="#quickstart">
-            <Button size="sm" className="bg-zinc-100 text-zinc-900 hover:bg-zinc-200 font-semibold">
-              <Download className="mr-1.5 h-3.5 w-3.5" />
-              Get Ferryx
-            </Button>
-          </a>
+          <DownloadMenu variant="navbar" />
         </div>
       </div>
     </header>

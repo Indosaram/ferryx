@@ -1,0 +1,1 @@
+I read this as Implementation - inspect the repository daemon implementation and existing test setup, design the test suite in `src-tauri/tests/daemon_persistence_contract.rs`, verify the contracts against the daemon binary, and ensure clean lifecycle teardown.

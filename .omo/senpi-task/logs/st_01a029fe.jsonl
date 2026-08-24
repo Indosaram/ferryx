@@ -25,3 +25,6 @@
 {"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a029fe/sessions/st_01a029fe/2026-08-22T14-52-38-897Z_01a029f5-a271-7280-b10d-8ecf6e0689a6.jsonl"}}
 {"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
 {"type":"suspended","payload":{"reason":"new"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/orca-lite/.omo/senpi-task/children/st_01a029fe/sessions/st_01a029fe/2026-08-22T14-52-38-897Z_01a029f5-a271-7280-b10d-8ecf6e0689a6.jsonl"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"persisted_only"}}
+{"type":"suspended","payload":{"reason":"quit"}}

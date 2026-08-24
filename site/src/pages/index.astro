@@ -41,7 +41,7 @@ const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_UR
     <div class="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col selection:bg-zinc-800 selection:text-white">
       <Navbar client:load basePath={baseUrl} />
       <main class="flex-1">
-        <Hero />
+        <Hero client:load />
         <div class="relative z-10 -mt-[560px] mx-auto mb-0 max-w-5xl px-4 sm:px-6">
           <LiveFerryxDemo client:only="react" />
         </div>

@@ -1,8 +1,0 @@
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
-{"type":"child_error","payload":{"message":"OpenAI API error (403): 403 \"You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok.\"","stop_reason":"error"}}
-{"type":"retry_fallback_applied","payload":{"from":"xai/grok-4.6","to":"anthropic/claude-sonnet-5","chain_key":"xai/grok-4.6","reason":"hard-error"}}
-{"type":"child_error","payload":{"message":"429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"},\"request_id\":\"req_011CeHrx4ZmE9nrBhTW77zYi\"} (retry-after-ms: 270000)","stop_reason":"error"}}
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"cancelled","residency_state":"resident"}}
-{"type":"cancelled","payload":{"previous_status":"running","reason":"parent turn aborted"}}
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"cancelled","residency_state":"disposed"}}
-{"type":"destroyed","payload":{"cause":"cancel"}}

@@ -222,6 +222,8 @@ pub enum DaemonStreamMessage<'a> {
         sequence: u64,
         #[serde(with = "base64_serde")]
         data: Cow<'a, [u8]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics_read_unix_micros: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     Gap {
@@ -256,6 +258,7 @@ mod tests {
             session_id: Cow::Borrowed("s1"),
             sequence: 42,
             data: Cow::Borrowed(b"hello world"),
+            metrics_read_unix_micros: None,
         };
         let json = serde_json::to_string(&output).expect("serialize output");
 
@@ -275,6 +278,10 @@ mod tests {
             json.contains(r#""sequence":42"#),
             "Expected sequence 42: {json}"
         );
+        assert!(
+            !json.contains("metricsReadUnixMicros"),
+            "Disabled metrics metadata must not alter the daemon wire frame: {json}"
+        );
 
         let deserialized: DaemonStreamMessage =
             serde_json::from_str(&json).expect("deserialize output");
@@ -283,10 +290,12 @@ mod tests {
                 session_id,
                 sequence,
                 data,
+                metrics_read_unix_micros,
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(sequence, 42);
                 assert_eq!(&data[..], b"hello world");
+                assert_eq!(metrics_read_unix_micros, None);
             }
             _ => panic!("Expected Output variant"),
         }

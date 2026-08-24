@@ -1,7 +1,0 @@
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
-{"type":"child_error","payload":{"message":"400 <!DOCTYPE HTML PUBLIC \"-//IETF/DTD HTML 2.0//EN\">\r\n<HTML><HEAD>\r\n<TITLE>400 Bad Request</TITLE>\r\n</HEAD><BODY>\r\n<H1>Request Blocked</H1>\r\n</BODY></HTML>\r\n","stop_reason":"error"}}
-{"type":"retry_fallback_applied","payload":{"from":"modu/gpt-5.6-terra","to":"anthropic/claude-opus-5","chain_key":"modu/gpt-5.6-terra","reason":"hard-error"}}
-{"type":"child_error","payload":{"message":"429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"},\"request_id\":\"req_011CeGtVHR9uT3j3FzR7MqRz\"} (retry-after-ms: 3295000)","stop_reason":"error"}}
-{"type":"retry_fallback_applied","payload":{"from":"anthropic/claude-opus-5","to":"opencode-go/glm-5.2","chain_key":"modu/gpt-5.6-terra","reason":"transient"}}
-{"type":"child_error","payload":{"message":"429: {\"type\":\"GoUsageLimitError\",\"message\":\"Monthly usage limit reached. Resets in 14 days. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_01KG1GK8G737VN20V0BT7RK016/go\"}","stop_reason":"error"}}
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"resident"}}

@@ -1,0 +1,20 @@
+> I read this as updating Tauri bundling configuration and backend cross-platform guards - configure `src-tauri/tauri.conf.json`, `Cargo.toml`, and `src-tauri/src/daemon/` with target-specific guards and verify with `cargo check`.
+
+### Summary of Changes
+
+1. **`src-tauri/tauri.conf.json`**:
+   - Explicitly configured `bundle.targets`: `["dmg", "app", "nsis", "msi", "appimage", "deb"]`.
+   - Added `publisher`, `copyright`, `category` (`DeveloperTool`), `shortDescription`, and `longDescription`.
+   - Configured `bundle.windows` with `allowDowngrades`, `webviewInstallMode` (`downloadBootstrapper`), `nsis` (`installMode: "currentUser"`, `languages: ["English"]`, `startMenuFolder: "Ferryx"`), and `wix` (`language: "en-US"`, `fipsCompliant: false`).
+   - Configured `bundle.linux` (`deb` dependencies/metadata, `appimage`) and `bundle.macOS` (`minimumSystemVersion: "10.15"`, `hardenedRuntime: true`).
+
+2. **`src-tauri/Cargo.toml`**:
+   - Added package metadata (`authors`, `license`, `repository`, `homepage`).
+
+3. **`src-tauri/src/daemon/server.rs` & `client.rs`**:
+   - Added `#[cfg(unix)]` and `#[cfg(not(unix))]` guards for POSIX-only filesystem extensions (`PermissionsExt`, `OpenOptionsExt`, `MetadataExt`, `FileTypeExt`), `libc::getuid`, and `libc::flock`.
+   - Guarded Unix-specific symlink / permission tests.
+
+### Verification
+- Validated `tauri.conf.json` JSON schema and deserialization via `tauri-build`.
+- Verified clean compilation with `cargo check --manifest-path src-tauri/Cargo.toml` and `cargo check --tests --manifest-path src-tauri/Cargo.toml`.

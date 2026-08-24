@@ -1,6 +1,4 @@
-use ferryx_lib::daemon::{
-    decode_daemon_stream_frame, encode_daemon_stream_frame, DaemonStreamMessage,
-};
+use ferryx_lib::daemon::DaemonStreamMessage;
 use std::borrow::Cow;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -44,6 +42,18 @@ fn raw_length_prefixed_decode(frame: &[u8]) -> &[u8] {
     &frame[4..]
 }
 
+fn encode_current_daemon_frame(message: &DaemonStreamMessage<'_>) -> String {
+    // Keep this byte-for-byte aligned with server.rs: serde_json::to_string + newline framing.
+    let mut frame = serde_json::to_string(message).expect("serialize daemon stream frame");
+    frame.push('\n');
+    frame
+}
+
+fn decode_current_daemon_frame(frame: &str) -> DaemonStreamMessage<'static> {
+    // Keep this aligned with client.rs: serde_json::from_str(stream_line.trim()).
+    serde_json::from_str(frame.trim()).expect("parse daemon stream frame")
+}
+
 fn measurement(total_payload_bytes: usize, elapsed: Duration) -> Measurement {
     let mib = total_payload_bytes as f64 / (1024.0 * 1024.0);
     Measurement {
@@ -60,18 +70,19 @@ fn benchmark_size(size: usize) -> (Measurement, Measurement, Measurement, Measur
         session_id: Cow::Borrowed("throughput-bench-session"),
         sequence: 42,
         data: Cow::Borrowed(&payload),
+        metrics_read_unix_micros: None,
     };
 
     for _ in 0..warmup_iterations {
-        let frame = encode_daemon_stream_frame(black_box(&message)).expect("encode warmup frame");
-        let decoded = decode_daemon_stream_frame(black_box(&frame)).expect("decode warmup frame");
+        let frame = encode_current_daemon_frame(black_box(&message));
+        let decoded = decode_current_daemon_frame(black_box(&frame));
         black_box(decoded);
         let raw = raw_length_prefixed_encode(black_box(&payload));
         black_box(raw_length_prefixed_decode(black_box(&raw)));
     }
 
-    let encoded_frame = encode_daemon_stream_frame(&message).expect("encode reference frame");
-    let decoded = decode_daemon_stream_frame(&encoded_frame).expect("decode reference frame");
+    let encoded_frame = encode_current_daemon_frame(&message);
+    let decoded = decode_current_daemon_frame(&encoded_frame);
     match decoded {
         DaemonStreamMessage::Output { data, .. } => assert_eq!(data.as_ref(), payload.as_slice()),
         other => panic!("unexpected decoded frame: {other:?}"),
@@ -81,14 +92,14 @@ fn benchmark_size(size: usize) -> (Measurement, Measurement, Measurement, Measur
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let frame = encode_daemon_stream_frame(black_box(&message)).expect("encode daemon frame");
+        let frame = encode_current_daemon_frame(black_box(&message));
         black_box(frame);
     }
     let json_encode = measurement(iterations * size, start.elapsed());
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let decoded = decode_daemon_stream_frame(black_box(&encoded_frame)).expect("decode daemon frame");
+        let decoded = decode_current_daemon_frame(black_box(&encoded_frame));
         match decoded {
             DaemonStreamMessage::Output { data, .. } => {
                 black_box(data.len());

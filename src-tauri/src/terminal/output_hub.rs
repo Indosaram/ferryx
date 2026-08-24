@@ -11,6 +11,8 @@ const BROADCAST_CAPACITY: usize = 1024;
 pub struct OutputChunk {
     pub sequence: u64,
     pub bytes: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_read_unix_micros: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +54,14 @@ impl BoundedBuffer {
     }
 
     pub fn push(&mut self, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
+        self.push_with_read_timestamp(chunk_bytes, None)
+    }
+
+    pub fn push_with_read_timestamp(
+        &mut self,
+        chunk_bytes: Vec<u8>,
+        metrics_read_unix_micros: Option<u64>,
+    ) -> Option<OutputChunk> {
         if chunk_bytes.is_empty() {
             return None;
         }
@@ -62,6 +72,7 @@ impl BoundedBuffer {
         let chunk = OutputChunk {
             sequence,
             bytes: chunk_bytes,
+            metrics_read_unix_micros,
         };
 
         self.current_size += chunk.bytes.len();
@@ -201,13 +212,24 @@ impl TerminalOutputHub {
     }
 
     pub fn publish(&self, session_id: &str, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
+        self.publish_with_read_timestamp(session_id, chunk_bytes, None)
+    }
+
+    pub fn publish_with_read_timestamp(
+        &self,
+        session_id: &str,
+        chunk_bytes: Vec<u8>,
+        metrics_read_unix_micros: Option<u64>,
+    ) -> Option<OutputChunk> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
         }?;
 
         let mut hub = session_hub.write();
-        let chunk = hub.buffer.push(chunk_bytes)?;
+        let chunk = hub
+            .buffer
+            .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
 
         // Broadcast to sequence subscribers
         let _ = hub.sender.send(chunk.clone());

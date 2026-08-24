@@ -1,0 +1,305 @@
+name: Release Ferryx
+
+'on':
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v0.1.0; defaults to GITHUB_REF_NAME or v<package.json version>)'
+        required: false
+        type: string
+      draft:
+        description: 'Publish as Draft Release'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Publish as Pre-release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # =========================================================================
+  # 1. MATRIX DESKTOP BUILDS (macOS Universal, Windows x64 NSIS/MSI, Linux x64)
+  # =========================================================================
+  build-desktop:
+    name: Build (${{ matrix.os_name }})
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            os_name: 'macos'
+            target: 'universal-apple-darwin'
+            extra_rust_targets: 'aarch64-apple-darwin x86_64-apple-darwin'
+            tauri_args: '--target universal-apple-darwin'
+          - platform: 'windows-latest'
+            os_name: 'windows'
+            target: 'x86_64-pc-windows-msvc'
+            extra_rust_targets: ''
+            tauri_args: '--target x86_64-pc-windows-msvc'
+          - platform: 'ubuntu-latest'
+            os_name: 'linux'
+            target: 'x86_64-unknown-linux-gnu'
+            extra_rust_targets: ''
+            tauri_args: '--target x86_64-unknown-linux-gnu'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }} ${{ matrix.extra_rust_targets }}
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Node/Bun dependencies
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+
+      - name: Build Frontend UI
+        run: bun run --cwd ui build
+
+      - name: Build Tauri Application Bundle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bunx @tauri-apps/cli build ${{ matrix.tauri_args }}
+
+      - name: Collect platform release artifacts
+        id: collect
+        shell: bash
+        run: |
+          mkdir -p dist-artifacts
+          echo "Scanning for installer packages in src-tauri/target..."
+          find src-tauri/target -type f \( \
+            -name "*.dmg" -o \
+            -name "*.exe" -o \
+            -name "*.msi" -o \
+            -name "*.AppImage" -o \
+            -name "*.deb" -o \
+            -name "*.app.tar.gz" -o \
+            -name "*.app.zip" \
+          \) \
+            -not -path "*/build/*" \
+            -not -path "*/deps/*" \
+            -not -path "*/examples/*" \
+            -not -path "*/incremental/*" \
+            -not -path "*/tmp/*" \
+            -exec cp -v {} dist-artifacts/ \;
+          
+          echo "Collected artifacts:"
+          ls -la dist-artifacts/
+
+      - name: Upload platform artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferryx-bundles-${{ matrix.os_name }}
+          path: dist-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # =========================================================================
+  # 2. WINDOWS MSIX BUILD & PACKAGING (Microsoft Store / Sideloading)
+  # =========================================================================
+  build-msix:
+    name: Build MSIX (Windows Store)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Node/Bun dependencies
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+
+      - name: Build Frontend UI
+        run: bun run --cwd ui build
+
+      - name: Determine Application Version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            PKG_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
+            TAG="v${PKG_VER}"
+          fi
+          CLEAN_VER="${TAG#v}"
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+          echo "Building MSIX for version: ${CLEAN_VER}"
+
+      - name: Compile Ferryx Release Binary
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Package MSIX for Windows
+        shell: powershell
+        run: |
+          .\scripts\build-msix.ps1 -Version "${{ steps.version.outputs.version }}" -OutputDir "dist/msix"
+
+      - name: Upload MSIX artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferryx-bundles-msix
+          path: dist/msix/*.msix
+          if-no-files-found: error
+          retention-days: 7
+
+  # =========================================================================
+  # 3. PUBLISH GITHUB RELEASE
+  # =========================================================================
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-desktop, build-msix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Release Tag
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            PKG_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
+            TAG="v${PKG_VER}"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Publishing release for tag: ${TAG}"
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-packages
+          pattern: ferryx-bundles-*
+          merge-multiple: true
+
+      - name: Prepare Staging Directory and Compute SHA256 Checksums
+        shell: bash
+        run: |
+          mkdir -p release-dist
+          cp -v release-packages/* release-dist/ 2>/dev/null || true
+          
+          cd release-dist
+          # Create canonical aliases for landing page direct download links
+          for f in *; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *universal*.dmg) cp -vn "$f" Ferryx_universal.dmg ;;
+              *aarch64*.dmg|*arm64*.dmg) cp -vn "$f" Ferryx_aarch64.dmg ;;
+              *x64*.dmg|*x86_64*.dmg) cp -vn "$f" Ferryx_x64.dmg ;;
+              *setup.exe|*.exe) cp -vn "$f" Ferryx_x64-setup.exe ;;
+              *.msix) cp -vn "$f" Ferryx_x64.msix ;;
+              *.AppImage) cp -vn "$f" Ferryx_amd64.AppImage ;;
+              *.deb) cp -vn "$f" Ferryx_amd64.deb ;;
+            esac
+          done
+
+          # Compute sha256 checksums for all release binaries
+          sha256sum * > SHA256SUMS.txt
+          echo "=== SHA256 Checksums ==="
+          cat SHA256SUMS.txt
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Ferryx ${{ steps.version.outputs.tag }}
+          draft: ${{ inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
+          files: release-dist/*
+          body: |
+            ## Ferryx ${{ steps.version.outputs.tag }}
+
+            Ultra-lightweight workspace and AI agent launcher powered by Tauri v2 and Rust.
+
+            ### 📦 Installer Downloads
+
+            | Platform | Package | Description |
+            | :--- | :--- | :--- |
+            | **macOS** | `.dmg` | Universal bundle (Apple Silicon & Intel) |
+            | **Windows** | `.exe` | Standard NSIS Setup installer (x64) |
+            | **Windows** | `.msi` | Windows Installer MSI package (x64) |
+            | **Windows** | `.msix` | MSIX package for Microsoft Store & Sideloading |
+            | **Linux** | `.AppImage` | Standalone portable executable (x64) |
+            | **Linux** | `.deb` | Debian / Ubuntu package (x64) |
+
+            ### 🔐 Verification
+            Verify the integrity of downloaded binaries using the included `SHA256SUMS.txt` file:
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            *For Microsoft Store submission instructions, see [docs/MS_STORE_SUBMISSION.md](https://github.com/Indosaram/ferryx/blob/main/docs/MS_STORE_SUBMISSION.md).*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
