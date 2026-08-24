@@ -1,0 +1,48 @@
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:268:19
+    |
+103 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+268 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 3 warnings
+   Compiling ferryx v0.1.0 (/Users/indo/code/project/orca-lite/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.95s
+     Running tests/ipc_hardening_contract.rs (src-tauri/target/debug/deps/ipc_hardening_contract-00e9176bc6e47781)
+
+running 7 tests
+test dirty_delete_returns_structured_error_code ... ok
+test identity_based_ipc_resolves_registered_worktree_and_emits_mutation_events ... ok
+test swapped_checked_out_branches_cannot_delete_a_stale_identity_slot ... ok
+test terminal_lifecycle_state_serializes_stably ... ok
+test worktree_status_does_not_emit_when_dirty_state_is_unchanged ... ok
+test worktree_status_emits_dirty_changed_on_clean_to_dirty_transition ... ok
+test worktree_status_emits_dirty_changed_on_dirty_to_clean_transition ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+cargo test ipc_hardening_contract exit: 0

@@ -1,0 +1,51 @@
+[2026-08-23 23:42:14] === Ferryx Standalone Daemon Lifecycle & Session Persistence Verification ===
+[2026-08-23 23:42:14] Runtime Directory: /tmp/rorca-501
+[2026-08-23 23:42:14] Socket Path: /tmp/rorca-501/daemon.sock
+[2026-08-23 23:42:14] Lock Path: /tmp/rorca-501/daemon.lock
+[2026-08-23 23:42:14] Phase 1: Spawning headless daemon process: /Users/indo/code/project/orca-lite/src-tauri/target/debug/ferryx --daemon
+[2026-08-23 23:42:14] Daemon stdout received: 'FERRYX_DAEMON_READY'
+[2026-08-23 23:42:14] Daemon process successfully started with PID: 53570
+[2026-08-23 23:42:14] Phase 2: Connecting Client 1 to daemon UDS...
+[2026-08-23 23:42:14] Handshake OK: protocol_version=2, daemon_pid=53570, epoch=1787496134025
+[2026-08-23 23:42:14] Registering workspace 'ws-terminal-persistence-test' for repo: /Users/indo/code/project/orca-lite
+[2026-08-23 23:42:14] RegisterWorkspace response: {'type': 'registerWorkspaceOk'}
+[2026-08-23 23:42:14] Phase 3: Spawning terminal session in workspace 'ws-terminal-persistence-test' (80x24)...
+[2026-08-23 23:42:14] Spawn response: {'type': 'spawnOk', 'sessionId': 'd830df2b-e7db-480c-838f-3b5e793623a6'}
+[2026-08-23 23:42:14] Terminal session created with session ID: d830df2b-e7db-480c-838f-3b5e793623a6
+[2026-08-23 23:42:14] Phase 4: Opening Attach stream to capture initial output and shell PID...
+[2026-08-23 23:42:14] Attach response on Client 1: {'type': 'attachOk', 'epoch': 1787496134025, 'sessionId': 'd830df2b-e7db-480c-838f-3b5e793623a6', 'startSequence': None, 'endSequence': None, 'gap': None, 'history': ''}
+[2026-08-23 23:42:14] Writing identification command: echo __SHELL_PID_IS_$$:__PPID_IS_$PPID; echo MARKER_INIT_PERSISTENCE_778899
+[2026-08-23 23:42:14] Write response: {'type': 'writeOk'}
+[2026-08-23 23:42:14] Observed Shell PID: 53608, Parent PID: 53570
+[2026-08-23 23:42:14] Verified Shell is a direct child of the Daemon process!
+[2026-08-23 23:42:14] Verified initial output sequences (89 frames, monotonic sequence progression: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]...)
+[2026-08-23 23:42:14] Phase 5: Simulating Client Disconnect (closing Client 1 and Attach Stream 1)...
+[2026-08-23 23:42:14] Verifying Daemon PID 53570 and Shell PID 53608 survive client disconnect...
+[2026-08-23 23:42:14] Confirmed: Both Daemon and Shell processes remain ACTIVE after client disconnection!
+[2026-08-23 23:42:14] Phase 6: Connecting Client 2 (reconnect scenario)...
+[2026-08-23 23:42:14] Handshake OK: protocol_version=2, daemon_pid=53570, epoch=1787496134025
+[2026-08-23 23:42:14] Client 2 calling ListSessions to verify session persistence...
+[2026-08-23 23:42:14] ListSessions response: {'type': 'listSessionsOk', 'epoch': 1787496134025, 'sessions': ['d830df2b-e7db-480c-838f-3b5e793623a6']}
+[2026-08-23 23:42:14] Confirmed session d830df2b-e7db-480c-838f-3b5e793623a6 is present in active session list.
+[2026-08-23 23:42:14] Phase 7: Calling DescribeSession from Client 2...
+[2026-08-23 23:42:14] DescribeSession response: {'type': 'describeSessionOk', 'session': {'sessionId': 'd830df2b-e7db-480c-838f-3b5e793623a6', 'workspaceId': 'ws-terminal-persistence-test', 'worktree': None, 'cwd': '/Users/indo/code/project/orca-lite', 'cols': 80, 'rows': 24, 'running': True, 'startSequence': 1, 'endSequence': 97}}
+[2026-08-23 23:42:14] Confirmed session details: running=true, cols=80, rows=24
+[2026-08-23 23:42:14] Phase 8: Client 2 attaching to session stream to verify buffer replay...
+[2026-08-23 23:42:14] Client 2 Attach response: {'type': 'attachOk', 'epoch': 1787496134025, 'sessionId': 'd830df2b-e7db-480c-838f-3b5e793623a6', 'startSequence': 1, 'endSequence': 97, 'gap': None, 'history': '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'}
+[2026-08-23 23:42:14] Replay buffer received: 1858 bytes
+[2026-08-23 23:42:14] Replay buffer verification PASSED: contains output generated before client disconnection!
+[2026-08-23 23:42:14] Phase 9: Client 2 issuing Resize command to 132 cols x 43 rows...
+[2026-08-23 23:42:14] Resize response: {'type': 'resizeOk'}
+[2026-08-23 23:42:14] Confirmed resized dimensions via DescribeSession: cols=132, rows=43
+[2026-08-23 23:42:14] Phase 10: Writing live input via Client 2 and confirming shell PID stability...
+[2026-08-23 23:42:14] Observed live shell PID from command execution: 53608
+[2026-08-23 23:42:14] Shell PID stability PROVEN: PID 53608 survived disconnect, reconnect, resize, and new write!
+[2026-08-23 23:42:14] Phase 11: Performing isolated Close on session d830df2b-e7db-480c-838f-3b5e793623a6...
+[2026-08-23 23:42:14] Close response: {'type': 'closeOk'}
+[2026-08-23 23:42:14] ListSessions after close: {'type': 'listSessionsOk', 'epoch': 1787496134025, 'sessions': []}
+[2026-08-23 23:42:14] Confirmed session d830df2b-e7db-480c-838f-3b5e793623a6 is removed from daemon active registry.
+[2026-08-23 23:42:15] Confirmed Shell PID 53608 is reaped: True
+[2026-08-23 23:42:15] Phase 12: Sending Shutdown request to Daemon...
+[2026-08-23 23:42:15] Daemon process exited cleanly with code: 0
+[2026-08-23 23:42:15] Socket path exists after shutdown: True
+[2026-08-23 23:42:15] Lock path exists after shutdown: True
