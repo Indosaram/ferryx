@@ -18,8 +18,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+#[cfg(unix)]
+use tokio::net::UnixStream as DaemonStream;
+
+#[cfg(not(unix))]
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+#[cfg(not(unix))]
+use tokio::net::TcpStream as DaemonStream;
+
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
@@ -265,7 +273,7 @@ impl DaemonClient {
         validate_runtime_socket_path(path).map_err(daemon_socket_trust_error)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn validate_existing_socket_path_for_uid(
         path: &Path,
         expected_uid: libc::uid_t,
@@ -274,11 +282,26 @@ impl DaemonClient {
             .map_err(daemon_socket_trust_error)
     }
 
-    async fn connect_or_spawn(&self) -> Result<UnixStream, IpcError> {
+    #[cfg(unix)]
+    async fn connect_socket(path: &Path) -> Result<DaemonStream, std::io::Error> {
+        DaemonStream::connect(path).await
+    }
+
+    #[cfg(not(unix))]
+    async fn connect_socket(path: &Path) -> Result<DaemonStream, std::io::Error> {
+        let port_str = fs::read_to_string(path)?;
+        let port: u16 = port_str
+            .trim()
+            .parse()
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+        DaemonStream::connect(format!("127.0.0.1:{port}")).await
+    }
+
+    async fn connect_or_spawn(&self) -> Result<DaemonStream, IpcError> {
         match fs::symlink_metadata(&self.socket_path) {
             Ok(_) => {
                 Self::validate_existing_socket_path(&self.socket_path)?;
-                if let Ok(stream) = UnixStream::connect(&self.socket_path).await {
+                if let Ok(stream) = Self::connect_socket(&self.socket_path).await {
                     return Ok(stream);
                 }
             }
@@ -332,7 +355,7 @@ impl DaemonClient {
         }
 
         // Exactly one connection attempt after the readiness event; never poll and never fall back.
-        UnixStream::connect(&self.socket_path).await.map_err(|e| {
+        Self::connect_socket(&self.socket_path).await.map_err(|e| {
             IpcError::new(
                 IpcErrorCode::InternalError,
                 format!("Failed to connect to daemon socket after readiness signal: {e}"),
@@ -984,7 +1007,7 @@ impl DaemonClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::protocol::{

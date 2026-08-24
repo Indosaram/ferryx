@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use ferryx_lib::ipc::{CreateWorktreeRequest, SpawnTerminalRequest};
 use ferryx_lib::worktree::{
     run_git, CreateWorktreeOptions, DirtyState, WorktreeError, WorktreeManager,

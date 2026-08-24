@@ -10,5 +10,5 @@ pub use server::*;
 pub use state::*;
 pub use tailscale::*;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

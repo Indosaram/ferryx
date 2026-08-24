@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use ferryx_lib::daemon::{DaemonClient, DaemonServer};
 use ferryx_lib::ipc::{
     cmd_terminal_close, cmd_terminal_spawn, cmd_worktree_create, cmd_worktree_delete,

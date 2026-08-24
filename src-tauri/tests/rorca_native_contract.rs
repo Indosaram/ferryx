@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use ferryx_lib::ipc::{
     cmd_project_branches, cmd_project_initial, cmd_project_register, derive_workspace_id,
     initial_project, IpcErrorCode, ProjectBranchesRequest, RegisterProjectRequest,

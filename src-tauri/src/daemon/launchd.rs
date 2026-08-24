@@ -4,12 +4,18 @@ use std::process::Command;
 
 const PLIST_LABEL: &str = "com.rorca.daemon";
 
+#[cfg(target_os = "macos")]
 pub fn get_launchd_plist_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| {
         PathBuf::from(h)
             .join("Library/LaunchAgents")
             .join(format!("{PLIST_LABEL}.plist"))
     })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn get_launchd_plist_path() -> Option<PathBuf> {
+    None
 }
 
 pub fn generate_launchd_plist(executable_path: &str) -> String {
@@ -123,7 +129,7 @@ pub fn uninstall_launchd_agent() -> Result<(), String> {
     uninstall_launchd_agent_from_path(&plist_path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

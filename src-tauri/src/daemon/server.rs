@@ -15,21 +15,44 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(all(test, unix))]
+use tokio::net::UnixStream;
+#[cfg(not(unix))]
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
+#[cfg(unix)]
 pub fn get_runtime_dir() -> PathBuf {
     let uid = unsafe { libc::getuid() };
     PathBuf::from(format!("/tmp/rorca-{uid}"))
 }
 
+#[cfg(not(unix))]
+pub fn get_runtime_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("TEMP"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
+        .join("Ferryx")
+        .join("runtime")
+}
+
+#[cfg(unix)]
 pub fn get_socket_path() -> PathBuf {
     get_runtime_dir().join("daemon.sock")
+}
+
+#[cfg(not(unix))]
+pub fn get_socket_path() -> PathBuf {
+    get_runtime_dir().join("daemon.port")
 }
 
 pub fn get_lock_path() -> PathBuf {
@@ -51,7 +74,11 @@ fn dirs_next() -> Option<PathBuf> {
     {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
@@ -70,6 +97,7 @@ enum RuntimeNodeKind {
     Socket,
 }
 
+#[cfg(unix)]
 fn validate_safe_ownership_and_type_for_uid(
     path: &Path,
     kind: RuntimeNodeKind,
@@ -105,14 +133,57 @@ fn validate_safe_ownership_and_type_for_uid(
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn validate_safe_ownership_and_type_for_uid(
+    path: &Path,
+    kind: RuntimeNodeKind,
+    _expected_uid: u32,
+) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let meta = fs::symlink_metadata(path)
+        .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "Path {} is a symlink, which is prohibited for daemon runtime",
+            path.display()
+        ));
+    }
+    let valid_type = match kind {
+        RuntimeNodeKind::Directory => meta.file_type().is_dir(),
+        RuntimeNodeKind::RegularFile | RuntimeNodeKind::Socket => !meta.file_type().is_dir(),
+    };
+    if !valid_type {
+        return Err(format!(
+            "Path {} has an invalid runtime node type",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Result<(), String> {
     validate_safe_ownership_and_type_for_uid(path, kind, unsafe { libc::getuid() })
 }
 
+#[cfg(not(unix))]
+fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Result<(), String> {
+    validate_safe_ownership_and_type_for_uid(path, kind, 0)
+}
+
+#[cfg(unix)]
 pub(crate) fn validate_runtime_socket_path(path: &Path) -> Result<(), String> {
     validate_runtime_socket_path_for_uid(path, unsafe { libc::getuid() })
 }
 
+#[cfg(not(unix))]
+pub(crate) fn validate_runtime_socket_path(path: &Path) -> Result<(), String> {
+    validate_runtime_socket_path_for_uid(path, 0)
+}
+
+#[cfg(unix)]
 pub(crate) fn validate_runtime_socket_path_for_uid(
     path: &Path,
     expected_uid: libc::uid_t,
@@ -139,8 +210,20 @@ pub(crate) fn validate_runtime_socket_path_for_uid(
     validate_safe_ownership_and_type_for_uid(path, RuntimeNodeKind::Socket, expected_uid)
 }
 
+#[cfg(not(unix))]
+pub(crate) fn validate_runtime_socket_path_for_uid(
+    path: &Path,
+    _expected_uid: u32,
+) -> Result<(), String> {
+    if let Some(runtime_dir) = path.parent() {
+        validate_safe_ownership_and_type_for_uid(runtime_dir, RuntimeNodeKind::Directory, 0)?;
+    }
+    validate_safe_ownership_and_type_for_uid(path, RuntimeNodeKind::RegularFile, 0)?;
+    Ok(())
+}
+
 fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
-    match fs::create_dir(path) {
+    match fs::create_dir_all(path) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
         Err(error) => {
@@ -151,22 +234,25 @@ fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
         }
     }
     validate_safe_ownership_and_type(path, RuntimeNodeKind::Directory)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-        format!(
-            "Failed to secure daemon runtime directory {}: {error}",
-            path.display()
-        )
-    })?;
-    let mode = fs::symlink_metadata(path)
-        .map_err(|error| format!("Failed to verify {}: {error}", path.display()))?
-        .permissions()
-        .mode()
-        & 0o777;
-    if mode != 0o700 {
-        return Err(format!(
-            "Daemon runtime directory {} has mode {mode:o}, expected 700",
-            path.display()
-        ));
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "Failed to secure daemon runtime directory {}: {error}",
+                path.display()
+            )
+        })?;
+        let mode = fs::symlink_metadata(path)
+            .map_err(|error| format!("Failed to verify {}: {error}", path.display()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o700 {
+            return Err(format!(
+                "Daemon runtime directory {} has mode {mode:o}, expected 700",
+                path.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -178,16 +264,20 @@ fn open_secure_lock_file(path: &Path) -> Result<File, String> {
         Err(error) => return Err(format!("Failed to inspect lock file: {error}")),
     }
 
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    let file = options
         .open(path)
-        .map_err(|error| format!("Failed to open lock file: {error}"))?;
+        .map_err(|error| format!("Failed to open lock file {}: {error}", path.display()))?;
     validate_safe_ownership_and_type(path, RuntimeNodeKind::RegularFile)?;
+    #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|error| format!("Failed to secure lock file: {error}"))?;
     Ok(file)
@@ -329,12 +419,24 @@ impl DaemonServer {
         // Clean up stale socket only after lock acquisition and safe ownership check.
         remove_stale_socket_after_lock(&socket_path)?;
 
+        #[cfg(unix)]
         let listener = UnixListener::bind(&socket_path).map_err(|e| {
             format!(
                 "Failed to bind UDS socket at {}: {e}",
                 socket_path.display()
             )
         })?;
+
+        #[cfg(not(unix))]
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
+            format!("Failed to bind TCP listener on localhost: {e}")
+        })?;
+
+        #[cfg(not(unix))]
+        {
+            let port = listener.local_addr().map_err(|e| format!("Failed to get local port: {e}"))?.port();
+            fs::write(&socket_path, port.to_string()).map_err(|e| format!("Failed to write daemon.port: {e}"))?;
+        }
 
         // Ensure 0600 mode
         validate_safe_ownership_and_type(&socket_path, RuntimeNodeKind::Socket)?;
@@ -369,8 +471,11 @@ impl DaemonServer {
         Ok(())
     }
 
-    pub async fn handle_client(self: Arc<Self>, stream: UnixStream) {
-        let (read_half, mut write_half) = stream.into_split();
+    pub async fn handle_client<S>(self: Arc<Self>, stream: S)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
 
@@ -859,12 +964,14 @@ impl DaemonServer {
         }
     }
 
-    pub async fn pump_sequenced_stream(
+    pub async fn pump_sequenced_stream<W>(
         session_id: String,
         mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
-        writer: tokio::net::unix::OwnedWriteHalf,
-    ) {
+        writer: W,
+    ) where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let mut writer = BufWriter::new(writer);
         let mut last_seen_sequence: Option<u64> = None;
 
@@ -940,7 +1047,7 @@ impl DaemonServer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::terminal::output_hub::OutputChunk;

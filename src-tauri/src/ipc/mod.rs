@@ -20,7 +20,7 @@ where
 
 #[cfg(test)]
 mod blocking_contract_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 pub use browser::*;

@@ -464,6 +464,7 @@ mod tests {
         assert!(!is_unshifted_cmd_w(NSEventModifierFlags::Command, None, 0));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn app_remote_state_persists_pairing_but_starts_off() {
         let _lock = FERRYX_DATA_DIR_LOCK.lock().expect("data dir lock");

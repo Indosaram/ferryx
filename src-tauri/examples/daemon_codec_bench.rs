@@ -1,6 +1,5 @@
-use ferryx_lib::daemon::{
-    decode_daemon_stream_frame, encode_daemon_stream_frame, DaemonStreamMessage,
-};
+use ferryx_lib::daemon::DaemonStreamMessage;
+use serde_json::{from_str, to_string};
 use std::borrow::Cow;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -64,16 +63,22 @@ fn benchmark_size(size: usize) -> (Measurement, Measurement, Measurement, Measur
         metrics_read_unix_micros: None,
     };
 
+    // client.rs/server.rs currently call serde_json::{from_str,to_string} directly around the
+    // real DaemonStreamMessage type, so the benchmark imports and invokes those exact functions.
     for _ in 0..warmup_iterations {
-        let frame = encode_daemon_stream_frame(black_box(&message)).expect("encode warmup frame");
-        let decoded = decode_daemon_stream_frame(black_box(&frame)).expect("decode warmup frame");
+        let mut frame = to_string(black_box(&message)).expect("encode warmup frame");
+        frame.push('\n');
+        let decoded: DaemonStreamMessage<'static> =
+            from_str(black_box(frame.trim())).expect("decode warmup frame");
         black_box(decoded);
         let raw = raw_length_prefixed_encode(black_box(&payload));
         black_box(raw_length_prefixed_decode(black_box(&raw)));
     }
 
-    let encoded_frame = encode_daemon_stream_frame(&message).expect("encode reference frame");
-    let decoded = decode_daemon_stream_frame(&encoded_frame).expect("decode reference frame");
+    let mut encoded_frame = to_string(&message).expect("encode reference frame");
+    encoded_frame.push('\n');
+    let decoded: DaemonStreamMessage<'static> =
+        from_str(encoded_frame.trim()).expect("decode reference frame");
     match decoded {
         DaemonStreamMessage::Output { data, .. } => assert_eq!(data.as_ref(), payload.as_slice()),
         other => panic!("unexpected decoded frame: {other:?}"),
@@ -83,14 +88,16 @@ fn benchmark_size(size: usize) -> (Measurement, Measurement, Measurement, Measur
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let frame = encode_daemon_stream_frame(black_box(&message)).expect("encode daemon frame");
+        let mut frame = to_string(black_box(&message)).expect("encode daemon frame");
+        frame.push('\n');
         black_box(frame);
     }
     let json_encode = measurement(iterations * size, start.elapsed());
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let decoded = decode_daemon_stream_frame(black_box(&encoded_frame)).expect("decode daemon frame");
+        let decoded: DaemonStreamMessage<'static> =
+            from_str(black_box(encoded_frame.trim())).expect("decode daemon frame");
         match decoded {
             DaemonStreamMessage::Output { data, .. } => {
                 black_box(data.len());

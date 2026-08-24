@@ -35,9 +35,20 @@ pub fn run_daemon_headless() -> Result<(), Box<dyn std::error::Error + Send + Sy
         // Ensure server listener is bound and accepting before emitting readiness signal
         let socket_path = ferryx_lib::daemon::server::get_socket_path();
         loop {
+            #[cfg(unix)]
             if socket_path.exists() {
                 if let Ok(_probe) = tokio::net::UnixStream::connect(&socket_path).await {
                     break;
+                }
+            }
+            #[cfg(not(unix))]
+            if socket_path.exists() {
+                if let Ok(port_str) = std::fs::read_to_string(&socket_path) {
+                    if let Ok(port) = port_str.trim().parse::<u16>() {
+                        if let Ok(_probe) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
+                            break;
+                        }
+                    }
                 }
             }
             tokio::task::yield_now().await;

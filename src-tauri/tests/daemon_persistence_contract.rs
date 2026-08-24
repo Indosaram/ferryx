@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use ferryx_lib::daemon::launchd::{
     generate_launchd_plist, get_launchd_plist_path, uninstall_launchd_agent_from_path,
 };
