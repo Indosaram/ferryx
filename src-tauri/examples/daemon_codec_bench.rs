@@ -1,10 +1,13 @@
-use ferryx_lib::daemon::DaemonStreamMessage;
+use ferryx_lib::daemon::{
+    decode_daemon_stream_frame, encode_daemon_stream_frame, DaemonStreamMessage,
+};
 use std::borrow::Cow;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 const PAYLOAD_SIZES: [usize; 4] = [4 * 1024, 32 * 1024, 128 * 1024, 512 * 1024];
 const TARGET_BYTES_PER_MEASUREMENT: usize = 128 * 1024 * 1024;
+const RAW_DECODE_MIN_ITERATIONS: usize = 1_000_000;
 
 #[derive(Clone, Copy)]
 struct Measurement {
@@ -42,18 +45,6 @@ fn raw_length_prefixed_decode(frame: &[u8]) -> &[u8] {
     &frame[4..]
 }
 
-fn encode_current_daemon_frame(message: &DaemonStreamMessage<'_>) -> String {
-    // Keep this byte-for-byte aligned with server.rs: serde_json::to_string + newline framing.
-    let mut frame = serde_json::to_string(message).expect("serialize daemon stream frame");
-    frame.push('\n');
-    frame
-}
-
-fn decode_current_daemon_frame(frame: &str) -> DaemonStreamMessage<'static> {
-    // Keep this aligned with client.rs: serde_json::from_str(stream_line.trim()).
-    serde_json::from_str(frame.trim()).expect("parse daemon stream frame")
-}
-
 fn measurement(total_payload_bytes: usize, elapsed: Duration) -> Measurement {
     let mib = total_payload_bytes as f64 / (1024.0 * 1024.0);
     Measurement {
@@ -74,15 +65,15 @@ fn benchmark_size(size: usize) -> (Measurement, Measurement, Measurement, Measur
     };
 
     for _ in 0..warmup_iterations {
-        let frame = encode_current_daemon_frame(black_box(&message));
-        let decoded = decode_current_daemon_frame(black_box(&frame));
+        let frame = encode_daemon_stream_frame(black_box(&message)).expect("encode warmup frame");
+        let decoded = decode_daemon_stream_frame(black_box(&frame)).expect("decode warmup frame");
         black_box(decoded);
         let raw = raw_length_prefixed_encode(black_box(&payload));
         black_box(raw_length_prefixed_decode(black_box(&raw)));
     }
 
-    let encoded_frame = encode_current_daemon_frame(&message);
-    let decoded = decode_current_daemon_frame(&encoded_frame);
+    let encoded_frame = encode_daemon_stream_frame(&message).expect("encode reference frame");
+    let decoded = decode_daemon_stream_frame(&encoded_frame).expect("decode reference frame");
     match decoded {
         DaemonStreamMessage::Output { data, .. } => assert_eq!(data.as_ref(), payload.as_slice()),
         other => panic!("unexpected decoded frame: {other:?}"),
@@ -92,14 +83,14 @@ fn benchmark_size(size: usize) -> (Measurement, Measurement, Measurement, Measur
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let frame = encode_current_daemon_frame(black_box(&message));
+        let frame = encode_daemon_stream_frame(black_box(&message)).expect("encode daemon frame");
         black_box(frame);
     }
     let json_encode = measurement(iterations * size, start.elapsed());
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let decoded = decode_current_daemon_frame(black_box(&encoded_frame));
+        let decoded = decode_daemon_stream_frame(black_box(&encoded_frame)).expect("decode daemon frame");
         match decoded {
             DaemonStreamMessage::Output { data, .. } => {
                 black_box(data.len());
@@ -116,12 +107,16 @@ fn benchmark_size(size: usize) -> (Measurement, Measurement, Measurement, Measur
     }
     let raw_encode = measurement(iterations * size, start.elapsed());
 
+    // The raw decoder only validates a four-byte prefix and returns a payload slice, so use a
+    // fixed minimum operation count to keep the result above timer-resolution noise.
+    let raw_decode_iterations = iterations.max(RAW_DECODE_MIN_ITERATIONS);
     let start = Instant::now();
-    for _ in 0..iterations {
+    for _ in 0..raw_decode_iterations {
         let decoded = raw_length_prefixed_decode(black_box(&raw_frame));
-        black_box(decoded);
+        black_box(decoded.first());
+        black_box(decoded.last());
     }
-    let raw_decode = measurement(iterations * size, start.elapsed());
+    let raw_decode = measurement(raw_decode_iterations * size, start.elapsed());
 
     (json_encode, json_decode, raw_encode, raw_decode)
 }
@@ -137,8 +132,11 @@ fn size_label(size: usize) -> String {
 fn main() {
     println!("Daemon terminal-output codec benchmark");
     println!(
-        "Each measurement processes ~{} MiB of payload after warmup.",
+        "Each JSON/base64 and raw-encode measurement processes ~{} MiB after warmup.",
         TARGET_BYTES_PER_MEASUREMENT / (1024 * 1024)
+    );
+    println!(
+        "Raw decode uses at least {RAW_DECODE_MIN_ITERATIONS} iterations because it is an O(1) slice baseline."
     );
     println!(
         "{:<9} {:>13} {:>11} {:>13} {:>11} {:>13} {:>11} {:>13} {:>11}",
@@ -168,7 +166,7 @@ fn main() {
     for size in PAYLOAD_SIZES {
         let (json_encode, json_decode, raw_encode, raw_decode) = benchmark_size(size);
         println!(
-            "{:<9} {:>13.1} {:>11.2} {:>13.1} {:>11.2} {:>13.1} {:>11.2} {:>13.1} {:>11.2}",
+            "{:<9} {:>13.1} {:>11.3} {:>13.1} {:>11.3} {:>13.1} {:>11.3} {:>13.1} {:>11.3}",
             size_label(size),
             json_encode.mib_per_second,
             json_encode.elapsed.as_secs_f64() * 1000.0,

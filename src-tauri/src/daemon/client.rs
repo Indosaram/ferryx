@@ -1264,6 +1264,7 @@ mod tests {
                 session_id: s_id,
                 sequence,
                 data,
+                ..
             } => {
                 assert_eq!(s_id, session_id);
                 assert!(sequence >= 1);

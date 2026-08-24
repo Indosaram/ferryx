@@ -37,8 +37,8 @@ const worktree: Worktree = {
 
 describe("useWorkspaceStore browser lifecycle", () => {
   beforeEach(() => {
-    vi.mocked(services.spawnTerminal).mockReset();
-    vi.mocked(services.spawnTerminal).mockResolvedValue("backend-unused");
+    (services.spawnTerminal as any).mockReset();
+    (services.spawnTerminal as any).mockResolvedValue("backend-unused");
 
     vi.spyOn(browserTauri, "createBrowser").mockResolvedValue({
       browserId: "browser-1",
@@ -84,7 +84,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
   });
 
   it("reuses the same clientRequestId when one logical terminal spawn retries after an ambiguous renderer transport failure", async () => {
-    vi.mocked(services.spawnTerminal)
+    (services.spawnTerminal as any)
       .mockRejectedValueOnce({ code: "UNKNOWN", message: "lost Tauri response", details: {} })
       .mockResolvedValueOnce("backend-retried");
 
@@ -97,8 +97,8 @@ describe("useWorkspaceStore browser lifecycle", () => {
     });
 
     expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
-    const firstRequest = vi.mocked(services.spawnTerminal).mock.calls[0]?.[0] as Record<string, unknown>;
-    const secondRequest = vi.mocked(services.spawnTerminal).mock.calls[1]?.[0] as Record<string, unknown>;
+    const firstRequest = (services.spawnTerminal as any).mock.calls[0]?.[0] as Record<string, unknown>;
+    const secondRequest = (services.spawnTerminal as any).mock.calls[1]?.[0] as Record<string, unknown>;
     expect(firstRequest.clientRequestId).toEqual(expect.any(String));
     expect(secondRequest.clientRequestId).toBe(firstRequest.clientRequestId);
     expect(result.current.state.layout.tabs).toHaveLength(1);

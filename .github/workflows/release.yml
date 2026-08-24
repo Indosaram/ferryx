@@ -108,7 +108,19 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: bunx @tauri-apps/cli build ${{ matrix.tauri_args }}
+          ENABLE_CODE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        run: |
+          if [ "${{ matrix.os_name }}" = "macos" ] && [ -z "${{ secrets.APPLE_CERTIFICATE }}" ]; then
+            echo "Skipping macOS codesigning (no certificate secret configured in repository)."
+            # Unset signing env vars to allow unsigned bundle creation
+            unset APPLE_CERTIFICATE
+            unset APPLE_CERTIFICATE_PASSWORD
+            unset APPLE_SIGNING_IDENTITY
+            unset APPLE_ID
+            unset APPLE_PASSWORD
+            unset APPLE_TEAM_ID
+          fi
+          bunx @tauri-apps/cli build ${{ matrix.tauri_args }}
 
       - name: Collect platform release artifacts
         id: collect

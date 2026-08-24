@@ -7,6 +7,10 @@ import {
   type TerminalRuntimeReplayGap,
 } from "./terminalEvents";
 import { decodeBase64 } from "./terminalOutput";
+import {
+  recordReceiveToDrained,
+  terminalThroughputMetricsEnabled,
+} from "./terminalThroughputMetrics";
 import type { AttachTerminalResponse } from "./types";
 
 // Kept under the existing export name for compatibility with host-manager tests/callers.
@@ -129,6 +133,7 @@ function concatOutputBytes(chunks: Uint8Array[], totalBytes: number): Uint8Array
  * - If queued bytes reach or exceed `MAX_PENDING_OUTPUT_CHARS` before rAF, the buffer is flushed synchronously
  *   to guarantee memory safety without loss or reordering.
  * - In development builds, lightweight counters record rAF wait, coalescing, and threshold flush behavior.
+ * - With VITE_FERRYX_TERMINAL_METRICS=1, channel receive timestamps are retained until xterm's write callback drains.
  * - Teardown (via unlisten or manager destroy) immediately cancels pending rAF callbacks and clears buffered data.
  */
 export function attachScheduledOutputSubscription(
@@ -138,6 +143,7 @@ export function attachScheduledOutputSubscription(
 ): () => void {
   let outputBuffer: Uint8Array[] = [];
   let outputBufferBytes = 0;
+  let outputReceiveTimesMs: number[] = [];
   let outputFrame = 0;
   let outputFrameScheduledAt = 0;
   let active = true;
@@ -146,7 +152,12 @@ export function attachScheduledOutputSubscription(
   let lastAppliedSequence: bigint | null = parseSequence(options?.initialSequence);
   let currentDaemonEpoch: string | null = options?.daemonEpoch ?? null;
   let historyEndSequence: bigint | null = null;
-  const queuedLiveChunks: Array<{ data: Uint8Array; sequence?: string | null; daemonEpoch?: string | null }> = [];
+  const queuedLiveChunks: Array<{
+    data: Uint8Array;
+    sequence?: string | null;
+    daemonEpoch?: string | null;
+    receivedAtMs?: number;
+  }> = [];
 
   const clearPendingOutput = () => {
     if (outputFrame !== 0) {
@@ -156,6 +167,7 @@ export function attachScheduledOutputSubscription(
     outputFrameScheduledAt = 0;
     outputBuffer = [];
     outputBufferBytes = 0;
+    outputReceiveTimesMs = [];
   };
 
   const flushOutput = (reason: "frame" | "threshold", frameTimestamp?: number) => {
@@ -165,26 +177,36 @@ export function attachScheduledOutputSubscription(
     }
     if (outputBuffer.length === 0) {
       outputFrameScheduledAt = 0;
+      outputReceiveTimesMs = [];
       return;
     }
 
     const chunkCount = outputBuffer.length;
     const coalesced = concatOutputBytes(outputBuffer, outputBufferBytes);
+    const receiveTimesMs = outputReceiveTimesMs;
     const frameWaitMs = reason === "frame" && outputFrameScheduledAt > 0
       ? Math.max(0, (frameTimestamp ?? schedulerNow()) - outputFrameScheduledAt)
       : 0;
     outputBuffer = [];
     outputBufferBytes = 0;
+    outputReceiveTimesMs = [];
     outputFrameScheduledAt = 0;
-    terminal.write(coalesced);
+    if (terminalThroughputMetricsEnabled() && receiveTimesMs.length > 0) {
+      terminal.write(coalesced, () => recordReceiveToDrained(receiveTimesMs));
+    } else {
+      terminal.write(coalesced);
+    }
     recordSchedulerFlush(reason, chunkCount, frameWaitMs);
   };
 
-  const queueOutput = (chunk: TerminalOutputChunk) => {
+  const queueOutput = (chunk: TerminalOutputChunk, receivedAtMs?: number) => {
     const data = toOutputBytes(chunk);
     if (data.byteLength === 0) return;
     outputBuffer.push(data);
     outputBufferBytes += data.byteLength;
+    if (terminalThroughputMetricsEnabled() && receivedAtMs !== undefined) {
+      outputReceiveTimesMs.push(receivedAtMs);
+    }
     if (import.meta.env.DEV) {
       schedulerMetrics.receivedChunks += 1;
       schedulerMetrics.receivedBytes += data.byteLength;
@@ -202,6 +224,7 @@ export function attachScheduledOutputSubscription(
     data: Uint8Array,
     sequence?: string | null,
     daemonEpoch?: string | null,
+    receivedAtMs?: number,
   ) => {
     const seq = parseSequence(sequence);
     if (seq !== null) {
@@ -217,7 +240,7 @@ export function attachScheduledOutputSubscription(
         options?.onSequenceUpdate?.(sequence, currentDaemonEpoch);
       }
     }
-    queueOutput(data);
+    queueOutput(data, receivedAtMs);
   };
 
   const applyReplayHistory = (
@@ -295,32 +318,32 @@ export function attachScheduledOutputSubscription(
 
       const pending = queuedLiveChunks.splice(0, queuedLiveChunks.length);
       for (const chunk of pending) {
-        processLiveChunk(chunk.data, chunk.sequence, chunk.daemonEpoch);
+        processLiveChunk(chunk.data, chunk.sequence, chunk.daemonEpoch, chunk.receivedAtMs);
       }
     } catch {
       if (!active || generation !== streamGeneration) return;
       attached = true;
       const pending = queuedLiveChunks.splice(0, queuedLiveChunks.length);
       for (const chunk of pending) {
-        processLiveChunk(chunk.data, chunk.sequence, chunk.daemonEpoch);
+        processLiveChunk(chunk.data, chunk.sequence, chunk.daemonEpoch, chunk.receivedAtMs);
       }
     }
   };
 
   const unsubscribeOutput = terminalEventBus.subscribeOutput(
     backendSessionId,
-    (chunk, sequence, daemonEpoch) => {
+    (chunk, sequence, daemonEpoch, receivedAtMs) => {
       if (!active) return;
       const data = toOutputBytes(chunk);
       const seq = parseSequence(sequence);
       if (seq === null) {
-        queueOutput(data);
+        queueOutput(data, receivedAtMs);
         return;
       }
       if (!attached) {
-        queuedLiveChunks.push({ data, sequence, daemonEpoch });
+        queuedLiveChunks.push({ data, sequence, daemonEpoch, receivedAtMs });
       } else {
-        processLiveChunk(data, sequence, daemonEpoch);
+        processLiveChunk(data, sequence, daemonEpoch, receivedAtMs);
       }
     },
     false,

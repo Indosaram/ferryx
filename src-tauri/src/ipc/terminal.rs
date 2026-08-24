@@ -68,6 +68,7 @@ pub fn stop_managed_pump(session_id: &str) {
             pump.stream_task.abort();
         }
     }
+    crate::terminal::metrics::clear_pending_batch_read(session_id);
 }
 
 pub fn start_managed_pump<R: Runtime>(
@@ -82,6 +83,7 @@ pub fn start_managed_pump<R: Runtime>(
         old_pump.task.abort();
         old_pump.stream_task.abort();
     }
+    crate::terminal::metrics::clear_pending_batch_read(&session_id);
 
     let stream_task = attachment.stream_task;
     let epoch = attachment.epoch;
@@ -114,12 +116,30 @@ pub fn start_managed_pump<R: Runtime>(
             };
 
             match next {
-                Some(DaemonStreamMessage::Output { sequence, data, .. }) => {
+                Some(DaemonStreamMessage::Output {
+                    sequence,
+                    data,
+                    metrics_read_unix_micros,
+                    ..
+                }) => {
+                    crate::terminal::metrics::note_batch_read_timestamp(
+                        &session_id_clone,
+                        metrics_read_unix_micros,
+                    );
                     buffer.extend_from_slice(&data);
                     last_seq = Some(sequence);
                     while buffer.len() < BATCH_MAX_BYTES {
                         match messages.try_recv() {
-                            Ok(DaemonStreamMessage::Output { sequence, data, .. }) => {
+                            Ok(DaemonStreamMessage::Output {
+                                sequence,
+                                data,
+                                metrics_read_unix_micros,
+                                ..
+                            }) => {
+                                crate::terminal::metrics::note_batch_read_timestamp(
+                                    &session_id_clone,
+                                    metrics_read_unix_micros,
+                                );
                                 buffer.extend_from_slice(&data);
                                 last_seq = Some(sequence);
                             }
@@ -269,6 +289,7 @@ pub fn start_managed_pump<R: Runtime>(
                 Some(epoch),
             );
         }
+        crate::terminal::metrics::clear_pending_batch_read(&session_id_clone);
 
         let mut guard = ACTIVE_PUMPS.lock();
         if let Some(map) = guard.as_mut() {
@@ -443,6 +464,7 @@ fn flush_terminal_output<R: Runtime>(
         if let Some(frame) = encode_terminal_output_frame(session_id, buffer, sequence, daemon_epoch) {
             match channel.send(Response::new(frame)) {
                 Ok(()) => {
+                    crate::terminal::metrics::record_channel_send_for_session(session_id);
                     buffer.clear();
                     return true;
                 }
@@ -474,6 +496,7 @@ fn flush_terminal_output<R: Runtime>(
         end_sequence: None,
     };
     buffer.clear();
+    crate::terminal::metrics::clear_pending_batch_read(session_id);
     if let Err(error) = app.emit(TERMINAL_OUTPUT_EVENT, payload) {
         tracing::debug!("Failed to emit terminal output event: {error}");
         false

@@ -7,6 +7,7 @@ import {
   type DecodedTerminalOutputFrame,
   TerminalOutputDecoderRegistry,
 } from "./terminalOutput";
+import { metricsNow, terminalThroughputMetricsEnabled } from "./terminalThroughputMetrics";
 import type { TerminalLifecyclePayload, TerminalOutputPayload } from "./types";
 
 const MAX_BACKLOG_BYTES = 512 * 1024;
@@ -15,7 +16,12 @@ const OSC_TITLE_START_RE = /\u001b\](?:0|1|2);/g;
 const OSC_PARTIAL_PREFIXES = ["\u001b", "\u001b]", "\u001b]0", "\u001b]1", "\u001b]2"] as const;
 
 export type TerminalOutputChunk = Uint8Array | string;
-type OutputListener = (data: TerminalOutputChunk, sequence?: string | null, daemonEpoch?: string | null) => void;
+type OutputListener = (
+  data: TerminalOutputChunk,
+  sequence?: string | null,
+  daemonEpoch?: string | null,
+  receivedAtMs?: number,
+) => void;
 type LifecycleListener = (payload: TerminalLifecyclePayload) => void;
 type TitleListener = (sessionId: string, title: string) => void;
 
@@ -215,8 +221,9 @@ class TerminalEventBus {
     if (!isTauri() || this.binaryOutputChannel) return;
 
     const channel = new Channel<ArrayBuffer>((frame) => {
+      const receivedAtMs = terminalThroughputMetricsEnabled() ? metricsNow() : undefined;
       try {
-        this.handleBinaryOutput(decodeTerminalOutputFrame(frame));
+        this.handleBinaryOutput(decodeTerminalOutputFrame(frame), receivedAtMs);
       } catch (error) {
         console.error("Failed to decode terminal output channel frame", error);
       }
@@ -260,11 +267,17 @@ class TerminalEventBus {
     });
   }
 
-  private handleBinaryOutput(payload: DecodedTerminalOutputFrame) {
+  private handleBinaryOutput(payload: DecodedTerminalOutputFrame, receivedAtMs?: number) {
     const decodedText = this.decoderRegistry.decode(payload.sessionId, payload.data);
     if (decodedText) this.trackTitles(payload.sessionId, decodedText);
     if (payload.data.byteLength > 0) {
-      this.publishOutput(payload.sessionId, payload.data, payload.sequence, payload.daemonEpoch);
+      this.publishOutput(
+        payload.sessionId,
+        payload.data,
+        payload.sequence,
+        payload.daemonEpoch,
+        receivedAtMs,
+      );
     }
   }
 
@@ -293,6 +306,7 @@ class TerminalEventBus {
     data: Uint8Array,
     sequence?: string | null,
     daemonEpoch?: string | null,
+    receivedAtMs?: number,
   ) {
     if (data.byteLength > 0) {
       let entry = this.backlog.get(sessionId);
@@ -320,7 +334,7 @@ class TerminalEventBus {
     }
 
     for (const listener of this.outputListeners.get(sessionId) ?? []) {
-      listener(data, sequence, daemonEpoch);
+      listener(data, sequence, daemonEpoch, receivedAtMs);
     }
   }
 }

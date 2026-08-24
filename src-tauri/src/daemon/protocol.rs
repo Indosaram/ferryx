@@ -248,6 +248,22 @@ pub enum DaemonStreamMessage<'a> {
     },
 }
 
+/// Serialize one daemon streaming message using the production newline-delimited JSON frame.
+pub fn encode_daemon_stream_frame(
+    message: &DaemonStreamMessage<'_>,
+) -> serde_json::Result<String> {
+    let mut frame = serde_json::to_string(message)?;
+    frame.push('\n');
+    Ok(frame)
+}
+
+/// Parse one daemon streaming message using the production newline-delimited JSON frame.
+pub fn decode_daemon_stream_frame(
+    frame: &str,
+) -> serde_json::Result<DaemonStreamMessage<'static>> {
+    serde_json::from_str(frame.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
