@@ -18,12 +18,10 @@ describe('Cross-Platform Download Configuration', () => {
     expect(macos.id).toBe('macos');
     expect(macos.name).toBe('macOS');
     expect(macos.defaultAsset).toBeDefined();
-    expect(macos.defaultAsset.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_aarch64.dmg`);
+    expect(macos.defaultAsset.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_universal.dmg`);
     expect(macos.defaultAsset.fileType).toBe('.dmg');
 
     const assetIds = macos.assets.map((a) => a.id);
-    expect(assetIds).toContain('macos-arm64');
-    expect(assetIds).toContain('macos-x64');
     expect(assetIds).toContain('macos-universal');
 
     for (const asset of macos.assets) {
