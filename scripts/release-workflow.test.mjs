@@ -15,6 +15,15 @@ test("the bundle step receives the updater signing secrets", () => {
   );
 });
 
+test("release builds use Zig setup v2 for Zig 0.16 archives", () => {
+  const setupActionReferences = WORKFLOW.match(/uses: mlugg\/setup-zig@v\d+/g) ?? [];
+  assert.deepEqual(setupActionReferences, [
+    "uses: mlugg/setup-zig@v2",
+    "uses: mlugg/setup-zig@v2",
+  ]);
+  assert.doesNotMatch(WORKFLOW, /uses: mlugg\/setup-zig@v1/);
+});
+
 test("the macOS build imports its Developer ID identity and configures notarization", () => {
   assert.match(WORKFLOW, /name: Import macOS signing and notarization credentials/);
   assert.match(WORKFLOW, /APPLE_CERTIFICATE: \$\{\{ secrets\.APPLE_CERTIFICATE \}\}/);
