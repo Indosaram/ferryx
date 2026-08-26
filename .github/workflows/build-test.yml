@@ -114,6 +114,12 @@ jobs:
       - name: Cargo Check
         run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
+      # cargo check does not invoke link.exe, so it cannot catch mismatched Ghostty static and
+      # import library directives. Link the Windows binary before allowing a release-tag PR through.
+      - name: Cargo Link (Windows)
+        if: matrix.os_name == 'windows'
+        run: cargo build --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
       # The renderer contract suite constructs a real WGPU device (GpuContext::new) and is
       # verified locally on GPU hardware instead; hosted runners have no reliable adapter.
       # daemon_persistence_contract shares on-disk daemon state, so tests run single-threaded.

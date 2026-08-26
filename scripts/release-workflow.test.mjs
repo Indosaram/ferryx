@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOW = readFileSync(join(REPO_ROOT, ".github/workflows/release.yml"), "utf8");
+const BUILD_TEST_WORKFLOW = readFileSync(join(REPO_ROOT, ".github/workflows/build-test.yml"), "utf8");
 
 test("the bundle step receives the updater signing secrets", () => {
   assert.match(WORKFLOW, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
@@ -81,4 +82,12 @@ test("release workflow triggers on date-versioned tag pushes and retains manual 
   );
   assert.match(WORKFLOW, /^\s*workflow_dispatch:\s*$/m);
   assert.doesNotMatch(WORKFLOW, /^\s*branches:\s*$/m);
+});
+
+test("Windows CI links the native binary before a release tag", () => {
+  assert.match(BUILD_TEST_WORKFLOW, /name: Cargo Link \(Windows\)/);
+  assert.match(
+    BUILD_TEST_WORKFLOW,
+    /if: matrix\.os_name == 'windows'[\s\S]*cargo build --manifest-path src-tauri\/Cargo\.toml --target \$\{\{ matrix\.target \}\}/,
+  );
 });

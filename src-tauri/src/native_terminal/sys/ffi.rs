@@ -11,7 +11,6 @@ use super::types::{
     GhosttyTerminalSelectWordOptions, GhosttyTerminalSelectionFormatOptions,
 };
 
-#[link(name = "ghostty-vt", kind = "static")]
 extern "C" {
     pub fn ghostty_terminal_new(
         allocator: *const GhosttyAllocator,

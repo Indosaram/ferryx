@@ -1,5 +1,7 @@
 //! Private raw ABI definitions and safe query helpers for libghostty-vt build info.
 
+extern crate ferryx_lib as _;
+
 use std::ffi::{c_int, c_void};
 use std::fmt;
 
@@ -156,7 +158,6 @@ impl GhosttyString {
     }
 }
 
-#[link(name = "ghostty-vt", kind = "static")]
 extern "C" {
     pub fn ghostty_build_info(data: c_int, out: *mut c_void) -> c_int;
 }

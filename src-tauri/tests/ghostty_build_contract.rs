@@ -140,6 +140,23 @@ fn test_compute_link_lib_stem() {
 }
 
 #[test]
+fn test_ghostty_link_directives_are_owned_by_build_script() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source_paths = [
+        "src/native_terminal/sys/ffi.rs",
+        "tests/ghostty_build_info_ffi.rs",
+    ];
+
+    for source_path in source_paths {
+        let source = fs::read_to_string(manifest_dir.join(source_path)).unwrap();
+        assert!(
+            !source.contains("#[link("),
+            "{source_path} must defer Ghostty linking to build_ghostty.rs"
+        );
+    }
+}
+
+#[test]
 fn test_resolve_static_lib_windows_and_unix() {
     let temp_dir = tempfile::tempdir().unwrap();
     let lib_dir = temp_dir.path().join("lib");
