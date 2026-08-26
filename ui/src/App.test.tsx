@@ -40,6 +40,7 @@ const native = {
   getWorktreeStatus: vi.fn(),
   getInitialProject: vi.fn().mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }),
   listProjectBranches: vi.fn(),
+  listWorktrees: vi.fn().mockResolvedValue([]),
   registerProject: vi.fn(),
   signalTerminal: vi.fn(),
   saveSession: vi.fn().mockResolvedValue(undefined),
@@ -52,6 +53,8 @@ const native = {
   isTauriRuntime: vi.fn(() => true),
   onNewTerminalTabMenu: vi.fn(),
   onCloseTabMenu: vi.fn(),
+  onSelectWorktreeMenu: vi.fn(),
+  selectWorktreeMenuHandler: null as ((digit: number) => void) | null,
   onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
   onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
   menuHandler: null as null | (() => void),
@@ -120,7 +123,7 @@ vi.mock("./lib/tauri", () => ({
   deleteWorktreeDestructive: vi.fn(),
   getInitialProject: native.getInitialProject,
   listProjectBranches: native.listProjectBranches,
-  listWorktrees: vi.fn().mockResolvedValue([]),
+  listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
   signalTerminal: native.signalTerminal,
   saveSession: native.saveSession,
@@ -137,6 +140,7 @@ vi.mock("./lib/tauri", () => ({
   isTauriRuntime: native.isTauriRuntime,
   onNewTerminalTabMenu: native.onNewTerminalTabMenu,
   onCloseTabMenu: native.onCloseTabMenu,
+  onSelectWorktreeMenu: native.onSelectWorktreeMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
   onTerminalOutput: native.onTerminalOutput,
   publishFocusedTerminal: native.publishFocusedTerminal,
@@ -317,6 +321,8 @@ describe("App project workspace flow", () => {
     native.getInitialProject.mockReset();
     native.getInitialProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
     native.listProjectBranches.mockReset();
+    native.listWorktrees.mockReset();
+    native.listWorktrees.mockResolvedValue([]);
     native.registerProject.mockReset();
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
     native.signalTerminal.mockReset();
@@ -327,6 +333,14 @@ describe("App project workspace flow", () => {
     native.spawnTerminal.mockReset();
     native.spawnTerminal.mockResolvedValue("mock-spawn-id");
     native.onNewTerminalTabMenu.mockReset();
+    native.onSelectWorktreeMenu.mockReset();
+    native.selectWorktreeMenuHandler = null;
+    native.onSelectWorktreeMenu.mockImplementation(async (handler: (digit: number) => void) => {
+      native.selectWorktreeMenuHandler = handler;
+      return () => {
+        if (native.selectWorktreeMenuHandler === handler) native.selectWorktreeMenuHandler = null;
+      };
+    });
     native.onCloseTabMenu.mockReset();
     native.menuHandler = null;
     native.closeMenuHandler = null;
@@ -467,6 +481,28 @@ describe("App project workspace flow", () => {
     expect(await screen.findByText("Active project orca-lite")).toBeInTheDocument();
     expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite");
+  });
+
+  it("keeps the native shell initializing until persisted workspace tabs are preloaded", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    let resolveSession!: (session: null) => void;
+    const sessionPromise = new Promise<null>((resolve) => {
+      resolveSession = resolve;
+    });
+    native.loadSession.mockImplementation(() => sessionPromise);
+
+    render(<App />);
+
+    await waitFor(() => expect(native.loadSession).toHaveBeenCalled());
+    expect(screen.getByLabelText("Initializing project")).toBeInTheDocument();
+    expect(screen.queryByText("Active project orca-lite")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSession(null);
+      await sessionPromise;
+    });
+
+    expect(await screen.findByText("Active project orca-lite")).toBeInTheDocument();
   });
 
   it("migrates the legacy default placeholder to the canonical native project", async () => {
@@ -964,6 +1000,187 @@ describe("App project workspace flow", () => {
       );
     } finally {
       workspace.storeState.worktrees.length = 4;
+    }
+  });
+
+  it("selects a worktree when macOS forwards Cmd+N through the native key monitor", async () => {
+    localStorage.setItem(
+      PROJECTS_STORAGE_KEY,
+      JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo", gitRoot: "/repo" }]),
+    );
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    native.registerProject.mockResolvedValue({
+      workspaceId: "orca-lite",
+      repoRoot: "/repo",
+      gitRoot: "/repo",
+    });
+
+    render(<App />);
+    await waitFor(() => expect(native.onSelectWorktreeMenu).toHaveBeenCalled());
+
+    // The Window menu swallows the keydown, so the digit arrives as a native event.
+    act(() => {
+      native.selectWorktreeMenuHandler!(2);
+    });
+
+    await waitFor(() =>
+      expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "/repo/feature" }),
+      ),
+    );
+  });
+
+  it("targets the synthesized root row of a visible non-Git project via native Cmd+digit", async () => {
+    const originalWorktrees = [...workspace.storeState.worktrees];
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "plain-docs", repoRoot: "/notes/docs", gitRoot: null },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: workspaceId === "alpha" ? "/repos/alpha" : "/notes/docs",
+      gitRoot: workspaceId === "alpha" ? "/repos/alpha" : null,
+    }));
+
+    const alphaMain = {
+      path: "/repos/alpha/main",
+      branch: "refs/heads/main",
+      head: "",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    workspace.storeState.worktrees = [alphaMain];
+
+    try {
+      render(<App />);
+      await waitFor(() => expect(native.onSelectWorktreeMenu).toHaveBeenCalled());
+
+      // alpha has 1 row (digit 1). plain-docs is visible with no git worktrees,
+      // so its synthesized folder root is row 2 (digit 2).
+      const handler = native.selectWorktreeMenuHandler;
+      if (!handler) throw new Error("Expected selectWorktreeMenuHandler to be registered");
+      act(() => {
+        handler(2);
+      });
+
+      // Targeting the synthesized plain-folder root switches to the plain project.
+      await waitFor(() => expect(screen.getByText("Active project plain-docs")).toBeInTheDocument());
+
+      cleanup();
+      workspace.ensureTabForWorktree.mockClear();
+
+      // When the non-Git project is active and has no git rows, digit 1 targets its synthesized root row directly.
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "plain-docs");
+      workspace.storeState.worktrees = [];
+      render(<App />);
+      await waitFor(() => expect(native.onSelectWorktreeMenu).toHaveBeenCalled());
+
+      const activeHandler = native.selectWorktreeMenuHandler;
+      if (!activeHandler) throw new Error("Expected selectWorktreeMenuHandler to be registered");
+      act(() => {
+        activeHandler(1);
+      });
+
+      await waitFor(() =>
+        expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/notes/docs", branch: null }),
+        ),
+      );
+    } finally {
+      workspace.storeState.worktrees = originalWorktrees;
+    }
+  });
+
+  it("targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit", async () => {
+    const originalWorktrees = [...workspace.storeState.worktrees];
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: `/repos/${workspaceId}`,
+    }));
+
+    const alphaMain = {
+      path: "/repos/alpha/main",
+      branch: "refs/heads/main",
+      head: "",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const betaExtra = {
+      path: "/repos/beta/extra-owned",
+      branch: "refs/heads/orca/beta/extra-owned",
+      head: "",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const betaCached1 = {
+      path: "/repos/beta/cached-first",
+      branch: "refs/heads/cached-1",
+      head: "",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const betaCached2 = {
+      path: "/repos/beta/cached-second",
+      branch: "refs/heads/cached-2",
+      head: "",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    workspace.storeState.worktrees = [alphaMain, betaExtra, betaCached1, betaCached2];
+
+    native.listWorktrees.mockImplementation(async (workspaceId: string) => {
+      if (workspaceId === "beta") return [betaCached1, betaCached2];
+      return [];
+    });
+
+    try {
+      render(<App />);
+      await waitFor(() => expect(native.onSelectWorktreeMenu).toHaveBeenCalled());
+      await waitFor(() => expect(native.listWorktrees).toHaveBeenCalledWith("beta"));
+
+      // Top-to-bottom Sidebar order is:
+      // Digit 1: alpha -> /repos/alpha/main
+      // Digit 2: beta  -> /repos/beta/cached-first  (cached row 1)
+      // Digit 3: beta  -> /repos/beta/cached-second (cached row 2)
+      // Digit 4: beta  -> /repos/beta/extra-owned   (extra owned row)
+      const handler = native.selectWorktreeMenuHandler;
+      if (!handler) throw new Error("Expected selectWorktreeMenuHandler to be registered");
+      act(() => {
+        handler(2);
+      });
+
+      await waitFor(() => expect(screen.getByText("Active project beta")).toBeInTheDocument());
+      await waitFor(() =>
+        expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/repos/beta/cached-first" }),
+        ),
+      );
+    } finally {
+      workspace.storeState.worktrees = originalWorktrees;
     }
   });
 

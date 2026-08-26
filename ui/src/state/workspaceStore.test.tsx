@@ -10,6 +10,7 @@ if (typeof window === "undefined") {
   globalThis.HTMLElement = dom.window.HTMLElement;
 }
 
+import { StrictMode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -17,7 +18,7 @@ import type { BrowserTab, LayoutState, TerminalSession, TerminalTab, Worktree } 
 import * as browserTauri from "../lib/browserTauri";
 import { createLayoutState } from "./layout";
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
-import { clearWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 const { useWorkspaceStore, workspaceReducer } = await import("./workspaceStore");
 type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
@@ -713,6 +714,190 @@ describe("session title activity", () => {
 });
 
 describe("worktree tab and session isolation", () => {
+  it("never exposes the outgoing workspace state under the incoming workspace id", () => {
+    const { services } = createServices();
+    const alphaState: WorkspaceState = {
+      ...restoredTwoTabState(),
+      workspaceId: "alpha",
+    };
+    const betaState: WorkspaceState = {
+      ...restoredTwoTabState(),
+      workspaceId: "beta",
+      worktrees: [featureWorktree],
+      activeWorktreePath: featureWorktree.path,
+      sessions: Object.fromEntries(
+        Object.entries(restoredTwoTabState().sessions).map(([id, session]) => [
+          id,
+          {
+            ...session,
+            cwd: featureWorktree.path,
+            worktreePath: featureWorktree.path,
+            workspaceId: "beta",
+            worktree: { wsId: "ws-main", slug: "feature" },
+          },
+        ]),
+      ),
+    };
+    setWorkspaceSnapshot("alpha", alphaState);
+    setWorkspaceSnapshot("beta", betaState);
+
+    const observed: Array<{
+      requestedWorkspaceId: string;
+      stateWorkspaceId: string | undefined;
+      activeWorktreePath: string | null;
+    }> = [];
+    const { rerender } = renderHook(
+      ({ workspaceId }: { workspaceId: string }) => {
+        const store = useWorkspaceStore({ workspaceId, services });
+        observed.push({
+          requestedWorkspaceId: workspaceId,
+          stateWorkspaceId: store.state.workspaceId,
+          activeWorktreePath: store.state.activeWorktreePath,
+        });
+        return store;
+      },
+      { initialProps: { workspaceId: "alpha" } },
+    );
+
+    observed.length = 0;
+    rerender({ workspaceId: "beta" });
+
+    expect(observed).not.toHaveLength(0);
+    expect(observed).toEqual(
+      observed.map(() => ({
+        requestedWorkspaceId: "beta",
+        stateWorkspaceId: "beta",
+        activeWorktreePath: featureWorktree.path,
+      })),
+    );
+  });
+
+  it("retains target workspace tabs and avoids spawning terminals across alpha -> beta -> alpha switch under render retries", async () => {
+    const { services } = createServices();
+    const alphaTab: TerminalTab = { id: "tab-alpha", label: "alpha", sessionId: "session-alpha" };
+    const betaTab: TerminalTab = { id: "tab-beta", label: "beta", sessionId: "session-beta" };
+
+    const alphaState: WorkspaceState = {
+      workspaceId: "alpha",
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {
+        "session-alpha": restoredSession("session-alpha", "restored-backend-alpha", worktree.path),
+      },
+      layout: createLayoutState([alphaTab], alphaTab.id),
+      worktreeLayouts: {},
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    const betaState: WorkspaceState = {
+      workspaceId: "beta",
+      worktrees: [featureWorktree],
+      activeWorktreePath: featureWorktree.path,
+      sessions: {
+        "session-beta": restoredSession("session-beta", "restored-backend-beta", featureWorktree.path),
+      },
+      layout: createLayoutState([betaTab], betaTab.id),
+      worktreeLayouts: {},
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    setWorkspaceSnapshot("alpha", alphaState);
+    setWorkspaceSnapshot("beta", betaState);
+
+    (services.spawnTerminal as any).mockClear();
+
+    const { result, rerender } = renderHook(
+      ({ workspaceId }: { workspaceId: string }) =>
+        useWorkspaceStore({ workspaceId, services }),
+      {
+        initialProps: { workspaceId: "alpha" },
+        wrapper: StrictMode,
+      },
+    );
+
+    expect(result.current.state.workspaceId).toBe("alpha");
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual(["tab-alpha"]);
+
+    rerender({ workspaceId: "beta" });
+    expect(result.current.state.workspaceId).toBe("beta");
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual(["tab-beta"]);
+
+    rerender({ workspaceId: "alpha" });
+    expect(result.current.state.workspaceId).toBe("alpha");
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual(["tab-alpha"]);
+
+    await act(async () => {
+      await result.current.ensureTabForWorktree(worktree);
+    });
+
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual(["tab-alpha"]);
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+  });
+
+  it("keeps active worktree tab visible without zero-tab flicker while unpopulated worktree spawn is pending", async () => {
+    let resolveDeferredSpawnB: (backendId: string) => void = () => {
+      throw new Error("resolveDeferredSpawnB not initialized");
+    };
+    const deferredSpawnBPromise = new Promise<string>((resolve) => {
+      resolveDeferredSpawnB = resolve;
+    });
+
+    const { services } = createServices();
+    let sessionNumber = 0;
+    vi.mocked(services.spawnTerminal).mockImplementation(async (request) => {
+      if (request.worktree?.slug === "feature" || request.cwd === featureWorktree.path) {
+        return deferredSpawnBPromise;
+      }
+      return `backend-${++sessionNumber}`;
+    });
+
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    let tabA: string | null = null;
+    await act(async () => {
+      tabA = openedTab(await result.current.openTab(worktree, "worktree-A-tab"));
+    });
+    if (!tabA) throw new Error("tabA was not created");
+
+    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabA]);
+    expect(result.current.state.layout.tabs).toHaveLength(1);
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
+
+    // Trigger switch to unpopulated worktree B while spawn is held unresolved
+    let switchPromise: Promise<string | null> | null = null;
+    act(() => {
+      switchPromise = result.current.ensureTabForWorktree(featureWorktree);
+    });
+    if (!switchPromise) throw new Error("switchPromise was not created");
+
+    // While spawn is in-flight, A's tab and layout must remain visible and non-empty (no zero-tab intermediate frame)
+    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+    expect(result.current.state.layout.tabs).not.toHaveLength(0);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabA]);
+    expect(result.current.state.layout.activeTabId).toBe(tabA);
+
+    // Resolve B's spawn
+    let tabBId: string | null = null;
+    await act(async () => {
+      resolveDeferredSpawnB("backend-feature-1");
+      tabBId = await switchPromise;
+    });
+
+    // Final state assertions: active worktree is B, layout contains B's tab, exactly 1 terminal spawned for B (2 total)
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+    expect(tabBId).toBeTruthy();
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabBId]);
+    expect(result.current.state.layout.activeTabId).toBe(tabBId);
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
+  });
+
   it("maintains independent tabs and sessions per worktree when switching between worktrees", async () => {
     const { services } = createServices();
     const { result } = renderHook(() =>

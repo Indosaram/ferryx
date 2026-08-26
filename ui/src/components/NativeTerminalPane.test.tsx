@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
 import { useShortcuts } from "../lib/shortcuts";
-import { NativeTerminalPane } from "./NativeTerminalPane";
+import { NATIVE_TERMINAL_HANDLE_INSET_PX, NativeTerminalPane } from "./NativeTerminalPane";
 
 const tauriCoreMocks = vi.hoisted(() => ({
   invoke: vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined),
@@ -44,6 +44,30 @@ class MockResizeObserver implements ResizeObserver {
   }
 }
 
+// jsdom reports an all-zero rect, which the compositor rejects as invalid
+// dimensions, so panes under test must measure a real area to reach set_bounds.
+const PANE_RECT = {
+  x: 10,
+  y: 20,
+  width: 800,
+  height: 600,
+  top: 20,
+  bottom: 620,
+  left: 10,
+  right: 810,
+  toJSON: () => ({}),
+} as DOMRect;
+
+function stubPaneRect(): () => void {
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return PANE_RECT;
+  };
+  return () => {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  };
+}
+
 function createSession(
   sessionId = "term-session-1",
   backendSessionId: string | null = sessionId,
@@ -59,7 +83,9 @@ function createSession(
 }
 
 describe("NativeTerminalPane IPC failure reporting and visible error state", () => {
+  let restorePaneRect: () => void;
   beforeEach(() => {
+    restorePaneRect = stubPaneRect();
     tauriCoreMocks.invoke.mockReset();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
@@ -69,6 +95,7 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
   });
 
   afterEach(() => {
+    restorePaneRect();
     cleanup();
     vi.unstubAllGlobals();
   });
@@ -191,6 +218,46 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
   });
 
+  it("measures viewport DOM geometry and passes bounds and scaleFactor in cmd_native_terminal_attach on mount", async () => {
+    const session = createSession("term-session-presize");
+
+    render(<NativeTerminalPane sessionId="term-session-presize" session={session} />);
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
+      sessionId: "term-session-presize",
+      bounds: {
+        x: 10,
+        y: 20,
+        width: 800,
+        height: 600,
+      },
+      scaleFactor: 2,
+    });
+  });
+
+  it("omits geometry in cmd_native_terminal_attach when viewport has zero-area dimensions on mount", async () => {
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    };
+
+    const session = createSession("term-session-zero");
+    render(<NativeTerminalPane sessionId="term-session-zero" session={session} />);
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
+      sessionId: "term-session-zero",
+    });
+  });
+
   it("observes DOM rectangle, explicitly attaches session, and reports initial bounds on mount in Tauri mode", async () => {
     const session = createSession("term-session-1");
 
@@ -198,6 +265,13 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
       sessionId: "term-session-1",
+      bounds: {
+        x: 10,
+        y: 20,
+        width: 800,
+        height: 600,
+      },
+      scaleFactor: 2,
     });
 
     await waitFor(() => {
@@ -221,59 +295,63 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     expect(primaryRecord.observer.observe).toHaveBeenCalled();
   });
 
-  it("measures and reports bounds for the full terminal pane without a top inset", async () => {
+  it("reserves the pane-handle strip at the top of the reported native bounds", async () => {
+    // The native compositor view is parented above the WKWebView, so anything
+    // inside the reported bounds is painted over. The pane-drag handle only
+    // stays visible if that strip is excluded from the surface geometry.
     const session = createSession("term-session-1");
-
+    const paneRect = { x: 10, y: 20, width: 800, height: 600 };
+    // The viewport is offset from the pane box by the reserved handle strip, so
+    // the browser measures it shorter and lower than its parent.
     HTMLElement.prototype.getBoundingClientRect = function () {
       if (this.getAttribute("data-testid") === "native-terminal-viewport") {
         return {
-          x: 10,
-          y: 20,
-          width: 800,
-          height: 600,
-          top: 20,
-          bottom: 620,
-          left: 10,
-          right: 810,
+          ...paneRect,
+          y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
+          height: paneRect.height - NATIVE_TERMINAL_HANDLE_INSET_PX,
+          top: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
+          bottom: paneRect.y + paneRect.height,
+          left: paneRect.x,
+          right: paneRect.x + paneRect.width,
           toJSON: () => ({}),
         } as DOMRect;
       }
       return {
-        x: 10,
-        y: 20,
-        width: 800,
-        height: 600,
-        top: 20,
-        bottom: 620,
-        left: 10,
-        right: 810,
+        ...paneRect,
+        top: paneRect.y,
+        bottom: paneRect.y + paneRect.height,
+        left: paneRect.x,
+        right: paneRect.x + paneRect.width,
         toJSON: () => ({}),
       } as DOMRect;
     };
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-1" session={session} />,
+    );
 
-    const viewport = getByTestId("native-terminal-viewport");
-    expect(viewport).toBeInTheDocument();
+    // The strip is reserved in the DOM ...
+    expect(getByTestId("native-terminal-viewport").style.top).toBe(
+      `${NATIVE_TERMINAL_HANDLE_INSET_PX}px`,
+    );
 
+    // ... and excluded from the geometry handed to the compositor, so the
+    // native surface cannot paint over the handle.
     await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
-        "cmd_native_terminal_set_bounds",
-        {
-          sessionId: "term-session-1",
-          bounds: {
-            x: 10,
-            y: 20,
-            width: 800,
-            height: 600,
-          },
-          scaleFactor: 2,
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
+        sessionId: "term-session-1",
+        bounds: {
+          x: paneRect.x,
+          y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
+          width: paneRect.width,
+          height: paneRect.height - NATIVE_TERMINAL_HANDLE_INSET_PX,
         },
-      );
+        scaleFactor: 2,
+      });
     });
   });
 
-  it("reports changed bounds payload once when geometry changes", async () => {
+    it("reports changed bounds payload once when geometry changes", async () => {
     const session = createSession("term-session-1");
 
     const { container } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
@@ -332,6 +410,129 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     });
   });
 
+  it("skips the rejected zero-area measurement and reports the first real one", async () => {
+    // A freshly split pane measures zero-area mid-layout. The compositor rejects
+    // those dimensions, so the pane must not spend a request on them, and the
+    // skipped measurement must not be cached as already-sent, or the pane would
+    // stay blank with no bounds and no presentation signal.
+    const session = createSession("term-session-1");
+    let rect = {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      top: 0,
+      bottom: 0,
+      left: 0,
+      right: 0,
+      toJSON: () => ({}),
+    } as DOMRect;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return rect;
+    };
+
+    const { container } = render(
+      <NativeTerminalPane sessionId="term-session-1" session={session} />,
+    );
+
+    const boundsCalls = () =>
+      tauriCoreMocks.invoke.mock.calls.filter(
+        ([command]) => command === "cmd_native_terminal_set_bounds",
+      );
+
+    await waitFor(() => {
+      expect(resizeRecords.length).toBeGreaterThan(0);
+    });
+    expect(boundsCalls()).toHaveLength(0);
+
+    const observedElement = container.firstElementChild as HTMLElement;
+    rect = {
+      x: 236,
+      y: 32,
+      width: 522,
+      height: 818,
+      top: 32,
+      bottom: 850,
+      left: 236,
+      right: 758,
+      toJSON: () => ({}),
+    } as DOMRect;
+    const zeroAreaRecord = resizeRecords[0];
+    act(() => {
+      zeroAreaRecord.callback(
+        [
+          {
+            target: observedElement,
+            contentRect: new DOMRectReadOnly(236, 32, 522, 818),
+            borderBoxSize: [],
+            contentBoxSize: [],
+            devicePixelContentBoxSize: [],
+          } as unknown as ResizeObserverEntry,
+        ],
+        zeroAreaRecord.observer,
+      );
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
+        sessionId: "term-session-1",
+        bounds: { x: 236, y: 32, width: 522, height: 818 },
+        scaleFactor: 2,
+      });
+    });
+    expect(boundsCalls()).toHaveLength(1);
+  });
+
+  it("retries an identical measurement after a rejected bounds request", async () => {
+    // The cached geometry means "the compositor already has this". A failed
+    // request must clear it, otherwise a retry carrying the same rect is deduped
+    // away and the surface never receives bounds.
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const session = createSession("term-session-1");
+    let failBounds = true;
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_set_bounds" && failBounds) {
+        throw new Error("invalid dimensions");
+      }
+      return undefined;
+    });
+
+    const { container } = render(
+      <NativeTerminalPane sessionId="term-session-1" session={session} />,
+    );
+
+    const boundsCalls = () =>
+      tauriCoreMocks.invoke.mock.calls.filter(
+        ([command]) => command === "cmd_native_terminal_set_bounds",
+      );
+    await waitFor(() => {
+      expect(boundsCalls()).toHaveLength(1);
+    });
+
+    failBounds = false;
+    const observedElement = container.firstElementChild as HTMLElement;
+    const retryRecord = resizeRecords[0];
+    act(() => {
+      retryRecord.callback(
+        [
+          {
+            target: observedElement,
+            contentRect: new DOMRectReadOnly(10, 20, 800, 600),
+            borderBoxSize: [],
+            contentBoxSize: [],
+            devicePixelContentBoxSize: [],
+          } as unknown as ResizeObserverEntry,
+        ],
+        retryRecord.observer,
+      );
+    });
+
+    await waitFor(() => {
+      expect(boundsCalls()).toHaveLength(2);
+    });
+    consoleSpy.mockRestore();
+  });
+
   it("disconnects ResizeObserver and invokes detach on unmount", async () => {
     const session = createSession("term-session-1");
 
@@ -350,6 +551,100 @@ describe("NativeTerminalPane geometry reporting contract", () => {
         sessionId: "term-session-1",
       });
     });
+  });
+
+  it("presents the replacement terminal before detaching the outgoing terminal", async () => {
+    const firstSession = createSession("term-session-1");
+    const secondSession = createSession("term-session-2");
+    const { rerender } = render(
+      <NativeTerminalPane sessionId={firstSession.id} session={firstSession} />,
+    );
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: firstSession.backendSessionId }),
+      );
+    });
+    tauriCoreMocks.invoke.mockClear();
+
+    rerender(<NativeTerminalPane sessionId={secondSession.id} session={secondSession} />);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: secondSession.backendSessionId }),
+      );
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        sessionId: firstSession.backendSessionId,
+      });
+    });
+
+    const commands = tauriCoreMocks.invoke.mock.calls.map(([command]) => command);
+    expect(commands.indexOf("cmd_native_terminal_set_bounds")).toBeLessThan(
+      commands.indexOf("cmd_native_terminal_detach"),
+    );
+  });
+
+  it("keeps the outgoing terminal until the last rapid replacement is presented", async () => {
+    const firstSession = createSession("term-session-1");
+    const secondSession = createSession("term-session-2");
+    const thirdSession = createSession("term-session-3");
+    let resolveSecondBounds!: (value: undefined) => void;
+    const secondBounds = new Promise<undefined>((resolve) => {
+      resolveSecondBounds = resolve;
+    });
+    tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
+      if (
+        command === "cmd_native_terminal_set_bounds" &&
+        args?.sessionId === secondSession.backendSessionId
+      ) {
+        return secondBounds;
+      }
+      return undefined;
+    });
+
+    const { rerender } = render(
+      <NativeTerminalPane sessionId={firstSession.id} session={firstSession} />,
+    );
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: firstSession.backendSessionId }),
+      );
+    });
+    tauriCoreMocks.invoke.mockClear();
+
+    rerender(<NativeTerminalPane sessionId={secondSession.id} session={secondSession} />);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: secondSession.backendSessionId }),
+      );
+    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_detach", {
+      sessionId: firstSession.backendSessionId,
+    });
+
+    rerender(<NativeTerminalPane sessionId={thirdSession.id} session={thirdSession} />);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.objectContaining({ sessionId: thirdSession.backendSessionId }),
+      );
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        sessionId: firstSession.backendSessionId,
+      });
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_detach", {
+        sessionId: secondSession.backendSessionId,
+      });
+    });
+
+    const commands = tauriCoreMocks.invoke.mock.calls.map(([command]) => command);
+    const thirdBoundsIndex = commands.lastIndexOf("cmd_native_terminal_set_bounds");
+    expect(thirdBoundsIndex).toBeLessThan(commands.indexOf("cmd_native_terminal_detach"));
+
+    resolveSecondBounds(undefined);
   });
 
   it("does not report Tauri geometry bounds in remote/web non-Tauri mode", async () => {
@@ -386,7 +681,9 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 });
 
 describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () => {
+  let restorePaneRect: () => void;
   beforeEach(() => {
+    restorePaneRect = stubPaneRect();
     tauriCoreMocks.invoke.mockReset();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
@@ -395,6 +692,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   afterEach(() => {
+    restorePaneRect();
     cleanup();
     vi.unstubAllGlobals();
   });
@@ -1064,7 +1362,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 });
 
 describe("NativeTerminalPane daemon and session identity mapping", () => {
+  let restorePaneRect: () => void;
   beforeEach(() => {
+    restorePaneRect = stubPaneRect();
     tauriCoreMocks.invoke.mockReset();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
@@ -1074,6 +1374,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
   });
 
   afterEach(() => {
+    restorePaneRect();
     cleanup();
     vi.unstubAllGlobals();
   });
@@ -1088,12 +1389,18 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     );
 
     // 1. Native attach must use backendSessionId
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
-      sessionId: daemonSessionId,
-    });
-    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_attach", {
-      sessionId: frontendId,
-    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+      "cmd_native_terminal_attach",
+      expect.objectContaining({
+        sessionId: daemonSessionId,
+      }),
+    );
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_attach",
+      expect.objectContaining({
+        sessionId: frontendId,
+      }),
+    );
 
     // 2. Native bounds must use backendSessionId
     await waitFor(() => {
@@ -1156,9 +1463,12 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
   it("preserves fallback behavior when callers only supply sessionId without session object", () => {
     render(<NativeTerminalPane sessionId="legacy-caller-supplied-id" />);
 
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
-      sessionId: "legacy-caller-supplied-id",
-    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+      "cmd_native_terminal_attach",
+      expect.objectContaining({
+        sessionId: "legacy-caller-supplied-id",
+      }),
+    );
   });
 
   it("makes no attach, focus, or input IPC calls when session has null backendSessionId, then attaches once upon receiving backendSessionId", async () => {
@@ -1194,15 +1504,21 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     rerender(<NativeTerminalPane sessionId={frontendId} session={reboundSession} />);
 
     // Now it attaches exactly once with the rebound daemon ID, never with frontendId
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
-      sessionId: "daemon-pty-fresh-123",
-    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+      "cmd_native_terminal_attach",
+      expect.objectContaining({
+        sessionId: "daemon-pty-fresh-123",
+      }),
+    );
     const attachCalls = tauriCoreMocks.invoke.mock.calls.filter(
       ([cmd]) => cmd === "cmd_native_terminal_attach",
     );
     expect(attachCalls).toHaveLength(1);
-    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_attach", {
-      sessionId: frontendId,
-    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_attach",
+      expect.objectContaining({
+        sessionId: frontendId,
+      }),
+    );
   });
 });

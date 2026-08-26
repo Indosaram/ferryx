@@ -14,18 +14,28 @@ vi.mock("../lib/tauri", async (importOriginal) => {
 });
 
 import { createLayoutState } from "./layout";
-import type { WorkspaceState } from "./workspaceStore";
+import {
+  useWorkspaceStore,
+  type WorkspaceServices,
+  type WorkspaceState,
+} from "./workspaceStore";
 import {
   clearHmrWorkspaceState,
+  getHmrWorkspaceState,
   setHmrWorkspaceState,
 } from "./hmrWorkspaceState";
 import {
   defaultListLiveBackendSessionIds,
   getWorkspaceRestoreStatus,
+  preloadWorkspaceSnapshots,
   resetWorkspaceRestore,
   setWorkspaceRestoreStatus,
   useWorkspaceRestore,
 } from "./workspaceRestore";
+import {
+  clearWorkspaceSnapshot,
+  getWorkspaceSnapshot,
+} from "./workspaceSnapshotCache";
 
 function persistedSingleTerminal(workspaceId: string, backendSessionId: string, daemonEpoch?: string) {
   return {
@@ -64,10 +74,194 @@ function persistedSingleTerminal(workspaceId: string, backendSessionId: string, 
 describe("workspaceRestore coordinator", () => {
   beforeEach(() => {
     resetWorkspaceRestore();
+    clearWorkspaceSnapshot();
+    clearHmrWorkspaceState();
     tauriMocks.isTauriRuntime.mockReturnValue(true);
     tauriMocks.listTerminalSessions.mockReset();
     tauriMocks.loadSession.mockReset();
     tauriMocks.spawnTerminal.mockReset();
+  });
+
+  it("preserves newer HMR state and does not restore stale preloaded snapshot when recoveredFromHmr is true", async () => {
+    const workspaceId = "ws-returned-hmr";
+    const persisted = persistedSingleTerminal(workspaceId, "backend-1");
+
+    await preloadWorkspaceSnapshots(
+      [workspaceId],
+      async () => persisted,
+      async () => [{ sessionId: "backend-1" }],
+    );
+
+    const hmr2TabState: WorkspaceState = {
+      workspaceId,
+      worktrees: [{ path: "/repo/test", branch: "main", head: "111", bare: false, detached: false, locked: null, prunable: null }],
+      activeWorktreePath: "/repo/test",
+      sessions: {
+        "sess-1": {
+          id: "sess-1",
+          workspaceId,
+          worktree: { wsId: workspaceId, slug: "main" },
+          backendSessionId: "backend-1",
+          worktreePath: "/repo/test",
+          cwd: "/repo/test",
+          lifecycle: "working",
+        },
+        "sess-2": {
+          id: "sess-2",
+          workspaceId,
+          worktree: { wsId: workspaceId, slug: "main" },
+          backendSessionId: "backend-2",
+          worktreePath: "/repo/test",
+          cwd: "/repo/test",
+          lifecycle: "working",
+        },
+      },
+      layout: createLayoutState([
+        { id: "tab-1", sessionId: "sess-1", label: "main", kind: "terminal" },
+        { id: "tab-2", sessionId: "sess-2", label: "tab-2", kind: "terminal" },
+      ]),
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+    };
+
+    setHmrWorkspaceState(workspaceId, hmr2TabState);
+
+    const restoreWorkspace = vi.fn();
+    const loadSessionFn = vi.fn(async () => {
+      throw new Error("preloaded HMR recovery must not trigger disk read");
+    });
+
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId,
+        recoveredFromHmr: true,
+        restoreWorkspace,
+        loadSessionFn,
+        listLiveBackendSessionIdsFn: async () => [
+          { sessionId: "backend-1" },
+          { sessionId: "backend-2" },
+        ],
+      }),
+    );
+
+    expect(restoreWorkspace).not.toHaveBeenCalled();
+    expect(loadSessionFn).not.toHaveBeenCalled();
+    expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    expect(getHmrWorkspaceState(workspaceId)?.layout.tabs).toHaveLength(2);
+    clearHmrWorkspaceState(workspaceId);
+    unmount();
+  });
+
+  it("preloads every persisted workspace snapshot before project switching", async () => {
+    const alpha = persistedSingleTerminal("alpha", "backend-alpha");
+    const beta = persistedSingleTerminal("beta", "backend-beta");
+    const persisted = {
+      ...alpha,
+      workspaces: {
+        ...alpha.workspaces,
+        ...beta.workspaces,
+      },
+    };
+
+    await preloadWorkspaceSnapshots(
+      ["alpha", "beta"],
+      async () => persisted,
+      async () => [
+        { sessionId: "backend-alpha" },
+        { sessionId: "backend-beta" },
+      ],
+    );
+
+    expect(getWorkspaceSnapshot("alpha")).toMatchObject({
+      workspaceId: "alpha",
+      layout: { tabs: [{ id: "tab-1" }] },
+    });
+    expect(getWorkspaceSnapshot("beta")).toMatchObject({
+      workspaceId: "beta",
+      layout: { tabs: [{ id: "tab-1" }] },
+    });
+
+    const restoreWorkspace = vi.fn();
+    const loadSessionFn = vi.fn(async () => {
+      throw new Error("preloaded state must avoid a second disk read");
+    });
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId: "beta",
+        recoveredFromHmr: false,
+        restoreWorkspace,
+        loadSessionFn,
+        listLiveBackendSessionIdsFn: async () => [],
+      }),
+    );
+
+    expect(restoreWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "beta",
+        layout: expect.objectContaining({
+          tabs: [expect.objectContaining({ id: "tab-1" })],
+        }),
+      }),
+    );
+    expect(loadSessionFn).not.toHaveBeenCalled();
+    expect(getWorkspaceRestoreStatus("beta")).toBe("restored");
+    unmount();
+  });
+
+  it("exposes preloaded tabs on the first render of a project switch", async () => {
+    const alpha = persistedSingleTerminal("alpha", "backend-alpha");
+    const beta = persistedSingleTerminal("beta", "backend-beta");
+    await preloadWorkspaceSnapshots(
+      ["alpha", "beta"],
+      async () => ({
+        ...alpha,
+        workspaces: {
+          ...alpha.workspaces,
+          ...beta.workspaces,
+        },
+      }),
+      async () => [
+        { sessionId: "backend-alpha" },
+        { sessionId: "backend-beta" },
+      ],
+    );
+    const services: WorkspaceServices = {
+      ensureTerminalEvents: vi.fn(async () => undefined),
+      spawnTerminal: vi.fn(async () => "unexpected-spawn"),
+      getTerminalCwd: vi.fn(async () => null),
+      closeTerminal: vi.fn(async () => undefined),
+      waitForTerminalExit: vi.fn(async () => undefined),
+    };
+    const observed: Array<{
+      requestedWorkspaceId: string;
+      stateWorkspaceId: string | undefined;
+      tabCount: number;
+    }> = [];
+    const { rerender } = renderHook(
+      ({ workspaceId }: { workspaceId: string }) => {
+        const store = useWorkspaceStore({ workspaceId, services });
+        observed.push({
+          requestedWorkspaceId: workspaceId,
+          stateWorkspaceId: store.state.workspaceId,
+          tabCount: store.state.layout.tabs.length,
+        });
+        return store;
+      },
+      { initialProps: { workspaceId: "alpha" } },
+    );
+
+    observed.length = 0;
+    rerender({ workspaceId: "beta" });
+
+    expect(observed).not.toHaveLength(0);
+    expect(observed).toEqual(
+      observed.map(() => ({
+        requestedWorkspaceId: "beta",
+        stateWorkspaceId: "beta",
+        tabCount: 1,
+      })),
+    );
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
   });
 
   it("transitions from idle -> loading -> restored on successful disk restore", async () => {

@@ -1,10 +1,18 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
-import { activityStateToAgentState, summarizeActivities, type ActivitySummary, type TerminalActivity } from "../lib/activity";
+import {
+  activityStateToAgentState,
+  summarizeActivities,
+  type ActivitySummary,
+  type TerminalActivity,
+  type TerminalActivityState,
+} from "../lib/activity";
 import { classifyTerminalTitleActivity, formatTabLabelFromTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
+import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
 import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
+import { switchDebug } from "../lib/switchDebug";
 import { worktreeIdentity } from "../lib/types";
 import type {
   ActiveAgent,
@@ -156,27 +164,45 @@ export function useWorkspaceStore({
   }
   const [state, reactDispatch] = useReducer(workspaceReducer, initialRef.current.state);
   const stateRef = useRef(state);
-  stateRef.current = state;
   const spawningSessionIdsRef = useRef(new Set<string>());
   const mountedWorkspaceIdRef = useRef(workspaceId);
   // Provenance belongs to the workspace currently mounted; keeping the first
   // one would make restore pick the wrong HMR-vs-disk path after a switch.
   const recoveredFromHmrRef = useRef(initialRef.current.recoveredFromHmr);
-  if (mountedWorkspaceIdRef.current !== workspaceId) {
-    setWorkspaceSnapshot(mountedWorkspaceIdRef.current, stateRef.current);
-    mountedWorkspaceIdRef.current = workspaceId;
+
+  let renderedState = state;
+  let recoveredFromHmr = recoveredFromHmrRef.current;
+
+  if (state.workspaceId !== workspaceId) {
+    const previousWorkspaceId = state.workspaceId ?? mountedWorkspaceIdRef.current;
+    setWorkspaceSnapshot(previousWorkspaceId, state);
     const swapped = initWorkspaceState({ workspaceId, initialWorktrees });
-    stateRef.current = swapped.state;
+    switchDebug("workspace.store.swap", {
+      fromWorkspaceId: previousWorkspaceId,
+      toWorkspaceId: workspaceId,
+      outgoingTabCount: state.layout.tabs.length,
+      outgoingSessionCount: Object.keys(state.sessions).length,
+      incomingStateWorkspaceId: swapped.state.workspaceId ?? null,
+      incomingActiveWorktreePath: swapped.state.activeWorktreePath,
+      incomingWorktreeCount: swapped.state.worktrees.length,
+      incomingTabCount: swapped.state.layout.tabs.length,
+      incomingSessionCount: Object.keys(swapped.state.sessions).length,
+      recoveredFromHmr: swapped.recoveredFromHmr,
+    });
+    renderedState = swapped.state;
+    recoveredFromHmr = swapped.recoveredFromHmr;
     recoveredFromHmrRef.current = swapped.recoveredFromHmr;
     reactDispatch({ type: "RESTORE_WORKSPACE", state: swapped.state });
   }
-  const recoveredFromHmr = recoveredFromHmrRef.current;
+
+  stateRef.current = renderedState;
+  mountedWorkspaceIdRef.current = workspaceId;
 
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
       const nextState = workspaceReducer(stateRef.current, action);
       stateRef.current = nextState;
-      const owningWorkspaceId = mountedWorkspaceIdRef.current;
+      const owningWorkspaceId = nextState.workspaceId ?? mountedWorkspaceIdRef.current;
       setHmrWorkspaceState(owningWorkspaceId, nextState);
       setWorkspaceSnapshot(owningWorkspaceId, nextState);
       reactDispatch(action);
@@ -185,8 +211,9 @@ export function useWorkspaceStore({
   );
 
   useEffect(() => {
-    setHmrWorkspaceState(workspaceId, state);
-  }, [state, workspaceId]);
+    const owningWorkspaceId = renderedState.workspaceId ?? workspaceId;
+    setHmrWorkspaceState(owningWorkspaceId, renderedState);
+  }, [renderedState, workspaceId]);
 
   useEffect(() => {
     const unsubscribeLifecycle = terminalEventBus.subscribeLifecycle((payload) => {
@@ -247,11 +274,24 @@ export function useWorkspaceStore({
   const openTab = useCallback(
     async (worktree: Worktree, label?: string, backendSessionIdOverride?: string) => {
       const capturedWorktreePath = worktree.path;
+      switchDebug("terminal.open.start", {
+        workspaceId,
+        worktreePath: capturedWorktreePath,
+        tabCount: stateRef.current.layout.tabs.length,
+        sessionCount: Object.keys(stateRef.current.sessions).length,
+        backendOverride: backendSessionIdOverride ?? null,
+      });
       const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride);
       // The active project can change while the spawn is in flight; landing this
       // tab now would inject one project's worktree into another's state, and
       // dropping it silently would orphan the backend PTY we just created.
       if (mountedWorkspaceIdRef.current !== workspaceId) {
+        switchDebug("terminal.open.discarded", {
+          requestedWorkspaceId: workspaceId,
+          mountedWorkspaceId: mountedWorkspaceIdRef.current,
+          worktreePath: capturedWorktreePath,
+          backendSessionId: binding.session.backendSessionId,
+        });
         if (backendSessionIdOverride === undefined) {
           await closeBackendSession(binding.session, services);
         }
@@ -262,6 +302,14 @@ export function useWorkspaceStore({
       }
       dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath });
       dispatch({ type: "SELECT_WORKTREE", path: capturedWorktreePath });
+      switchDebug("terminal.open.complete", {
+        workspaceId,
+        worktreePath: capturedWorktreePath,
+        tabId: binding.tab.id,
+        sessionId: binding.session.id,
+        backendSessionId: binding.session.backendSessionId,
+        tabCount: stateRef.current.layout.tabs.length,
+      });
       return binding.tab.id;
     },
     [createSpawnedTab, dispatch, services, workspaceId],
@@ -318,20 +366,51 @@ export function useWorkspaceStore({
     async (worktree: Worktree, options?: { allowCreate?: boolean }) => {
       const allowCreate = options?.allowCreate ?? true;
       const snapshot = stateRef.current;
+      switchDebug("worktree.ensure.start", {
+        workspaceId,
+        requestedPath: worktree.path,
+        activeWorktreePath: snapshot.activeWorktreePath,
+        allowCreate,
+        activeTabCount: snapshot.layout.tabs.length,
+        activeTabIds: snapshot.layout.tabs.map((tab) => tab.id),
+        parkedTabCount: snapshot.worktreeLayouts?.[worktree.path]?.tabs.length ?? 0,
+        sessionCount: Object.keys(snapshot.sessions).length,
+      });
       if (snapshot.activeWorktreePath === worktree.path) {
         const activeTab = snapshot.layout.tabs.find(
           (tab) => tab.kind !== "browser" && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
         ) ?? snapshot.layout.tabs[0];
         if (activeTab) {
+          switchDebug("worktree.ensure.active-tab", {
+            workspaceId,
+            worktreePath: worktree.path,
+            tabId: activeTab.id,
+          });
           dispatch({ type: "ACTIVATE_TAB", tabId: activeTab.id });
           return activeTab.id;
         }
-        if (!allowCreate) return null;
+        if (!allowCreate) {
+          switchDebug("worktree.ensure.empty-no-create", {
+            workspaceId,
+            worktreePath: worktree.path,
+          });
+          return null;
+        }
+        switchDebug("worktree.ensure.create-active", {
+          workspaceId,
+          worktreePath: worktree.path,
+        });
         return openTab(worktree);
       }
 
       const parkedLayout = snapshot.worktreeLayouts?.[worktree.path];
       if (parkedLayout && parkedLayout.tabs.length > 0) {
+        switchDebug("worktree.ensure.restore-parked", {
+          workspaceId,
+          worktreePath: worktree.path,
+          parkedTabCount: parkedLayout.tabs.length,
+          parkedActiveTabId: parkedLayout.activeTabId,
+        });
         dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
         const activeTabId = parkedLayout.activeTabId ?? parkedLayout.tabs[0]?.id;
         if (activeTabId) {
@@ -345,15 +424,23 @@ export function useWorkspaceStore({
         (tab) => tab.kind !== "browser" && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
       );
       if (existingInCurrent) {
+        switchDebug("worktree.ensure.existing-current", {
+          workspaceId,
+          worktreePath: worktree.path,
+          tabId: existingInCurrent.id,
+        });
         dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
         dispatch({ type: "ACTIVATE_TAB", tabId: existingInCurrent.id });
         return existingInCurrent.id;
       }
 
-      dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+      switchDebug("worktree.ensure.create-new", {
+        workspaceId,
+        worktreePath: worktree.path,
+      });
       return openTab(worktree);
     },
-    [dispatch, openTab],
+    [dispatch, openTab, workspaceId],
   );
 
   const splitPane = useCallback(
@@ -709,12 +796,21 @@ export function useWorkspaceStore({
     [createBrowserTab],
   );
 
+  const agents = useMemo(() => selectAgents(renderedState), [renderedState]);
+  const tabActivity = useMemo(() => selectTabActivitySummaries(renderedState), [renderedState]);
+  const worktreeActivity = useMemo(() => selectWorktreeActivitySummaries(renderedState), [renderedState]);
+  const activityNotificationTargets = useMemo(
+    () => selectActivityNotificationTargets(renderedState),
+    [renderedState],
+  );
+
   return {
-    state,
+    state: renderedState,
     recoveredFromHmr,
-    agents: selectAgents(state),
-    tabActivity: selectTabActivitySummaries(state),
-    worktreeActivity: selectWorktreeActivitySummaries(state),
+    agents,
+    tabActivity,
+    worktreeActivity,
+    activityNotificationTargets,
     openTab,
     createBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
@@ -835,6 +931,44 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
   return result;
 }
 
+export type ActivityNotificationTarget = {
+  sessionId: string;
+  tabId: string;
+  worktreePath: string;
+  worktreeLabel: string;
+  agentLabel: string | undefined;
+  terminalTitle: string;
+  state: TerminalActivityState;
+};
+
+export function selectActivityNotificationTargets(state: WorkspaceState): ActivityNotificationTarget[] {
+  const targets: ActivityNotificationTarget[] = [];
+  const activityBySessionId = state.activityBySessionId ?? {};
+
+  for (const [sessionId, activity] of Object.entries(activityBySessionId)) {
+    const tabId = findTabIdForSession(state, sessionId);
+    if (!tabId) continue;
+    const session = state.sessions[sessionId];
+    const worktreePath = sessionWorktreePath(session);
+    const worktree = state.worktrees.find((candidate) => candidate.path === worktreePath);
+    const worktreeLabel = worktree ? workspaceName(worktree) : "";
+    const parsed = parseAgentTitle(activity.title);
+    const agentLabel = parsed?.isAgent ? parsed.name : undefined;
+
+    targets.push({
+      sessionId,
+      tabId,
+      worktreePath,
+      worktreeLabel,
+      agentLabel,
+      terminalTitle: activity.title,
+      state: activity.state,
+    });
+  }
+
+  return targets;
+}
+
 function initWorkspaceState({
   workspaceId,
   initialWorktrees,
@@ -844,12 +978,31 @@ function initWorkspaceState({
 }): { state: WorkspaceState; recoveredFromHmr: boolean } {
   const hmrState = getHmrWorkspaceState(workspaceId);
   if (hmrState) {
+    switchDebug("workspace.state.init", {
+      workspaceId,
+      source: "hmr",
+      worktreeCount: hmrState.worktrees.length,
+      tabCount: hmrState.layout.tabs.length,
+      sessionCount: Object.keys(hmrState.sessions).length,
+    });
     return { state: { ...hmrState, workspaceId }, recoveredFromHmr: true };
   }
   const snapshot = getWorkspaceSnapshot(workspaceId);
   if (snapshot) {
+    switchDebug("workspace.state.init", {
+      workspaceId,
+      source: "snapshot",
+      worktreeCount: snapshot.worktrees.length,
+      tabCount: snapshot.layout.tabs.length,
+      sessionCount: Object.keys(snapshot.sessions).length,
+    });
     return { state: { ...snapshot, workspaceId }, recoveredFromHmr: false };
   }
+  switchDebug("workspace.state.init", {
+    workspaceId,
+    source: "empty",
+    initialWorktreeCount: initialWorktrees.length,
+  });
   return { state: createInitialState(initialWorktrees, workspaceId), recoveredFromHmr: false };
 }
 
@@ -872,6 +1025,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "RESTORE_WORKSPACE":
       return {
         ...action.state,
+        workspaceId: action.state.workspaceId ?? state.workspaceId,
         worktreeLayouts: action.state.worktreeLayouts ?? {},
         unreadTabIds: action.state.unreadTabIds ?? {},
         unreadWorktreePaths: action.state.unreadWorktreePaths ?? {},
@@ -987,7 +1141,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
     }
     case "MARK_TAB_UNREAD": {
-      if (action.tabId === state.layout.activeTabId) return state;
+      if (isTabVisible(state, action.tabId)) return state;
       const worktreePath = getTabWorktreePath(state, action.tabId);
       return {
         ...state,
@@ -1284,12 +1438,22 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const activity: TerminalActivity = {
         state: classified,
         title: formatTabLabelFromTitle(action.title, normalizedTitle),
-        isAgent: Boolean(parsed?.isAgent || classified),
+        isAgent: Boolean(parsed?.isAgent),
         agentType: parsed?.isAgent ? parsed.agentType : undefined,
       };
       return applySessionActivity(state, action.tabId, action.sessionId, activity);
     }
   }
+}
+
+function isTabVisible(state: WorkspaceState, tabId: string): boolean {
+  if (state.layout.activeTabId === tabId) return true;
+  if (state.layout.tabGroups) {
+    for (const group of Object.values(state.layout.tabGroups)) {
+      if (group.activeTabId === tabId) return true;
+    }
+  }
+  return false;
 }
 
 function applySessionActivity(
@@ -1314,7 +1478,7 @@ function applySessionActivity(
     activityBySessionId: { ...(state.activityBySessionId ?? {}), [sessionId]: activity },
   };
 
-  if (activity.state === "done" && previous?.state !== "done" && tabId !== state.layout.activeTabId) {
+  if (activity.state === "done" && previous?.state !== "done" && !isTabVisible(state, tabId)) {
     const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,

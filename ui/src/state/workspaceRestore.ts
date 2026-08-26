@@ -3,13 +3,16 @@ import { useEffect } from "react";
 import { deserializeWorkspaceState, serializeWorkspaceState } from "../lib/sessionPersistence";
 import { isTauriRuntime, listTerminalSessions, loadSession } from "../lib/tauri";
 import { defaultTauriTransport } from "../lib/terminalTransport/tauriTransport";
+import type { PersistedWorkspaceSession } from "../lib/types";
+import { switchDebug } from "../lib/switchDebug";
 import { getHmrWorkspaceState } from "./hmrWorkspaceState";
-import { getWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import { getWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 import type { WorkspaceState } from "./workspaceStore";
 
 export type WorkspaceRestoreStatus = "idle" | "loading" | "restored" | "failed";
 
 const restoreStatusByWorkspace = new Map<string, WorkspaceRestoreStatus>();
+const preloadedRestoreStateByWorkspace = new Map<string, WorkspaceState | null>();
 
 export function getWorkspaceRestoreStatus(workspaceId: string): WorkspaceRestoreStatus {
   return restoreStatusByWorkspace.get(workspaceId) ?? "idle";
@@ -33,8 +36,10 @@ export function reopenWorkspaceRestore(workspaceId: string): void {
 export function resetWorkspaceRestore(workspaceId?: string): void {
   if (workspaceId) {
     restoreStatusByWorkspace.delete(workspaceId);
+    preloadedRestoreStateByWorkspace.delete(workspaceId);
   } else {
     restoreStatusByWorkspace.clear();
+    preloadedRestoreStateByWorkspace.clear();
   }
 }
 
@@ -73,6 +78,77 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
   }));
 }
 
+function prepareDiskRestoredState(workspaceId: string, state: WorkspaceState): WorkspaceState {
+  return {
+    ...state,
+    workspaceId,
+    sessions: Object.fromEntries(
+      Object.entries(state.sessions).map(([id, session]) => [
+        id,
+        { ...session, lastOutputSequence: null },
+      ]),
+    ),
+  };
+}
+
+export async function preloadWorkspaceSnapshots(
+  workspaceIds: readonly string[],
+  loadSessionFn: () => Promise<unknown> = loadSession,
+  listLiveBackendSessionIdsFn: UseWorkspaceRestoreOptions["listLiveBackendSessionIdsFn"] =
+    defaultListLiveBackendSessionIds,
+): Promise<void> {
+  switchDebug("workspace.preload.start", { workspaceIds });
+  const persistedSession = (await loadSessionFn()) as PersistedWorkspaceSession | null;
+  if (!persistedSession) {
+    switchDebug("workspace.preload.empty", { workspaceIds });
+    for (const workspaceId of workspaceIds) {
+      preloadedRestoreStateByWorkspace.set(workspaceId, null);
+    }
+    return;
+  }
+  const liveBackendIds = await listLiveBackendSessionIdsFn();
+  switchDebug("workspace.preload.loaded", {
+    workspaceIds,
+    persistedWorkspaceIds: Object.keys(persistedSession.workspaces ?? {}),
+    liveBackendShape: Array.isArray(liveBackendIds)
+      ? `array:${liveBackendIds.length}`
+      : liveBackendIds === null
+        ? "null"
+        : typeof liveBackendIds,
+  });
+
+  for (const workspaceId of workspaceIds) {
+    const restoredState = deserializeWorkspaceState(
+      workspaceId,
+      persistedSession,
+      liveBackendIds,
+    );
+    if (!restoredState) {
+      switchDebug("workspace.preload.missing", { workspaceId });
+      preloadedRestoreStateByWorkspace.set(workspaceId, null);
+      continue;
+    }
+    const preparedState = prepareDiskRestoredState(workspaceId, restoredState);
+    setWorkspaceSnapshot(
+      workspaceId,
+      preparedState,
+    );
+    preloadedRestoreStateByWorkspace.set(workspaceId, preparedState);
+    switchDebug("workspace.preload.snapshot", {
+      workspaceId,
+      activeWorktreePath: preparedState.activeWorktreePath,
+      worktreeCount: preparedState.worktrees.length,
+      tabCount: preparedState.layout.tabs.length,
+      tabIds: preparedState.layout.tabs.map((tab) => tab.id),
+      sessionCount: Object.keys(preparedState.sessions).length,
+      missingBackendSessionIds: Object.values(preparedState.sessions)
+        .filter((session) => session.backendSessionId === null)
+        .map((session) => session.id),
+    });
+  }
+  switchDebug("workspace.preload.complete", { workspaceIds });
+}
+
 export function useWorkspaceRestore({
   workspaceId,
   recoveredFromHmr,
@@ -82,16 +158,57 @@ export function useWorkspaceRestore({
   enabled = true,
 }: UseWorkspaceRestoreOptions): WorkspaceRestoreStatus {
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      switchDebug("workspace.restore.gated", { workspaceId });
+      return;
+    }
+
+    if (preloadedRestoreStateByWorkspace.has(workspaceId)) {
+      const preloadedState = preloadedRestoreStateByWorkspace.get(workspaceId) ?? null;
+      preloadedRestoreStateByWorkspace.delete(workspaceId);
+
+      if (recoveredFromHmr) {
+        switchDebug("workspace.restore.preloaded.skipped-hmr", {
+          workspaceId,
+          action: "skipped-hmr",
+          hasState: Boolean(preloadedState),
+          tabCount: preloadedState?.layout.tabs.length ?? 0,
+          sessionCount: preloadedState ? Object.keys(preloadedState.sessions).length : 0,
+        });
+        setWorkspaceRestoreStatus(workspaceId, "restored");
+        return;
+      }
+
+      switchDebug("workspace.restore.preloaded", {
+        workspaceId,
+        action: "applied",
+        hasState: Boolean(preloadedState),
+        tabCount: preloadedState?.layout.tabs.length ?? 0,
+        sessionCount: preloadedState ? Object.keys(preloadedState.sessions).length : 0,
+      });
+      if (preloadedState) restoreWorkspace(preloadedState);
+      setWorkspaceRestoreStatus(workspaceId, "restored");
+      return;
+    }
 
     if (!recoveredFromHmr && getWorkspaceSnapshot(workspaceId) === null) {
       reopenWorkspaceRestore(workspaceId);
     }
     const currentStatus = getWorkspaceRestoreStatus(workspaceId);
-    if (currentStatus === "restored") return;
+    if (currentStatus === "restored") {
+      switchDebug("workspace.restore.skipped", {
+        workspaceId,
+        status: currentStatus,
+      });
+      return;
+    }
 
     let cancelled = false;
     setWorkspaceRestoreStatus(workspaceId, "loading");
+    switchDebug("workspace.restore.start", {
+      workspaceId,
+      recoveredFromHmr,
+    });
 
     async function runRestore() {
       try {
@@ -100,6 +217,10 @@ export function useWorkspaceRestore({
           const hmrState = getHmrWorkspaceState(workspaceId);
           if (!hmrState) {
             setWorkspaceRestoreStatus(workspaceId, "restored");
+            switchDebug("workspace.restore.complete", {
+              workspaceId,
+              source: "hmr-empty",
+            });
             return;
           }
           session = serializeWorkspaceState(
@@ -114,11 +235,24 @@ export function useWorkspaceRestore({
 
         if (!session) {
           setWorkspaceRestoreStatus(workspaceId, "restored");
+          switchDebug("workspace.restore.complete", {
+            workspaceId,
+            source: "disk-empty",
+          });
           return;
         }
 
         const liveBackendIds = await listLiveBackendSessionIdsFn();
         if (cancelled) return;
+        switchDebug("workspace.restore.loaded", {
+          workspaceId,
+          source: recoveredFromHmr ? "hmr" : "disk",
+          liveBackendShape: Array.isArray(liveBackendIds)
+            ? `array:${liveBackendIds.length}`
+            : liveBackendIds === null
+              ? "null"
+              : typeof liveBackendIds,
+        });
 
         const restoredState = deserializeWorkspaceState(workspaceId, session, liveBackendIds);
         if (cancelled) return;
@@ -127,28 +261,44 @@ export function useWorkspaceRestore({
           restoredState &&
           (restoredState.layout.tabs.length > 0 ||
             Object.values(restoredState.worktreeLayouts ?? {}).some((l) => l.tabs.length > 0));
+        switchDebug("workspace.restore.resolved", {
+          workspaceId,
+          hasRestoredTabs: Boolean(hasRestoredTabs),
+          tabCount: restoredState?.layout.tabs.length ?? 0,
+          parkedTabCount: restoredState
+            ? Object.values(restoredState.worktreeLayouts ?? {}).reduce(
+                (total, layout) => total + layout.tabs.length,
+                0,
+              )
+            : 0,
+          sessionCount: restoredState ? Object.keys(restoredState.sessions).length : 0,
+        });
 
         if (hasRestoredTabs) {
           const stateToRestore = recoveredFromHmr
             ? restoredState
-            : {
-                ...restoredState,
-                sessions: Object.fromEntries(
-                  Object.entries(restoredState.sessions).map(([id, sess]) => [
-                    id,
-                    { ...sess, lastOutputSequence: null },
-                  ]),
-                ),
-              };
+            : prepareDiskRestoredState(workspaceId, restoredState);
           restoreWorkspace(stateToRestore);
           setWorkspaceRestoreStatus(workspaceId, "restored");
+          switchDebug("workspace.restore.complete", {
+            workspaceId,
+            source: recoveredFromHmr ? "hmr" : "disk",
+          });
           return;
         }
 
         setWorkspaceRestoreStatus(workspaceId, "restored");
+        switchDebug("workspace.restore.complete", {
+          workspaceId,
+          source: "no-tabs",
+        });
       } catch (error) {
         if (!cancelled) {
           setWorkspaceRestoreStatus(workspaceId, "failed");
+          switchDebug("workspace.restore.error", {
+            workspaceId,
+            error: String(error),
+          });
           console.warn("Session restore on boot skipped:", error);
         }
       }
@@ -158,6 +308,10 @@ export function useWorkspaceRestore({
 
     return () => {
       cancelled = true;
+      switchDebug("workspace.restore.cancel", {
+        workspaceId,
+        status: getWorkspaceRestoreStatus(workspaceId),
+      });
       if (getWorkspaceRestoreStatus(workspaceId) === "loading") {
         setWorkspaceRestoreStatus(workspaceId, "idle");
       }

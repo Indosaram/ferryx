@@ -135,6 +135,23 @@ function reportNativeTerminalIpcFailure(command: NativeTerminalIpcCommand, error
   console.error("Native terminal IPC command failed", { command, error });
 }
 
+/**
+ * Height in CSS pixels reserved at the top of every terminal pane for the DOM
+ * pane-drag handle.
+ *
+ * The native compositor view is parented ABOVE the WKWebView on macOS
+ * (`src-tauri/src/native_terminal/platform/macos.rs`), so a DOM overlay drawn
+ * inside the surface bounds is painted over and invisible even though it still
+ * receives pointer events (the native view returns nil from `hitTest:`). The
+ * xterm-era handle worked because the terminal was itself DOM. Keeping this
+ * strip outside the reported bounds is what makes the handle visible again.
+ *
+ * This is a fixed reservation rather than a hover-time inset on purpose: the
+ * compositor derives rows from the surface height, so resizing on hover would
+ * reflow the terminal on every pointer pass over the top edge.
+ */
+export const NATIVE_TERMINAL_HANDLE_INSET_PX = 12;
+
 export function NativeTerminalPane({
   sessionId,
   session,
@@ -298,15 +315,20 @@ export function NativeTerminalPane({
     let observer: ResizeObserver | null = null;
     let lastGeometry: GeometryState | null = null;
 
-    const reportBounds = () => {
-      if (!isSubscribed) return;
+    const measureGeometry = (): GeometryState | null => {
       const rect = element.getBoundingClientRect();
       const scaleFactor =
         typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
           ? window.devicePixelRatio
           : 1;
 
-      const currentGeometry: GeometryState = {
+      const physicalWidth = Math.round(rect.width * scaleFactor);
+      const physicalHeight = Math.round(rect.height * scaleFactor);
+      if (physicalWidth < 1 || physicalHeight < 1) {
+        return null;
+      }
+
+      return {
         bounds: {
           x: rect.x,
           y: rect.y,
@@ -315,6 +337,31 @@ export function NativeTerminalPane({
         },
         scaleFactor,
       };
+    };
+
+    const reportBounds = () => {
+      if (!isSubscribed) return;
+      const currentGeometry = measureGeometry();
+
+      if (!currentGeometry) {
+        const rect = element.getBoundingClientRect();
+        const scaleFactor =
+          typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
+            ? window.devicePixelRatio
+            : 1;
+        switchDebug("terminal.surface.bounds.deferred", {
+          localSessionId: sessionId,
+          backendSessionId: targetSessionId,
+          bounds: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          },
+          scaleFactor,
+        });
+        return;
+      }
 
       if (
         lastGeometry &&
@@ -357,6 +404,12 @@ export function NativeTerminalPane({
           }
         })
         .catch((error: unknown) => {
+          // The cached geometry stands for "the compositor already has this".
+          // Keeping it after a failure would suppress every identical retry, so
+          // drop it and let the next measurement through.
+          if (lastGeometry === currentGeometry) {
+            lastGeometry = null;
+          }
           switchDebug("terminal.surface.bounds.error", {
             localSessionId: sessionId,
             backendSessionId: targetSessionId,
@@ -369,13 +422,26 @@ export function NativeTerminalPane({
         });
     };
 
+    const initialGeometry = measureGeometry();
+    if (initialGeometry) {
+      scaleFactorRef.current = initialGeometry.scaleFactor;
+    }
+
     switchDebug("terminal.surface.attach.start", {
       localSessionId: sessionId,
       backendSessionId: targetSessionId,
+      bounds: initialGeometry?.bounds,
+      scaleFactor: initialGeometry?.scaleFactor,
     });
     void attachNativeTerminalLifecycle(targetSessionId, () =>
       invoke("cmd_native_terminal_attach", {
         sessionId: targetSessionId,
+        ...(initialGeometry
+          ? {
+              bounds: initialGeometry.bounds,
+              scaleFactor: initialGeometry.scaleFactor,
+            }
+          : {}),
       }),
     )
       .then(() => {
@@ -467,7 +533,8 @@ export function NativeTerminalPane({
       <div
         ref={viewportRef}
         data-testid="native-terminal-viewport"
-        className="absolute inset-0"
+        className="absolute inset-x-0 bottom-0"
+        style={{ top: `${NATIVE_TERMINAL_HANDLE_INSET_PX}px` }}
       >
         <textarea
           ref={inputRef}

@@ -41,8 +41,31 @@ function lifecycleCalls(): Array<[string, string | undefined]> {
     .map(([cmd, args]) => [cmd, args?.sessionId]);
 }
 
+// jsdom reports an all-zero rect, which the compositor rejects as invalid
+// dimensions, so panes under test must measure a real area to reach set_bounds.
+const PANE_RECT = {
+  x: 10,
+  y: 20,
+  width: 800,
+  height: 600,
+  top: 20,
+  bottom: 620,
+  left: 10,
+  right: 810,
+  toJSON: () => ({}),
+} as DOMRect;
+
 describe("NativeTerminalPane compositor ownership lifecycle", () => {
+  let restorePaneRect: () => void;
+
   beforeEach(() => {
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return PANE_RECT;
+    };
+    restorePaneRect = () => {
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+    };
     tauriCoreMocks.invoke.mockReset();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
@@ -52,6 +75,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
   });
 
   afterEach(async () => {
+    restorePaneRect();
     cleanup();
     await Promise.resolve();
     vi.unstubAllGlobals();

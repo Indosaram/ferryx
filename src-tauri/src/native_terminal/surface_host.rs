@@ -314,6 +314,27 @@ impl NativeTerminalSurfaceHostState {
         Ok(layout)
     }
 
+    pub fn attach_daemon_attachment_with_bounds<R: Runtime>(
+        &self,
+        session_id: &str,
+        attachment: DaemonAttachment,
+        app: Option<tauri::AppHandle<R>>,
+        bounds: Option<LogicalBounds>,
+    ) -> Result<(), NativeTerminalError> {
+        validate_session_id(session_id)?;
+        if let Some(bounds) = bounds {
+            let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
+            self.prepare_session_layout(
+                NativeTerminalBoundsRequest {
+                    session_id: session_id.to_string(),
+                    bounds,
+                },
+                metrics,
+            )?;
+        }
+        self.attach_daemon_attachment(session_id, attachment, app)
+    }
+
     pub fn attach_daemon_attachment<R: Runtime>(
         &self,
         session_id: &str,

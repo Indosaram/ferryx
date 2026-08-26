@@ -109,12 +109,29 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     daemon_client: State<'_, Arc<DaemonClient>>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
+    bounds: Option<NativeTerminalLogicalRect>,
+    scale_factor: Option<f64>,
 ) -> Result<(), IpcError> {
     let attachment = match daemon_client.attach(&session_id, None).await {
         Ok(attachment) => attachment,
         Err(err) => return Err(err),
     };
-    if let Err(err) = state.attach_daemon_attachment(&session_id, attachment, Some(app)) {
+    let logical_bounds = match (bounds, scale_factor) {
+        (Some(rect), Some(scale)) if scale.is_finite() && scale > 0.0 => Some(LogicalBounds {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            scale_factor: scale,
+        }),
+        _ => None,
+    };
+    if let Err(err) = state.attach_daemon_attachment_with_bounds(
+        &session_id,
+        attachment,
+        Some(app),
+        logical_bounds,
+    ) {
         return Err(IpcError::internal(err.to_string()));
     }
     Ok(())

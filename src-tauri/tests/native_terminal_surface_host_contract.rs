@@ -644,3 +644,129 @@ async fn native_terminal_surface_host_state_coalescing_seam_tracks_session_lifec
     assert!(!state.schedule_session_render(session_id));
     assert!(!state.is_session_render_pending(session_id));
 }
+
+#[tokio::test]
+async fn native_terminal_attach_with_target_geometry_replays_rprompt_at_target_column_width() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "term-rprompt-pre-size-contract";
+
+    let (_tx, rx) = tokio::sync::mpsc::channel(16);
+    let stream_task = tokio::spawn(async {});
+
+    // Model ZLE/RPROMPT replay with right-margin-relative cursor move:
+    // "~/orca $ ", save cursor (\x1b[s), clamp to right edge (\x1b[999C),
+    // move left by prompt width (\x1b[9D), write marker ("[RPROMPT]"), restore cursor (\x1b[u).
+    let history = b"~/orca $ \x1b[s\x1b[999C\x1b[9D[RPROMPT]\x1b[u".to_vec();
+
+    let attachment = DaemonAttachment {
+        session_id: session_id.to_string(),
+        epoch: 1,
+        start_sequence: Some(1),
+        end_sequence: Some(1),
+        gap: None,
+        history,
+        messages: rx,
+        stream_task,
+    };
+
+    let cell_metrics =
+        ferryx_lib::native_terminal::renderer::font_manager::derived_cell_metrics_for_scale(1.0);
+    let target_cols: u16 = 130;
+    let target_rows: u16 = 24;
+    let target_bounds = LogicalBounds {
+        x: 0.0,
+        y: 0.0,
+        width: (target_cols as u32 * cell_metrics.width_px) as f64,
+        height: (target_rows as u32 * cell_metrics.height_px) as f64,
+        scale_factor: 1.0,
+    };
+
+    state
+        .attach_daemon_attachment_with_bounds::<tauri::Wry>(
+            session_id,
+            attachment,
+            None,
+            Some(target_bounds),
+        )
+        .expect("attach daemon session with target bounds");
+
+    let snapshot = state
+        .snapshot_for_session(session_id)
+        .expect("snapshot query")
+        .expect("session snapshot must exist");
+
+    assert_eq!(snapshot.cols, target_cols);
+    assert_eq!(snapshot.rows, target_rows);
+
+    let row0_str: String = snapshot.grid[0]
+        .iter()
+        .map(|c| {
+            if c.text.is_empty() {
+                ' '
+            } else {
+                c.text.chars().next().unwrap_or(' ')
+            }
+        })
+        .collect();
+
+    // With 130-column pre-sizing before replay, [RPROMPT] is placed at the 130-column edge
+    assert!(
+        row0_str.len() == 130 && row0_str[120..130].contains("[RPROMPT]"),
+        "expected [RPROMPT] at 130-column right margin (cols 120..130), got len {} row: '{row0_str}'",
+        row0_str.len()
+    );
+    assert!(
+        !row0_str[70..80].contains("[RPROMPT]"),
+        "expected [RPROMPT] NOT to be stranded at 80-column boundary (cols 70..80), got: '{row0_str}'"
+    );
+}
+
+#[tokio::test]
+async fn native_terminal_legacy_attach_without_geometry_replays_at_default_80_columns() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "term-legacy-attach-contract";
+
+    let (_tx, rx) = tokio::sync::mpsc::channel(16);
+    let stream_task = tokio::spawn(async {});
+
+    let history = b"~/orca $ \x1b[s\x1b[999C\x1b[9D[RPROMPT]\x1b[u".to_vec();
+
+    let attachment = DaemonAttachment {
+        session_id: session_id.to_string(),
+        epoch: 1,
+        start_sequence: Some(1),
+        end_sequence: Some(1),
+        gap: None,
+        history,
+        messages: rx,
+        stream_task,
+    };
+
+    state
+        .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+        .expect("legacy attach daemon session");
+
+    let snapshot = state
+        .snapshot_for_session(session_id)
+        .expect("snapshot query")
+        .expect("session snapshot must exist");
+
+    assert_eq!(snapshot.cols, 80);
+    assert_eq!(snapshot.rows, 24);
+
+    let row0_str: String = snapshot.grid[0]
+        .iter()
+        .map(|c| {
+            if c.text.is_empty() {
+                ' '
+            } else {
+                c.text.chars().next().unwrap_or(' ')
+            }
+        })
+        .collect();
+    assert!(
+        row0_str.len() == 80 && row0_str[70..80].contains("[RPROMPT]"),
+        "legacy attach without bounds must replay at 80-column margin, got len {} row: '{row0_str}'",
+        row0_str.len()
+    );
+}

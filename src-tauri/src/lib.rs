@@ -137,6 +137,48 @@ pub fn is_unshifted_cmd_w_characters(characters: Option<&str>) -> bool {
 pub const ANSI_KEY_CODE_W: u16 = 13;
 
 #[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_1: u16 = 18;
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_5: u16 = 23;
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_9: u16 = 25;
+
+/// macOS keyCodes for the top-row digits 1..9, in order.
+#[cfg(target_os = "macos")]
+const ANSI_DIGIT_KEY_CODES: [u16; 9] = [18, 19, 20, 21, 23, 22, 26, 28, 25];
+
+/// Returns the pressed digit when the event is an unshifted Cmd+1..9.
+///
+/// The standard macOS Window menu owns Cmd+digit, so AppKit consumes those
+/// events and the webview never receives a `keydown`. The local key monitor uses
+/// this to claim them for worktree selection, exactly as it already does for
+/// unshifted Cmd+W.
+#[cfg(target_os = "macos")]
+pub fn unshifted_cmd_digit(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    characters: Option<&str>,
+    key_code: u16,
+) -> Option<u8> {
+    if !is_unshifted_cmd_w_modifiers(flags) {
+        return None;
+    }
+
+    if let Some(digit) = characters
+        .and_then(|chars| chars.chars().next())
+        .and_then(|char| char.to_digit(10))
+    {
+        if (1..=9).contains(&digit) {
+            return Some(digit as u8);
+        }
+    }
+
+    ANSI_DIGIT_KEY_CODES
+        .iter()
+        .position(|candidate| *candidate == key_code)
+        .map(|index| index as u8 + 1)
+}
+
+#[cfg(target_os = "macos")]
 pub fn is_unshifted_cmd_w(
     flags: objc2_app_kit::NSEventModifierFlags,
     characters: Option<&str>,
@@ -162,6 +204,11 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
         if is_unshifted_cmd_w(flags, chars_str.as_deref(), key_code) {
             if let Some(window) = app_handle.get_webview_window("main") {
                 let _ = window.emit("menu_close_tab", ());
+            }
+            ptr::null_mut()
+        } else if let Some(digit) = unshifted_cmd_digit(flags, chars_str.as_deref(), key_code) {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit("menu_select_worktree", digit);
             }
             ptr::null_mut()
         } else {
@@ -227,6 +274,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let builder = builder.manage(native_terminal_surface_host);
 
     builder.invoke_handler(tauri::generate_handler![
+        cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,
         cmd_terminal_attach,
@@ -314,6 +362,51 @@ mod tests {
                 None => std::env::remove_var("FERRYX_DATA_DIR"),
             }
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cmd_digit_is_claimed_for_worktree_selection() {
+        use objc2_app_kit::NSEventModifierFlags;
+
+        // The standard macOS Window menu claims Cmd+1..9, so AppKit swallows the
+        // keystroke before the webview sees a keydown. The local monitor must
+        // recognize it and hand it to the frontend instead.
+        for (digit, key_code) in [
+            (1u8, ANSI_KEY_CODE_1),
+            (5u8, ANSI_KEY_CODE_5),
+            (9u8, ANSI_KEY_CODE_9),
+        ] {
+            let label = digit.to_string();
+            assert_eq!(
+                unshifted_cmd_digit(
+                    NSEventModifierFlags::Command,
+                    Some(label.as_str()),
+                    key_code,
+                ),
+                Some(digit),
+                "Cmd+{digit} must map to worktree index {digit}"
+            );
+        }
+
+        // Rejected: any extra modifier, or a non-digit key.
+        assert_eq!(
+            unshifted_cmd_digit(
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+                Some("1"),
+                ANSI_KEY_CODE_1,
+            ),
+            None,
+        );
+        assert_eq!(
+            unshifted_cmd_digit(NSEventModifierFlags::Command, Some("w"), ANSI_KEY_CODE_W),
+            None,
+        );
+        // Rejected: no Command modifier at all (plain "1" typed into a terminal).
+        assert_eq!(
+            unshifted_cmd_digit(NSEventModifierFlags::empty(), Some("1"), ANSI_KEY_CODE_1),
+            None,
+        );
     }
 
     #[test]

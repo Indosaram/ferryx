@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod debug;
 pub mod error;
 #[cfg(feature = "native-terminal")]
 pub mod native_terminal;
@@ -28,6 +29,7 @@ mod blocking_contract_tests;
 mod tests;
 
 pub use browser::*;
+pub use debug::*;
 pub use error::*;
 #[cfg(feature = "native-terminal")]
 pub use native_terminal::*;

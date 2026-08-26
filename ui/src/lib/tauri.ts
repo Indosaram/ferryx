@@ -315,6 +315,16 @@ export async function onCloseTabMenu(handler: () => void): Promise<UnlistenFn> {
   return listen<void>("menu_close_tab", () => handler());
 }
 
+/**
+ * The macOS Window menu owns Cmd+1..9, so AppKit consumes those events before the
+ * webview receives a keydown. The native key monitor forwards the pressed digit
+ * here instead.
+ */
+export async function onSelectWorktreeMenu(handler: (digit: number) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<number>("menu_select_worktree", (event) => handler(event.payload));
+}
+
 export async function onWorktreeChanged(handler: (payload: WorktreeChangedPayload) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<WorktreeChangedPayload>("worktree_changed", (event) => handler(event.payload));

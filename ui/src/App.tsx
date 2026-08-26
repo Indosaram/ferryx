@@ -35,6 +35,7 @@ import {
   isTauriRuntime,
   loadSession,
   onCloseTabMenu,
+  onSelectWorktreeMenu,
   onNewTerminalTabMenu,
   onRemoteSelectionRequested,
   publishFocusedTerminal,
@@ -51,6 +52,7 @@ import {
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
 import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
+import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
   worktreeIdentity,
@@ -61,7 +63,7 @@ import {
 } from "./lib/types";
 import { registerWindowCloseGuard } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
-import { useWorkspaceRestore } from "./state/workspaceRestore";
+import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
@@ -113,8 +115,14 @@ export function App() {
     if (!isNativeRuntime) return;
     let cancelled = false;
     void getInitialProject()
-      .then((startup) => {
-        if (!cancelled) setBootstrap(canonicalizeProjectBootstrap(loadProjectBootstrap(), startup));
+      .then(async (startup) => {
+        const prepared = canonicalizeProjectBootstrap(loadProjectBootstrap(), startup);
+        await preloadWorkspaceSnapshots(prepared.projects.map((project) => project.workspaceId)).catch(
+          (error) => {
+            console.warn("Workspace session preload skipped:", error);
+          },
+        );
+        if (!cancelled) setBootstrap(prepared);
       })
       .catch((error) => {
         if (!cancelled) setBootstrapError(error instanceof Error ? error.message : String(error));
@@ -293,6 +301,28 @@ function WorkspaceApp({
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
   const stateRef = useRef(state);
   stateRef.current = state;
+  useEffect(() => {
+    switchDebug("workspace.render", {
+      activeProjectId: activeProject.workspaceId,
+      stateWorkspaceId: state.workspaceId ?? null,
+      activeWorktreePath: state.activeWorktreePath,
+      worktreeCount: state.worktrees.length,
+      tabCount: state.layout.tabs.length,
+      tabIds: state.layout.tabs.map((tab) => tab.id),
+      sessionCount: Object.keys(state.sessions).length,
+      registeredProjectId,
+      recoveredFromHmr,
+    });
+  }, [
+    activeProject.workspaceId,
+    recoveredFromHmr,
+    registeredProjectId,
+    state.activeWorktreePath,
+    state.layout.tabs,
+    state.sessions,
+    state.workspaceId,
+    state.worktrees.length,
+  ]);
   const plainRootWorktree = useMemo(
     () =>
       activeProject.gitRoot === null
@@ -320,7 +350,11 @@ function WorkspaceApp({
     registeredWorkspaceId: registeredProjectId,
   });
 
-  const inactiveProjectWorktrees = useInactiveProjectWorktrees(projects, activeProject.workspaceId);
+  const inactiveProjectWorktrees = useInactiveProjectWorktrees(
+    projects,
+    activeProject.workspaceId,
+    state.worktrees,
+  );
   const inactiveProjectWorktreesRef = useRef(inactiveProjectWorktrees);
   inactiveProjectWorktreesRef.current = inactiveProjectWorktrees;
 
@@ -334,17 +368,33 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     setRegisteredProjectId(null);
+    switchDebug("project.register.start", {
+      workspaceId: activeProject.workspaceId,
+      repoRoot: activeProject.repoRoot,
+      registrationAttempt,
+    });
     void registerProject({
       workspaceId: activeProject.workspaceId,
       repoPath: activeProject.repoRoot,
     })
       .then(async (registered) => {
-        if (cancelled) return;
+        if (cancelled) {
+          switchDebug("project.register.ignored", {
+            requestedWorkspaceId: activeProject.workspaceId,
+            registeredWorkspaceId: registered.workspaceId,
+          });
+          return;
+        }
         // The backend owns one workspace ID per canonical root and returns the
         // existing project when this root is already registered under another
         // ID, so adopt that ID instead of keeping a stale alias.
         const adopted =
           registered.workspaceId !== activeProject.workspaceId && registered.repoRoot === activeProject.repoRoot;
+        switchDebug("project.register.success", {
+          requestedWorkspaceId: activeProject.workspaceId,
+          registeredWorkspaceId: registered.workspaceId,
+          adopted,
+        });
         setProjects((current) => {
           if (
             !adopted &&
@@ -371,19 +421,42 @@ function WorkspaceApp({
           return next;
         });
         if (adopted) {
+          switchDebug("project.register.adopt", {
+            fromWorkspaceId: activeProject.workspaceId,
+            toWorkspaceId: registered.workspaceId,
+          });
           setActiveProjectId(registered.workspaceId);
           persistActiveProjectId(registered.workspaceId);
           return;
         }
+        switchDebug("project.register.refresh.start", {
+          workspaceId: activeProject.workspaceId,
+        });
         await refreshWorktrees({ allowCreate: false });
-        if (cancelled) return;
+        if (cancelled) {
+          switchDebug("project.register.refresh.ignored", {
+            workspaceId: activeProject.workspaceId,
+          });
+          return;
+        }
+        switchDebug("project.register.ready", {
+          workspaceId: activeProject.workspaceId,
+        });
         setRegisteredProjectId(activeProject.workspaceId);
       })
       .catch((error) => {
+        switchDebug("project.register.error", {
+          workspaceId: activeProject.workspaceId,
+          error: String(error),
+          cancelled,
+        });
         if (!cancelled) reportRuntimeError(error);
       });
     return () => {
       cancelled = true;
+      switchDebug("project.register.cancel", {
+        workspaceId: activeProject.workspaceId,
+      });
     };
   }, [activeProject.repoRoot, activeProject.workspaceId, registrationAttempt, refreshWorktrees, reportRuntimeError]);
 
@@ -528,7 +601,22 @@ function WorkspaceApp({
 
   const handleSelectProject = useCallback(
     (project: RegisteredProject) => {
-      if (project.workspaceId === activeProjectRef.current.workspaceId) return;
+      const current = activeProjectRef.current;
+      if (project.workspaceId === current.workspaceId) {
+        switchDebug("project.select.noop", {
+          workspaceId: project.workspaceId,
+        });
+        return;
+      }
+      const snapshot = stateRef.current;
+      switchDebug("project.select.requested", {
+        fromWorkspaceId: current.workspaceId,
+        toWorkspaceId: project.workspaceId,
+        outgoingStateWorkspaceId: snapshot.workspaceId ?? null,
+        outgoingActiveWorktreePath: snapshot.activeWorktreePath,
+        outgoingTabCount: snapshot.layout.tabs.length,
+        outgoingSessionCount: Object.keys(snapshot.sessions).length,
+      });
       setActiveProjectId(project.workspaceId);
       persistActiveProjectId(project.workspaceId);
       setWorktreeStatuses({});
@@ -555,6 +643,14 @@ function WorkspaceApp({
       const owner = ownerId
         ? projectsRef.current.find((project) => project.workspaceId === ownerId)
         : undefined;
+      switchDebug("worktree.select.requested", {
+        currentWorkspaceId: activeProjectRef.current.workspaceId,
+        ownerWorkspaceId: owner?.workspaceId ?? null,
+        worktreePath: worktree.path,
+        pendingCrossProject: Boolean(
+          owner && owner.workspaceId !== activeProjectRef.current.workspaceId,
+        ),
+      });
       if (owner && owner.workspaceId !== activeProjectRef.current.workspaceId) {
         handleSelectProject(owner);
         setPendingWorktreePath(worktree.path);
@@ -568,7 +664,19 @@ function WorkspaceApp({
   useEffect(() => {
     if (!pendingWorktreePath) return;
     const target = state.worktrees.find((worktree) => worktree.path === pendingWorktreePath);
-    if (!target) return;
+    if (!target) {
+      switchDebug("worktree.select.pending", {
+        workspaceId: activeProject.workspaceId,
+        pendingWorktreePath,
+        availableWorktreePaths: state.worktrees.map((worktree) => worktree.path),
+      });
+      return;
+    }
+    switchDebug("worktree.select.pending.resolved", {
+      workspaceId: activeProject.workspaceId,
+      worktreePath: target.path,
+      tabCount: state.layout.tabs.length,
+    });
     setPendingWorktreePath(null);
     void ensureTabForWorktree(target).catch(reportRuntimeError);
   }, [ensureTabForWorktree, pendingWorktreePath, reportRuntimeError, state.worktrees]);
@@ -914,6 +1022,23 @@ function WorkspaceApp({
     };
   }, [handleCloseTab]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    // Cmd+1..9 never reaches the webview because the macOS Window menu claims it,
+    // so the native key monitor forwards the digit as an event instead.
+    void onSelectWorktreeMenu((digit) => {
+      handleSelectWorktreeByIndex(digit - 1);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleSelectWorktreeByIndex]);
+
   const shortcutHandlers = useMemo(
     () => ({
       "tab.newTerminal": handleAddTerminalTab,
@@ -1190,10 +1315,24 @@ function listVisibleWorktrees(
     const owned = worktrees.filter(
       (worktree) => resolveWorktreeOwnerId(worktree, projects, activeProjectId) === project.workspaceId,
     );
-    const rows =
+    const cached = inactiveProjectWorktrees[project.workspaceId] ?? [];
+    let rows =
       project.workspaceId === activeProjectId
-        ? owned
-        : [...owned, ...(inactiveProjectWorktrees[project.workspaceId] ?? [])];
+        ? (owned.length > 0 ? owned : cached)
+        : [...cached, ...owned];
+    if (project.gitRoot === null && rows.length === 0) {
+      rows = [
+        {
+          path: project.repoRoot,
+          head: "",
+          branch: null,
+          bare: false,
+          detached: false,
+          locked: null,
+          prunable: null,
+        },
+      ];
+    }
     for (const row of rows) {
       if (visible.some((candidate) => candidate.path === row.path)) continue;
       visible.push(row);

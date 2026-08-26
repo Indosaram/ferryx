@@ -50,6 +50,33 @@ function releasePresentationWaiters(sessionId: string): void {
   for (const detachment of pending) executeDetachment(detachment);
 }
 
+/**
+ * Cancels a held detachment for a session that is attaching again.
+ *
+ * A detachment parked under another session's presentation is no longer in
+ * `pendingDetachments`, so the cancellation scan in `attachNativeTerminalLifecycle`
+ * cannot see it. Without this, re-attaching that same surface would still let the
+ * parked teardown fire once the other session presents.
+ */
+function cancelHeldDetachmentsFor(sessionId: string): boolean {
+  let cancelled = false;
+  for (const [replacementSessionId, waiting] of detachmentsWaitingForPresentation) {
+    const remaining = waiting.filter((detachment) => {
+      if (detachment.sessionId !== sessionId) return true;
+      detachment.resolve();
+      cancelled = true;
+      return false;
+    });
+    if (remaining.length === waiting.length) continue;
+    if (remaining.length === 0) {
+      detachmentsWaitingForPresentation.delete(replacementSessionId);
+    } else {
+      detachmentsWaitingForPresentation.set(replacementSessionId, remaining);
+    }
+  }
+  return cancelled;
+}
+
 function holdDetachmentForPresentation(
   pending: PendingDetachment,
   replacementSessionId: string,
@@ -124,9 +151,20 @@ export function attachNativeTerminalLifecycle<T>(
       switchDebug("terminal.lifecycle.detach.cancelled", {
         backendSessionId: sessionId,
       });
-    } else {
+    } else if (!attachedSessionIds.has(sessionId)) {
+      // Only an attach that actually takes over the compositor can stand in for
+      // an outgoing surface, so its detachment waits for this one to present.
+      // A re-attach of a surface that is still attached (React replaying an
+      // effect, a sibling pane re-mounting) replaces nothing: parking an
+      // unrelated pane's detachment under it would tear that live pane down as
+      // soon as this one presents, leaving a blank split pane.
       holdDetachmentForPresentation(pending, sessionId);
     }
+  }
+  if (cancelHeldDetachmentsFor(sessionId)) {
+    switchDebug("terminal.lifecycle.detach.held.cancelled", {
+      backendSessionId: sessionId,
+    });
   }
   if (attachedSessionIds.has(sessionId)) {
     switchDebug("terminal.lifecycle.attach.reused", {
