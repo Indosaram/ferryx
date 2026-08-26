@@ -1,0 +1,70 @@
+### cmd: bun run --cwd ui test
+ ✓ src/lib/terminalOutput.test.ts (9 tests) 5ms
+ ✓ src/devRuntimeContract.test.ts (2 tests) 2ms
+ ✓ src/lib/linkRouting.test.ts (6 tests) 5ms
+ ✓ src/workspaceThemeContract.test.ts (6 tests) 6ms
+ ✓ src/index-html.test.ts (3 tests) 4ms
+ ✓ src/lib/agentsSettings.test.ts (7 tests) 6ms
+ ✓ src/lib/browserSettings.test.ts (8 tests) 12ms
+ ✓ src/lib/branchFilter.test.ts (15 tests) 2ms
+ ✓ src/lib/agentTitle.test.ts (15 tests) 14ms
+ ✓ src/remote/terminalGridProtocol.test.ts (4 tests) 3ms
+ ✓ src/state/layout.test.ts (11 tests) 9ms
+ ✓ src/lib/switchDebug.test.ts (2 tests) 4ms
+ ✓ src/lib/storageKeys.test.ts (5 tests) 6ms
+ ✓ src/state/layout.paneHandleDrop.runtime.test.ts (2 tests) 3ms
+ ✓ src/manifest.test.ts (3 tests) 4ms
+ ✓ src/lib/activity.test.ts (3 tests) 2ms
+ ✓ src/lib/terminalEvents.test.ts (4 tests) 3ms
+ ✓ src/lib/agentIcon.test.ts (2 tests) 5ms
+ ✓ src/lib/generalSettings.test.ts (4 tests) 6ms
+ ✓ src/components/TerminalSplitView.pointerDrag.test.tsx (5 tests) 4ms
+ ✓ src/assets/ferryx-icon.test.ts (1 test) 2ms
+ ✓ src/lib/ipcErrors.test.ts (2 tests) 3ms
+ ✓ src/lib/worktreeOwnership.test.ts (5 tests) 3ms
+ ✓ src/test/viteHmrConfig.test.ts (1 test) 98ms
+
+ Test Files  84 passed (84)
+      Tests  692 passed (692)
+   Start at  13:25:47
+   Duration  70.93s (transform 1.52s, setup 8.55s, collect 14.91s, tests 9.49s, environment 22.61s, prepare 4.02s)
+
+exit=0
+
+### cmd: bun run --cwd ui build
+dist/index.html                              1.18 kB │ gzip:  0.55 kB
+dist/assets/geist-variable-CrgPqtmy.woff2   69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png       805.82 kB
+dist/assets/index-MWjJEOo7.css              46.90 kB │ gzip:  8.71 kB
+dist/assets/check-BLJyUScl.js                0.29 kB │ gzip:  0.24 kB
+dist/assets/x-vXa8kOcq.js                    4.24 kB │ gzip:  1.20 kB
+dist/assets/RemoteApp-bTTbtcmv.js           24.79 kB │ gzip:  8.04 kB
+dist/assets/browser-D5YYXGmR.js             25.78 kB │ gzip: 10.13 kB
+dist/assets/SettingsDialog-Cdmu_5BW.js      52.78 kB │ gzip: 12.65 kB
+dist/assets/index-9wV3dbYa.js              172.38 kB │ gzip: 55.59 kB
+dist/assets/App-Bo7WiAOQ.js                300.52 kB │ gzip: 85.76 kB
+✓ built in 4.58s
+exit=0
+
+### cmd: cargo build --manifest-path src-tauri/Cargo.toml
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:285:19
+    |
+104 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+285 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 4 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 13s
+exit=0
+
+### cmd: cargo test --manifest-path src-tauri/Cargo.toml
+running 253 tests
+test remote::tests::test_grid_render_live_pty_output_emits_grid_frame_after_attach ... FAILED
+test remote::tests::test_grid_render_resize_returns_full_frame_with_requested_geometry ... FAILED
+test result: FAILED. 251 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.00s
+error: test failed, to rerun pass `--lib`
+exit=101

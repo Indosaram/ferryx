@@ -1,13 +1,7 @@
 name: Release Ferryx
 
-# Releases are cut exclusively by pushing a date-versioned tag: vYYYY.MM.DD, with an
-# optional same-day revision (vYYYY.MM.DD.N). There is no manual dispatch, so every
-# release corresponds to a tag in the history.
 'on':
-  push:
-    tags:
-      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
-      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -91,12 +85,18 @@ jobs:
           bun install --frozen-lockfile || bun install
           bun install --cwd ui --frozen-lockfile || bun install --cwd ui
 
+      - name: Stamp release tag into app version
+        shell: bash
+        run: node scripts/sync-version.mjs --tag "${{ github.ref_name }}"
+
       - name: Build Frontend UI
         run: bun run --cwd ui build
 
       - name: Build Tauri Application Bundle
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -131,7 +131,10 @@ jobs:
             -name "*.AppImage" -o \
             -name "*.deb" -o \
             -name "*.app.tar.gz" -o \
-            -name "*.app.zip" \
+            -name "*.app.zip" -o \
+            -name "*.nsis.zip" -o \
+            -name "*.AppImage.tar.gz" -o \
+            -name "*.sig" \
           \) \
             -not -path "*/build/*" \
             -not -path "*/deps/*" \
@@ -195,7 +198,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          CLEAN_VER="${GITHUB_REF_NAME#v}"
+          CLEAN_VER="$(node scripts/sync-version.mjs --tag "${{ github.ref_name }}" | sed 's/^version=//')"
           echo "version=${CLEAN_VER}" >> "$GITHUB_OUTPUT"
           echo "Building MSIX for version: ${CLEAN_VER}"
 
@@ -260,6 +263,19 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           echo "=== SHA256 Checksums ==="
           cat SHA256SUMS.txt
+
+      - name: Generate updater manifest (latest.json)
+        shell: bash
+        run: |
+          MANIFEST_VERSION="$(node scripts/sync-version.mjs --tag "${{ github.ref_name }}" | sed 's/^version=//')"
+          node scripts/build-latest-json.mjs \
+            --version "${MANIFEST_VERSION}" \
+            --dir release-dist \
+            --out release-dist/latest.json \
+            --repo "${{ github.repository }}" \
+            --tag "${{ github.ref_name }}"
+          echo "=== latest.json ==="
+          cat release-dist/latest.json
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2

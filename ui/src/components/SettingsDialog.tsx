@@ -7,6 +7,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Download,
   ExternalLink,
   FolderGit2,
   Globe,
@@ -37,6 +38,16 @@ import {
 import { useGeneralSettings } from "../lib/generalSettings";
 import { useNotificationSettings } from "../lib/notificationSettings";
 import { SHORTCUTS, isMacShortcutPlatform, shortcutAliasesLabels, shortcutLabel } from "../lib/shortcuts";
+import {
+  checkForUpdate,
+  downloadAndInstallUpdate,
+  getCurrentVersion,
+  getUpdateStatus,
+  relaunchApp,
+  subscribeUpdateStatus,
+  type UpdateStatus,
+} from "../lib/updater";
+
 import {
   createPairingCode,
   detectAgents,
@@ -291,8 +302,103 @@ function GeneralSettings() {
             />
           </SettingRow>
         </div>
+        <SoftwareUpdateCard />
       </div>
     </section>
+  );
+}
+
+function updateStatusMessage(status: UpdateStatus): string {
+  switch (status.state) {
+    case "checking":
+      return "Checking for updates…";
+    case "available":
+      return `Version ${status.version} is available.`;
+    case "downloading":
+      return `Downloading version ${status.version}…`;
+    case "downloaded":
+      return `Version ${status.version} is ready to install.`;
+    case "error":
+      return `Update failed: ${status.error}`;
+    case "idle":
+      return "Ferryx is up to date.";
+  }
+}
+
+function SoftwareUpdateCard() {
+  const [status, setStatus] = useState<UpdateStatus>(() => getUpdateStatus());
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+
+  useEffect(() => subscribeUpdateStatus(setStatus), []);
+
+  useEffect(() => {
+    let active = true;
+    void getCurrentVersion().then((version) => {
+      if (active) setCurrentVersion(version);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const busy = status.state === "checking" || status.state === "downloading";
+  const percent = Math.round((status.downloadProgress ?? 0) * 100);
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <h3 className="text-[12px] font-semibold">Software Update</h3>
+      <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+        Current version {currentVersion ?? "unknown"}. Updates are signed and verified before they install.
+      </p>
+      <p
+        data-testid="settings-update-status"
+        aria-live="polite"
+        className="mt-2 text-[12px] leading-5 text-foreground"
+      >
+        {updateStatusMessage(status)}
+      </p>
+      {status.state === "downloading" || status.state === "downloaded" ? (
+        <div
+          role="progressbar"
+          aria-label="Update download progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-accent"
+        >
+          <div className="h-full rounded-full bg-foreground transition-all" style={{ width: `${percent}%` }} />
+        </div>
+      ) : null}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void checkForUpdate()}
+          disabled={busy}
+          className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+        >
+          <RotateCw className="size-3" />
+          Check for Updates
+        </button>
+        <button
+          type="button"
+          onClick={() => void downloadAndInstallUpdate()}
+          disabled={status.state !== "available"}
+          className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+        >
+          <Download className="size-3" />
+          Download Update
+        </button>
+        <button
+          type="button"
+          onClick={() => void relaunchApp()}
+          disabled={status.state !== "downloaded"}
+          className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+        >
+          <RotateCcw className="size-3" />
+          Install and Relaunch
+        </button>
+      </div>
+    </div>
   );
 }
 

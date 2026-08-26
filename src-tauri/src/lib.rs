@@ -213,11 +213,15 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         // so no broad JavaScript guest capability needs to be granted.
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .manage(daemon_client)
         .manage(remote_manager)
         .manage(workspace_registry)
         .manage(notification_audio)
         .manage(browser_manager);
+
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     #[cfg(feature = "native-terminal")]
     let builder = builder.manage(native_terminal_surface_host);

@@ -16,3 +16,7 @@ Thumbs.db
 
 # Agent session runtime state
 .omo/
+
+# Local secrets (updater signing key)
+.env
+.env.local

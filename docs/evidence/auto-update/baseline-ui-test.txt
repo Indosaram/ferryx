@@ -1,0 +1,95 @@
+=== BASELINE (pre-change snapshot of dirty worktree at 2026-08-26T03:35:54Z)
+snapshot: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ulw-baseline-7p96dhml/repo
+$ vitest run --maxWorkers=1
+
+ RUN  v3.2.7 /private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ulw-baseline-7p96dhml/repo/ui
+
+ ✓ src/components/SettingsDialog.test.tsx (24 tests) 2471ms
+   ✓ SettingsDialog > shows the registered shortcuts in the dedicated Keyboard Shortcuts section  431ms
+ ✓ src/App.test.tsx (60 tests) 2444ms
+   ✓ App project workspace flow > shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm  312ms
+ ✓ src/components/NativeTerminalPane.test.tsx (32 tests) 1245ms
+ ✓ src/components/Sidebar.test.tsx (27 tests) 889ms
+ ✓ src/state/workspaceRuntime.test.tsx (7 tests) 537ms
+ ✓ src/components/ProjectDialogs.test.tsx (13 tests) 493ms
+ ✓ src/components/TabBar.test.tsx (17 tests) 593ms
+ ✓ src/components/TerminalSplitView.test.tsx (18 tests) 474ms
+ ✓ src/components/NativeTerminalPane.lifecycle.test.tsx (6 tests) 379ms
+ ✓ src/components/BrowserToolbar.test.tsx (8 tests) 180ms
+ ✓ src/components/TerminalSearchOverlay.test.tsx (4 tests) 173ms
+ ✓ src/remote/RemoteTerminal.contract.test.tsx (6 tests) 264ms
+ ✓ src/components/NewTabPopover.test.tsx (14 tests) 251ms
+ ✓ src/components/SettingsDialog.workspace.test.tsx (2 tests) 218ms
+ ✓ src/components/WorktreeDeleteDialog.test.tsx (5 tests) 344ms
+ ✓ src/components/Sidebar.activity.test.tsx (3 tests) 303ms
+ ✓ src/state/projectSwitchBack.test.tsx (7 tests) 265ms
+ ✓ src/components/TerminalSplitView.browserDragVisibility.runtime.test.tsx (2 tests) 162ms
+ ✓ src/remote/RemoteUI.test.tsx (6 tests) 222ms
+ ✓ src/lib/shortcuts.test.tsx (47 tests) 211ms
+ ✓ src/state/inactiveProjectWorktrees.test.tsx (4 tests) 179ms
+ ✓ src/components/WorkspaceHeader.test.tsx (4 tests) 95ms
+ ✓ src/components/NewTabPopover.browserTab.runtime.test.tsx (2 tests) 193ms
+ ✓ src/components/TerminalSplitView.paneDrop.runtime.test.tsx (4 tests) 105ms
+ ✓ src/state/workspaceStore.test.tsx (28 tests) 230ms
+ ✓ src/components/WorktreeList.test.tsx (10 tests) 192ms
+ ✓ src/components/NativeTerminalPane.titleBell.test.tsx (3 tests) 88ms
+ ✓ src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx (3 tests) 68ms
+ ✓ src/components/CommandPalette.test.tsx (2 tests) 125ms
+ ✓ src/components/TerminalSplitView.mixedPaneLeaf.runtime.test.tsx (1 test) 119ms
+ ✓ src/components/EmptyWorkspaceView.test.tsx (3 tests) 207ms
+ ✓ src/lib/browserTauri.test.ts (4 tests) 84ms
+ ✓ src/state/projectWorkspaceScope.test.tsx (2 tests) 107ms
+ ✓ src/components/TerminalPane.nativeAlways.test.tsx (4 tests) 152ms
+ ✓ src/components/TerminalSplitView.dragOver.runtime.test.tsx (1 test) 43ms
+ ✓ src/components/TerminalSplitView.tabDropFallback.test.tsx (1 test) 120ms
+ ✓ src/state/workspaceRestore.test.tsx (15 tests) 42ms
+ ✓ src/components/tab-dnd/SplitEdgeDropZone.test.tsx (6 tests) 43ms
+ ✓ src/state/workspaceStore.browserPaneLeafMove.runtime.test.tsx (2 tests) 12ms
+ ✓ src/lib/settingsRuntime.test.ts (7 tests) 78ms
+ ✓ src/lib/terminalEvents.bus.test.ts (7 tests) 43ms
+ ✓ src/components/TabBar.appearance.test.tsx (1 test) 46ms
+ ✓ src/components/BrowserPane.test.tsx (3 tests) 57ms
+ ✓ src/state/workspaceStore.browserPaneDrop.runtime.test.tsx (2 tests) 36ms
+ ✓ src/components/TerminalSplitView.browserPaneDrop.runtime.test.tsx (1 test) 48ms
+ ✓ src/state/layout.test.ts (11 tests) 4ms
+ ✓ src/state/workspaceStore.hmrRetention.test.tsx (2 tests) 41ms
+ ✓ src/state/workspaceStore.browserLifecycle.test.tsx (2 tests) 18ms
+ ✓ src/state/workspaceStore.tabDrop.test.tsx (4 tests) 18ms
+ ✓ src/lib/terminalSettings.test.tsx (7 tests) 49ms
+ ✓ src/state/workspaceActivity.test.tsx (3 tests) 23ms
+ ✓ src/components/TerminalPane.test.tsx (1 test) 38ms
+ ✓ src/lib/browserSettings.test.ts (8 tests) 5ms
+ ✓ src/state/workspaceStore.paneDrop.runtime.test.tsx (2 tests) 39ms
+ ✓ src/lib/sessionPersistence.test.ts (14 tests) 12ms
+ ✓ src/state/paneTree.test.ts (48 tests) 8ms
+ ✓ src/lib/browserRestoreSettings.test.ts (4 tests) 9ms
+ ✓ src/lib/agentTitle.test.ts (15 tests) 27ms
+ ✓ src/lib/tauri.test.ts (19 tests) 10ms
+ ✓ src/appearanceThemeContract.test.ts (7 tests) 15ms
+ ✓ src/lib/agentsSettings.test.ts (7 tests) 7ms
+ ✓ src/workspaceThemeContract.test.ts (6 tests) 7ms
+ ✓ src/manifest.test.ts (3 tests) 2ms
+ ✓ src/state/layout.paneHandleDrop.runtime.test.ts (2 tests) 7ms
+ ✓ src/lib/linkRouting.test.ts (6 tests) 5ms
+ ✓ src/lib/agentIcon.test.ts (2 tests) 27ms
+ ✓ src/devRuntimeContract.test.ts (2 tests) 4ms
+ ✓ src/lib/terminalOutput.test.ts (9 tests) 10ms
+ ✓ src/components/TerminalSplitView.pointerDrag.test.tsx (5 tests) 4ms
+ ✓ src/lib/terminalTransport/terminalTransport.test.ts (8 tests) 5ms
+ ✓ src/lib/worktreeOwnership.test.ts (5 tests) 5ms
+ ✓ src/remote/terminalGridProtocol.test.ts (4 tests) 4ms
+ ✓ src/index-html.test.ts (3 tests) 4ms
+ ✓ src/lib/terminalEvents.test.ts (4 tests) 43ms
+ ✓ src/lib/storageKeys.test.ts (5 tests) 13ms
+ ✓ src/lib/generalSettings.test.ts (4 tests) 5ms
+ ✓ src/assets/ferryx-icon.test.ts (1 test) 2ms
+ ✓ src/lib/activity.test.ts (3 tests) 3ms
+ ✓ src/lib/ipcErrors.test.ts (2 tests) 2ms
+ ✓ src/test/viteHmrConfig.test.ts (1 test) 140ms
+
+ Test Files  80 passed (80)
+      Tests  657 passed (657)
+   Start at  12:35:54
+   Duration  120.26s (transform 4.10s, setup 12.91s, collect 28.25s, tests 15.25s, environment 36.83s, prepare 6.39s)
+
+exit=0

@@ -68,6 +68,7 @@ bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-process = "2"
 rodio = { version = "0.22", default-features = false, features = [
     "playback",
     "wav",
@@ -78,6 +79,9 @@ rodio = { version = "0.22", default-features = false, features = [
 ] }
 fontdb = { version = "0.16", optional = true }
 ab_glyph = { version = "0.2", optional = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", features = ["exception"] }
