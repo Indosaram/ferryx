@@ -1,86 +1,23 @@
-# Ferryx
 
-Ferryx is an ultra-lightweight, native workspace built for terminal development and AI agent workflows. It pairs a fast Rust pseudoterminal daemon with Tauri v2, flexible split-pane tiling, companion browser tabs, and pairing-authenticated mobile remote control.
 
-## Web and Documentation
+## License
 
-Live documentation is hosted on GitHub Pages:
+This project is licensed under the [MIT License](LICENSE).
 
-https://indosaram.github.io/ferryx/
+## Code Signing Policy
 
-When running locally, explore the site at:
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
-- Landing page: <http://localhost:14173/>
-- Documentation: <http://localhost:14173/docs/introduction/>
-- Shortcut reference: <http://localhost:14173/docs/shortcuts/>
+- **Maintainer**: [@Indosaram](https://github.com/Indosaram)
+- **Privacy**: Ferryx does not collect, store, or transmit telemetry or personal data to remote servers.
 
-## Features
+## License
 
-- **Native Rust PTY Host**: Fast kernel pseudoterminal allocation with minimal latency and persistent sessions.
-- **Multi-Agent Workflows**: Parallel AI coding sessions in dedicated tabs or split panes with real-time status and activity detection.
-- **Split-Pane Tiling**: Mix terminal and browser leaves within the same tab with draggable divider resizing.
-- **Embedded Browser Companion**: Side-by-side native web views for local dev server previews and documentation.
-- **Mobile Remote Gateway**: Authenticated HTTP and WebSocket server to monitor or steer sessions from a phone or tablet.
-- **Session Persistence**: Automatic workspace layout saving and daemon reattachment across app restarts.
+This project is licensed under the [MIT License](LICENSE).
 
-## Prerequisites
+## Code Signing Policy
 
-- [Bun](https://bun.sh/) (v1.1 or higher)
-- [Rust](https://www.rust-lang.org/) (Cargo 1.80 or higher)
-- [Node.js](https://nodejs.org/) (v20 or higher)
-- [Tauri CLI](https://v2.tauri.app/start/prerequisites/) (v2)
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
-## Quick Start
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/Indosaram/ferryx.git
-cd ferryx
-bun install --cwd ui
-bun install --cwd site
-```
-
-### 2. Run the desktop application
-
-From the repository root, start the native Tauri shell. It launches the UI dev server defined by `src-tauri/tauri.conf.json` automatically:
-
-```bash
-cd src-tauri && cargo tauri dev
-```
-
-### 3. Run the documentation site
-
-Launch the local Astro and Starlight documentation server on port 14173:
-
-```bash
-bun run --cwd site dev
-```
-
-## Validate Changes
-
-Run the checks that currently gate the UI, documentation site, and Rust backend:
-
-```bash
-bun run --cwd ui test
-bun run --cwd site build
-cd src-tauri && cargo check
-```
-
-## Architecture
-
-```text
-ferryx/
-├── src-tauri/   # Rust Tauri v2 desktop core, PTY daemon, IPC, notifications, and mobile remote server
-├── ui/          # React 18 frontend with native terminal surface integration, layout management, and remote pairing UI
-├── site/        # Astro + Starlight static showcase and documentation deployed to GitHub Pages
-└── docs/        # Project specifications, architectural audit logs, and reference docs
-```
-
-- **Rust Native Core (`src-tauri`)**: Owns pseudoterminal lifecycles via `portable-pty`, manages Git worktree leases, provides native child webviews, and runs an authenticated Axum WebSocket gateway for mobile pairing.
-- **Frontend Application (`ui`)**: React 18 shell rendered inside WebKit or Webview2. It drives pane tiling, agent title detection, keyboard shortcuts, and terminal search overlays.
-- **Docs & Landing (`site`)**: Static Astro and Starlight site hosting guides and interactive browser demos.
-
-## Contributing
-
-Contributions are welcome. Create a focused branch from `main`, run the validation commands above, and open a pull request that explains the user-visible result.
+- **Maintainer**: [@Indosaram](https://github.com/Indosaram)
+- **Privacy**: Ferryx does not collect, store, or transmit telemetry or personal data to remote servers.
