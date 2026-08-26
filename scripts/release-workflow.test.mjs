@@ -91,3 +91,11 @@ test("Windows CI links the native binary before a release tag", () => {
     /if: matrix\.os_name == 'windows'[\s\S]*cargo build --manifest-path src-tauri\/Cargo\.toml --target \$\{\{ matrix\.target \}\}/,
   );
 });
+
+test("the date-based updater release builds only the NSIS bundle on Windows to avoid WiX's MSI version ceiling", () => {
+  assert.match(
+    WORKFLOW,
+    /platform:\s*['"]windows-latest['"][\s\S]*?tauri_args:\s*['"][^'"]*--bundles\s+nsis[^'"]*['"]/,
+  );
+  assert.doesNotMatch(WORKFLOW, /\| \*\*Windows\*\* \| `\.msi`/);
+});

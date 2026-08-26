@@ -34,7 +34,7 @@ jobs:
             os_name: 'windows'
             target: 'x86_64-pc-windows-msvc'
             extra_rust_targets: ''
-            tauri_args: '--target x86_64-pc-windows-msvc'
+            tauri_args: '--target x86_64-pc-windows-msvc --bundles nsis'
           - platform: 'ubuntu-latest'
             os_name: 'linux'
             target: 'x86_64-unknown-linux-gnu'
@@ -332,7 +332,6 @@ jobs:
             | :--- | :--- | :--- |
             | **macOS** | `.dmg` | Universal bundle (Apple Silicon & Intel) |
             | **Windows** | `.exe` | Standard NSIS Setup installer (x64) |
-            | **Windows** | `.msi` | Windows Installer MSI package (x64) |
             | **Windows** | `.msix` | MSIX package for Microsoft Store & Sideloading |
             | **Linux** | `.AppImage` | Standalone portable executable (x64) |
             | **Linux** | `.deb` | Debian / Ubuntu package (x64) |
