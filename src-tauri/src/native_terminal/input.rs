@@ -99,6 +99,31 @@ pub enum NativeTerminalInput {
     },
 }
 
+/// macOS "natural text editing" chords that Ghostty resolves through default keybinds instead
+/// of the key encoder, so they emit legacy readline bytes rather than fixterm sequences.
+///
+/// Mirrors the defaults in `vendor/ghostty/src/config/Config.zig`: Ferryx drives libghostty's
+/// encoder directly and has no keybind layer, so without this the shell receives fixterm
+/// sequences (`\x1b[1;9D`, `\x7f`) that readline does not act on.
+fn natural_text_editing_bytes(event: &KeyEvent) -> Option<&'static [u8]> {
+    let mods = event.modifiers;
+    if mods.ctrl || mods.shift {
+        return None;
+    }
+
+    let super_only = mods.super_key && !mods.alt;
+    let alt_only = mods.alt && !mods.super_key;
+
+    match event.key {
+        KeyCode::ArrowLeft if super_only => Some(b"\x01"),
+        KeyCode::ArrowRight if super_only => Some(b"\x05"),
+        KeyCode::Backspace if super_only => Some(b"\x15"),
+        KeyCode::ArrowLeft if alt_only => Some(b"\x1bb"),
+        KeyCode::ArrowRight if alt_only => Some(b"\x1bf"),
+        _ => None,
+    }
+}
+
 impl NativeTerminalInput {
     pub(crate) fn encoded(
         &self,
@@ -106,9 +131,15 @@ impl NativeTerminalInput {
     ) -> Result<Vec<u8>, NativeTerminalError> {
         match self {
             Self::KeyEvent { key_event } => {
+                let event = key_event.to_key_event()?;
+                if event.action != KeyAction::Release {
+                    if let Some(bytes) = natural_text_editing_bytes(&event) {
+                        return Ok(bytes.to_vec());
+                    }
+                }
                 let option_as_alt =
                     crate::terminal::preferences::cached_terminal_preferences().macos_option_as_alt;
-                terminal.encode_key_with_option_as_alt(&key_event.to_key_event()?, option_as_alt)
+                terminal.encode_key_with_option_as_alt(&event, option_as_alt)
             }
             Self::Text { text } => {
                 if text.is_empty() {
@@ -277,6 +308,158 @@ mod tests {
             metrics,
         )
         .expect("valid input probe bounds")
+    }
+
+    #[test]
+    fn natural_text_editing_chords_emit_ghostty_legacy_bytes() {
+        use super::natural_text_editing_bytes;
+        use crate::native_terminal::key::KeyEvent;
+
+        let chord = |key: KeyCode, alt: bool, super_key: bool| KeyEvent {
+            key,
+            action: KeyAction::Press,
+            modifiers: KeyModifiers {
+                alt,
+                super_key,
+                ..KeyModifiers::default()
+            },
+            utf8: None,
+        };
+
+        assert_eq!(
+            natural_text_editing_bytes(&chord(KeyCode::ArrowLeft, false, true)),
+            Some(b"\x01".as_slice())
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&chord(KeyCode::ArrowRight, false, true)),
+            Some(b"\x05".as_slice())
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&chord(KeyCode::Backspace, false, true)),
+            Some(b"\x15".as_slice())
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&chord(KeyCode::ArrowLeft, true, false)),
+            Some(b"\x1bb".as_slice())
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&chord(KeyCode::ArrowRight, true, false)),
+            Some(b"\x1bf".as_slice())
+        );
+    }
+
+    #[test]
+    fn non_natural_text_editing_chords_stay_on_the_encoder_path() {
+        use super::natural_text_editing_bytes;
+        use crate::native_terminal::key::KeyEvent;
+
+        let event = |key: KeyCode, modifiers: KeyModifiers, action: KeyAction| KeyEvent {
+            key,
+            action,
+            modifiers,
+            utf8: None,
+        };
+        let alt = KeyModifiers {
+            alt: true,
+            ..KeyModifiers::default()
+        };
+        let super_key = KeyModifiers {
+            super_key: true,
+            ..KeyModifiers::default()
+        };
+
+        assert_eq!(
+            natural_text_editing_bytes(&event(KeyCode::Backspace, alt, KeyAction::Press)),
+            None
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&event(KeyCode::Delete, alt, KeyAction::Press)),
+            None
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&event(
+                KeyCode::ArrowLeft,
+                KeyModifiers::default(),
+                KeyAction::Press
+            )),
+            None
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&event(
+                KeyCode::ArrowLeft,
+                KeyModifiers {
+                    alt: true,
+                    shift: true,
+                    ..KeyModifiers::default()
+                },
+                KeyAction::Press
+            )),
+            None
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&event(
+                KeyCode::ArrowLeft,
+                KeyModifiers {
+                    super_key: true,
+                    ctrl: true,
+                    ..KeyModifiers::default()
+                },
+                KeyAction::Press
+            )),
+            None
+        );
+        assert_eq!(
+            natural_text_editing_bytes(&event(
+                KeyCode::ArrowLeft,
+                KeyModifiers {
+                    alt: true,
+                    super_key: true,
+                    ..KeyModifiers::default()
+                },
+                KeyAction::Press
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn encoded_routes_natural_text_editing_chords_past_the_key_encoder() {
+        use super::BrowserKeyEventDto;
+        use crate::native_terminal::terminal::NativeTerminal;
+
+        let terminal = NativeTerminal::new(80, 24).expect("terminal for encoding boundary");
+        let encode = |key: &str, modifiers: KeyModifiers| {
+            NativeTerminalInput::KeyEvent {
+                key_event: BrowserKeyEventDto {
+                    key: key.into(),
+                    action: KeyAction::Press,
+                    modifiers,
+                    utf8: None,
+                },
+            }
+            .encoded(&terminal)
+            .expect("chord encodes")
+        };
+        let super_key = KeyModifiers {
+            super_key: true,
+            ..KeyModifiers::default()
+        };
+        let alt = KeyModifiers {
+            alt: true,
+            ..KeyModifiers::default()
+        };
+
+        assert_eq!(encode("ArrowLeft", super_key), b"\x01".to_vec());
+        assert_eq!(encode("ArrowRight", super_key), b"\x05".to_vec());
+        assert_eq!(encode("Backspace", super_key), b"\x15".to_vec());
+        assert_eq!(encode("ArrowLeft", alt), b"\x1bb".to_vec());
+        assert_eq!(encode("ArrowRight", alt), b"\x1bf".to_vec());
+
+        assert_eq!(encode("Backspace", alt), b"\x1b\x7f".to_vec());
+        assert_eq!(
+            encode("ArrowLeft", KeyModifiers::default()),
+            b"\x1b[D".to_vec()
+        );
     }
 
     #[test]

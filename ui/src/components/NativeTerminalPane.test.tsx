@@ -578,6 +578,106 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("forwards macOS word-navigation and word-deletion chords instead of letting the focus sink edit itself", () => {
+    const session = createSession("term-session-1");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+
+    const chords = [
+      { key: "ArrowLeft", altKey: true, expected: { alt: true, superKey: false } },
+      { key: "ArrowRight", altKey: true, expected: { alt: true, superKey: false } },
+      { key: "ArrowLeft", metaKey: true, expected: { alt: false, superKey: true } },
+      { key: "Backspace", altKey: true, expected: { alt: true, superKey: false } },
+      { key: "Backspace", metaKey: true, expected: { alt: false, superKey: true } },
+      { key: "Delete", altKey: true, expected: { alt: true, superKey: false } },
+    ] as const;
+
+    for (const chord of chords) {
+      tauriCoreMocks.invoke.mockClear();
+      const event = new KeyboardEvent("keydown", {
+        key: chord.key,
+        code: chord.key,
+        altKey: "altKey" in chord ? chord.altKey : false,
+        metaKey: "metaKey" in chord ? chord.metaKey : false,
+        bubbles: true,
+        cancelable: true,
+      });
+
+      act(() => {
+        textarea.dispatchEvent(event);
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-1",
+        input: {
+          keyEvent: {
+            key: chord.key,
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: false,
+              alt: chord.expected.alt,
+              superKey: chord.expected.superKey,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    }
+  });
+
+  it("recovers the physical key when macOS translates an Option chord into a glyph", () => {
+    const session = createSession("term-session-1");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+
+    const chords = [
+      { key: "\u0192", code: "KeyF", shiftKey: false, expected: "f" },
+      { key: "\u222B", code: "KeyB", shiftKey: false, expected: "b" },
+      { key: "\u00C1", code: "KeyF", shiftKey: true, expected: "F" },
+      { key: "\u00BA", code: "Digit1", shiftKey: false, expected: "1" },
+    ] as const;
+
+    for (const chord of chords) {
+      tauriCoreMocks.invoke.mockClear();
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: chord.key,
+            code: chord.code,
+            altKey: true,
+            shiftKey: chord.shiftKey,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-1",
+        input: {
+          keyEvent: {
+            key: chord.expected,
+            action: "Press",
+            modifiers: {
+              shift: chord.shiftKey,
+              ctrl: false,
+              alt: true,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    }
+  });
+
   it("forwards modified character keys through the typed key IPC payload", () => {
     const session = createSession("term-session-1");
     const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);

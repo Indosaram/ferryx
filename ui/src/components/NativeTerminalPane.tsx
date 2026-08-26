@@ -114,6 +114,23 @@ function shouldForwardKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
   );
 }
 
+function physicalKeyForAltChord(event: KeyboardEvent<HTMLTextAreaElement>): string {
+  if (!event.altKey || event.key.length !== 1) {
+    return event.key;
+  }
+
+  const code = event.code;
+  if (/^Key[A-Z]$/.test(code)) {
+    const letter = code.slice(3);
+    return event.shiftKey ? letter : letter.toLowerCase();
+  }
+  if (/^Digit[0-9]$/.test(code)) {
+    return code.slice(5);
+  }
+
+  return event.key;
+}
+
 function reportNativeTerminalIpcFailure(command: NativeTerminalIpcCommand, error: unknown): void {
   console.error("Native terminal IPC command failed", { command, error });
 }
@@ -535,7 +552,7 @@ export function NativeTerminalPane({
             event.preventDefault();
             sendInput({
               keyEvent: {
-                key: event.key,
+                key: physicalKeyForAltChord(event),
                 action: "Press",
                 modifiers: {
                   shift: event.shiftKey,
