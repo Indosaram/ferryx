@@ -7,7 +7,6 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
-  Download,
   ExternalLink,
   FolderGit2,
   Globe,
