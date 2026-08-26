@@ -1,0 +1,70 @@
+{
+  "run": "ferryx remote native-terminal grid mirror",
+  "dispatched_at_kst": "2026-08-26 11:14",
+  "settled_at_kst": "2026-08-26 11:37",
+  "helper_log": "/tmp/ferryx-remote-grid-helper.log",
+  "manifest": "/tmp/ferryx-remote-grid-batch.json",
+  "plan": "docs/REMOTE_NATIVE_TERMINAL_MIRROR_IMPLEMENTATION_PLAN.md",
+  "cancelled_dag_run": "dag_75965615-2c82-4533-8f20-170f3ece58e2",
+  "cancel_reason": "web-fanout child task was lost to a session process restart before invoking the helper (reconcile_lost, zero tool calls, no scope files); helper batch was re-dispatched directly from the coordinator under a monitor",
+  "scopes": [
+    {
+      "lane": "A backend",
+      "label": "ferryx remote grid mirror backend",
+      "scope_id": "17277835-ef22-4664-9fb1-a5fa080229dc",
+      "browser_page_id": "surface:46",
+      "generation": 1,
+      "terminal_state": "COMPLETED",
+      "terminal_detail": "completion_check ready=true",
+      "changed_files": [
+        "src-tauri/src/remote/mirror.rs",
+        "src-tauri/src/remote/mod.rs",
+        "src-tauri/src/remote/protocol.rs",
+        "src-tauri/src/remote/server.rs",
+        "src-tauri/src/remote/tests.rs",
+        "src-tauri/tauri.conf.json"
+      ],
+      "close_attempts": 2,
+      "close_result": "RETAINED_CLOSE_FAILED",
+      "close_error": "cmux close-surface failed: Surface ref not found: surface:46",
+      "close_assessment": "AUTHORITATIVE TERMINAL ERROR. Verified via `cmux --json list-pane-surfaces` that surface:46 does not exist: the browser tab is already gone, so no browser resource is leaking. The helper refuses to remove the scope file because its close precondition (closing the tab) cannot be satisfied against a missing surface. Residual artifact is the stale scope file ~/.omo/bridge/scopes-18800/17277835-ef22-4664-9fb1-a5fa080229dc.json, which the gpt2omo-relay TTL janitor reaps on lease expiry (default 120 min).",
+      "residual_scope_file": "~/.omo/bridge/scopes-18800/17277835-ef22-4664-9fb1-a5fa080229dc.json"
+    },
+    {
+      "lane": "B frontend",
+      "label": "ferryx remote grid mirror frontend",
+      "scope_id": "3559634c-6522-449a-93c3-ef7d48ad24b6",
+      "browser_page_id": "surface:47",
+      "generation": 1,
+      "terminal_state": "COMPLETED",
+      "terminal_detail": "completion_check ready=true",
+      "changed_files": [
+        "ui/src/remote/terminalGridProtocol.ts",
+        "ui/src/remote/terminalGridProtocol.test.ts",
+        "ui/src/remote/RemoteTerminal.tsx",
+        "ui/src/remote/RemoteTerminal.contract.test.tsx"
+      ],
+      "close_attempts": 1,
+      "close_result": "CLOSED",
+      "close_error": null,
+      "close_assessment": "Clean close: session_closed=true, scope_removed=true, scope file absent."
+    },
+    {
+      "lane": "coverage follow-up (never dispatched)",
+      "label": "ferryx grid socket integration coverage",
+      "scope_id": "a46e68aa-9f15-4059-be02-f6e81145d435",
+      "terminal_state": "NEVER_DISPATCHED",
+      "close_result": "not retained/resumable or lease released",
+      "close_assessment": "Fresh batch timed out at readiness (180s) with actual task dispatch count 0, so this scope never bound a worker. Close reports it is not retained/resumable, consistent with no live browser resource. Nothing leaked."
+    }
+  ],
+  "delegation_channel_status": {
+    "state": "UNAVAILABLE",
+    "evidence": "cmux --json list-pane-surfaces reports 0 surfaces of type browser across four consecutive checks; every ChatGPT tab was recycled into a terminal surface.",
+    "failure_modes_seen": [
+      "--resume-scope 17277835: RETAINED_BROWSER_VERIFY_TRANSIENT / 'Surface is not a browser'",
+      "--batch-stdin fresh dispatch: readiness timeout after 180s, actual task dispatch count 0"
+    ],
+    "unblock": "Open a ChatGPT browser surface in cmux, then dispatch docs/remote-grid-socket-coverage-followup.md"
+  }
+}

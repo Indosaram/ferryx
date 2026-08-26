@@ -9,8 +9,11 @@ import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { IconButton } from "./components/ui/IconButton";
+import { workspaceName } from "./lib/branchFilter";
 import { newBrowserTabUrl } from "./lib/browserSettings";
 import { useGeneralSettings } from "./lib/generalSettings";
+import { NotificationCoordinator } from "./lib/notificationCoordinator";
+import type { TerminalActivityState } from "./lib/activity";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
 import {
@@ -171,19 +174,48 @@ export function deriveFocusedTerminal(
     : (state.worktrees.find((wt) => wt.path === state.activeWorktreePath) ?? null);
 
   const ident = foundWorktree ? worktreeIdentity(foundWorktree) : null;
-  const worktreeSlug =
-    ident?.slug ??
-    (foundWorktree?.branch ? foundWorktree.branch.replace(/^refs\/heads\//, "") : null);
+  const worktreeSlug = ident?.slug ?? null;
   const worktreeLabel = foundWorktree?.branch
     ? foundWorktree.branch.replace(/^refs\/heads\//, "")
     : activeTab.label;
+
+  const terminalTabs = state.layout.tabs
+    .filter((tab) => {
+      if (tab.id === activeTab.id) return true;
+      if (tab.kind === "browser") return false;
+      const tabSession = state.sessions[tab.sessionId];
+      const tabWorktreePath = tabSession?.worktreePath ?? tabSession?.cwd;
+      return tabWorktreePath === foundWorktree?.path;
+    })
+    .map((tab) => ({ id: tab.id, label: remoteTabLabel(tab.label) }));
 
   return {
     workspaceId,
     worktreeSlug: worktreeSlug ?? null,
     worktreeLabel: worktreeLabel ?? null,
     backendSessionId: session?.backendSessionId ?? null,
+    activeTabId: activeTab.id,
+    tabId: activeTab.id,
+    tabs: terminalTabs,
+    terminalTabs,
   };
+}
+
+function remoteTabLabel(label: string): string {
+  const trimmed = label.trim();
+  return /^(?:~[/\\]|[/\\]|[a-zA-Z]:[/\\]|file:)/.test(trimmed) ? "Terminal" : trimmed || "Terminal";
+}
+
+function isTerminalTabInWorktree(
+  state: WorkspaceState,
+  worktree: Worktree,
+  tabId: string | null,
+): boolean {
+  if (!tabId) return true;
+  const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
+  if (!tab || tab.kind === "browser") return false;
+  const session = state.sessions[tab.sessionId];
+  return (session?.worktreePath ?? session?.cwd) === worktree.path;
 }
 
 function matchWorktreeBySlug(worktrees: Worktree[], slug: string): Worktree | undefined {
@@ -272,7 +304,9 @@ function WorkspaceApp({
     agents,
     tabActivity,
     worktreeActivity,
-    updateSessionTitleActivity,
+    activityNotificationTargets,    markTabUnread,
+    markWorktreeUnread,
+    subscribeTerminalBell,
     openTab,
     createBrowserTab,
     navigateBrowserTab,
@@ -301,6 +335,76 @@ function WorkspaceApp({
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  const markTabUnreadRef = useRef(markTabUnread);
+  markTabUnreadRef.current = markTabUnread;
+  const markWorktreeUnreadRef = useRef(markWorktreeUnread);
+  markWorktreeUnreadRef.current = markWorktreeUnread;
+
+  const coordinatorRef = useRef<NotificationCoordinator | null>(null);
+  if (!coordinatorRef.current) {
+    coordinatorRef.current = new NotificationCoordinator({
+      onMarkTabUnread: (tabId) => markTabUnreadRef.current?.(tabId),
+      onMarkWorktreeUnread: (path) => markWorktreeUnreadRef.current?.(path),
+    });
+  }
+
+  const activityNotificationTargetsRef = useRef(activityNotificationTargets);
+  activityNotificationTargetsRef.current = activityNotificationTargets;
+
+  const lastAgentStatesRef = useRef<Map<string, TerminalActivityState>>(new Map());
+
+  useEffect(() => {
+    const targets = activityNotificationTargets ?? [];
+    for (const target of targets) {
+      const previousState = lastAgentStatesRef.current.get(target.sessionId);
+      if (previousState !== target.state) {
+        lastAgentStatesRef.current.set(target.sessionId, target.state);
+        coordinatorRef.current?.handleAgentStateChange({
+          sessionId: target.sessionId,
+          tabId: target.tabId,
+          worktreePath: target.worktreePath,
+          worktreeLabel: target.worktreeLabel,
+          agentLabel: target.agentLabel,
+          terminalTitle: target.terminalTitle,
+          nextState: target.state,
+        });
+      }
+    }
+  }, [activityNotificationTargets]);
+
+  const handleTerminalBell = useCallback((sessionId: string, tabId: string) => {
+    const targets = activityNotificationTargetsRef.current ?? [];
+    const target = targets.find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    let worktreePath = target?.worktreePath;
+    let worktreeLabel = target?.worktreeLabel;
+    let terminalTitle = target?.terminalTitle;
+
+    if (!target) {
+      const session = stateRef.current.sessions[sessionId];
+      const fallbackWorktreePath = session?.worktreePath ?? session?.cwd ?? "";
+      const worktree = stateRef.current.worktrees.find(
+        (candidate) => candidate.path === fallbackWorktreePath,
+      );
+      worktreePath = fallbackWorktreePath;
+      worktreeLabel = worktree ? workspaceName(worktree) : "";
+      terminalTitle = "";
+    }
+
+    coordinatorRef.current?.handleTerminalBell({
+      sessionId,
+      tabId,
+      worktreePath,
+      worktreeLabel,
+      terminalTitle,
+    });
+  }, []);
+
+  // The bell arrives from the store's global native subscription, not from a pane prop: only the
+  // active tab's panes are mounted, and a bell in the tab you are watching is not what notifies.
+  useEffect(() => subscribeTerminalBell(handleTerminalBell), [handleTerminalBell, subscribeTerminalBell]);
   useEffect(() => {
     switchDebug("workspace.render", {
       activeProjectId: activeProject.workspaceId,
@@ -564,7 +668,11 @@ function WorkspaceApp({
   const [pendingTabClose, setPendingTabClose] = useState<{ id: string; label: string } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
-  const [pendingRemoteSlug, setPendingRemoteSlug] = useState<{ workspaceId: string; slug: string } | null>(null);
+  const [pendingRemoteSlug, setPendingRemoteSlug] = useState<{
+    workspaceId: string;
+    slug?: string | null;
+    tabId?: string | null;
+  } | null>(null);
 
   const focusedTerminalPayload = useMemo(
     () => deriveFocusedTerminal(activeProject.workspaceId, state),
@@ -679,59 +787,14 @@ function WorkspaceApp({
     });
     setPendingWorktreePath(null);
     void ensureTabForWorktree(target).catch(reportRuntimeError);
-  }, [ensureTabForWorktree, pendingWorktreePath, reportRuntimeError, state.worktrees]);
-
-  useEffect(() => {
-    if (!pendingRemoteSlug) return;
-    // The slug was queued for one project; after a switch elsewhere it must not
-    // open a same-named worktree in whichever project is now active.
-    if (pendingRemoteSlug.workspaceId !== activeProject.workspaceId) {
-      setPendingRemoteSlug(null);
-      return;
-    }
-    const target = matchWorktreeBySlug(state.worktrees, pendingRemoteSlug.slug);
-    if (!target) return;
-    setPendingRemoteSlug(null);
-    void ensureTabForWorktree(target).catch(reportRuntimeError);
-  }, [activeProject.workspaceId, ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
-
-  const handleRemoteSelectionRequested = useCallback(
-    (payload: RemoteSelectionRequestedPayload) => {
-      if (!payload || !payload.workspaceId) return;
-      const targetProject = projectsRef.current.find((p) => p.workspaceId === payload.workspaceId);
-      const isCurrentProject = activeProjectRef.current.workspaceId === payload.workspaceId;
-
-      if (payload.worktreeSlug) {
-        if (isCurrentProject) {
-          const targetWorktree = matchWorktreeBySlug(stateRef.current.worktrees, payload.worktreeSlug);
-          if (targetWorktree) {
-            handleSelectWorktree(targetWorktree);
-          }
-        } else if (targetProject) {
-          handleSelectProject(targetProject);
-          setPendingRemoteSlug({ workspaceId: targetProject.workspaceId, slug: payload.worktreeSlug });
-        }
-      } else {
-        if (!isCurrentProject && targetProject) {
-          handleSelectProject(targetProject);
-        }
-      }
-    },
-    [handleSelectProject, handleSelectWorktree],
-  );
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    void onRemoteSelectionRequested(handleRemoteSelectionRequested).then((dispose: () => void) => {
-      if (cancelled) dispose();
-      else unlisten = dispose;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [handleRemoteSelectionRequested]);
+  }, [
+    activeProject.workspaceId,
+    ensureTabForWorktree,
+    pendingWorktreePath,
+    reportRuntimeError,
+    state.layout.tabs.length,
+    state.worktrees,
+  ]);
 
   const handleSelectTerminalTab = useCallback(
     (tabId: string) => {
@@ -757,6 +820,87 @@ function WorkspaceApp({
     },
     [activateTab, ensureTabForWorktree, reportRuntimeError],
   );
+
+  useEffect(() => {
+    if (!pendingRemoteSlug) return;
+    // The slug was queued for one project; after a switch elsewhere it must not
+    // open a same-named worktree in whichever project is now active.
+    if (pendingRemoteSlug.workspaceId !== activeProject.workspaceId) {
+      setPendingRemoteSlug(null);
+      return;
+    }
+    const target = pendingRemoteSlug.slug
+      ? matchWorktreeBySlug(state.worktrees, pendingRemoteSlug.slug)
+      : (state.worktrees.find((wt) => worktreeIdentity(wt) === null) ??
+         state.worktrees.find((wt) => wt.path === activeProject.repoRoot) ??
+         state.worktrees[0]);
+    if (!target) return;
+    const requestedTabId = pendingRemoteSlug.tabId ?? null;
+    setPendingRemoteSlug(null);
+    if (!isTerminalTabInWorktree(state, target, requestedTabId)) return;
+    void Promise.resolve(ensureTabForWorktree(target))
+      .then(() => {
+        if (requestedTabId) {
+          activateTab(requestedTabId);
+        }
+      })
+      .catch(reportRuntimeError);
+  }, [activeProject.repoRoot, activeProject.workspaceId, activateTab, ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
+
+  const handleRemoteSelectionRequested = useCallback(
+    (payload: RemoteSelectionRequestedPayload) => {
+      if (!payload || !payload.workspaceId) return;
+      const targetProject = projectsRef.current.find((p) => p.workspaceId === payload.workspaceId);
+      const isCurrentProject = activeProjectRef.current.workspaceId === payload.workspaceId;
+      const requestedTabId = payload.tabId ?? payload.activeTabId ?? null;
+
+      if (isCurrentProject) {
+        const targetWorktree = payload.worktreeSlug
+          ? matchWorktreeBySlug(stateRef.current.worktrees, payload.worktreeSlug)
+          : (stateRef.current.worktrees.find((wt) => worktreeIdentity(wt) === null) ??
+             stateRef.current.worktrees.find((wt) => wt.path === activeProjectRef.current.repoRoot) ??
+             stateRef.current.worktrees[0]);
+
+        if (targetWorktree) {
+          if (!isTerminalTabInWorktree(stateRef.current, targetWorktree, requestedTabId)) return;
+          if (targetWorktree.path === stateRef.current.activeWorktreePath) {
+            if (requestedTabId) {
+              activateTab(requestedTabId);
+            }
+          } else {
+            void Promise.resolve(ensureTabForWorktree(targetWorktree))
+              .then(() => {
+                if (requestedTabId) {
+                  activateTab(requestedTabId);
+                }
+              })
+              .catch(reportRuntimeError);
+          }
+        }
+      } else if (targetProject) {
+        handleSelectProject(targetProject);
+        setPendingRemoteSlug({
+          workspaceId: targetProject.workspaceId,
+          slug: payload.worktreeSlug ?? null,
+          tabId: requestedTabId,
+        });
+      }
+    },
+    [activateTab, ensureTabForWorktree, handleSelectProject, reportRuntimeError],
+  );
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void onRemoteSelectionRequested(handleRemoteSelectionRequested).then((dispose: () => void) => {
+      if (cancelled) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleRemoteSelectionRequested]);
 
   const handleAddTerminalTab = useCallback(() => {
     const activeWt = activeWorktreeRef.current;
@@ -1149,7 +1293,6 @@ function WorkspaceApp({
             sessions={state.sessions}
             unreadTabIds={state.unreadTabIds}
             activityByTabId={tabActivity}
-            onTitleChange={updateSessionTitleActivity}
             onActivateTab={handleSelectTerminalTab}
             onCloseTab={handleCloseTab}
             onCloseOtherTabs={handleCloseOtherTabs}

@@ -137,7 +137,7 @@ describe("shortcut registry", () => {
     addEventListener.mockRestore();
   });
 
-  it("dispatches only registered modifier chords and preserves ordinary xterm typing and Ctrl-C", () => {
+  it("dispatches only registered modifier chords and preserves ordinary terminal typing and Ctrl-C", () => {
     const handlers = {
       "tab.newTerminal": vi.fn(),
       "terminal.splitRight": vi.fn(),
@@ -147,7 +147,7 @@ describe("shortcut registry", () => {
     const terminalHost = document.createElement("div");
     terminalHost.className = "terminal-host";
     const terminal = document.createElement("textarea");
-    terminal.className = "xterm-helper-textarea";
+    terminal.className = "terminal-input";
     terminalHost.appendChild(terminal);
     document.body.appendChild(terminalHost);
 
@@ -167,7 +167,7 @@ describe("shortcut registry", () => {
     terminalHost.remove();
   });
 
-  it.each(TERMINAL_CHORD_CASES)("routes %s when xterm is focused", (_label, actionId, eventInit) => {
+  it.each(TERMINAL_CHORD_CASES)("routes %s when terminal is focused", (_label, actionId, eventInit) => {
     const handlers: Partial<Record<ShortcutActionId, ReturnType<typeof vi.fn>>> = {
       "tab.newTerminal": vi.fn(),
       "tab.newBrowser": vi.fn(),

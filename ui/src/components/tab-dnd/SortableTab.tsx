@@ -4,6 +4,7 @@ import { Globe, Pin, TerminalSquare, X } from "lucide-react";
 import { memo, useMemo, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../../lib/activity";
+import { resolveAgentIcon } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
 import type { WorkspaceTab } from "../../lib/types";
 import { StatusDot } from "../ui/StatusDot";
@@ -53,6 +54,8 @@ export const SortableTab = memo(function SortableTab({
   const resolvedActivity = tab.kind === "browser" ? null : resolveActivityIndicator(activity);
   const activityIndicator = unread && (resolvedActivity === null || resolvedActivity === "done") ? "unread" : resolvedActivity;
   const isPinned = Boolean(tab.pinned);
+  const agentType = activity?.agentType;
+  const AgentIcon = agentType ? resolveAgentIcon(agentType) : null;
 
   const style = {
     transform: CSS.Transform.toString(sortable.transform),
@@ -91,6 +94,26 @@ export const SortableTab = memo(function SortableTab({
     >
       {tab.kind === "browser" ? (
         <Globe className="size-3 shrink-0 text-primary" />
+      ) : AgentIcon ? (
+        <span
+          data-testid="tab-agent-icon"
+          data-agent-type={agentType}
+          className="relative inline-flex size-3 shrink-0 items-center justify-center"
+        >
+          <AgentIcon className="size-3 shrink-0" />
+          {activityIndicator ? (
+            <span
+              data-testid={activityIndicator === "unread" ? "tab-unread-dot" : `tab-${activityIndicator}-indicator`}
+              aria-label={`Agent ${activityIndicator}`}
+              className="absolute -bottom-0.5 -right-0.5 inline-flex items-center justify-center"
+            >
+              <StatusDot
+                state={activityIndicator}
+                className={activityIndicator === "working" ? "size-2" : "size-1.5 ring-1 ring-card"}
+              />
+            </span>
+          ) : null}
+        </span>
       ) : activityIndicator ? (
         <span
           data-testid={activityIndicator === "unread" ? "tab-unread-dot" : `tab-${activityIndicator}-indicator`}

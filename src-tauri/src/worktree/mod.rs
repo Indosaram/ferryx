@@ -34,6 +34,28 @@ pub mod tests {
     }
 
     #[test]
+    fn plain_folder_without_git_registers_and_guards_worktrees() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let folder = temp_dir.path();
+        fs::create_dir_all(folder.join("nested")).expect("mkdir failed");
+
+        let manager = WorktreeManager::try_new(folder).expect("plain folder registers");
+        assert_eq!(manager.repo_root(), fs::canonicalize(folder).unwrap());
+        assert!(!manager.is_git_backed());
+
+        // Worktree inspection is empty; mutations are rejected with a clear error.
+        assert!(manager.list_worktrees().unwrap().is_empty());
+        let err = manager
+            .create_worktree(CreateWorktreeOptions::new(
+                "ws-1",
+                "task",
+                folder.join("wt-task"),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::NotAGitRepository { .. }));
+    }
+
+    #[test]
     fn branch_namespace_formatting_and_validation() {
         assert_eq!(
             WorktreeManager::format_branch_name("ws-123", "task-a").unwrap(),

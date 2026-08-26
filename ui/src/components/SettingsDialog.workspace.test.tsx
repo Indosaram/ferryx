@@ -32,8 +32,8 @@ describe("SettingsDialog workspace section", () => {
     const onAddProject = vi.fn();
     const onAddWorktree = vi.fn();
     const projects = [
-      { workspaceId: "default", repoRoot: "/repo/default" },
-      { workspaceId: "frontend", repoRoot: "/repo/frontend" },
+      { workspaceId: "default", repoRoot: "/repo/default", gitRoot: "/repo/default" },
+      { workspaceId: "frontend", repoRoot: "/repo/frontend", gitRoot: "/repo/frontend" },
     ];
     const activeWorktree = {
       path: "/repo/default",

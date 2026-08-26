@@ -1,0 +1,439 @@
+{
+  "timestamp": "2026-08-24T10:31:01.344Z",
+  "environment": {
+    "os": "Darwin 25.6.0 (darwin)",
+    "arch": "arm64",
+    "runtime": "bun 1.4.0",
+    "cpuCores": 16,
+    "xtermVersion": "6.0.0",
+    "xtermPackage": "@xterm/xterm@6.0.0"
+  },
+  "wrappedMicrobench": {
+    "directMibPerSec": 408847.5,
+    "legacyMibPerSec": 113.9,
+    "directMedianMs": 0.024,
+    "legacyMedianMs": 87.781,
+    "speedupFactor": 3657.541666666667,
+    "directRunsMs": [
+      0.032,
+      0.024,
+      0.021
+    ],
+    "legacyRunsMs": [
+      90.407,
+      87.781,
+      86.997
+    ],
+    "measurementSurface": "js-buffer-in-memory"
+  },
+  "workloads": [
+    {
+      "id": "wrapped-direct-10mb",
+      "name": "Uint8Array Direct Pass-Through (10 MiB)",
+      "category": "throughput",
+      "measurementSurface": "js-buffer-in-memory",
+      "totalBytes": 10485760,
+      "chunkBytes": 32768,
+      "chunkCount": 320,
+      "runs": 3,
+      "medianMs": 0.024,
+      "minMs": 0.021,
+      "maxMs": 0.032,
+      "mibPerSec": 408847.5,
+      "checksum": 0,
+      "notes": "Direct binary chunk ingestion bypassing base64 decoding (in-memory buffer transform)"
+    },
+    {
+      "id": "wrapped-legacy-base64-10mb",
+      "name": "Base64 Decoded Legacy Path (10 MiB)",
+      "category": "throughput",
+      "measurementSurface": "js-buffer-in-memory",
+      "totalBytes": 10485760,
+      "chunkBytes": 32768,
+      "chunkCount": 320,
+      "runs": 3,
+      "medianMs": 87.781,
+      "minMs": 86.997,
+      "maxMs": 90.407,
+      "mibPerSec": 113.9,
+      "checksum": 0,
+      "notes": "Historical base64 -> atob -> Uint8Array pipeline (in-memory buffer transform)"
+    },
+    {
+      "id": "ascii-10mb",
+      "name": "ASCII Stream (10 MiB)",
+      "category": "throughput",
+      "measurementSurface": "xterm-headless-parser",
+      "totalBytes": 10485760,
+      "chunkBytes": 32768,
+      "chunkCount": 320,
+      "runs": 3,
+      "medianMs": 486.9360419999998,
+      "minMs": 485.24741600000004,
+      "maxMs": 490.771042,
+      "mibPerSec": 20.536577984506646,
+      "checksum": 10537275,
+      "notes": "Sustained ASCII stream parsed via xterm VT parser"
+    },
+    {
+      "id": "ascii-50mb",
+      "name": "ASCII Stream (50 MiB)",
+      "category": "throughput",
+      "measurementSurface": "xterm-headless-parser",
+      "totalBytes": 52428800,
+      "chunkBytes": 32768,
+      "chunkCount": 1600,
+      "runs": 3,
+      "medianMs": 2424.3431660000006,
+      "minMs": 2422.7987080000003,
+      "maxMs": 2424.858292000001,
+      "mibPerSec": 20.62414294363143,
+      "checksum": 52683652,
+      "notes": "Sustained ASCII stream parsed via xterm VT parser"
+    },
+    {
+      "id": "ascii-100mb",
+      "name": "ASCII Stream (100 MiB)",
+      "category": "throughput",
+      "measurementSurface": "xterm-headless-parser",
+      "totalBytes": 104857600,
+      "chunkBytes": 32768,
+      "chunkCount": 3200,
+      "runs": 3,
+      "medianMs": 4848.201833000001,
+      "minMs": 4847.930999999999,
+      "maxMs": 4916.861665999997,
+      "mibPerSec": 20.62620399161917,
+      "checksum": 105364365,
+      "notes": "Sustained ASCII stream parsed via xterm VT parser"
+    },
+    {
+      "id": "ansi-sgr-10mb",
+      "name": "ANSI SGR / 24-bit Escape Stream (10 MiB)",
+      "category": "parser",
+      "measurementSurface": "xterm-headless-parser",
+      "totalBytes": 10485760,
+      "chunkBytes": 32768,
+      "chunkCount": 320,
+      "runs": 3,
+      "medianMs": 570.5936250000013,
+      "minMs": 527.5357499999991,
+      "maxMs": 571.5118750000001,
+      "mibPerSec": 17.52560765115449,
+      "checksum": 10528561,
+      "notes": "Color codes, cursor positioning, and attribute reset tokens parsed via xterm VT parser"
+    },
+    {
+      "id": "unicode-cjk-10mb",
+      "name": "Unicode CJK / Emoji / Wide-Char Stream (10 MiB)",
+      "category": "parser",
+      "measurementSurface": "xterm-headless-parser",
+      "totalBytes": 10485760,
+      "chunkBytes": 32768,
+      "chunkCount": 320,
+      "runs": 3,
+      "medianMs": 566.6419169999972,
+      "minMs": 561.6643330000006,
+      "maxMs": 575.4957079999986,
+      "mibPerSec": 17.647829608059244,
+      "checksum": 10576011,
+      "notes": "Multi-byte UTF-8 sequences, wide glyphs, and combining diacritics parsed via xterm VT parser"
+    },
+    {
+      "id": "multipane-4x10mb",
+      "name": "Multi-Pane Concurrent (4 panes x 10 MiB)",
+      "category": "multipane",
+      "measurementSurface": "xterm-headless-parser",
+      "totalBytes": 41943040,
+      "chunkBytes": 32768,
+      "chunkCount": 1280,
+      "runs": 3,
+      "medianMs": 821.4447909999981,
+      "minMs": 816.8834580000002,
+      "maxMs": 1099.746665999999,
+      "mibPerSec": 48.694690669722796,
+      "latency": {
+        "p50Ms": 2.180625000000873,
+        "p95Ms": 2.5946249999979045,
+        "p99Ms": 3.0802919999987353
+      },
+      "checksum": 0,
+      "notes": "Interleaved multi-pane chunk dispatch simulating simultaneous PTY channels into xterm parsers"
+    },
+    {
+      "id": "interactivity-event-dispatch",
+      "name": "Interactive Keystroke / Event Dispatch (1,000 cycles)",
+      "category": "interactivity",
+      "measurementSurface": "xterm-headless-parser",
+      "totalBytes": 3000,
+      "chunkBytes": 3,
+      "chunkCount": 1000,
+      "runs": 1,
+      "medianMs": 1258.5039579999975,
+      "minMs": 1.012791000001016,
+      "maxMs": 1.9275410000009288,
+      "mibPerSec": 0.0022733523649504134,
+      "latency": {
+        "p50Ms": 1.2610829999975977,
+        "p95Ms": 1.27429100000154,
+        "p99Ms": 1.2895410000019183
+      },
+      "checksum": 95000,
+      "notes": "Microsecond dispatch jitter profile for terminal input handling through xterm write boundary"
+    }
+  ],
+  "featureBaseline": {
+    "xtermPackage": "@xterm/xterm",
+    "xtermVersion": "6.0.0",
+    "addons": [
+      {
+        "name": "@xterm/addon-fit",
+        "version": "0.11.0",
+        "purpose": "Auto-sizing terminal to container dimensions"
+      },
+      {
+        "name": "@xterm/addon-search",
+        "version": "0.16.0",
+        "purpose": "In-buffer text search with match navigation"
+      },
+      {
+        "name": "@xterm/addon-unicode11",
+        "version": "0.9.0",
+        "purpose": "Unicode 11 VTE width and emoji support"
+      },
+      {
+        "name": "@xterm/addon-webgl",
+        "version": "0.19.0",
+        "purpose": "Hardware-accelerated glyph rendering pipeline"
+      }
+    ],
+    "features": [
+      {
+        "id": "binary-scheduled-output-replay",
+        "name": "Binary Scheduled Output & Daemon Replay",
+        "sourceFiles": [
+          "ui/src/lib/terminalOutputScheduler.ts",
+          "ui/src/lib/terminalOutput.ts"
+        ],
+        "contractDescription": "Coalesced Uint8Array output stream via RAF and 128 KiB threshold flush; daemon sequence/epoch tracking with gap handling.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true,
+        "notes": "Source-audited; dedicated command evidence remains required before native parity sign-off."
+      },
+      {
+        "id": "resize-handling",
+        "name": "Resize Observer & Viewport Preservation",
+        "sourceFiles": [
+          "ui/src/lib/terminalInstanceFactory.ts",
+          "ui/src/lib/terminalFit.ts"
+        ],
+        "contractDescription": "ResizeObserver on terminal container element, debounced RAF refit, preserves scroll-to-bottom anchor, syncs cols/rows over IPC.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      },
+      {
+        "id": "input-forwarding",
+        "name": "Keystroke & Pointer Input Forwarding",
+        "sourceFiles": [
+          "ui/src/lib/terminalInstanceFactory.ts"
+        ],
+        "contractDescription": "terminal.onData dispatches keystrokes and escape sequences directly to daemon PTY via writeTerminal IPC; pointerdown focuses terminal.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      },
+      {
+        "id": "title-reporting",
+        "name": "Window & Tab Title Reporting",
+        "sourceFiles": [
+          "ui/src/lib/terminalInstanceFactory.ts",
+          "ui/src/lib/agentTitle.ts"
+        ],
+        "contractDescription": "OSC 0 and OSC 2 sequence handling via terminal.onTitleChange updates tab and workspace session title.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      },
+      {
+        "id": "bell-notification",
+        "name": "Terminal Bell (BEL) Notification",
+        "sourceFiles": [
+          "ui/src/lib/terminalInstanceFactory.ts"
+        ],
+        "contractDescription": "BEL (0x07) trigger dispatches terminal.onBell callback for tab badge and audio/visual alerts.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      },
+      {
+        "id": "search-addon",
+        "name": "Search Overlay & Addon Navigation",
+        "sourceFiles": [
+          "ui/src/components/TerminalSearchOverlay.tsx",
+          "ui/src/lib/terminalInstanceFactory.ts"
+        ],
+        "contractDescription": "@xterm/addon-search provides findNext / findPrevious, regex, case sensitivity, and whole word searching over active buffer.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      },
+      {
+        "id": "unicode11-addon",
+        "name": "Unicode 11 Extended VTE Addon",
+        "sourceFiles": [
+          "ui/src/lib/terminalInstanceFactory.ts"
+        ],
+        "contractDescription": "Loads @xterm/addon-unicode11 dynamically in factory and sets activeVersion='11' for wcwidth on emoji and CJK wide glyphs.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true,
+        "notes": "Source-audited in ui/src/lib/terminalInstanceFactory.ts; dynamic loading seam present in UI but lacks dedicated vitest UI test file; manual QA required."
+      },
+      {
+        "id": "webgl-renderer",
+        "name": "WebGL Hardware Accelerated Rendering",
+        "sourceFiles": [
+          "ui/src/lib/terminalRenderer.ts",
+          "ui/src/lib/terminalInstanceFactory.ts"
+        ],
+        "contractDescription": "Asynchronously loads @xterm/addon-webgl for GPU acceleration; falls back cleanly to canvas/DOM rendering if context fails.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      },
+      {
+        "id": "terminal-settings-contracts",
+        "name": "Theme, Font, and Scrollback Configuration",
+        "sourceFiles": [
+          "ui/src/lib/terminalSettings.ts"
+        ],
+        "contractDescription": "Saves and resolves font stack, font size (10-36), scrollback (1k-100k), cursorStyle, macosOptionAsAlt, and 24-bit theme palette.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      },
+      {
+        "id": "desktop-vs-browser-boundary",
+        "name": "Desktop Tauri vs Browser Runtime Boundary",
+        "sourceFiles": [
+          "ui/src/lib/terminalInstanceFactory.ts",
+          "ui/src/lib/tauri.ts"
+        ],
+        "contractDescription": "isTauriRuntime() guards IPC PTY session creation; browser preview environment renders simulated preview prompt banner.",
+        "verificationStatus": "source_audited",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true
+      }
+    ],
+    "settingsContracts": {
+      "fontFamily": {
+        "default": "Berkeley Mono, JetBrains Mono, Fira Code, Menlo, Monaco, Consolas, monospace",
+        "configurable": true,
+        "source": "localStorage + native ghostty config sync"
+      },
+      "fontSize": {
+        "default": 13,
+        "min": 10,
+        "max": 36,
+        "configurable": true
+      },
+      "scrollback": {
+        "default": 10000,
+        "min": 1000,
+        "max": 100000,
+        "configurable": true
+      },
+      "cursorStyle": {
+        "options": [
+          "block",
+          "bar",
+          "underline"
+        ],
+        "default": "block"
+      },
+      "macosOptionAsAlt": {
+        "default": false,
+        "configurable": true
+      },
+      "themeColors": {
+        "paletteKeys": [
+          "background",
+          "foreground",
+          "cursor",
+          "cursorAccent",
+          "selectionBackground",
+          "black",
+          "red",
+          "green",
+          "yellow",
+          "blue",
+          "magenta",
+          "cyan",
+          "white",
+          "brightBlack",
+          "brightRed",
+          "brightGreen",
+          "brightYellow",
+          "brightBlue",
+          "brightMagenta",
+          "brightCyan",
+          "brightWhite"
+        ],
+        "defaultBackground": "#282c34",
+        "defaultForeground": "#ffffff"
+      }
+    },
+    "unmeasuredRealSurfaceScenarios": [
+      {
+        "id": "idle-cpu-multi-session",
+        "name": "Idle CPU Under Multi-Session Load",
+        "sourceFiles": [
+          "ui/src/lib/terminalHostManager.ts"
+        ],
+        "contractDescription": "Zero-activity background PTY sessions must exhibit <= 0.1% CPU wake-up frequency on macOS Activity Monitor.",
+        "verificationStatus": "unmeasured_real_surface",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true,
+        "notes": "Unmeasured real-surface scenario: requires macOS Instruments / Activity Monitor profiling under live 10-pane daemon session."
+      },
+      {
+        "id": "tab-switch-real-latency",
+        "name": "Real Surface Tab Switch Frame Latency",
+        "sourceFiles": [
+          "ui/src/lib/terminalHostManager.ts"
+        ],
+        "contractDescription": "Switching between active output tabs must render the new terminal buffer in < 16.6ms (1 frame) without layout reflow glitch.",
+        "verificationStatus": "unmeasured_real_surface",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true,
+        "notes": "Unmeasured real-surface scenario: host manager unit mocks exist, but real display frame budget requires manual QA / profiler."
+      },
+      {
+        "id": "split-resize-continuous-fps",
+        "name": "Interactive Split Pane Continuous Drag FPS",
+        "sourceFiles": [
+          "ui/src/components/TerminalSplitView.tsx"
+        ],
+        "contractDescription": "Continuous mouse dragging on pane divider under active terminal throughput sustains >= 60 FPS without DOM stall.",
+        "verificationStatus": "unmeasured_real_surface",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true,
+        "notes": "Unmeasured real-surface scenario: requires Chrome DevTools Performance recording during live split drag."
+      },
+      {
+        "id": "hmr-restore-process-recovery",
+        "name": "Process Crash / Reload Terminal State Recovery",
+        "sourceFiles": [
+          "ui/src/state/workspaceRestore.test.tsx"
+        ],
+        "contractDescription": "Full desktop application reload restores active terminal sessions, scroll position, and PTY connection without data loss.",
+        "verificationStatus": "unmeasured_real_surface",
+        "hasCommandEvidence": false,
+        "manualQaRequired": true,
+        "notes": "Unmeasured real-surface scenario: store logic is test-verified, but Tauri process relaunch requires manual QA validation."
+      }
+    ]
+  }
+}

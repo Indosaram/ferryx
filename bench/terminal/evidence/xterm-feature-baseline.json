@@ -1,0 +1,254 @@
+{
+  "xtermPackage": "@xterm/xterm",
+  "xtermVersion": "6.0.0",
+  "addons": [
+    {
+      "name": "@xterm/addon-fit",
+      "version": "0.11.0",
+      "purpose": "Auto-sizing terminal to container dimensions"
+    },
+    {
+      "name": "@xterm/addon-search",
+      "version": "0.16.0",
+      "purpose": "In-buffer text search with match navigation"
+    },
+    {
+      "name": "@xterm/addon-unicode11",
+      "version": "0.9.0",
+      "purpose": "Unicode 11 VTE width and emoji support"
+    },
+    {
+      "name": "@xterm/addon-webgl",
+      "version": "0.19.0",
+      "purpose": "Hardware-accelerated glyph rendering pipeline"
+    }
+  ],
+  "features": [
+    {
+      "id": "binary-scheduled-output-replay",
+      "name": "Binary Scheduled Output & Daemon Replay",
+      "sourceFiles": [
+        "ui/src/lib/terminalOutputScheduler.ts",
+        "ui/src/lib/terminalOutput.ts"
+      ],
+      "contractDescription": "Coalesced Uint8Array output stream via RAF and 128 KiB threshold flush; daemon sequence/epoch tracking with gap handling.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true,
+      "notes": "Source-audited; dedicated command evidence remains required before native parity sign-off."
+    },
+    {
+      "id": "resize-handling",
+      "name": "Resize Observer & Viewport Preservation",
+      "sourceFiles": [
+        "ui/src/lib/terminalInstanceFactory.ts",
+        "ui/src/lib/terminalFit.ts"
+      ],
+      "contractDescription": "ResizeObserver on terminal container element, debounced RAF refit, preserves scroll-to-bottom anchor, syncs cols/rows over IPC.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    },
+    {
+      "id": "input-forwarding",
+      "name": "Keystroke & Pointer Input Forwarding",
+      "sourceFiles": [
+        "ui/src/lib/terminalInstanceFactory.ts"
+      ],
+      "contractDescription": "terminal.onData dispatches keystrokes and escape sequences directly to daemon PTY via writeTerminal IPC; pointerdown focuses terminal.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    },
+    {
+      "id": "title-reporting",
+      "name": "Window & Tab Title Reporting",
+      "sourceFiles": [
+        "ui/src/lib/terminalInstanceFactory.ts",
+        "ui/src/lib/agentTitle.ts"
+      ],
+      "contractDescription": "OSC 0 and OSC 2 sequence handling via terminal.onTitleChange updates tab and workspace session title.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    },
+    {
+      "id": "bell-notification",
+      "name": "Terminal Bell (BEL) Notification",
+      "sourceFiles": [
+        "ui/src/lib/terminalInstanceFactory.ts"
+      ],
+      "contractDescription": "BEL (0x07) trigger dispatches terminal.onBell callback for tab badge and audio/visual alerts.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    },
+    {
+      "id": "search-addon",
+      "name": "Search Overlay & Addon Navigation",
+      "sourceFiles": [
+        "ui/src/components/TerminalSearchOverlay.tsx",
+        "ui/src/lib/terminalInstanceFactory.ts"
+      ],
+      "contractDescription": "@xterm/addon-search provides findNext / findPrevious, regex, case sensitivity, and whole word searching over active buffer.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    },
+    {
+      "id": "unicode11-addon",
+      "name": "Unicode 11 Extended VTE Addon",
+      "sourceFiles": [
+        "ui/src/lib/terminalInstanceFactory.ts"
+      ],
+      "contractDescription": "Loads @xterm/addon-unicode11 dynamically in factory and sets activeVersion='11' for wcwidth on emoji and CJK wide glyphs.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true,
+      "notes": "Source-audited in ui/src/lib/terminalInstanceFactory.ts; dynamic loading seam present in UI but lacks dedicated vitest UI test file; manual QA required."
+    },
+    {
+      "id": "webgl-renderer",
+      "name": "WebGL Hardware Accelerated Rendering",
+      "sourceFiles": [
+        "ui/src/lib/terminalRenderer.ts",
+        "ui/src/lib/terminalInstanceFactory.ts"
+      ],
+      "contractDescription": "Asynchronously loads @xterm/addon-webgl for GPU acceleration; falls back cleanly to canvas/DOM rendering if context fails.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    },
+    {
+      "id": "terminal-settings-contracts",
+      "name": "Theme, Font, and Scrollback Configuration",
+      "sourceFiles": [
+        "ui/src/lib/terminalSettings.ts"
+      ],
+      "contractDescription": "Saves and resolves font stack, font size (10-36), scrollback (1k-100k), cursorStyle, macosOptionAsAlt, and 24-bit theme palette.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    },
+    {
+      "id": "desktop-vs-browser-boundary",
+      "name": "Desktop Tauri vs Browser Runtime Boundary",
+      "sourceFiles": [
+        "ui/src/lib/terminalInstanceFactory.ts",
+        "ui/src/lib/tauri.ts"
+      ],
+      "contractDescription": "isTauriRuntime() guards IPC PTY session creation; browser preview environment renders simulated preview prompt banner.",
+      "verificationStatus": "source_audited",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true
+    }
+  ],
+  "settingsContracts": {
+    "fontFamily": {
+      "default": "Berkeley Mono, JetBrains Mono, Fira Code, Menlo, Monaco, Consolas, monospace",
+      "configurable": true,
+      "source": "localStorage + native ghostty config sync"
+    },
+    "fontSize": {
+      "default": 13,
+      "min": 10,
+      "max": 36,
+      "configurable": true
+    },
+    "scrollback": {
+      "default": 10000,
+      "min": 1000,
+      "max": 100000,
+      "configurable": true
+    },
+    "cursorStyle": {
+      "options": [
+        "block",
+        "bar",
+        "underline"
+      ],
+      "default": "block"
+    },
+    "macosOptionAsAlt": {
+      "default": false,
+      "configurable": true
+    },
+    "themeColors": {
+      "paletteKeys": [
+        "background",
+        "foreground",
+        "cursor",
+        "cursorAccent",
+        "selectionBackground",
+        "black",
+        "red",
+        "green",
+        "yellow",
+        "blue",
+        "magenta",
+        "cyan",
+        "white",
+        "brightBlack",
+        "brightRed",
+        "brightGreen",
+        "brightYellow",
+        "brightBlue",
+        "brightMagenta",
+        "brightCyan",
+        "brightWhite"
+      ],
+      "defaultBackground": "#282c34",
+      "defaultForeground": "#ffffff"
+    }
+  },
+  "unmeasuredRealSurfaceScenarios": [
+    {
+      "id": "idle-cpu-multi-session",
+      "name": "Idle CPU Under Multi-Session Load",
+      "sourceFiles": [
+        "ui/src/lib/terminalHostManager.ts"
+      ],
+      "contractDescription": "Zero-activity background PTY sessions must exhibit <= 0.1% CPU wake-up frequency on macOS Activity Monitor.",
+      "verificationStatus": "unmeasured_real_surface",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true,
+      "notes": "Unmeasured real-surface scenario: requires macOS Instruments / Activity Monitor profiling under live 10-pane daemon session."
+    },
+    {
+      "id": "tab-switch-real-latency",
+      "name": "Real Surface Tab Switch Frame Latency",
+      "sourceFiles": [
+        "ui/src/lib/terminalHostManager.ts"
+      ],
+      "contractDescription": "Switching between active output tabs must render the new terminal buffer in < 16.6ms (1 frame) without layout reflow glitch.",
+      "verificationStatus": "unmeasured_real_surface",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true,
+      "notes": "Unmeasured real-surface scenario: host manager unit mocks exist, but real display frame budget requires manual QA / profiler."
+    },
+    {
+      "id": "split-resize-continuous-fps",
+      "name": "Interactive Split Pane Continuous Drag FPS",
+      "sourceFiles": [
+        "ui/src/components/TerminalSplitView.tsx"
+      ],
+      "contractDescription": "Continuous mouse dragging on pane divider under active terminal throughput sustains >= 60 FPS without DOM stall.",
+      "verificationStatus": "unmeasured_real_surface",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true,
+      "notes": "Unmeasured real-surface scenario: requires Chrome DevTools Performance recording during live split drag."
+    },
+    {
+      "id": "hmr-restore-process-recovery",
+      "name": "Process Crash / Reload Terminal State Recovery",
+      "sourceFiles": [
+        "ui/src/state/workspaceRestore.test.tsx"
+      ],
+      "contractDescription": "Full desktop application reload restores active terminal sessions, scroll position, and PTY connection without data loss.",
+      "verificationStatus": "unmeasured_real_surface",
+      "hasCommandEvidence": false,
+      "manualQaRequired": true,
+      "notes": "Unmeasured real-surface scenario: store logic is test-verified, but Tauri process relaunch requires manual QA validation."
+    }
+  ]
+}

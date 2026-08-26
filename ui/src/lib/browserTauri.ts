@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  BrowserAutomationRequest,
+  BrowserAutomationSnapshot,
   BrowserSessionSummary,
   BrowserState,
   CreateBrowserRequest,
@@ -108,4 +110,16 @@ export async function importBrowserCookies(profileId: string, filePath: string):
 
 export async function openExternalUrl(url: string): Promise<void> {
   return invoke<void>("cmd_browser_open_external", { url });
+}
+
+export async function browserAutomationSnapshot(
+  browserId: string,
+): Promise<BrowserAutomationSnapshot> {
+  return invoke<BrowserAutomationSnapshot>("cmd_browser_automation_snapshot", { browserId });
+}
+
+export async function browserAutomationAct(
+  request: BrowserAutomationRequest,
+): Promise<void> {
+  return invoke<void>("cmd_browser_automation_act", { request });
 }

@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
 import {
+  selectActivityNotificationTargets,
   selectTabActivitySummaries,
   selectWorktreeActivitySummaries,
   useWorkspaceStore,
+  workspaceReducer,
   type WorkspaceServices,
   type WorkspaceState,
 } from "./workspaceStore";
@@ -170,5 +172,166 @@ describe("workspace activity tracking", () => {
       hasWaiting: false,
       hasDone: false,
     });
+  });
+
+  it("does not set isAgent for shell titles carrying activity words like make: running tests", async () => {
+    const workspaceServices = services();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree], services: workspaceServices }),
+    );
+
+    let tabId = "";
+    await act(async () => {
+      tabId = openedTab(await result.current.openTab(worktree));
+    });
+    const tab = result.current.state.layout.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.kind === "browser") throw new Error("expected terminal tab");
+    const sessionId = tab.sessionId;
+
+    act(() => {
+      result.current.updateSessionTitleActivity(tabId, "make: running tests");
+    });
+
+    expect(result.current.state.activityBySessionId?.[sessionId]).toMatchObject({
+      isAgent: false,
+      state: "working",
+    });
+  });
+
+  it("does not mark a tab unread when it is the activeTabId of a secondary visible tab group", () => {
+    const state: WorkspaceState = {
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {
+        "session-a": {
+          id: "session-a",
+          cwd: worktree.path,
+          workspaceId: "default",
+          worktree: { wsId: "ws-main", slug: "main" },
+          backendSessionId: "backend-a",
+          lifecycle: "working",
+        },
+        "session-b": {
+          id: "session-b",
+          cwd: worktree.path,
+          workspaceId: "default",
+          worktree: { wsId: "ws-main", slug: "main" },
+          backendSessionId: "backend-b",
+          lifecycle: "working",
+        },
+        "session-c": {
+          id: "session-c",
+          cwd: worktree.path,
+          workspaceId: "default",
+          worktree: { wsId: "ws-main", slug: "main" },
+          backendSessionId: "backend-c",
+          lifecycle: "working",
+        },
+      },
+      layout: {
+        tabs: [
+          { id: "tab-a", label: "tab-a", sessionId: "session-a" },
+          { id: "tab-b", label: "tab-b", sessionId: "session-b" },
+          { id: "tab-c", label: "tab-c", sessionId: "session-c" },
+        ],
+        activeTabId: "tab-a",
+        focusedGroupId: "group-a",
+        tabGroups: {
+          "group-a": { id: "group-a", tabIds: ["tab-a"], activeTabId: "tab-a" },
+          "group-b": { id: "group-b", tabIds: ["tab-b"], activeTabId: "tab-b" },
+        },
+        layoutsByTabId: {},
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {
+        "session-b": { state: "working", title: "⠋ omo: build", isAgent: true, agentType: "omo" },
+        "session-c": { state: "working", title: "⠋ omo: build", isAgent: true, agentType: "omo" },
+      },
+    };
+
+    const nextStateB = workspaceReducer(state, {
+      type: "SESSION_TITLE_ACTIVITY",
+      tabId: "tab-b",
+      sessionId: "session-b",
+      title: "✳ omo: done",
+    });
+    expect(nextStateB.unreadTabIds["tab-b"]).toBeUndefined();
+
+    const nextStateC = workspaceReducer(state, {
+      type: "SESSION_TITLE_ACTIVITY",
+      tabId: "tab-c",
+      sessionId: "session-c",
+      title: "✳ omo: done",
+    });
+    expect(nextStateC.unreadTabIds["tab-c"]).toBe(true);
+  });
+
+  it("resolves notification targets with worktreeLabel, agentLabel, and skips unowned sessions", () => {
+    const state: WorkspaceState = {
+      worktrees: [featureWorktree],
+      activeWorktreePath: featureWorktree.path,
+      sessions: {
+        "session-a": {
+          id: "session-a",
+          cwd: featureWorktree.path,
+          workspaceId: "default",
+          worktree: { wsId: "ws-main", slug: "feature" },
+          backendSessionId: "backend-a",
+          lifecycle: "working",
+        },
+        "session-unowned": {
+          id: "session-unowned",
+          cwd: featureWorktree.path,
+          workspaceId: "default",
+          worktree: { wsId: "ws-main", slug: "feature" },
+          backendSessionId: "backend-unowned",
+          lifecycle: "working",
+        },
+      },
+      layout: {
+        tabs: [{ id: "tab-a", label: "feature", sessionId: "session-a" }],
+        activeTabId: "tab-a",
+        layoutsByTabId: {},
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {
+        "session-a": { state: "working", title: "⠋ omo: build", isAgent: true, agentType: "omo" },
+        "session-unowned": { state: "waiting", title: "✋ codex: permission", isAgent: true, agentType: "codex" },
+      },
+    };
+
+    const targets = selectActivityNotificationTargets(state);
+    expect(targets).toEqual([
+      {
+        sessionId: "session-a",
+        tabId: "tab-a",
+        worktreePath: featureWorktree.path,
+        worktreeLabel: "feature",
+        agentLabel: "OMO",
+        terminalTitle: "⠋ omo: build",
+        state: "working",
+      },
+    ]);
+  });
+
+  it("memoizes selector outputs when renderedState does not change", () => {
+    const workspaceServices = services();
+    const { result, rerender } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree], services: workspaceServices }),
+    );
+
+    const initialAgents = result.current.agents;
+    const initialTabActivity = result.current.tabActivity;
+    const initialWorktreeActivity = result.current.worktreeActivity;
+    const initialTargets = result.current.activityNotificationTargets;
+
+    rerender();
+
+    expect(result.current.agents).toBe(initialAgents);
+    expect(result.current.tabActivity).toBe(initialTabActivity);
+    expect(result.current.worktreeActivity).toBe(initialWorktreeActivity);
+    expect(result.current.activityNotificationTargets).toBe(initialTargets);
   });
 });

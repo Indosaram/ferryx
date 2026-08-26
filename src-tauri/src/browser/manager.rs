@@ -22,6 +22,7 @@ pub struct ManagedBrowserSession {
     pub load_error: Option<String>,
     pub visible: bool,
     pub bounds: Option<LogicalRect>,
+    pub automation_targets: HashMap<String, String>,
 }
 
 fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
@@ -88,6 +89,7 @@ impl BrowserManager {
             load_error: None,
             visible,
             bounds: req.bounds,
+            automation_targets: HashMap::new(),
         };
 
         let state = browser_state(&session);
@@ -145,6 +147,7 @@ impl BrowserManager {
 
         s.url = valid_url.clone();
         s.generation += 1;
+        s.automation_targets.clear();
         s.loading = true;
         s.load_error = None;
         Ok(valid_url)
@@ -156,6 +159,7 @@ impl BrowserManager {
             .get_mut(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
         s.generation += 1;
+        s.automation_targets.clear();
         s.loading = true;
         s.load_error = None;
         Ok(browser_state(s))
@@ -170,6 +174,58 @@ impl BrowserManager {
             .get_mut(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
         s.bounds = Some(bounds);
+        Ok(())
+    }
+
+    pub fn record_automation_targets(
+        &self,
+        browser_id: &str,
+        generation: u64,
+        targets: Vec<BrowserAutomationTarget>,
+    ) -> Result<(), BrowserError> {
+        let mut guard = self.sessions.write();
+        let session = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        if session.generation != generation {
+            return Err(BrowserError::AutomationSnapshotStale);
+        }
+        session.automation_targets = targets
+            .into_iter()
+            .map(|target| (target.reference, target.selector))
+            .collect();
+        Ok(())
+    }
+
+    pub fn automation_target(
+        &self,
+        browser_id: &str,
+        generation: u64,
+        reference: &str,
+    ) -> Result<String, BrowserError> {
+        let guard = self.sessions.read();
+        let session = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        if session.generation != generation {
+            return Err(BrowserError::AutomationSnapshotStale);
+        }
+        session
+            .automation_targets
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| BrowserError::AutomationTargetNotFound(reference.to_string()))
+    }
+
+    pub fn assert_automation_generation(
+        &self,
+        browser_id: &str,
+        generation: u64,
+    ) -> Result<(), BrowserError> {
+        let current = self.get_state(browser_id)?;
+        if current.generation != generation {
+            return Err(BrowserError::AutomationSnapshotStale);
+        }
         Ok(())
     }
 
@@ -209,7 +265,11 @@ impl BrowserManager {
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
 
         if let Some(u) = url {
-            s.url = u;
+            if s.url != u {
+                s.url = u;
+                s.generation += 1;
+                s.automation_targets.clear();
+            }
         }
         if let Some(t) = title {
             s.title = Some(t);

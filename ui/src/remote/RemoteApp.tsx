@@ -1,6 +1,12 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  clearRemoteAuthToken,
+  getRemoteAuthToken,
+  setRemoteAuthToken,
+} from "../lib/remoteClient";
 import { PairingPage } from "./PairingPage";
 import {
+  getRemoteDocumentTitle,
   normalizeRemoteWorkspaceState,
   RemoteWorkspaceMirror,
   type RemoteContextOption,
@@ -8,8 +14,17 @@ import {
 } from "./RemoteSessionList";
 import { RemoteTerminal } from "./RemoteTerminal";
 
-const TOKEN_KEY = "ferryx_remote_token";
-const LEGACY_TOKEN_KEY = "rorca_remote_token";
+const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
+
+type RemoteActiveSelectionEvent = {
+  readonly workspaceId: string | null;
+  readonly worktreeSlug: string | null;
+  readonly tabId?: string | null;
+};
+
+type RemoteActiveSelectionChange = {
+  readonly selection: RemoteActiveSelectionEvent | null;
+};
 
 const EMPTY_MODEL: RemoteWorkspaceModel = {
   context: {
@@ -21,46 +36,120 @@ const EMPTY_MODEL: RemoteWorkspaceModel = {
   options: [],
 };
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function parseActiveSelectionEvent(raw: unknown): RemoteActiveSelectionChange | null {
+  if (typeof raw !== "string") return null;
+  let message: unknown;
+  try {
+    message = JSON.parse(raw);
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+  const event = record(message);
+  if (event?.event !== REMOTE_ACTIVE_SELECTION_CHANGED_EVENT) return null;
+  const payload = record(event.payload);
+  if (!payload) return { selection: null };
+  return {
+    selection: {
+      workspaceId: optionalString(payload.workspaceId),
+      worktreeSlug: optionalString(payload.worktreeSlug),
+      tabId: optionalString(payload.tabId ?? payload.activeTabId),
+    },
+  };
+}
+
+function selectionMatchesActiveContext(
+  option: RemoteContextOption,
+  selection: RemoteActiveSelectionEvent,
+): boolean {
+  if (selection.workspaceId !== option.workspaceId) return false;
+  if (option.worktreeSlug !== null && selection.worktreeSlug !== null && selection.worktreeSlug !== option.worktreeSlug) {
+    return false;
+  }
+  if (option.tabId && selection.tabId && selection.tabId !== option.tabId) {
+    return false;
+  }
+  return true;
+}
+
+function modelConfirmsSelection(option: RemoteContextOption, model: RemoteWorkspaceModel): boolean {
+  const confirmedWorktree = model.context.worktreeSlug ?? model.context.worktreeLabel;
+  const requestedWorktree = option.worktreeSlug ?? option.worktreeLabel;
+  const workspaceMatches = model.context.workspaceId === option.workspaceId;
+  const worktreeMatches = requestedWorktree === null || confirmedWorktree === requestedWorktree;
+  const tabMatches = !option.tabId || model.context.activeTabId === option.tabId;
+  return workspaceMatches && worktreeMatches && tabMatches;
+}
+
+function eventsSocketUrl(token: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/v1/events?token=${encodeURIComponent(token)}`;
+}
+
 export const RemoteApp: React.FC = () => {
-  const [token, setToken] = useState<string | null>(
-    () => localStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(LEGACY_TOKEN_KEY),
-  );
+  const [token, setToken] = useState<string | null>(getRemoteAuthToken);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
+  const selectionRequestAcceptedRef = useRef(false);
+  const selectionEventReceivedRef = useRef(false);
+  const confirmationInFlightRef = useRef(false);
+  const workspaceRefreshVersionRef = useRef(0);
 
   const disconnect = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    clearRemoteAuthToken();
     setToken(null);
     setModel(EMPTY_MODEL);
     setPending(null);
     setStatusMessage(null);
+    pendingSelectionRef.current = null;
+    selectionRequestAcceptedRef.current = false;
+    selectionEventReceivedRef.current = false;
+    confirmationInFlightRef.current = false;
+    workspaceRefreshVersionRef.current += 1;
   }, []);
 
   const handlePaired = useCallback((newToken: string) => {
-    localStorage.setItem(TOKEN_KEY, newToken);
-    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    setRemoteAuthToken(newToken);
     setToken(newToken);
   }, []);
 
-  const refreshWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
+  const loadWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
     if (!token) return null;
     try {
       const response = await fetch(
         `/api/v1/workspace/state?token=${encodeURIComponent(token)}`,
       );
       if (!response.ok) {
-        disconnect();
+        if (response.status === 401 || response.status === 403) {
+          disconnect();
+        }
         return null;
       }
-      const next = normalizeRemoteWorkspaceState(await response.json());
-      setModel(next);
-      return next;
+      return normalizeRemoteWorkspaceState(await response.json());
     } catch {
       return null;
     }
   }, [disconnect, token]);
+
+  const refreshWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
+    const refreshVersion = workspaceRefreshVersionRef.current;
+    const next = await loadWorkspace();
+    if (!next || workspaceRefreshVersionRef.current !== refreshVersion) return null;
+    setModel(next);
+    return next;
+  }, [loadWorkspace]);
 
   useEffect(() => {
     const hash = window.location.hash;
@@ -88,9 +177,68 @@ export const RemoteApp: React.FC = () => {
     if (token) void refreshWorkspace();
   }, [refreshWorkspace, token]);
 
+  useEffect(() => {
+    if (!token) {
+      document.title = "Ferryx";
+      return;
+    }
+    document.title = getRemoteDocumentTitle(model);
+    return () => {
+      document.title = "Ferryx";
+    };
+  }, [model, token]);
+
+  const clearPendingSelection = useCallback(() => {
+    pendingSelectionRef.current = null;
+    selectionRequestAcceptedRef.current = false;
+    selectionEventReceivedRef.current = false;
+    confirmationInFlightRef.current = false;
+    setPending(null);
+  }, []);
+
+  const confirmSelection = useCallback(async (option: RemoteContextOption) => {
+    if (confirmationInFlightRef.current) return;
+    confirmationInFlightRef.current = true;
+    const confirmed = await refreshWorkspace();
+    confirmationInFlightRef.current = false;
+    if (pendingSelectionRef.current !== option) return;
+    if (confirmed && modelConfirmsSelection(option, confirmed)) {
+      setStatusMessage("Desktop context confirmed");
+      clearPendingSelection();
+    } else {
+      setStatusMessage("Waiting for Ferryx Desktop confirmation...");
+    }
+  }, [clearPendingSelection, refreshWorkspace]);
+
+  useEffect(() => {
+    if (!token || typeof WebSocket === "undefined") return;
+    const socket = new WebSocket(eventsSocketUrl(token));
+    socket.onmessage = (event) => {
+      const change = parseActiveSelectionEvent(event.data);
+      if (!change) return;
+      workspaceRefreshVersionRef.current += 1;
+      const selection = change.selection;
+      const pendingSelection = pendingSelectionRef.current;
+      if (!pendingSelection) {
+        void refreshWorkspace();
+        return;
+      }
+      if (!selection || !selectionMatchesActiveContext(pendingSelection, selection)) {
+        void refreshWorkspace();
+        return;
+      }
+      selectionEventReceivedRef.current = true;
+      if (selectionRequestAcceptedRef.current) void confirmSelection(pendingSelection);
+    };
+    return () => socket.close();
+  }, [confirmSelection, token]);
+
   const selectContext = useCallback(async (option: RemoteContextOption) => {
     if (!token || pending) return;
     const target = option.worktreeLabel ?? option.worktreeSlug;
+    pendingSelectionRef.current = option;
+    selectionRequestAcceptedRef.current = false;
+    selectionEventReceivedRef.current = false;
     setPending(option);
     setStatusMessage(
       `Switching to ${option.workspaceId}${target ? ` / ${target}` : ""}...`,
@@ -105,29 +253,30 @@ export const RemoteApp: React.FC = () => {
           body: JSON.stringify({
             workspaceId: option.workspaceId,
             ...(option.worktreeSlug ? { worktreeSlug: option.worktreeSlug } : {}),
+            ...(option.tabId ? { tabId: option.tabId } : {}),
           }),
         },
       );
       if (!response.ok) throw new Error(`Selection failed (${response.status})`);
 
-      const confirmed = await refreshWorkspace();
-      if (!confirmed) throw new Error("Desktop context could not be refreshed");
-      const confirmedWorktree =
-        confirmed.context.worktreeSlug ?? confirmed.context.worktreeLabel;
-      const requestedWorktree = option.worktreeSlug ?? option.worktreeLabel;
-      if (
-        confirmed.context.workspaceId !== option.workspaceId ||
-        (requestedWorktree !== null && confirmedWorktree !== requestedWorktree)
-      ) {
-        throw new Error("Ferryx Desktop has not confirmed this context yet");
+      selectionRequestAcceptedRef.current = true;
+      workspaceRefreshVersionRef.current += 1;
+      confirmationInFlightRef.current = true;
+      const immediatelyObserved = await refreshWorkspace();
+      confirmationInFlightRef.current = false;
+      if (immediatelyObserved && modelConfirmsSelection(option, immediatelyObserved)) {
+        setStatusMessage("Desktop context confirmed");
+        clearPendingSelection();
+        return;
       }
-      setStatusMessage("Desktop context confirmed");
+      setStatusMessage("Waiting for Ferryx Desktop confirmation...");
+      if (selectionEventReceivedRef.current) void confirmSelection(option);
     } catch (error) {
+      confirmationInFlightRef.current = false;
       setStatusMessage(error instanceof Error ? error.message : "Context selection failed");
-    } finally {
-      setPending(null);
+      clearPendingSelection();
     }
-  }, [pending, refreshWorkspace, token]);
+  }, [clearPendingSelection, confirmSelection, pending, refreshWorkspace, token]);
 
   if (!token) return <PairingPage onPaired={handlePaired} />;
 
@@ -135,20 +284,18 @@ export const RemoteApp: React.FC = () => {
 
   return (
     <div className="flex h-[100dvh] min-h-screen flex-col overflow-hidden bg-background text-foreground">
-      <header className="flex h-11 shrink-0 items-center justify-between border-b border-border bg-card px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="flex size-6 items-center justify-center rounded-md bg-primary text-xs font-bold text-primary-foreground" aria-hidden="true">
+      <header className="flex h-7 shrink-0 items-center justify-between border-b border-border bg-card px-2.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="flex size-4 items-center justify-center rounded bg-primary text-[10px] font-bold text-primary-foreground" aria-hidden="true">
             F
           </span>
-          <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold">Ferryx Remote</h1>
-            <p className="text-xs text-muted-foreground">Following Ferryx Desktop</p>
-          </div>
+          <h1 className="truncate text-xs font-semibold leading-none">Ferryx Remote</h1>
+          <span className="hidden text-[10px] text-muted-foreground sm:inline leading-none">Following Ferryx Desktop</span>
         </div>
         <button
           type="button"
           onClick={disconnect}
-          className="min-h-9 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           Disconnect
         </button>

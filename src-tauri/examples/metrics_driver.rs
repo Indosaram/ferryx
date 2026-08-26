@@ -14,7 +14,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match mode {
         "list" => {
-            let sessions = client.list_sessions().await.map_err(|e| format!("list failed: {e:?}"))?;
+            let sessions = client
+                .list_sessions()
+                .await
+                .map_err(|e| format!("list failed: {e:?}"))?;
             println!("sessions: {sessions:#?}");
         }
         "write" => {

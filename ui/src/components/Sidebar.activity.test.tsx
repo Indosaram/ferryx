@@ -22,8 +22,8 @@ const qaWorktree: Worktree = {
 };
 
 const projects = [
-  { workspaceId: "default", repoRoot: "/repos/default" },
-  { workspaceId: "qa", repoRoot: "/repos/qa" },
+  { workspaceId: "default", repoRoot: "/repos/default", gitRoot: "/repos/default" },
+  { workspaceId: "qa", repoRoot: "/repos/qa", gitRoot: "/repos/qa" },
 ];
 
 function summary(overrides: Partial<ActivitySummary>): ActivitySummary {

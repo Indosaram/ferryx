@@ -1449,6 +1449,7 @@ mod tests {
             worktree_slug: None,
             worktree_label: None,
             session_id: None,
+            ..Default::default()
         };
         client
             .remote_set_active_selection(Some(sel.clone()))

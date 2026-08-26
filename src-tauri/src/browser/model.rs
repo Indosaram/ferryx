@@ -130,3 +130,45 @@ pub struct BrowserOpenRequestedPayload {
     pub browser_id: String,
     pub target_url: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationTarget {
+    pub reference: String,
+    pub selector: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationElement {
+    pub reference: String,
+    pub role: String,
+    pub name: String,
+    pub tag_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationSnapshot {
+    pub browser_id: String,
+    pub generation: u64,
+    pub url: String,
+    pub title: String,
+    pub elements: Vec<BrowserAutomationElement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum BrowserAutomationAction {
+    Click { reference: String },
+    Fill { reference: String, value: String },
+    Keypress { key: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationRequest {
+    pub browser_id: String,
+    pub generation: u64,
+    pub action: BrowserAutomationAction,
+}

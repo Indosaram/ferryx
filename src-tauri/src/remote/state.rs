@@ -4,11 +4,13 @@ use crate::terminal::TerminalService;
 use crate::worktree::WorkspaceRegistry;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 
 pub type DesktopEventSink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
+pub const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT: &str = "remote_active_selection_changed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,11 +98,17 @@ impl RemoteGatewayState {
         workspace_registry: WorkspaceRegistry,
     ) -> Self {
         let base = remote_data_dir();
+        if base.is_none() {
+            tracing::warn!(
+                "no per-user data directory could be resolved; remote pairing state will be \
+                 kept in memory only and lost on exit"
+            );
+        }
         Self::new_with_paths(
             terminal_service,
             workspace_registry,
-            Some(base.join("remote-config.json")),
-            Some(base.join("remote-auth.json")),
+            base.as_ref().map(|base| base.join("remote-config.json")),
+            base.as_ref().map(|base| base.join("remote-auth.json")),
         )
     }
 
@@ -139,13 +147,19 @@ impl RemoteGatewayState {
 
     pub fn set_active_selection(&self, selection: RemoteActiveDesktopSelection) {
         let session_id = selection.session_id.clone();
+        let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);
         *self.active_selection.write() = Some(selection);
-        let _ = self.active_session_tx.send(session_id);
+        // `send` fails and discards the value when no receiver is alive, which is the normal
+        // state before any remote client attaches. `send_replace` stores it regardless so a
+        // later subscriber observes the current selection instead of the initial `None`.
+        self.active_session_tx.send_replace(session_id);
+        self.emit_active_selection_changed(payload);
     }
 
     pub fn clear_active_selection(&self) {
         *self.active_selection.write() = None;
-        let _ = self.active_session_tx.send(None);
+        self.active_session_tx.send_replace(None);
+        self.emit_active_selection_changed(serde_json::Value::Null);
     }
 
     pub fn set_active_selection_opt(&self, selection: Option<RemoteActiveDesktopSelection>) {
@@ -184,6 +198,15 @@ impl RemoteGatewayState {
         let _ = self.event_tx.send(event_json);
     }
 
+    fn emit_active_selection_changed(&self, payload: serde_json::Value) {
+        if let Ok(event) = serde_json::to_string(&RemoteEventMessage {
+            event: REMOTE_ACTIVE_SELECTION_CHANGED_EVENT.to_string(),
+            payload,
+        }) {
+            let _ = self.event_tx.send(event);
+        }
+    }
+
     pub fn persist_config(&self) -> std::io::Result<()> {
         let Some(path) = self.config_path.as_deref() else {
             return Ok(());
@@ -192,14 +215,37 @@ impl RemoteGatewayState {
     }
 }
 
-fn remote_data_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("FERRYX_DATA_DIR") {
-        return PathBuf::from(path).join("remote");
+/// Per-user directory sources consulted in order, as `(environment variable, subdirectory)`.
+///
+/// Windows does not define `HOME`; per-user application state belongs under `LOCALAPPDATA`,
+/// whose default ACL excludes other standard users.
+#[cfg(windows)]
+const DATA_DIR_SOURCES: &[(&str, &str)] = &[("LOCALAPPDATA", "Ferryx"), ("USERPROFILE", ".ferryx")];
+#[cfg(not(windows))]
+const DATA_DIR_SOURCES: &[(&str, &str)] = &[("HOME", ".ferryx")];
+
+/// Resolves the remote data directory from an arbitrary environment lookup.
+///
+/// Returns `None` when no per-user location can be determined. Callers then run without
+/// persistence: this file holds plaintext device tokens, so falling back to a shared
+/// scratch directory such as [`std::env::temp_dir`] would place credentials somewhere
+/// other accounts may read and automated cleaners routinely purge.
+fn resolve_remote_data_dir<F>(lookup: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    if let Some(path) = lookup("FERRYX_DATA_DIR") {
+        return Some(PathBuf::from(path).join("remote"));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".ferryx").join("remote");
-    }
-    std::env::temp_dir().join("ferryx").join("remote")
+    DATA_DIR_SOURCES
+        .iter()
+        .find_map(|(variable, subdirectory)| {
+            lookup(variable).map(|base| PathBuf::from(base).join(subdirectory).join("remote"))
+        })
+}
+
+fn remote_data_dir() -> Option<PathBuf> {
+    resolve_remote_data_dir(|variable| std::env::var_os(variable))
 }
 
 #[cfg(test)]
@@ -314,5 +360,84 @@ mod tests {
         );
         assert!(!*state.is_running.read());
         assert!(state.bound_address.read().is_none());
+    }
+
+    /// Builds a lookup over an explicit variable set so the platform-specific resolution order
+    /// can be exercised on any host without mutating process environment.
+    fn lookup_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        |variable: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == variable)
+                .map(|(_, value)| OsString::from(*value))
+        }
+    }
+
+    #[test]
+    fn explicit_data_dir_override_wins_over_platform_home() {
+        let resolved = resolve_remote_data_dir(lookup_from(&[
+            ("FERRYX_DATA_DIR", "/explicit/base"),
+            ("HOME", "/home/user"),
+            ("LOCALAPPDATA", r"C:\Users\user\AppData\Local"),
+        ]))
+        .expect("override must resolve");
+
+        assert_eq!(resolved, PathBuf::from("/explicit/base").join("remote"));
+    }
+
+    #[test]
+    fn credentials_are_never_placed_in_a_shared_scratch_directory() {
+        // Windows leaves HOME unset, which previously fell through to `std::env::temp_dir()` and
+        // wrote plaintext device tokens into the shared TEMP directory.
+        assert!(
+            resolve_remote_data_dir(lookup_from(&[("TMP", r"C:\Windows\Temp")])).is_none(),
+            "with no per-user variable set, persistence must be declined rather than redirected"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefers_localappdata_and_accepts_userprofile() {
+        let localappdata = resolve_remote_data_dir(lookup_from(&[
+            ("LOCALAPPDATA", r"C:\Users\user\AppData\Local"),
+            ("USERPROFILE", r"C:\Users\user"),
+        ]))
+        .expect("LOCALAPPDATA must resolve");
+        assert_eq!(
+            localappdata,
+            PathBuf::from(r"C:\Users\user\AppData\Local")
+                .join("Ferryx")
+                .join("remote")
+        );
+
+        let userprofile =
+            resolve_remote_data_dir(lookup_from(&[("USERPROFILE", r"C:\Users\user")]))
+                .expect("USERPROFILE must resolve when LOCALAPPDATA is absent");
+        assert_eq!(
+            userprofile,
+            PathBuf::from(r"C:\Users\user")
+                .join(".ferryx")
+                .join("remote")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_resolves_under_home_and_ignores_windows_variables() {
+        let resolved = resolve_remote_data_dir(lookup_from(&[("HOME", "/home/user")]))
+            .expect("HOME must resolve");
+        assert_eq!(
+            resolved,
+            PathBuf::from("/home/user").join(".ferryx").join("remote")
+        );
+
+        assert!(
+            resolve_remote_data_dir(lookup_from(&[(
+                "LOCALAPPDATA",
+                r"C:\Users\user\AppData\Local"
+            )]))
+            .is_none(),
+            "Windows-only variables must not be honored on Unix"
+        );
     }
 }

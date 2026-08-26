@@ -555,7 +555,10 @@ fn registry_binds_one_workspace_id_per_canonical_root() {
         .expect("a second registration resolves to the existing owner");
 
     assert_eq!(first, "first");
-    assert_eq!(second, "first", "a canonical root must not gain a second ID");
+    assert_eq!(
+        second, "first",
+        "a canonical root must not gain a second ID"
+    );
     assert_eq!(registry.list().len(), 1);
 }
 
@@ -695,5 +698,8 @@ fn local_overrides_replace_imported_font_and_option_as_alt() {
             macos_option_as_alt: None,
         },
     );
-    assert_eq!(rejected, imported, "blank/non-positive overrides are ignored");
+    assert_eq!(
+        rejected, imported,
+        "blank/non-positive overrides are ignored"
+    );
 }

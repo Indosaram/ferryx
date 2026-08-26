@@ -1,5 +1,8 @@
 use super::*;
+use crate::remote::protocol::RemoteEventMessage;
+use crate::remote::state::REMOTE_ACTIVE_SELECTION_CHANGED_EVENT;
 use crate::terminal::TerminalService;
+use crate::worktree::WorktreeIdentity;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -79,6 +82,33 @@ fn test_auth_manager_pairing_and_revocation() {
 }
 
 #[tokio::test]
+async fn test_active_selection_is_visible_to_a_receiver_that_subscribes_afterwards() {
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(
+        terminal_service,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: None,
+        worktree_slug: None,
+        worktree_label: None,
+        session_id: Some("session-late-subscriber".to_string()),
+        ..Default::default()
+    });
+
+    let receiver = state.active_session_watch_rx();
+    assert_eq!(
+        receiver.borrow().as_deref(),
+        Some("session-late-subscriber"),
+        "a client attaching after the desktop selection was set must observe that selection"
+    );
+
+    state.clear_active_selection();
+    assert_eq!(state.active_session_watch_rx().borrow().as_deref(), None);
+}
+
+#[tokio::test]
 async fn test_remote_server_rejects_off_mode_without_binding() {
     let terminal_service = Arc::new(TerminalService::default());
     let state = Arc::new(RemoteGatewayState::new(
@@ -136,6 +166,228 @@ async fn reqwest_like_health(url: &str) -> bool {
         }
     }
     false
+}
+
+#[tokio::test]
+async fn test_terminal_preferences_requires_a_valid_unrevoked_remote_token() {
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(
+        terminal_service,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start remote server");
+
+    let (missing_status, _) =
+        http_request(addr, "GET", "/api/v1/terminal/preferences", None, None).await;
+    assert_eq!(missing_status, 401);
+
+    let (invalid_status, _) = http_request(
+        addr,
+        "GET",
+        "/api/v1/terminal/preferences",
+        Some("not-a-valid-token"),
+        None,
+    )
+    .await;
+    assert_eq!(invalid_status, 401);
+
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, device) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "PreferencesTest")
+        .expect("pair test device");
+
+    let (valid_status, _) = http_request(
+        addr,
+        "GET",
+        "/api/v1/terminal/preferences",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(valid_status, 200);
+
+    assert!(state.auth_manager.revoke_device(&device.id));
+    let (revoked_status, _) = http_request(
+        addr,
+        "GET",
+        "/api/v1/terminal/preferences",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(revoked_status, 401);
+
+    handle.stop();
+}
+
+#[tokio::test]
+async fn test_active_selection_change_is_broadcast_to_authenticated_event_clients() {
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(
+        terminal_service,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start remote server");
+
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "EventTest")
+        .expect("pair event client");
+    let mut events_socket = open_ws_stream(addr, "/api/v1/events", Some(&token)).await;
+
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some("remote-e2e".into()),
+        worktree_slug: Some("mobile-control".into()),
+        worktree_label: Some("mobile-control".into()),
+        session_id: Some("focused-session".into()),
+        ..Default::default()
+    });
+
+    let message = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_server_ws_text_frame(&mut events_socket),
+    )
+    .await
+    .expect("timed out waiting for active selection event");
+    let event: RemoteEventMessage = serde_json::from_str(&message).expect("parse event message");
+    assert_eq!(event.event, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT);
+    assert_eq!(event.payload["workspaceId"], "remote-e2e");
+    assert_eq!(event.payload["worktreeSlug"], "mobile-control");
+    assert_eq!(event.payload["sessionId"], "focused-session");
+
+    handle.stop();
+}
+
+#[tokio::test]
+async fn test_authenticated_event_clients_receive_the_current_active_selection_on_connect() {
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(
+        terminal_service,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some("remote-e2e".into()),
+        worktree_slug: Some("mobile-control".into()),
+        worktree_label: Some("mobile-control".into()),
+        session_id: Some("focused-session".into()),
+        ..Default::default()
+    });
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start remote server");
+
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "LateEventClient")
+        .expect("pair event client");
+    let mut events_socket = open_ws_stream(addr, "/api/v1/events", Some(&token)).await;
+
+    let message = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_server_ws_text_frame(&mut events_socket),
+    )
+    .await
+    .expect("timed out waiting for active selection snapshot");
+    let event: RemoteEventMessage = serde_json::from_str(&message).expect("parse event message");
+    assert_eq!(event.event, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT);
+    assert_eq!(event.payload["workspaceId"], "remote-e2e");
+    assert_eq!(event.payload["worktreeSlug"], "mobile-control");
+    assert_eq!(event.payload["sessionId"], "focused-session");
+
+    handle.stop();
+}
+
+#[tokio::test]
+async fn test_authenticated_event_clients_receive_selection_changes_after_the_snapshot() {
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(
+        terminal_service,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some("first-workspace".into()),
+        worktree_slug: Some("first-worktree".into()),
+        worktree_label: Some("first-worktree".into()),
+        session_id: Some("first-session".into()),
+        ..Default::default()
+    });
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start remote server");
+
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "OrderedEventClient")
+        .expect("pair event client");
+    let mut events_socket = open_ws_stream(addr, "/api/v1/events", Some(&token)).await;
+
+    let snapshot = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_server_ws_text_frame(&mut events_socket),
+    )
+    .await
+    .expect("timed out waiting for active selection snapshot");
+    let snapshot: RemoteEventMessage = serde_json::from_str(&snapshot).expect("parse snapshot");
+    assert_eq!(snapshot.event, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT);
+    assert_eq!(snapshot.payload["workspaceId"], "first-workspace");
+
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some("second-workspace".into()),
+        worktree_slug: Some("second-worktree".into()),
+        worktree_label: Some("second-worktree".into()),
+        session_id: Some("second-session".into()),
+        ..Default::default()
+    });
+
+    let update = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_server_ws_text_frame(&mut events_socket),
+    )
+    .await
+    .expect("timed out waiting for active selection update");
+    let update: RemoteEventMessage = serde_json::from_str(&update).expect("parse update");
+    assert_eq!(update.event, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT);
+    assert_eq!(update.payload["workspaceId"], "second-workspace");
+    assert_eq!(update.payload["worktreeSlug"], "second-worktree");
+    assert_eq!(update.payload["sessionId"], "second-session");
+
+    handle.stop();
 }
 
 #[tokio::test]
@@ -416,6 +668,7 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
         worktree_slug: None,
         worktree_label: Some("main".into()),
         session_id: Some(s1.clone()),
+        ..Default::default()
     });
 
     // GET /api/v1/sessions must return ONLY s1, s2 is excluded
@@ -596,6 +849,7 @@ async fn test_desktop_ipc_active_selection_lifecycle() {
         worktree_slug: Some("my-feature".into()),
         worktree_label: Some("orca/my-ws/my-feature".into()),
         session_id: Some("term-uuid-456".into()),
+        ..Default::default()
     });
 
     let current = state.active_selection().expect("selection set");
@@ -865,6 +1119,11 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
             worktree_slug: None,
             worktree_label: Some("main".into()),
             session_id: Some("session-gui".into()),
+            tab_id: Some("tab-safe".into()),
+            terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
+                id: "tab-safe".into(),
+                label: "/Users/alice/private-shell".into(),
+            }],
         },
     )
     .await
@@ -873,7 +1132,8 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
     let sel = crate::ipc::remote::cmd_remote_get_active_selection(app.state())
         .await
         .expect("get active selection");
-    assert_eq!(sel.unwrap().workspace_id.as_deref(), Some("ws-gui"));
+    let selection = sel.expect("selection remains available");
+    assert_eq!(selection.workspace_id.as_deref(), Some("ws-gui"));
     assert_eq!(
         server
             .remote_state()
@@ -883,6 +1143,11 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
             .as_deref(),
         Some("ws-gui")
     );
+    assert_eq!(selection.terminal_tabs[0].id, "tab-safe");
+    assert_eq!(selection.terminal_tabs[0].label, "Terminal");
+    assert!(!serde_json::to_string(&selection)
+        .expect("serialize sanitized selection")
+        .contains("/Users/alice/private-shell"));
 
     // 7. Revoke device via GUI IPC command -> revokes on daemon
     let revoked = crate::ipc::remote::cmd_remote_device_revoke(app.state(), device_id)
@@ -1147,14 +1412,449 @@ async fn open_ws_stream(
         "GET {path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{auth_header}\r\n"
     );
     stream.write_all(req.as_bytes()).await.expect("tcp write");
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).await.expect("tcp read");
-    let resp_str = String::from_utf8_lossy(&buf[..n]);
+
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        let n = stream.read(&mut byte).await.expect("tcp read");
+        assert_ne!(
+            n, 0,
+            "WebSocket upgrade response ended before headers completed"
+        );
+        response.push(byte[0]);
+        assert!(
+            response.len() <= 16 * 1024,
+            "WebSocket upgrade headers too large"
+        );
+    }
+    let resp_str = String::from_utf8_lossy(&response);
     assert!(
         resp_str.contains("101 Switching Protocols"),
         "WebSocket upgrade must succeed, got:\n{resp_str}"
     );
     stream
+}
+
+async fn read_server_ws_text_frame(stream: &mut tokio::net::TcpStream) -> String {
+    let ServerWebSocketFrame::Text(text) = read_server_ws_frame(stream).await else {
+        panic!("expected first server frame to be Text");
+    };
+    text
+}
+
+enum ServerWebSocketFrame {
+    Text(String),
+    Binary(Vec<u8>),
+    Close,
+}
+
+async fn read_server_ws_frame(stream: &mut tokio::net::TcpStream) -> ServerWebSocketFrame {
+    use tokio::io::AsyncReadExt;
+
+    let mut header = [0u8; 2];
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("read websocket frame header");
+    assert_eq!(
+        header[1] & 0x80,
+        0,
+        "server websocket frames must be unmasked"
+    );
+
+    let payload_len = match header[1] & 0x7f {
+        len @ 0..=125 => usize::from(len),
+        126 => {
+            let mut extended = [0u8; 2];
+            stream
+                .read_exact(&mut extended)
+                .await
+                .expect("read websocket 16-bit payload length");
+            usize::from(u16::from_be_bytes(extended))
+        }
+        127 => {
+            let mut extended = [0u8; 8];
+            stream
+                .read_exact(&mut extended)
+                .await
+                .expect("read websocket 64-bit payload length");
+            usize::try_from(u64::from_be_bytes(extended)).expect("websocket frame fits usize")
+        }
+        _ => unreachable!(),
+    };
+
+    let mut payload = vec![0u8; payload_len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("read websocket frame payload");
+
+    match header[0] & 0x0f {
+        0x01 => ServerWebSocketFrame::Text(
+            String::from_utf8(payload).expect("websocket Text frame is utf-8"),
+        ),
+        0x02 => ServerWebSocketFrame::Binary(payload),
+        0x08 => ServerWebSocketFrame::Close,
+        opcode => panic!("unexpected server websocket opcode: {opcode}"),
+    }
+}
+
+async fn write_client_ws_frame(stream: &mut tokio::net::TcpStream, opcode: u8, payload: &[u8]) {
+    use tokio::io::AsyncWriteExt;
+
+    let mut frame = Vec::with_capacity(payload.len() + 14);
+    frame.push(0x80 | opcode);
+    match payload.len() {
+        len @ 0..=125 => frame.push(0x80 | u8::try_from(len).expect("payload length fits u8")),
+        len @ 126..=65_535 => {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(
+                &u16::try_from(len)
+                    .expect("payload length fits u16")
+                    .to_be_bytes(),
+            );
+        }
+        len => {
+            frame.push(0x80 | 127);
+            frame.extend_from_slice(
+                &u64::try_from(len)
+                    .expect("payload length fits u64")
+                    .to_be_bytes(),
+            );
+        }
+    }
+
+    let mask = [0x41, 0x92, 0x37, 0xe5];
+    frame.extend_from_slice(&mask);
+    for (index, byte) in payload.iter().enumerate() {
+        frame.push(byte ^ mask[index % mask.len()]);
+    }
+    stream
+        .write_all(&frame)
+        .await
+        .expect("write masked websocket frame");
+}
+
+struct GridSocketTestHarness {
+    pty: Arc<crate::terminal::PtyManager>,
+    terminal_service: Arc<crate::terminal::TerminalService>,
+    _state: Arc<RemoteGatewayState>,
+    session_id: String,
+    token: String,
+    handle: RemoteServerHandle,
+    addr: std::net::SocketAddr,
+}
+
+impl GridSocketTestHarness {
+    async fn start(command: portable_pty::CommandBuilder, cols: u16, rows: u16) -> Self {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(crate::terminal::TerminalOutputHub::default());
+        let terminal_service = Arc::new(crate::terminal::TerminalService::new(
+            Arc::clone(&pty),
+            Arc::clone(&hub),
+        ));
+        let (session_id, mut pty_rx) = pty.spawn(command, cols, rows).expect("spawn test session");
+        hub.register_session(&session_id);
+        let publish_session_id = session_id.clone();
+        let publish_hub = Arc::clone(&hub);
+        tokio::spawn(async move {
+            while let Some(chunk) = pty_rx.recv().await {
+                publish_hub.publish(&publish_session_id, chunk);
+            }
+        });
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            crate::worktree::WorkspaceRegistry::new(),
+        ));
+        *state.config.write() = RemoteGatewayConfig {
+            mode: RemoteNetworkMode::LocalNetwork,
+            port: 0,
+            allow_control: true,
+        };
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: None,
+            worktree_slug: None,
+            worktree_label: None,
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        });
+
+        let pairing_code = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pairing_code, "GridSocketTest")
+            .expect("pair grid socket client");
+        let (handle, addr) = start_remote_server(Arc::clone(&state))
+            .await
+            .expect("start test server");
+
+        Self {
+            pty,
+            terminal_service,
+            _state: state,
+            session_id,
+            token,
+            handle,
+            addr,
+        }
+    }
+
+    async fn stop(self) {
+        self.handle.stop();
+        self.pty
+            .close_session(&self.session_id)
+            .await
+            .expect("cleanup test session");
+    }
+}
+
+async fn open_grid_socket(harness: &GridSocketTestHarness) -> tokio::net::TcpStream {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        open_ws_stream(
+            harness.addr,
+            &format!("/api/v1/terminal/{}?render=grid", harness.session_id),
+            Some(&harness.token),
+        ),
+    )
+    .await
+    .expect("timed out opening grid websocket")
+}
+
+async fn read_grid_text_frame(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+    let frame = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_server_ws_frame(stream),
+    )
+    .await
+    .expect("timed out waiting for grid websocket frame");
+    let ServerWebSocketFrame::Text(text) = frame else {
+        panic!("grid socket must emit a Text frame");
+    };
+    serde_json::from_str(&text).expect("parse grid frame json")
+}
+
+#[tokio::test]
+async fn test_grid_render_attach_sends_full_frame_with_session_dimensions() {
+    let pty = Arc::new(crate::terminal::PtyManager::new());
+    let hub = Arc::new(crate::terminal::TerminalOutputHub::default());
+    let terminal_service = Arc::new(crate::terminal::TerminalService::new(
+        Arc::clone(&pty),
+        Arc::clone(&hub),
+    ));
+
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("sleep 30");
+    let (session_id, mut pty_rx) = pty
+        .spawn(command, 93, 27)
+        .expect("spawn grid mirror session");
+    hub.register_session(&session_id);
+    let publish_session_id = session_id.clone();
+    let publish_hub = Arc::clone(&hub);
+    tokio::spawn(async move {
+        while let Some(chunk) = pty_rx.recv().await {
+            publish_hub.publish(&publish_session_id, chunk);
+        }
+    });
+
+    let state = Arc::new(RemoteGatewayState::new(
+        Arc::clone(&terminal_service),
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: None,
+        worktree_slug: None,
+        worktree_label: None,
+        session_id: Some(session_id.clone()),
+        ..Default::default()
+    });
+
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "GridMirrorTest")
+        .expect("pair grid client");
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start grid remote server");
+
+    let mut stream = open_ws_stream(
+        addr,
+        &format!("/api/v1/terminal/{session_id}?render=grid"),
+        Some(&token),
+    )
+    .await;
+    let text = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_server_ws_text_frame(&mut stream),
+    )
+    .await
+    .expect("timed out waiting for initial grid Text frame");
+    let frame: serde_json::Value = serde_json::from_str(&text).expect("parse grid frame json");
+    assert_eq!(frame["type"], "grid");
+    assert_eq!(frame["cols"], 93);
+    assert_eq!(frame["rows"], 27);
+
+    handle.stop();
+    pty.close_session(&session_id)
+        .await
+        .expect("cleanup grid mirror session");
+}
+
+#[tokio::test]
+async fn test_grid_render_initial_frame_uses_requested_viewport_dimensions() {
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("sleep 30");
+    let harness = GridSocketTestHarness::start(command, 93, 27).await;
+
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        open_ws_stream(
+            harness.addr,
+            &format!(
+                "/api/v1/terminal/{}?render=grid&cols=47&rows=18",
+                harness.session_id
+            ),
+            Some(&harness.token),
+        ),
+    )
+    .await
+    .expect("timed out opening viewport-sized grid websocket");
+
+    let initial = read_grid_text_frame(&mut stream).await;
+    assert_eq!(initial["type"], "grid");
+    assert_eq!(initial["cols"], 47);
+    assert_eq!(initial["rows"], 18);
+    let session = harness
+        .terminal_service
+        .get_session(&harness.session_id)
+        .expect("active terminal session");
+    assert_eq!(session.get_size(), (47, 18));
+
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn test_grid_render_live_pty_output_emits_grid_frame_after_attach() {
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("IFS= read -r line; printf '%s\\n' \"$line\"; sleep 30");
+    let harness = GridSocketTestHarness::start(command, 93, 27).await;
+    let mut stream = open_grid_socket(&harness).await;
+
+    let initial = read_grid_text_frame(&mut stream).await;
+    assert_eq!(initial["type"], "grid");
+
+    let marker = "FERRYX_GRID_LIVE_MARKER";
+    harness
+        .terminal_service
+        .write_input(&harness.session_id, format!("{marker}\n").as_bytes())
+        .expect("write test input to PTY");
+
+    let update = read_grid_text_frame(&mut stream).await;
+    assert!(
+        matches!(update["type"].as_str(), Some("grid") | Some("gridDiff")),
+        "live output must emit a grid or gridDiff frame, got: {update}"
+    );
+    let rendered = update["lines"]
+        .as_array()
+        .expect("grid frame includes lines")
+        .iter()
+        .flat_map(|line| line["runs"].as_array().into_iter().flatten())
+        .filter_map(|run| run["text"].as_str())
+        .collect::<String>();
+    assert!(
+        rendered.contains(marker),
+        "live grid update must include PTY output marker, got: {update}"
+    );
+
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn test_grid_render_resize_returns_full_frame_with_requested_geometry() {
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("sleep 30");
+    let harness = GridSocketTestHarness::start(command, 80, 24).await;
+    let mut stream = open_grid_socket(&harness).await;
+
+    let initial = read_grid_text_frame(&mut stream).await;
+    assert_eq!(initial["type"], "grid");
+    assert_eq!(initial["cols"], 80);
+    assert_eq!(initial["rows"], 24);
+
+    let resize = br#"{"type":"resize","cols":51,"rows":17}"#;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        write_client_ws_frame(&mut stream, 0x01, resize),
+    )
+    .await
+    .expect("timed out sending resize control frame");
+
+    let resized = read_grid_text_frame(&mut stream).await;
+    assert_eq!(
+        resized["type"], "grid",
+        "resize must return a full grid frame"
+    );
+    assert_eq!(resized["cols"], 51);
+    assert_eq!(resized["rows"], 17);
+
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn test_legacy_terminal_socket_emits_binary_snapshot_without_grid_text_frames() {
+    let marker = "FERRYX_LEGACY_BINARY_MARKER";
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("IFS= read -r line; printf '%s\\n' \"$line\"; sleep 30");
+    let harness = GridSocketTestHarness::start(command, 80, 24).await;
+
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        open_ws_stream(
+            harness.addr,
+            &format!("/api/v1/terminal/{}", harness.session_id),
+            Some(&harness.token),
+        ),
+    )
+    .await
+    .expect("timed out opening legacy websocket");
+    harness
+        .terminal_service
+        .write_input(&harness.session_id, format!("{marker}\n").as_bytes())
+        .expect("write test input to legacy PTY");
+    let frame = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_server_ws_frame(&mut stream),
+    )
+    .await
+    .expect("timed out waiting for legacy terminal output");
+
+    let ServerWebSocketFrame::Binary(bytes) = frame else {
+        panic!("legacy terminal socket must emit Binary, never a grid Text frame");
+    };
+    assert!(
+        bytes
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes()),
+        "legacy binary output frame must include the PTY output marker"
+    );
+
+    harness.stop().await;
 }
 
 #[tokio::test]
@@ -1243,6 +1943,7 @@ async fn test_connected_terminal_websocket_closed_when_active_selection_changes(
         worktree_slug: None,
         worktree_label: Some("main".into()),
         session_id: Some(s1.clone()),
+        ..Default::default()
     });
 
     // 2. Connect WebSocket to active session s1 -> succeeds
@@ -1260,36 +1961,36 @@ async fn test_connected_terminal_websocket_closed_when_active_selection_changes(
         worktree_slug: None,
         worktree_label: Some("main".into()),
         session_id: Some(s2.clone()),
+        ..Default::default()
     });
 
-    // 5. Existing WebSocket connection on session s1 MUST be closed by server immediately
+    // 5. Existing WebSocket connection on session s1 MUST be closed after focus changes.
+    // PTY bytes legitimately emitted before the switch may already be buffered in TCP.
     let mut read_buf = [0u8; 1024];
-    let read_result = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        ws1_stream.read(&mut read_buf),
-    )
+    let close_result = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            match ws1_stream.read(&mut read_buf).await {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => {
+                    panic!("unexpected error waiting for focus-revoked socket close: {error}")
+                }
+            }
+        }
+    })
     .await;
-
-    match read_result {
-        Ok(Ok(n)) => {
-            // Either EOF (0 bytes) or WebSocket Close frame received
-            assert!(
-                n == 0 || (n >= 2 && (read_buf[0] & 0x0f == 0x08)),
-                "Expected EOF (0) or WebSocket Close frame opcode 8, got {n} bytes: {:?}",
-                &read_buf[..n]
-            );
-        }
-        Ok(Err(e)) => {
-            // Connection reset is also acceptable disconnect
-            assert!(matches!(
-                e.kind(),
-                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
-            ));
-        }
-        Err(_) => {
-            panic!("WebSocket on s1 timed out waiting for server to revoke/close connection after focus switched to s2");
-        }
-    }
+    assert!(
+        close_result.is_ok(),
+        "WebSocket on s1 timed out waiting for server to revoke/close connection after focus switched to s2"
+    );
 
     handle.stop();
     pty.close_session(&s1).await.unwrap();
@@ -1350,6 +2051,7 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
         worktree_slug: None,
         worktree_label: Some("main".to_string()),
         session_id: Some(session_id.clone()),
+        ..Default::default()
     };
     daemon_client
         .remote_set_active_selection(Some(active_selection))
@@ -1465,10 +2167,287 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
 }
 
 #[tokio::test]
+async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let config_path = dir.path().join("remote-config.json");
+    let auth_path = dir.path().join("remote-auth.json");
+    let (_daemon_dir, daemon_client, server, server_task) =
+        setup_test_daemon_with_remote_paths(Some(config_path), Some(auth_path)).await;
+
+    let repo_dir = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).expect("create repo directory");
+    crate::worktree::run_git(&repo_dir, &["init"]).expect("git init");
+    crate::worktree::run_git(
+        &repo_dir,
+        &[
+            "-c",
+            "user.name=Remote E2E",
+            "-c",
+            "user.email=remote-e2e@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    )
+    .expect("initial commit");
+
+    let workspace_id = "remote-e2e";
+    daemon_client
+        .register_workspace(workspace_id, repo_dir.to_str().expect("repo path utf-8"))
+        .await
+        .expect("register workspace");
+    let manager = server
+        .workspace_registry()
+        .manager(workspace_id)
+        .expect("workspace manager");
+    let worktree_slug = "mobile-control";
+
+    let (selection_tx, selection_rx) = tokio::sync::oneshot::channel();
+    let selection_tx = Arc::new(parking_lot::Mutex::new(Some(selection_tx)));
+    server.remote_state().set_desktop_event_sink(Arc::new({
+        let selection_tx = Arc::clone(&selection_tx);
+        move |event, payload| {
+            if event == REMOTE_SELECTION_REQUEST_EVENT {
+                if let Some(sender) = selection_tx.lock().take() {
+                    let _ = sender.send(payload);
+                }
+            }
+        }
+    }));
+
+    daemon_client
+        .remote_configure(RemoteGatewayConfig {
+            mode: RemoteNetworkMode::LocalNetwork,
+            port: 0,
+            allow_control: true,
+        })
+        .await
+        .expect("configure remote listener");
+    let bound_addr: std::net::SocketAddr = daemon_client
+        .remote_get_status()
+        .await
+        .expect("remote status")
+        .bound_address
+        .expect("bound address")
+        .parse()
+        .expect("parse bound address");
+
+    let pair_code = daemon_client
+        .remote_create_pairing_code(Some(DevicePermission::Control))
+        .await
+        .expect("create control pairing code");
+    let (pair_status, pair_body) = http_request(
+        bound_addr,
+        "POST",
+        "/api/v1/pair/exchange",
+        None,
+        Some(&format!(
+            r#"{{"code":"{pair_code}","deviceName":"Remote E2E"}}"#
+        )),
+    )
+    .await;
+    assert_eq!(pair_status, 200);
+    let token = serde_json::from_str::<serde_json::Value>(&pair_body).expect("pair response JSON")
+        ["token"]
+        .as_str()
+        .expect("pair token")
+        .to_string();
+
+    let create_body = format!(
+        r#"{{"workspaceId":"{workspace_id}","worktree":{{"wsId":"{workspace_id}","slug":"{worktree_slug}"}},"baseRef":null}}"#
+    );
+    let (create_status, create_response) = http_request(
+        bound_addr,
+        "POST",
+        "/api/v1/workspace/worktrees",
+        Some(&token),
+        Some(&create_body),
+    )
+    .await;
+    assert_eq!(create_status, 200);
+    let created: RemoteWorktreeInfo =
+        serde_json::from_str(&create_response).expect("safe worktree response");
+    assert_eq!(created.worktree_slug.as_deref(), Some(worktree_slug));
+    assert!(
+        !create_response.contains(dir.path().to_str().expect("temp root utf-8")),
+        "worktree creation response must not expose local paths: {create_response}"
+    );
+
+    let worktree = manager
+        .find_worktree_by_slug(workspace_id, worktree_slug)
+        .expect("find managed worktree")
+        .expect("created managed worktree");
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("IFS= read -r line; printf '%s\\n' \"$line\"; sleep 30");
+    let session_id = daemon_client
+        .spawn_terminal(
+            uuid::Uuid::new_v4().to_string(),
+            workspace_id.to_string(),
+            Some(WorktreeIdentity {
+                ws_id: workspace_id.to_string(),
+                slug: worktree_slug.to_string(),
+            }),
+            Some(
+                worktree
+                    .path
+                    .to_str()
+                    .expect("worktree path utf-8")
+                    .to_string(),
+            ),
+            80,
+            24,
+        )
+        .await
+        .expect("spawn selected-worktree terminal");
+
+    let (initial_status, initial_body) = http_request(
+        bound_addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(initial_status, 200);
+    assert!(
+        !initial_body.contains(dir.path().to_str().expect("temp root utf-8")),
+        "remote state must not expose local paths: {initial_body}"
+    );
+
+    let select_body =
+        format!(r#"{{"workspaceId":"{workspace_id}","worktreeSlug":"{worktree_slug}"}}"#);
+    let (select_status, _) = http_request(
+        bound_addr,
+        "POST",
+        "/api/v1/workspace/select",
+        Some(&token),
+        Some(&select_body),
+    )
+    .await;
+    assert_eq!(select_status, 200);
+    let selection_event = tokio::time::timeout(std::time::Duration::from_secs(2), selection_rx)
+        .await
+        .expect("timed out waiting for desktop selection request")
+        .expect("desktop selection sender remains available");
+    assert_eq!(selection_event["workspaceId"], workspace_id);
+    assert_eq!(selection_event["worktreeSlug"], worktree_slug);
+    assert!(
+        !selection_event
+            .to_string()
+            .contains(dir.path().to_str().expect("temp root utf-8")),
+        "desktop event must not expose local paths"
+    );
+
+    daemon_client
+        .remote_set_active_selection(Some(RemoteActiveDesktopSelection {
+            workspace_id: Some(workspace_id.to_string()),
+            worktree_slug: Some(worktree_slug.to_string()),
+            worktree_label: worktree.branch_short_name().map(str::to_string),
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        }))
+        .await
+        .expect("desktop confirms active selection");
+
+    let (state_status, state_body) = http_request(
+        bound_addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(state_status, 200);
+    let state: RemoteWorkspaceState = serde_json::from_str(&state_body).expect("workspace state");
+    assert_eq!(state.active_workspace_id, workspace_id);
+    assert_eq!(
+        state.active_context.workspace_id.as_deref(),
+        Some(workspace_id)
+    );
+    assert_eq!(
+        state.active_context.worktree_slug.as_deref(),
+        Some(worktree_slug)
+    );
+    assert!(
+        state
+            .projects
+            .iter()
+            .find(|project| project.workspace_id == workspace_id)
+            .is_some_and(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.worktree_slug.as_deref() == Some(worktree_slug))
+            }),
+        "remote state must expose the safe selected worktree option"
+    );
+    assert!(
+        !state_body.contains(dir.path().to_str().expect("temp root utf-8")),
+        "confirmed remote state must not expose local paths: {state_body}"
+    );
+    assert_eq!(state.sessions.len(), 1);
+    assert_eq!(state.sessions[0].session_id, session_id);
+
+    let mut socket = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        open_ws_stream(
+            bound_addr,
+            &format!("/api/v1/terminal/{session_id}?render=grid"),
+            Some(&token),
+        ),
+    )
+    .await
+    .expect("timed out opening grid websocket");
+    let initial_grid = read_grid_text_frame(&mut socket).await;
+    assert_eq!(initial_grid["type"], "grid");
+
+    let marker = "REMOTE_WORKTREE_TERMINAL_CONTROL_OK";
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        write_client_ws_frame(&mut socket, 0x02, format!("{marker}\n").as_bytes()),
+    )
+    .await
+    .expect("timed out writing terminal control frame");
+    let update = read_grid_text_frame(&mut socket).await;
+    assert!(
+        matches!(update["type"].as_str(), Some("grid") | Some("gridDiff")),
+        "terminal output must return a grid frame: {update}"
+    );
+    let rendered = update["lines"]
+        .as_array()
+        .expect("grid lines")
+        .iter()
+        .flat_map(|line| line["runs"].as_array().into_iter().flatten())
+        .filter_map(|run| run["text"].as_str())
+        .collect::<String>();
+    assert!(
+        rendered.contains(marker),
+        "grid response must contain terminal control marker: {update}"
+    );
+
+    daemon_client
+        .remote_configure(RemoteGatewayConfig {
+            mode: RemoteNetworkMode::Off,
+            port: 0,
+            allow_control: true,
+        })
+        .await
+        .expect("disable remote listener");
+    daemon_client
+        .close_terminal(&session_id)
+        .await
+        .expect("close terminal");
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn test_remote_terminal_forced_lag_replays_with_explicit_gap_and_sequence_metadata() {
     let pty = Arc::new(crate::terminal::PtyManager::new());
     let hub = Arc::new(crate::terminal::TerminalOutputHub::new(64));
-    let terminal_service = crate::terminal::TerminalService::new(Arc::clone(&pty), Arc::clone(&hub));
+    let terminal_service =
+        crate::terminal::TerminalService::new(Arc::clone(&pty), Arc::clone(&hub));
 
     let mut command = portable_pty::CommandBuilder::new("/bin/sh");
     command.arg("-c");
@@ -1499,17 +2478,19 @@ async fn test_remote_terminal_forced_lag_replays_with_explicit_gap_and_sequence_
         None,
     )
     .expect("remote lag recovery reattach");
-    let gap = recovered.snapshot.gap.as_ref().expect("eviction must report gap");
+    let gap = recovered
+        .snapshot
+        .gap
+        .as_ref()
+        .expect("eviction must report gap");
     assert_eq!(gap.requested_after_sequence, 0);
     assert!(gap.available_from_sequence > 1);
     assert!(recovered.snapshot.history_start_sequence.is_some());
     assert!(recovered.snapshot.history_end_sequence.is_some());
     assert!(!recovered.snapshot.history.is_empty());
 
-    let frame = crate::remote::server::encode_remote_terminal_snapshot_frame(
-        &recovered.snapshot,
-        true,
-    );
+    let frame =
+        crate::remote::server::encode_remote_terminal_snapshot_frame(&recovered.snapshot, true);
     let prefix = b"\x1b]777;ferryx;";
     assert!(frame.starts_with(prefix));
     let metadata_end = frame[prefix.len()..]
@@ -1559,4 +2540,297 @@ async fn test_remote_terminal_forced_lag_replays_with_explicit_gap_and_sequence_
     pty.close_session(&session_id)
         .await
         .expect("cleanup forced-lag session");
+}
+
+#[tokio::test]
+async fn test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage() {
+    use crate::remote::protocol::RemoteTerminalTabInfo;
+
+    let tab1 = RemoteTerminalTabInfo {
+        id: "tab-term-1".to_string(),
+        label: "build".to_string(),
+    };
+    let tab2 = RemoteTerminalTabInfo {
+        id: "tab-term-2".to_string(),
+        label: "tests".to_string(),
+    };
+
+    let selection = RemoteActiveDesktopSelection {
+        workspace_id: Some("proj-1".to_string()),
+        worktree_slug: Some("feat".to_string()),
+        worktree_label: Some("feature-cool".to_string()),
+        session_id: Some("session-123".to_string()),
+        tab_id: Some("tab-term-1".to_string()),
+        terminal_tabs: vec![tab1.clone(), tab2.clone()],
+    };
+
+    let json_str = serde_json::to_string(&selection).expect("serialize selection");
+    assert!(json_str.contains("\"tabId\":\"tab-term-1\""));
+    assert!(json_str.contains("\"terminalTabs\":["));
+    assert!(json_str.contains("\"id\":\"tab-term-1\""));
+    assert!(json_str.contains("\"label\":\"build\""));
+    assert!(json_str.contains("\"id\":\"tab-term-2\""));
+    assert!(json_str.contains("\"label\":\"tests\""));
+
+    // Ensure NO path leakage in serialized structure
+    assert!(!json_str.contains("/Users/"));
+    assert!(!json_str.contains("cwd"));
+    assert!(!json_str.contains("worktreePath"));
+    assert!(!json_str.contains("repoRoot"));
+
+    // Deserialization with aliases (e.g. activeTabId, tabs, tabLabel)
+    let aliased_json = serde_json::json!({
+        "workspaceId": "proj-1",
+        "activeTabId": "tab-term-2",
+        "tabs": [
+            { "tabId": "tab-term-2", "tabLabel": "tests" }
+        ]
+    });
+    let parsed: RemoteActiveDesktopSelection =
+        serde_json::from_value(aliased_json).expect("deserialize aliased selection");
+    assert_eq!(parsed.tab_id.as_deref(), Some("tab-term-2"));
+    assert_eq!(parsed.terminal_tabs.len(), 1);
+    assert_eq!(parsed.terminal_tabs[0].id, "tab-term-2");
+    assert_eq!(parsed.terminal_tabs[0].label, "tests");
+}
+
+#[tokio::test]
+async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo_root = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    crate::worktree::run_git(&repo_root, &["init"]).expect("git init");
+    crate::worktree::run_git(
+        &repo_root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    )
+    .expect("git commit");
+
+    let registry = crate::worktree::WorkspaceRegistry::new();
+    let workspace_id = "proj-safe";
+    registry
+        .register(workspace_id, &repo_root)
+        .expect("register");
+    let manager = registry.manager(workspace_id).expect("manager");
+
+    let ident = WorktreeIdentity {
+        ws_id: workspace_id.to_string(),
+        slug: "feature-tab".to_string(),
+    };
+    let wt_path = manager
+        .worktree_path_for(&ident.ws_id, &ident.slug)
+        .expect("wt path");
+    manager
+        .create_worktree(crate::worktree::CreateWorktreeOptions::new(
+            &ident.ws_id,
+            &ident.slug,
+            &wt_path,
+        ))
+        .expect("create worktree");
+
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    let (_handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start server");
+
+    let code_ctrl = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token_ctrl, _) = state
+        .auth_manager
+        .exchange_pairing_code(&code_ctrl, "ControlDevice")
+        .expect("pair ctrl");
+
+    let code_view = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::View);
+    let (token_view, _) = state
+        .auth_manager
+        .exchange_pairing_code(&code_view, "ViewDevice")
+        .expect("pair view");
+
+    let event_received = Arc::new(parking_lot::Mutex::new(None));
+    let event_received_clone = Arc::clone(&event_received);
+    state.set_desktop_event_sink(Arc::new(move |event, payload| {
+        *event_received_clone.lock() = Some((event.to_string(), payload));
+    }));
+
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some(workspace_id.to_string()),
+        worktree_slug: Some("feature-tab".to_string()),
+        worktree_label: Some("feature-tab".to_string()),
+        session_id: None,
+        tab_id: Some("tab-term-selected".to_string()),
+        terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
+            id: "tab-term-selected".to_string(),
+            label: "Terminal 1".to_string(),
+        }],
+    });
+
+    // 1. View-only token must be rejected with 403 Forbidden
+    let (status, _) = http_request(
+        addr,
+        "POST",
+        "/api/v1/workspace/select",
+        Some(&token_view),
+        Some(
+            &serde_json::json!({
+                "workspaceId": workspace_id,
+                "worktreeSlug": "feature-tab",
+                "tabId": "tab-view-attempt"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    let (status, _) = http_request(
+        addr,
+        "POST",
+        "/api/v1/workspace/select",
+        Some(&token_ctrl),
+        Some(
+            &serde_json::json!({
+                "workspaceId": workspace_id,
+                "worktreeSlug": "feature-tab",
+                "tabId": "unpublished-tab"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    // 2. Control token selecting worktree with tabId selector
+    let (status, body) = http_request(
+        addr,
+        "POST",
+        "/api/v1/workspace/select",
+        Some(&token_ctrl),
+        Some(
+            &serde_json::json!({
+                "workspaceId": workspace_id,
+                "worktreeSlug": "feature-tab",
+                "tabId": "tab-term-selected"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let select_resp: serde_json::Value = serde_json::from_str(&body).expect("select json");
+    assert_eq!(select_resp["workspaceId"], workspace_id);
+    assert_eq!(select_resp["worktreeSlug"], "feature-tab");
+    assert_eq!(select_resp["tabId"], "tab-term-selected");
+
+    let (event_name, event_payload) = event_received.lock().take().expect("desktop event emitted");
+    assert_eq!(event_name, "remote_selection_requested");
+    assert_eq!(event_payload["workspaceId"], workspace_id);
+    assert_eq!(event_payload["worktreeSlug"], "feature-tab");
+    assert_eq!(event_payload["tabId"], "tab-term-selected");
+
+    // 3. Primary worktree selection (without worktreeSlug) with tab selector
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some(workspace_id.to_string()),
+        worktree_slug: None,
+        worktree_label: Some("main".to_string()),
+        session_id: None,
+        tab_id: Some("tab-primary-2".to_string()),
+        terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
+            id: "tab-primary-2".to_string(),
+            label: "Terminal 2".to_string(),
+        }],
+    });
+    let (status, body) = http_request(
+        addr,
+        "POST",
+        "/api/v1/workspace/select",
+        Some(&token_ctrl),
+        Some(
+            &serde_json::json!({
+                "workspaceId": workspace_id,
+                "tabId": "tab-primary-2"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let select_primary_resp: serde_json::Value = serde_json::from_str(&body).expect("select json");
+    assert_eq!(select_primary_resp["workspaceId"], workspace_id);
+    assert_eq!(select_primary_resp["tabId"], "tab-primary-2");
+    assert!(
+        select_primary_resp.get("worktreeSlug").is_none()
+            || select_primary_resp["worktreeSlug"].is_null()
+    );
+
+    let (primary_name, primary_payload) = event_received
+        .lock()
+        .take()
+        .expect("primary desktop event emitted");
+    assert_eq!(primary_name, "remote_selection_requested");
+    assert_eq!(primary_payload["workspaceId"], workspace_id);
+    assert_eq!(primary_payload["tabId"], "tab-primary-2");
+
+    // 4. GET /api/v1/workspace/state contains safe active terminal tab descriptors
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some(workspace_id.to_string()),
+        worktree_slug: Some("feature-tab".to_string()),
+        worktree_label: Some("feature-tab".to_string()),
+        session_id: Some("sess-1".to_string()),
+        tab_id: Some("tab-term-selected".to_string()),
+        terminal_tabs: vec![
+            crate::remote::protocol::RemoteTerminalTabInfo {
+                id: "tab-term-selected".to_string(),
+                label: "Terminal 1".to_string(),
+            },
+            crate::remote::protocol::RemoteTerminalTabInfo {
+                id: "tab-term-other".to_string(),
+                label: "Terminal 2".to_string(),
+            },
+        ],
+    });
+
+    let (status, body) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let ws_state: RemoteWorkspaceState = serde_json::from_str(&body).expect("workspace state");
+    assert_eq!(
+        ws_state.active_context.tab_id.as_deref(),
+        Some("tab-term-selected")
+    );
+    assert_eq!(ws_state.active_context.terminal_tabs.len(), 2);
+    assert_eq!(
+        ws_state.active_context.terminal_tabs[0].id,
+        "tab-term-selected"
+    );
+    assert_eq!(ws_state.active_context.terminal_tabs[0].label, "Terminal 1");
+    assert_eq!(
+        ws_state.active_context.terminal_tabs[1].id,
+        "tab-term-other"
+    );
+    assert_eq!(ws_state.active_context.terminal_tabs[1].label, "Terminal 2");
+    assert!(!body.contains(dir.path().to_str().expect("temp utf-8")));
 }

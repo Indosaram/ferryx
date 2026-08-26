@@ -12,7 +12,7 @@ export interface NotificationSettings {
 }
 
 export { NOTIFICATION_SETTINGS_STORAGE_KEY };
-export const NOTIFICATION_SETTINGS_EVENT = "rorca:notifications:settings-changed";
+export const NOTIFICATION_SETTINGS_EVENT = "ferryx:notifications:settings-changed";
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: true,

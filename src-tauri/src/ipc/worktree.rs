@@ -75,6 +75,9 @@ pub async fn cmd_worktree_list(
     let registry = (*registry).clone();
     run_blocking(move || {
         let manager = registry.manager(&workspace_id).map_err(IpcError::from)?;
+        if !manager.is_git_backed() {
+            return Ok(Vec::new());
+        }
         manager.list_worktrees().map_err(IpcError::from)
     })
     .await

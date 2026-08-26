@@ -3,9 +3,8 @@ use std::borrow::Cow;
 use ferryx_lib::daemon::{DaemonAttachment, DaemonStreamMessage};
 use ferryx_lib::ipc::native_terminal::{
     copy_attached_native_selection, encode_attached_native_input, encode_attached_native_mouse,
-    encode_attached_native_paste, scroll_attached_native_terminal,
-    search_attached_native_terminal, select_attached_native_terminal, NativeTerminalScrollBehavior,
-    NativeTerminalSelectMode,
+    encode_attached_native_paste, scroll_attached_native_terminal, search_attached_native_terminal,
+    select_attached_native_terminal, NativeTerminalScrollBehavior, NativeTerminalSelectMode,
 };
 use ferryx_lib::native_terminal::surface_host::NativeTerminalSurfaceHostState;
 use ferryx_lib::native_terminal::{

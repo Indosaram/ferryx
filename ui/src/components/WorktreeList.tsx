@@ -80,7 +80,7 @@ export const WorktreeRow = memo(function WorktreeRow({
               data-activity-state={indicator ?? "idle"}
               className="inline-flex size-2 shrink-0 items-center justify-center"
             >
-              {indicator ? <StatusDot state={indicator} /> : <span className="size-2 shrink-0 rounded-full bg-[#00bc7d]" />}
+              {indicator ? <StatusDot state={indicator} /> : <span className="size-2 shrink-0 rounded-full bg-status-idle" />}
             </span>
             <span className="truncate text-[12px] font-semibold leading-tight text-[#fafafa]">
               {displayName}

@@ -686,7 +686,9 @@ mod tests {
         let font = &face.font;
         let font_size = 17.0;
 
-        let units_per_em = font.units_per_em().expect("system font reports units_per_em");
+        let units_per_em = font
+            .units_per_em()
+            .expect("system font reports units_per_em");
         let px_per_unit = font_size / units_per_em;
 
         let scaled = font.as_scaled(px_scale_for_size(font, font_size));
@@ -770,7 +772,10 @@ mod tests {
             let mask = mgr.rasterize_glyph("M", tight_width, metrics.height_px, false, false);
             assert_eq!(mask.len(), (tight_width * metrics.height_px) as usize);
             let total_coverage: u32 = mask.iter().map(|&b| b as u32).sum();
-            assert!(total_coverage > 0, "M glyph must rasterize cleanly within rounding tolerance");
+            assert!(
+                total_coverage > 0,
+                "M glyph must rasterize cleanly within rounding tolerance"
+            );
         }
     }
 }

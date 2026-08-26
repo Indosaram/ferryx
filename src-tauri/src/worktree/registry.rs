@@ -53,6 +53,33 @@ impl WorkspaceRegistry {
         Ok(())
     }
 
+    /// Binds `workspace_id` to `repo_root` only if no workspace owns that
+    /// canonical root yet, returning the existing owner otherwise. Find and
+    /// insert happen under one write lock so concurrent registrations cannot
+    /// bind two IDs to the same repository.
+    pub fn register_unique_root(
+        &self,
+        workspace_id: impl AsRef<str>,
+        repo_root: impl AsRef<Path>,
+    ) -> Result<String, WorktreeError> {
+        let workspace_id = Self::validate_workspace_id(workspace_id.as_ref())?.to_string();
+        let manager = WorktreeManager::try_new(repo_root.as_ref().to_path_buf())?;
+        let mut workspaces = self.workspaces.write();
+        if let Some((owner, _)) = workspaces
+            .iter()
+            .find(|(_, candidate)| candidate.repo_root() == manager.repo_root())
+        {
+            return Ok(owner.clone());
+        }
+        if let Some(existing) = workspaces.get(&workspace_id) {
+            if existing.repo_root() != manager.repo_root() {
+                return Err(WorktreeError::WorkspaceAlreadyRegistered { workspace_id });
+            }
+        }
+        workspaces.insert(workspace_id.clone(), manager);
+        Ok(workspace_id)
+    }
+
     pub fn contains(&self, workspace_id: &str) -> bool {
         self.workspaces.read().contains_key(workspace_id)
     }

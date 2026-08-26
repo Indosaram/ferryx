@@ -42,7 +42,7 @@ A zero-Electron, Rust-native PTY daemon and workspace launcher that launches in 
 
 - `docs/reference/BRANDING_AND_ICON_SPECIFICATION.md`: Authoritative specification for icons, Tauri loopback HMR, TabBar UX, and verification gates.
 - `src-tauri/`: Rust backend with portable-pty daemon, IPC controllers, notifications, and remote server.
-- `ui/`: React 18 + Vite frontend with xterm.js WebGL terminals, workspace state store, and remote pairing UI (`ui/src/remote/`).
+- `ui/`: React 18 + Vite frontend with native terminal engine integration, workspace state store, and remote pairing UI (`ui/src/remote/`).
 - `site/`: Marketing landing page and showcase built with Bun and Tailwind.
 - `README.md`: Developer-focused architecture and quickstart guide.
 

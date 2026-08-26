@@ -1,10 +1,14 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
+use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::{
-    ClientControlMessage, RemoteCreateWorktreeRequest, RemoteDeleteWorktreeRequest,
-    RemoteProjectInfo, RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload,
-    RemoteTerminalSession, RemoteWorkspaceState,
+    ClientControlMessage, RemoteActiveDesktopSelection, RemoteCreateWorktreeRequest,
+    RemoteDeleteWorktreeRequest, RemoteEventMessage, RemoteGridFrame, RemoteProjectInfo,
+    RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
+    RemoteWorkspaceState, RemoteWorktreeInfo,
 };
-use crate::remote::state::{RemoteGatewayState, RemoteNetworkMode};
+use crate::remote::state::{
+    RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
+};
 use crate::terminal::{
     AttachmentSnapshot, OutputChunk, PtyError, PtySessionState, SessionAttachment, TerminalService,
     TerminalSignal,
@@ -25,13 +29,16 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc};
 use tower_http::cors::{Any, CorsLayer};
 
 pub const REMOTE_SELECTION_REQUEST_EVENT: &str = "remote_selection_requested";
 const REMOTE_TERMINAL_METADATA_PREFIX: &[u8] = b"\x1b]777;ferryx;";
 const REMOTE_TERMINAL_METADATA_TERMINATOR: u8 = 0x07;
 const REMOTE_TERMINAL_HARD_RESET: &[u8] = b"\x1bc";
+const REMOTE_GRID_MAX_COLS: u16 = 512;
+const REMOTE_GRID_MAX_ROWS: u16 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,11 +83,11 @@ pub(crate) fn encode_remote_terminal_snapshot_frame(
             } else {
                 "replay".into()
             },
-            sequence: snapshot.history_end_sequence.map(|sequence| sequence.to_string()),
-            requested_after_sequence: gap
-                .map(|gap| gap.requested_after_sequence.to_string()),
-            available_from_sequence: gap
-                .map(|gap| gap.available_from_sequence.to_string()),
+            sequence: snapshot
+                .history_end_sequence
+                .map(|sequence| sequence.to_string()),
+            requested_after_sequence: gap.map(|gap| gap.requested_after_sequence.to_string()),
+            available_from_sequence: gap.map(|gap| gap.available_from_sequence.to_string()),
             start_sequence: snapshot
                 .history_start_sequence
                 .map(|sequence| sequence.to_string()),
@@ -98,7 +105,8 @@ fn encode_remote_terminal_frame(
     payload: &[u8],
     reset: bool,
 ) -> Vec<u8> {
-    let metadata = serde_json::to_vec(&metadata).expect("remote terminal frame metadata serializes");
+    let metadata =
+        serde_json::to_vec(&metadata).expect("remote terminal frame metadata serializes");
     let mut frame = Vec::with_capacity(
         REMOTE_TERMINAL_METADATA_PREFIX.len()
             + metadata.len()
@@ -150,6 +158,20 @@ struct PairExchangeResponse {
 #[derive(Deserialize)]
 struct AuthQuery {
     token: Option<String>,
+    render: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+fn validated_grid_geometry(cols: u16, rows: u16) -> Option<(u16, u16)> {
+    if cols == 0 || rows == 0 || cols > REMOTE_GRID_MAX_COLS || rows > REMOTE_GRID_MAX_ROWS {
+        return None;
+    }
+    Some((cols, rows))
+}
+
+fn requested_grid_geometry(query: &AuthQuery) -> Option<(u16, u16)> {
+    validated_grid_geometry(query.cols?, query.rows?)
 }
 
 fn extract_token(headers: &HeaderMap, query: Option<&AuthQuery>) -> Option<String> {
@@ -229,7 +251,6 @@ struct WorkspaceSnapshot {
     /// construction time, but we re-derive defensively in case the directory
     /// was removed or replaced by a symlink after registration).
     root: PathBuf,
-    repo_root_display: String,
     worktrees: Vec<crate::worktree::Worktree>,
 }
 
@@ -251,32 +272,45 @@ impl WorkspaceSnapshotCache {
             .map(|(workspace_id, mgr)| WorkspaceSnapshot {
                 workspace_id,
                 root: canonicalize_or_raw(mgr.repo_root()),
-                repo_root_display: mgr.repo_root().to_string_lossy().into_owned(),
                 worktrees: mgr.list_worktrees().unwrap_or_default(),
             })
             .collect();
         Self { workspaces }
     }
 
-    /// Workspace ids and repo roots in deterministic order, for building the
-    /// `projects` list without a second registry/disk round trip.
     fn projects(&self) -> Vec<RemoteProjectInfo> {
         self.workspaces
             .iter()
             .map(|w| RemoteProjectInfo {
                 workspace_id: w.workspace_id.clone(),
-                repo_root: w.repo_root_display.clone(),
+                worktrees: w
+                    .worktrees
+                    .iter()
+                    .map(|worktree| RemoteWorktreeInfo {
+                        worktree_slug: worktree.orca_info().map(|info| info.slug),
+                        worktree_label: worktree.branch_short_name().map(str::to_string),
+                    })
+                    .collect(),
             })
             .collect()
     }
 
     /// Previously listed worktrees for `workspace_id`, if registered. Reuses the
     /// snapshot captured at cache-build time instead of re-listing from disk.
-    fn worktrees_for(&self, workspace_id: &str) -> Vec<crate::worktree::Worktree> {
+    fn worktrees_for(&self, workspace_id: &str) -> Vec<RemoteWorktreeInfo> {
         self.workspaces
             .iter()
             .find(|w| w.workspace_id == workspace_id)
-            .map(|w| w.worktrees.clone())
+            .map(|workspace| {
+                workspace
+                    .worktrees
+                    .iter()
+                    .map(|worktree| RemoteWorktreeInfo {
+                        worktree_slug: worktree.orca_info().map(|info| info.slug),
+                        worktree_label: worktree.branch_short_name().map(str::to_string),
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -404,20 +438,28 @@ async fn get_workspace_state(
     // request with many sessions only lists each workspace's git worktrees once.
     let cache = WorkspaceSnapshotCache::build(&state.workspace_registry);
 
+    let active_selection = state.active_selection.read().clone();
     let projects = cache.projects();
-    let active_ws = state
-        .active_selection
-        .read()
+    let active_ws = active_selection
         .as_ref()
         .and_then(|sel| sel.workspace_id.clone())
         .filter(|id| !id.is_empty())
         .or_else(|| projects.first().map(|p| p.workspace_id.clone()))
         .unwrap_or_else(|| "default".into());
+    let active_context = active_selection.unwrap_or(RemoteActiveDesktopSelection {
+        workspace_id: Some(active_ws.clone()),
+        worktree_slug: None,
+        worktree_label: None,
+        session_id: None,
+        tab_id: None,
+        terminal_tabs: Vec::new(),
+    });
     let worktrees = cache.worktrees_for(&active_ws);
     let sessions = get_active_running_sessions(&state, &cache);
 
     Ok(Json(RemoteWorkspaceState {
         projects,
+        active_context,
         active_workspace_id: active_ws,
         worktrees,
         sessions,
@@ -478,12 +520,28 @@ async fn select_workspace(
         (None, None, payload.worktree_label.clone())
     };
 
+    if let Some(tab_id) = payload.tab_id.as_deref() {
+        let selection = state.active_selection();
+        let tab_is_available = selection.as_ref().is_some_and(|selection| {
+            selection.workspace_id.as_deref() == Some(payload.workspace_id.as_str())
+                && selection.worktree_slug.as_deref() == worktree_slug.as_deref()
+                && selection.terminal_tabs.iter().any(|tab| tab.id == tab_id)
+        });
+        if !tab_is_available {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Requested terminal tab is not available in the active desktop context".into(),
+            ));
+        }
+    }
+
     let event_payload = RemoteSelectionRequestPayload {
         workspace_id: payload.workspace_id,
         worktree: worktree_identity,
         worktree_slug,
         worktree_label,
         session_id: payload.session_id,
+        tab_id: payload.tab_id,
     };
 
     state.emit_desktop_event(
@@ -499,7 +557,7 @@ async fn create_worktree(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteCreateWorktreeRequest>,
-) -> Result<Json<crate::worktree::Worktree>, (StatusCode, String)> {
+) -> Result<Json<RemoteWorktreeInfo>, (StatusCode, String)> {
     let token = extract_token(&headers, Some(&query))
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
@@ -534,7 +592,10 @@ async fn create_worktree(
         .create_worktree(options)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(created))
+    Ok(Json(RemoteWorktreeInfo {
+        worktree_slug: created.orca_info().map(|info| info.slug),
+        worktree_label: created.branch_short_name().map(str::to_string),
+    }))
 }
 
 async fn delete_worktree(
@@ -616,11 +677,28 @@ async fn ws_events_handler(
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
+    // Subscribe before reading the snapshot: a desktop focus change in between
+    // is then queued as a follow-up event, never missed by this client.
     let rx = state.event_tx.subscribe();
-    Ok(ws.on_upgrade(move |socket| handle_events_socket(socket, rx)))
+    let active_selection = state.active_selection();
+    Ok(ws.on_upgrade(move |socket| handle_events_socket(socket, rx, active_selection)))
 }
 
-async fn handle_events_socket(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
+async fn handle_events_socket(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<String>,
+    active_selection: Option<RemoteActiveDesktopSelection>,
+) {
+    if let Some(selection) = active_selection {
+        let snapshot = serde_json::to_string(&RemoteEventMessage {
+            event: REMOTE_ACTIVE_SELECTION_CHANGED_EVENT.to_string(),
+            payload: serde_json::to_value(selection).unwrap_or(serde_json::Value::Null),
+        })
+        .unwrap_or_default();
+        if socket.send(Message::Text(snapshot.into())).await.is_err() {
+            return;
+        }
+    }
     while let Ok(msg) = rx.recv().await {
         if socket.send(Message::Text(msg.into())).await.is_err() {
             break;
@@ -641,6 +719,10 @@ async fn ws_terminal_handler(
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    let render_grid = query.render.as_deref() == Some("grid");
+    let requested_geometry = render_grid
+        .then(|| requested_grid_geometry(&query))
+        .flatten();
 
     let is_declared_active = {
         let active = state.active_selection.read();
@@ -658,13 +740,20 @@ async fn ws_terminal_handler(
         ));
     }
 
+    if let Some((cols, rows)) = requested_geometry {
+        state
+            .terminal_service
+            .resize(&session_id, cols, rows)
+            .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
+    }
+
     let attachment = state
         .terminal_service
         .attach_with_sequence(&session_id, None)
         .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_terminal_socket(socket, session_id, attachment, device, state)
+        handle_terminal_socket(socket, session_id, attachment, device, state, render_grid)
     }))
 }
 
@@ -674,7 +763,13 @@ async fn handle_terminal_socket(
     attachment: SessionAttachment,
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
+    render_grid: bool,
 ) {
+    if render_grid {
+        handle_terminal_grid_socket(socket, session_id, attachment, device, state).await;
+        return;
+    }
+
     let (mut sender, mut receiver) = socket.split();
     let SessionAttachment {
         snapshot,
@@ -745,7 +840,9 @@ async fn handle_terminal_socket(
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         match ctrl {
                             ClientControlMessage::Resize { cols, rows } => {
-                                let _ = term_service.resize(&session_id_clone, cols, rows);
+                                if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
+                                    let _ = term_service.resize(&session_id_clone, cols, rows);
+                                }
                             }
                             ClientControlMessage::Signal { signal } => {
                                 if can_control && signal == "interrupt" {
@@ -789,6 +886,256 @@ async fn handle_terminal_socket(
         _ = (&mut focus_watcher) => {
             send_task.abort();
             recv_task.abort();
+        }
+    };
+}
+
+fn grid_text_message(frame: RemoteGridFrame) -> Message {
+    let text = serde_json::to_string(&frame).expect("remote grid frame serializes");
+    Message::Text(text.into())
+}
+
+fn enqueue_grid_operation(
+    mirror: &Arc<parking_lot::Mutex<RemoteTerminalMirror>>,
+    outbound_tx: &mpsc::UnboundedSender<Message>,
+    operation: impl FnOnce(
+        &mut RemoteTerminalMirror,
+    ) -> Result<RemoteGridFrame, crate::native_terminal::NativeTerminalError>,
+) -> bool {
+    let mut mirror = mirror.lock();
+    let frame = match operation(&mut mirror) {
+        Ok(frame) => frame,
+        Err(_) => return false,
+    };
+    outbound_tx.send(grid_text_message(frame)).is_ok()
+}
+
+async fn handle_terminal_grid_socket(
+    socket: WebSocket,
+    session_id: String,
+    attachment: SessionAttachment,
+    device: DeviceInfo,
+    state: Arc<RemoteGatewayState>,
+) {
+    let (mut sender, mut receiver) = socket.split();
+    let SessionAttachment {
+        snapshot,
+        receiver: mut output_rx,
+    } = attachment;
+
+    let Some(session) = state.terminal_service.get_session(&session_id) else {
+        return;
+    };
+    let (cols, rows) = session.get_size();
+    let mirror = match RemoteTerminalMirror::new(cols, rows) {
+        Ok(mirror) => Arc::new(parking_lot::Mutex::new(mirror)),
+        Err(_) => return,
+    };
+
+    let initial_frame = {
+        let mut mirror = mirror.lock();
+        if !snapshot.history.is_empty() && mirror.feed(&snapshot.history).is_err() {
+            return;
+        }
+        match mirror.full_frame() {
+            Ok(frame) => frame,
+            Err(_) => return,
+        }
+    };
+    if sender.send(grid_text_message(initial_frame)).await.is_err() {
+        return;
+    }
+    let mut last_emitted_sequence = snapshot.history_end_sequence;
+
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
+    let mut writer_task = tokio::spawn(async move {
+        while let Some(message) = outbound_rx.recv().await {
+            if sender.send(message).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let terminal_service = Arc::clone(&state.terminal_service);
+    let send_session_id = session_id.clone();
+    let send_mirror = Arc::clone(&mirror);
+    let send_tx = outbound_tx.clone();
+    let mut send_task = tokio::spawn(async move {
+        let frame_interval = Duration::from_millis(33);
+        let mut pending_bytes = Vec::new();
+        let mut pending_end_sequence = None;
+        let mut next_emit = tokio::time::Instant::now() + frame_interval;
+
+        loop {
+            if !pending_bytes.is_empty() && tokio::time::Instant::now() >= next_emit {
+                if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| {
+                    mirror.feed(&pending_bytes)
+                }) {
+                    break;
+                }
+                pending_bytes.clear();
+                last_emitted_sequence = pending_end_sequence.take();
+                next_emit = tokio::time::Instant::now() + frame_interval;
+                continue;
+            }
+
+            let received = if pending_bytes.is_empty() {
+                Some(output_rx.recv().await)
+            } else {
+                tokio::select! {
+                    result = output_rx.recv() => Some(result),
+                    _ = tokio::time::sleep_until(next_emit) => None,
+                }
+            };
+            let Some(received) = received else {
+                continue;
+            };
+
+            match received {
+                Ok(chunk) => {
+                    let latest_sequence = pending_end_sequence.or(last_emitted_sequence);
+                    if latest_sequence.is_some_and(|last| chunk.sequence <= last) {
+                        continue;
+                    }
+                    pending_bytes.extend_from_slice(&chunk.bytes);
+                    pending_end_sequence = Some(chunk.sequence);
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    pending_bytes.clear();
+                    pending_end_sequence = None;
+                    let recovered = match recover_remote_terminal_attachment(
+                        &terminal_service,
+                        &send_session_id,
+                        last_emitted_sequence,
+                    ) {
+                        Ok(attachment) => attachment,
+                        Err(_) => break,
+                    };
+                    output_rx = recovered.receiver;
+                    let snapshot = recovered.snapshot;
+                    let Some(session) = terminal_service.get_session(&send_session_id) else {
+                        break;
+                    };
+                    let (cols, rows) = session.get_size();
+
+                    let sent = {
+                        let mut mirror = send_mirror.lock();
+                        let frame = if snapshot.gap.is_some() {
+                            let mut replacement = match RemoteTerminalMirror::new(cols, rows) {
+                                Ok(mirror) => mirror,
+                                Err(_) => break,
+                            };
+                            if replacement.feed(&snapshot.history).is_err() {
+                                break;
+                            }
+                            let frame = match replacement.full_frame() {
+                                Ok(frame) => frame,
+                                Err(_) => break,
+                            };
+                            *mirror = replacement;
+                            frame
+                        } else {
+                            if mirror.feed(&snapshot.history).is_err() {
+                                break;
+                            }
+                            match mirror.full_frame() {
+                                Ok(frame) => frame,
+                                Err(_) => break,
+                            }
+                        };
+                        send_tx.send(grid_text_message(frame)).is_ok()
+                    };
+                    if !sent {
+                        break;
+                    }
+                    if let Some(end_sequence) = snapshot.history_end_sequence {
+                        last_emitted_sequence = Some(end_sequence);
+                    }
+                    next_emit = tokio::time::Instant::now() + frame_interval;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let term_service = Arc::clone(&state.terminal_service);
+    let session_id_clone = session_id.clone();
+    let can_control = device.permission == DevicePermission::Control;
+    let recv_mirror = Arc::clone(&mirror);
+    let recv_tx = outbound_tx.clone();
+
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            match msg {
+                Message::Binary(bytes) => {
+                    if can_control {
+                        let _ = term_service.write_input(&session_id_clone, &bytes);
+                    }
+                }
+                Message::Text(text) => {
+                    if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
+                        match ctrl {
+                            ClientControlMessage::Resize { cols, rows } => {
+                                if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
+                                    let _ = term_service.resize(&session_id_clone, cols, rows);
+                                    if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| {
+                                        mirror.resize(cols, rows)
+                                    }) {
+                                        break;
+                                    }
+                                }
+                            }
+                            ClientControlMessage::Signal { signal } => {
+                                if can_control && signal == "interrupt" {
+                                    let _ = term_service
+                                        .signal(&session_id_clone, TerminalSignal::Interrupt);
+                                }
+                            }
+                            ClientControlMessage::Ping => {}
+                        }
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    let mut active_session_rx = state.active_session_watch_rx();
+    let target_session_id = session_id.clone();
+    let mut focus_watcher = tokio::spawn(async move {
+        if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
+            return;
+        }
+        while active_session_rx.changed().await.is_ok() {
+            let current = active_session_rx.borrow().clone();
+            if current.as_deref() != Some(target_session_id.as_str()) {
+                break;
+            }
+        }
+    });
+
+    drop(outbound_tx);
+    tokio::select! {
+        _ = (&mut send_task) => {
+            recv_task.abort();
+            writer_task.abort();
+            focus_watcher.abort();
+        }
+        _ = (&mut recv_task) => {
+            send_task.abort();
+            writer_task.abort();
+            focus_watcher.abort();
+        }
+        _ = (&mut writer_task) => {
+            send_task.abort();
+            recv_task.abort();
+            focus_watcher.abort();
+        }
+        _ = (&mut focus_watcher) => {
+            send_task.abort();
+            recv_task.abort();
+            writer_task.abort();
         }
     };
 }
@@ -858,11 +1205,16 @@ const EMBEDDED_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 </html>"#;
 
 async fn get_terminal_preferences(
+    State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
-    let _token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers, Some(&query))
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
     Ok(Json(crate::terminal::load_terminal_preferences()))
 }
 

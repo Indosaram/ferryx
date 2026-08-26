@@ -32,6 +32,10 @@ pub enum IpcErrorCode {
     BrowserHistoryFailed,
     BrowserCookieImportFailed,
     BrowserCloseFailed,
+    BrowserAutomationSnapshotStale,
+    BrowserAutomationTargetNotFound,
+    BrowserAutomationFailed,
+    BrowserCliUnavailable,
     PtyCreationError,
     PtySpawnError,
     PtyIoError,
@@ -39,6 +43,11 @@ pub enum IpcErrorCode {
     PtyKillError,
     ChannelError,
     NativeTerminalUnsupported,
+    CliFileCollision,
+    CliDirectoryCollision,
+    CliParentSymlinkDenied,
+    CliPlatformUnsupported,
+    CliExecutableNotFound,
     InternalError,
 }
 
@@ -214,10 +223,59 @@ impl From<crate::browser::BrowserError> for IpcError {
                 IpcErrorCode::BrowserCookieImportFailed
             }
             crate::browser::BrowserError::CloseFailed(_) => IpcErrorCode::BrowserCloseFailed,
+            crate::browser::BrowserError::AutomationSnapshotStale => {
+                IpcErrorCode::BrowserAutomationSnapshotStale
+            }
+            crate::browser::BrowserError::AutomationTargetNotFound(_) => {
+                IpcErrorCode::BrowserAutomationTargetNotFound
+            }
+            crate::browser::BrowserError::AutomationFailed(_) => {
+                IpcErrorCode::BrowserAutomationFailed
+            }
+            crate::browser::BrowserError::CliUnavailable(_) => IpcErrorCode::BrowserCliUnavailable,
             crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::InternalError,
             crate::browser::BrowserError::Internal(_) => IpcErrorCode::InternalError,
         };
         Self::new(code, message)
+    }
+}
+
+impl From<crate::ipc::cli_install::CliInstallError> for IpcError {
+    fn from(error: crate::ipc::cli_install::CliInstallError) -> Self {
+        let message = error.to_string();
+        match error {
+            crate::ipc::cli_install::CliInstallError::FileCollision { path } => {
+                Self::new(IpcErrorCode::CliFileCollision, message)
+                    .with_details(json!({ "path": path.to_string_lossy() }))
+            }
+            crate::ipc::cli_install::CliInstallError::DirectoryCollision { path } => {
+                Self::new(IpcErrorCode::CliDirectoryCollision, message)
+                    .with_details(json!({ "path": path.to_string_lossy() }))
+            }
+            crate::ipc::cli_install::CliInstallError::ParentSymlinkDenied { path } => {
+                Self::new(IpcErrorCode::CliParentSymlinkDenied, message)
+                    .with_details(json!({ "path": path.to_string_lossy() }))
+            }
+            crate::ipc::cli_install::CliInstallError::ParentNotDirectory { path } => {
+                Self::new(IpcErrorCode::InvalidPath, message)
+                    .with_details(json!({ "path": path.to_string_lossy() }))
+            }
+            crate::ipc::cli_install::CliInstallError::PlatformUnsupported { platform } => {
+                Self::new(IpcErrorCode::CliPlatformUnsupported, message)
+                    .with_details(json!({ "platform": platform }))
+            }
+            crate::ipc::cli_install::CliInstallError::ExecutableNotFound(reason) => {
+                Self::new(IpcErrorCode::CliExecutableNotFound, message)
+                    .with_details(json!({ "reason": reason }))
+            }
+            crate::ipc::cli_install::CliInstallError::HomeDirNotFound => {
+                Self::new(IpcErrorCode::InvalidPath, message)
+            }
+            crate::ipc::cli_install::CliInstallError::Io(err) => {
+                Self::new(IpcErrorCode::IoError, message)
+                    .with_details(json!({ "kind": format!("{:?}", err.kind()) }))
+            }
+        }
     }
 }
 

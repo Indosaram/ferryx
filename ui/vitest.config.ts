@@ -9,5 +9,17 @@ export default defineConfig({
     clearMocks: true,
     restoreMocks: true,
     fileParallelism: false,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary"],
+      reportsDirectory: "coverage",
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.bench.ts",
+        "src/**/*.check.ts",
+        "src/test/**",
+      ],
+    },
   },
 });

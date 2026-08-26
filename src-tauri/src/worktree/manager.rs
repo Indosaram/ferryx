@@ -95,6 +95,7 @@ impl Drop for WriterLeaseGuard {
 #[derive(Debug, Clone)]
 pub struct WorktreeManager {
     repo_root: PathBuf,
+    git_backed: bool,
     writer_leases: WriterLeaseRegistry,
     delete_lock: Arc<Mutex<()>>,
     dirty_snapshots: Arc<Mutex<HashMap<PathBuf, bool>>>,
@@ -123,18 +124,18 @@ impl WorktreeManager {
             return Err(WorktreeError::InvalidRepoRoot { path: canonical });
         }
 
-        let top_level = run_git(&canonical, &["rev-parse", "--show-toplevel"]).map_err(|_| {
-            WorktreeError::InvalidRepoRoot {
-                path: canonical.clone(),
-            }
-        })?;
-        let git_root = fs::canonicalize(PathBuf::from(top_level.trim())).map_err(|_| {
-            WorktreeError::InvalidRepoRoot {
-                path: canonical.clone(),
-            }
-        })?;
+        // Plain-folder mode: a non-Git directory is a valid (terminal-only)
+        // workspace root; only worktree operations are unavailable.
+        let (repo_root, git_backed) = match run_git(&canonical, &["rev-parse", "--show-toplevel"]) {
+            Ok(top_level) => match fs::canonicalize(PathBuf::from(top_level.trim())) {
+                Ok(git_root) => (git_root, true),
+                Err(_) => (canonical, false),
+            },
+            Err(_) => (canonical, false),
+        };
         Ok(Self {
-            repo_root: git_root,
+            repo_root,
+            git_backed,
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
             dirty_snapshots: Arc::new(Mutex::new(HashMap::new())),
@@ -143,6 +144,22 @@ impl WorktreeManager {
 
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    /// Whether this workspace root is a Git repository (worktree operations
+    /// require it). Plain-folder workspaces are terminal-only.
+    pub fn is_git_backed(&self) -> bool {
+        self.git_backed
+    }
+
+    fn require_git_backed(&self) -> Result<(), WorktreeError> {
+        if self.git_backed {
+            Ok(())
+        } else {
+            Err(WorktreeError::NotAGitRepository {
+                path: self.repo_root.clone(),
+            })
+        }
     }
 
     fn validate_path_components(&self, path: &Path) -> Result<(), WorktreeError> {
@@ -359,6 +376,7 @@ impl WorktreeManager {
         &self,
         options: CreateWorktreeOptions,
     ) -> Result<Worktree, WorktreeError> {
+        self.require_git_backed()?;
         let branch_name = Self::format_branch_name(&options.ws_id, &options.slug)?;
         self.validate_new_worktree_path(&options.path)?;
         if options.path.exists() {
@@ -399,6 +417,9 @@ impl WorktreeManager {
     }
 
     pub fn list_worktrees(&self) -> Result<Vec<Worktree>, WorktreeError> {
+        if !self.git_backed {
+            return Ok(Vec::new());
+        }
         let worktrees = git_worktree_list(&self.repo_root)?;
         Ok(worktrees
             .into_iter()
@@ -447,6 +468,7 @@ impl WorktreeManager {
     }
 
     pub fn check_dirty(&self, worktree_path: &Path) -> Result<DirtyState, WorktreeError> {
+        self.require_git_backed()?;
         let canonical = self.canonical_worktree_path(worktree_path)?;
         git_status_porcelain(&canonical)
     }

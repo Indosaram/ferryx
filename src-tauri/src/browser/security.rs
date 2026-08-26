@@ -27,6 +27,14 @@ pub enum BrowserError {
     CloseFailed(String),
     #[error("Platform unsupported: {0}")]
     PlatformUnsupported(String),
+    #[error("Browser automation snapshot is stale")]
+    AutomationSnapshotStale,
+    #[error("Browser automation element not found: {0}")]
+    AutomationTargetNotFound(String),
+    #[error("Browser automation failed: {0}")]
+    AutomationFailed(String),
+    #[error("Browser CLI unavailable: {0}")]
+    CliUnavailable(String),
     #[error("Internal browser error: {0}")]
     Internal(String),
 }

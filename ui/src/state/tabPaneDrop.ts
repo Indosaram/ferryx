@@ -24,7 +24,7 @@ export type TabPaneDropTarget = {
 /**
  * Moves a terminal or browser tab's existing pane subtree into a specific leaf of another
  * tab. No terminal session or browser is created or destroyed: ownership moves
- * entirely inside the layout graph so xterm buffers, webviews, and native PTYs survive.
+ * entirely inside the layout graph so terminal surfaces, webviews, and native PTYs survive.
  */
 export function moveTabIntoPaneSplit(
   inputLayout: LayoutState,

@@ -235,6 +235,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     // Lazily initialized: a machine with no audio output device must still launch.
     let notification_audio = Arc::new(NotificationAudioPlayer::new());
     let browser_manager = Arc::new(browser::BrowserManager::new());
+    let browser_cli_manager = Arc::clone(&browser_manager);
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
 
@@ -254,6 +255,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             install_app_menu(app)?;
             #[cfg(target_os = "macos")]
             install_macos_key_monitor(app)?;
+            ipc::browser_cli::start_browser_cli_server(
+                app.handle().clone(),
+                Arc::clone(&browser_cli_manager),
+            )?;
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
@@ -326,6 +331,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_session_save,
         cmd_session_load,
         cmd_session_clear,
+        cmd_cli_launcher_status,
+        cmd_cli_launcher_install,
         cmd_browser_create,
         cmd_browser_navigate,
         cmd_browser_go_back,
@@ -337,6 +344,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_set_zoom,
         cmd_browser_focus,
         cmd_browser_get_state,
+        cmd_browser_automation_snapshot,
+        cmd_browser_automation_act,
         cmd_browser_close,
         cmd_browser_list,
         cmd_browser_open_external,

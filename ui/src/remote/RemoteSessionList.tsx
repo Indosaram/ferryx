@@ -1,6 +1,8 @@
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   GitBranch,
   LoaderCircle,
   Monitor,
@@ -8,6 +10,11 @@ import {
   X,
 } from "lucide-react";
 import React, { useMemo, useState, type ReactNode } from "react";
+
+export type RemoteTerminalTabInfo = {
+  id: string;
+  label: string;
+};
 
 export type RemoteTerminalItem = {
   sessionId: string;
@@ -22,12 +29,15 @@ export type RemoteContext = {
   worktreeSlug: string | null;
   worktreeLabel: string | null;
   activeTerminal: RemoteTerminalItem | null;
+  activeTabId?: string | null;
+  terminalTabs?: RemoteTerminalTabInfo[];
 };
 
 export type RemoteContextOption = {
   workspaceId: string;
   worktreeSlug: string | null;
   worktreeLabel: string | null;
+  tabId?: string | null;
 };
 
 export type RemoteWorkspaceModel = {
@@ -65,9 +75,25 @@ function terminal(value: unknown): RemoteTerminalItem | null {
   return {
     sessionId,
     running: item.running !== false,
+    title: safeContextText(item.title ?? item.label),
     workspaceId: safeContextText(item.workspaceId),
     worktreeLabel: safeContextText(item.worktreeLabel),
   };
+}
+
+function tabItem(value: unknown): RemoteTerminalTabInfo | null {
+  const item = record(value);
+  const id = safeContextText(item?.id ?? item?.tabId);
+  const rawLabel = item?.label ?? item?.tabLabel ?? item?.title;
+  const label = safeContextText(rawLabel) ?? "Terminal";
+  if (!id) return null;
+  return { id, label };
+}
+
+function tabItems(value: unknown): RemoteTerminalTabInfo[] {
+  return Array.isArray(value)
+    ? value.map(tabItem).filter((item): item is RemoteTerminalTabInfo => item !== null)
+    : [];
 }
 
 function contextOption(value: unknown, fallbackWorkspaceId: string | null): RemoteContextOption | null {
@@ -161,6 +187,12 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
   const legacySingleSession =
     !hasExplicitTerminalDeclaration && sessionRows.length === 1 ? terminal(sessionRows[0]) : null;
   const activeTerminal = explicitTerminal ?? declaredSession ?? legacySingleSession;
+  const activeTabId = safeContextText(
+    declaredContext.tabId ?? declaredContext.activeTabId ?? state.activeTabId ?? state.tabId,
+  );
+  const terminalTabs = tabItems(
+    declaredContext.terminalTabs ?? declaredContext.tabs ?? state.terminalTabs ?? state.tabs,
+  );
   const activeWorkspaceId = workspaceId ?? safeContextText(activeTerminal?.workspaceId);
   const activeWorktreeSlug = worktreeSlug;
   const activeWorktreeLabel =
@@ -200,6 +232,8 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
       worktreeSlug: activeWorktreeSlug,
       worktreeLabel: activeWorktreeLabel,
       activeTerminal,
+      activeTabId,
+      terminalTabs,
     },
     options,
   };
@@ -220,6 +254,22 @@ function isCurrentOption(option: RemoteContextOption, context: RemoteContext) {
   const optionWorktree = option.worktreeSlug ?? option.worktreeLabel;
   const activeWorktree = context.worktreeSlug ?? context.worktreeLabel;
   return optionWorktree ? optionWorktree === activeWorktree : activeWorktree === null;
+}
+
+export function getRemoteDocumentTitle(model: RemoteWorkspaceModel): string {
+  if (!model.context.activeTerminal && (!model.context.terminalTabs || model.context.terminalTabs.length === 0)) {
+    return "Ferryx";
+  }
+  const activeTab = model.context.terminalTabs?.find(
+    (tab) => tab.id === model.context.activeTabId,
+  );
+  const title =
+    activeTab?.label ??
+    model.context.activeTerminal?.title ??
+    model.context.terminalTabs?.[0]?.label ??
+    (model.context.activeTerminal ? "Terminal" : null);
+
+  return title ? `${title} - Ferryx` : "Ferryx";
 }
 
 type RemoteWorkspaceMirrorProps = {
@@ -250,36 +300,35 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-background">
-      <div className="border-b border-border bg-card p-2">
+      <div className="border-b border-border bg-card px-2 py-1">
         <button
           type="button"
           aria-label="Change workspace context"
           aria-expanded={selectorOpen}
           onClick={() => setSelectorOpen((open) => !open)}
-          className="flex h-11 w-full items-center gap-3 rounded-md border border-border bg-background px-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex h-8 w-full items-center gap-2 rounded-md border border-border bg-background px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
-            <Monitor className="size-4" aria-hidden="true" />
+          <span className="flex size-5 shrink-0 items-center justify-center rounded bg-secondary text-muted-foreground">
+            <Monitor className="size-3" aria-hidden="true" />
           </span>
           <span className="min-w-0 flex-1" aria-label="Current desktop context">
-            <span className="block text-xs font-medium text-foreground">Desktop context</span>
-            <span className="block truncate font-mono text-xs text-muted-foreground">
+            <span className="block truncate font-mono text-[11px] text-foreground">
               {contextName(model.context)}
             </span>
           </span>
           <ChevronDown
             aria-hidden="true"
-            className={`size-4 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`}
+            className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`}
           />
         </button>
         {statusMessage ? (
-          <div role="status" aria-live="polite" className="mt-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
+          <div role="status" aria-live="polite" className="mt-1 flex items-center gap-1.5 px-0.5 text-[11px] text-muted-foreground">
             {pending ? (
-              <LoaderCircle className="size-3.5 animate-spin text-status-working motion-reduce:animate-none" aria-hidden="true" />
+              <LoaderCircle className="size-3 animate-spin text-status-working motion-reduce:animate-none" aria-hidden="true" />
             ) : (
-              <Check className="size-3.5 text-status-success" aria-hidden="true" />
+              <Check className="size-3 text-status-success" aria-hidden="true" />
             )}
-            <span>{statusMessage}</span>
+            <span className="truncate">{statusMessage}</span>
           </div>
         ) : null}
       </div>
@@ -352,6 +401,99 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
           </div>
         </div>
       ) : null}
+
+      {model.context.terminalTabs && model.context.terminalTabs.length > 1 ? (() => {
+        const tabs = model.context.terminalTabs;
+        const activeIdx = tabs.findIndex((tab) => tab.id === model.context.activeTabId);
+        const currentIndex = activeIdx >= 0 ? activeIdx : 0;
+        const currentOrdinal = currentIndex + 1;
+
+        return (
+          <div className="flex items-center border-b border-border bg-card px-1.5 py-0.5">
+            <div className="flex items-center gap-0.5 shrink-0 pr-1 border-r border-border">
+              <button
+                type="button"
+                aria-label="Previous terminal tab"
+                disabled={pending !== null || currentIndex <= 0}
+                onClick={() => {
+                  const prevTab = tabs[currentIndex - 1];
+                  if (prevTab && model.context.workspaceId) {
+                    onSelect({
+                      workspaceId: model.context.workspaceId,
+                      worktreeSlug: model.context.worktreeSlug,
+                      worktreeLabel: model.context.worktreeLabel,
+                      tabId: prevTab.id,
+                    });
+                  }
+                }}
+                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+              >
+                <ChevronLeft className="size-3.5" aria-hidden="true" />
+              </button>
+              <span
+                className="px-1 text-[11px] font-mono font-medium text-muted-foreground select-none"
+                aria-label={`Terminal position: Tab ${currentOrdinal} of ${tabs.length}`}
+              >
+                {currentOrdinal} / {tabs.length}
+              </span>
+              <button
+                type="button"
+                aria-label="Next terminal tab"
+                disabled={pending !== null || currentIndex >= tabs.length - 1}
+                onClick={() => {
+                  const nextTab = tabs[currentIndex + 1];
+                  if (nextTab && model.context.workspaceId) {
+                    onSelect({
+                      workspaceId: model.context.workspaceId,
+                      worktreeSlug: model.context.worktreeSlug,
+                      worktreeLabel: model.context.worktreeLabel,
+                      tabId: nextTab.id,
+                    });
+                  }
+                }}
+                className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+              >
+                <ChevronRight className="size-3.5" aria-hidden="true" />
+              </button>
+            </div>
+            <div
+              role="tablist"
+              aria-label="Terminal tabs"
+              className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1.5 scrollbar-sleek"
+            >
+              {tabs.map((tab) => {
+                const isActive = tab.id === model.context.activeTabId;
+                return (
+                  <button
+                    key={tab.id}
+                    role="tab"
+                    aria-selected={isActive}
+                    aria-label={tab.label}
+                    disabled={pending !== null}
+                    onClick={() => {
+                      if (isActive || !model.context.workspaceId) return;
+                      onSelect({
+                        workspaceId: model.context.workspaceId,
+                        worktreeSlug: model.context.worktreeSlug,
+                        worktreeLabel: model.context.worktreeLabel,
+                        tabId: tab.id,
+                      });
+                    }}
+                    className={`flex h-7 min-w-0 max-w-40 items-center gap-1 rounded px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
+                      isActive
+                        ? "bg-accent text-accent-foreground font-semibold"
+                        : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                    }`}
+                  >
+                    <TerminalIcon className="size-3 shrink-0 opacity-70" aria-hidden="true" />
+                    <span className="truncate">{tab.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })() : null}
 
       <div className="flex min-h-0 flex-1 flex-col">
         {model.context.activeTerminal ? (

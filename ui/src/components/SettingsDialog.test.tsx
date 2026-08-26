@@ -576,13 +576,105 @@ describe("SettingsDialog", () => {
     expect(pinButton).toHaveTextContent(/copied/i);
   });
 
-  it("states that Remote Access stops when Ferryx quits and must be enabled again after relaunch", () => {
+  it("states that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed", () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
 
     const remote = screen.getByRole("region", { name: "Remote Access" });
-    expect(remote).toHaveTextContent(/stops when Ferryx quits/i);
-    expect(remote).toHaveTextContent(/enabled again after relaunch/i);
+    expect(remote).toHaveTextContent(/authorized browser profiles reconnect/i);
+    expect(remote).toHaveTextContent(/re-pair only after browser storage is cleared, a device is revoked, or a different browser profile\/device is used/i);
+  });
+
+  it("automatically generates and displays a new QR code when Remote Access is already Active with paired devices present", async () => {
+    const activeRemoteStatus = {
+      enabled: true,
+      mode: "localNetwork" as const,
+      port: 43821,
+      boundAddress: "0.0.0.0:43821",
+      localIp: "192.168.1.50",
+      tailscale: {
+        installed: true,
+        running: true,
+        tailnetName: "orca-mesh",
+        selfDns: "orca-host.tailscale.net",
+        serveActive: true,
+      },
+    };
+    native.getRemoteStatus.mockResolvedValue(activeRemoteStatus);
+    native.listRemoteDevices.mockResolvedValue([
+      {
+        id: "dev-phone-1",
+        name: "Mobile Device",
+        permission: "control",
+        createdAt: Date.now() - 60000,
+        lastSeenAt: Date.now() - 10000,
+        revoked: false,
+      },
+    ]);
+    native.createPairingCode.mockResolvedValueOnce({
+      code: "719340",
+      expiresInSeconds: 60,
+    });
+
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+
+    await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
+    await waitFor(() => expect(native.createPairingCode).toHaveBeenCalledTimes(1));
+
+    const pinButton = await screen.findByTestId("remote-pairing-code");
+    expect(pinButton).toHaveTextContent("719340");
+    const qrImg = await screen.findByAltText("Pairing QR Code");
+    expect(qrImg).toBeInTheDocument();
+    expect(screen.queryByText("Generating...")).not.toBeInTheDocument();
+
+    // Verify refreshing / generating a new code works while active and paired devices exist
+    native.createPairingCode.mockResolvedValueOnce({
+      code: "882194",
+      expiresInSeconds: 60,
+    });
+    const newCodeButton = screen.getByRole("button", { name: /New Code/i });
+    fireEvent.click(newCodeButton);
+
+    await waitFor(() => expect(native.createPairingCode).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("PIN: 882194")).toBeInTheDocument();
+  });
+
+  it("surfaces a QR generation failure with a retry option rather than leaving indefinite Generating... loading", async () => {
+    const activeRemoteStatus = {
+      enabled: true,
+      mode: "localNetwork" as const,
+      port: 43821,
+      boundAddress: "0.0.0.0:43821",
+      localIp: "192.168.1.50",
+      tailscale: {
+        installed: false,
+        running: false,
+        tailnetName: null,
+        selfDns: null,
+        serveActive: false,
+      },
+    };
+    native.getRemoteStatus.mockResolvedValue(activeRemoteStatus);
+    native.createPairingCode.mockRejectedValueOnce(new Error("Pairing creation failed on daemon"));
+
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+
+    await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
+    expect(await screen.findByText(/Pairing creation failed on daemon/i)).toBeInTheDocument();
+    expect(screen.queryByText("Generating...")).not.toBeInTheDocument();
+
+    // Retry button recovers
+    native.createPairingCode.mockResolvedValueOnce({
+      code: "654321",
+      expiresInSeconds: 60,
+    });
+    const retryButton = screen.getByRole("button", { name: /Retry/i });
+    fireEvent.click(retryButton);
+
+    expect(await screen.findByTestId("remote-pairing-code")).toHaveTextContent("654321");
+    expect(await screen.findByAltText("Pairing QR Code")).toBeInTheDocument();
   });
 
   it("describes Default Agent as first in the New Tab list with a Default label, not auto-launch", async () => {

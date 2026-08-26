@@ -5,17 +5,20 @@ import type {
 import type { RegisteredProject } from "./tauri";
 
 const TOKEN_KEY = "ferryx_remote_token";
+const LEGACY_TOKEN_KEY = "rorca_remote_token";
 
 export function getRemoteAuthToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return localStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(LEGACY_TOKEN_KEY);
 }
 
 export function setRemoteAuthToken(token: string) {
   localStorage.setItem(TOKEN_KEY, token);
+  localStorage.removeItem(LEGACY_TOKEN_KEY);
 }
 
 export function clearRemoteAuthToken() {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(LEGACY_TOKEN_KEY);
 }
 
 export class RemoteClient {

@@ -9,14 +9,29 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseUrl = process.env.BASE_URL
   ? `${process.env.BASE_URL.replace(/\/$/, '')}/`
   : undefined;
+// Absolute origin, required so canonical/og:url resolve instead of emitting empty attributes.
+const siteOrigin = process.env.SITE_URL ?? 'https://indosaram.github.io';
+const socialImage = `${siteOrigin.replace(/\/$/, '')}${baseUrl ?? '/'}og-image.png`;
 
 export default defineConfig({
   ...(baseUrl ? { base: baseUrl } : {}),
+  site: siteOrigin,
   server: { port: 14173 },
   integrations: [
     starlight({
       title: 'Ferryx Docs',
       logo: { src: './src/assets/ferryx-icon.png' },
+      head: [
+        { tag: 'meta', attrs: { property: 'og:image', content: socialImage } },
+        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+        { tag: 'meta', attrs: { property: 'og:image:type', content: 'image/png' } },
+        {
+          tag: 'meta',
+          attrs: { property: 'og:image:alt', content: 'Ferryx — parallel agentic development workspace' },
+        },
+        { tag: 'meta', attrs: { name: 'twitter:image', content: socialImage } },
+      ],
       social: { github: 'https://github.com/Indosaram/ferryx' },
       sidebar: [
         {

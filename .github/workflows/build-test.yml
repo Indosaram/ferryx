@@ -138,3 +138,10 @@ jobs:
             --test session_persistence_integration \
             --test worktree_safety \
             -- --test-threads=1
+
+      # The remote grid mirror spans Rust and TypeScript: this asserts real serialized
+      # backend frames parse in the actual frontend parser. It lives here, not in the ui
+      # job, because it needs the Rust toolchain and the Ghostty submodule.
+      - name: Remote Grid Frame Seam (Rust -> TypeScript)
+        if: matrix.os_name == 'linux'
+        run: bun run --cwd ui src/remote/gridFrameSeam.check.ts

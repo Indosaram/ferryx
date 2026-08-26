@@ -69,12 +69,17 @@ fn register_canonical_project(
     repo_path: &Path,
     preferred_id: Option<&str>,
 ) -> Result<RegisteredProject, IpcError> {
-    // `try_new` walks up to the Git top level, canonicalizes it, and rejects
-    // non-Git paths, so the uniqueness check below compares canonical roots.
-    let repo_root = WorktreeManager::try_new(repo_path)
-        .map_err(IpcError::from)?
-        .repo_root()
-        .to_path_buf();
+    // `try_new` canonicalizes the root (walking up to the Git top level when
+    // the path lives inside a repository) and falls back to the folder itself
+    // for plain directories, so the uniqueness check below compares
+    // canonical roots.
+    let manager = WorktreeManager::try_new(repo_path).map_err(IpcError::from)?;
+    let git_root = if manager.is_git_backed() {
+        Some(manager.repo_root().to_path_buf())
+    } else {
+        None
+    };
+    let repo_root = manager.repo_root().to_path_buf();
 
     if let Some((workspace_id, _)) = registry
         .list()
@@ -84,20 +89,24 @@ fn register_canonical_project(
         return Ok(RegisteredProject {
             workspace_id,
             repo_root,
+            git_root,
         });
     }
 
-    let workspace_id = match preferred_id {
+    let requested_id = match preferred_id {
         Some(requested) => requested.to_string(),
         None => derive_workspace_id(&repo_root),
     };
-    registry
-        .register(&workspace_id, &repo_root)
+    // Find-or-insert under one registry write lock: two concurrent
+    // registrations of the same root must resolve to one workspace ID.
+    let workspace_id = registry
+        .register_unique_root(&requested_id, &repo_root)
         .map_err(IpcError::from)?;
     let repo_root = registry.repo_root(&workspace_id).map_err(IpcError::from)?;
     Ok(RegisteredProject {
         workspace_id,
         repo_root,
+        git_root,
     })
 }
 
@@ -113,6 +122,9 @@ pub struct RegisterProjectRequest {
 pub struct RegisteredProject {
     pub workspace_id: String,
     pub repo_root: PathBuf,
+    /// Canonical Git root when the workspace is a Git repository; `None` for
+    /// plain-folder (terminal-only) workspaces.
+    pub git_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,9 +172,6 @@ pub async fn cmd_project_register(
     Ok(registered)
 }
 
-/// Returns the one canonical project for the repository the app was started
-/// from, registering it on first call. Replaces the previous startup behaviour
-/// of registering both a derived ID and a `default` alias for the same root.
 #[tauri::command]
 pub async fn cmd_project_initial(
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -192,6 +201,9 @@ pub async fn cmd_project_branches(
         let manager = registry
             .manager(&request.workspace_id)
             .map_err(IpcError::from)?;
+        if !manager.is_git_backed() {
+            return Ok(Vec::new());
+        }
         let branch_output = run_git(
             manager.repo_root(),
             &[

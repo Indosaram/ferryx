@@ -55,4 +55,30 @@ describe("activity summaries", () => {
     expect(combined.runningCount).toBe(1);
     expect(combined.hasUnread).toBe(true);
   });
+
+  it("picks the highest precedence agentType (waiting > working > done) and returns undefined when none carry one", () => {
+    const mixed = summarizeActivities([
+      { state: "done", title: "done agent", isAgent: true, agentType: "aider" },
+      { state: "working", title: "working agent", isAgent: true, agentType: "codex" },
+      { state: "waiting", title: "waiting agent", isAgent: true, agentType: "omo" },
+    ]);
+    expect(mixed.agentType).toBe("omo");
+
+    const tiesFirstWins = summarizeActivities([
+      { state: "working", title: "first working", isAgent: true, agentType: "first" },
+      { state: "working", title: "second working", isAgent: true, agentType: "second" },
+    ]);
+    expect(tiesFirstWins.agentType).toBe("first");
+
+    const none = summarizeActivities([
+      { state: "working", title: "make test", isAgent: false },
+    ]);
+    expect(none.agentType).toBeUndefined();
+
+    const combined = combineActivitySummaries([
+      summarizeActivities([{ state: "working", title: "working", isAgent: true, agentType: "worker" }]),
+      summarizeActivities([{ state: "waiting", title: "waiting", isAgent: true, agentType: "waiter" }]),
+    ]);
+    expect(combined.agentType).toBe("waiter");
+  });
 });

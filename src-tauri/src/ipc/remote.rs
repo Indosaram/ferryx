@@ -2,7 +2,7 @@
 use crate::daemon::client::DaemonClient;
 use crate::ipc::IpcError;
 use crate::remote::auth::{DeviceInfo, DevicePermission};
-use crate::remote::protocol::RemoteActiveDesktopSelection;
+use crate::remote::protocol::{RemoteActiveDesktopSelection, RemoteTerminalTabInfo};
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
@@ -295,6 +295,28 @@ pub struct SetActiveDesktopSelectionRequest {
     pub worktree_slug: Option<String>,
     pub worktree_label: Option<String>,
     pub session_id: Option<String>,
+    #[serde(default, alias = "activeTabId")]
+    pub tab_id: Option<String>,
+    #[serde(default, alias = "tabs")]
+    pub terminal_tabs: Vec<RemoteTerminalTabInfo>,
+}
+
+fn remote_terminal_tab_label(label: String) -> String {
+    let trimmed = label.trim();
+    if trimmed.starts_with('/')
+        || trimmed.starts_with('\\')
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("~\\")
+        || trimmed.starts_with("file:")
+        || trimmed.as_bytes().get(1) == Some(&b':')
+            && matches!(trimmed.as_bytes().first(), Some(b'A'..=b'Z' | b'a'..=b'z'))
+    {
+        "Terminal".to_string()
+    } else if trimmed.is_empty() {
+        "Terminal".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[tauri::command]
@@ -306,6 +328,8 @@ pub async fn cmd_remote_set_active_selection(
         && request.worktree_slug.is_none()
         && request.worktree_label.is_none()
         && request.session_id.is_none()
+        && request.tab_id.is_none()
+        && request.terminal_tabs.is_empty()
     {
         None
     } else {
@@ -314,6 +338,15 @@ pub async fn cmd_remote_set_active_selection(
             worktree_slug: request.worktree_slug,
             worktree_label: request.worktree_label,
             session_id: request.session_id,
+            tab_id: request.tab_id,
+            terminal_tabs: request
+                .terminal_tabs
+                .into_iter()
+                .map(|tab| RemoteTerminalTabInfo {
+                    id: tab.id,
+                    label: remote_terminal_tab_label(tab.label),
+                })
+                .collect(),
         })
     };
     match &manager.inner {

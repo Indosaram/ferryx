@@ -303,22 +303,14 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     const paneRect = { x: 10, y: 20, width: 800, height: 600 };
     // The viewport is offset from the pane box by the reserved handle strip, so
     // the browser measures it shorter and lower than its parent.
+    // The browser applies the reservation, so both the pane box and the viewport
+    // inside it measure below the strip and shorter than the pane slot.
     HTMLElement.prototype.getBoundingClientRect = function () {
-      if (this.getAttribute("data-testid") === "native-terminal-viewport") {
-        return {
-          ...paneRect,
-          y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
-          height: paneRect.height - NATIVE_TERMINAL_HANDLE_INSET_PX,
-          top: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
-          bottom: paneRect.y + paneRect.height,
-          left: paneRect.x,
-          right: paneRect.x + paneRect.width,
-          toJSON: () => ({}),
-        } as DOMRect;
-      }
       return {
         ...paneRect,
-        top: paneRect.y,
+        y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
+        height: paneRect.height - NATIVE_TERMINAL_HANDLE_INSET_PX,
+        top: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
         bottom: paneRect.y + paneRect.height,
         left: paneRect.x,
         right: paneRect.x + paneRect.width,
@@ -330,10 +322,11 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       <NativeTerminalPane sessionId="term-session-1" session={session} />,
     );
 
-    // The strip is reserved in the DOM ...
-    expect(getByTestId("native-terminal-viewport").style.top).toBe(
-      `${NATIVE_TERMINAL_HANDLE_INSET_PX}px`,
-    );
+    // The strip is reserved on the pane's own box, so it is not terminal area
+    // in the DOM and cannot swallow the press that starts a handle drag ...
+    const pane = getByTestId("native-terminal-pane");
+    expect(pane.style.marginTop).toBe(`${NATIVE_TERMINAL_HANDLE_INSET_PX}px`);
+    expect(pane.style.height).toBe(`calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX}px)`);
 
     // ... and excluded from the geometry handed to the compositor, so the
     // native surface cannot paint over the handle.

@@ -6,8 +6,20 @@ const ANSI_ESCAPE_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
 const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/g;
 const LEADING_ACTIVITY_GLYPHS_RE = /^[\u2800-\u28FF✦✳⏲✋◇\s*•\-–—|/\\~]+/u;
 
-const WAITING_RE = /\b(waiting|awaiting|needs? input|requires? input|permission|action required|approval|confirm(?:ation)?|user input)\b/i;
-const DONE_RE = /\b(done|completed?|finished|idle)\b/i;
+const WAITING_WORDS_SOURCE = "(?:waiting|awaiting|needs? input|requires? input|permission|action required|approval|confirm(?:ation)?|user input)";
+const DONE_WORDS_SOURCE = "(?:done|completed?|finished|idle)";
+/** A status word terminating the title, optionally trailed by punctuation or an ellipsis. */
+const STATUS_TAIL_SOURCE = "(?:\\.{3}|[.!\\u2026]|\\s)*$";
+
+const WAITING_AT_END_RE = new RegExp(`\\b${WAITING_WORDS_SOURCE}${STATUS_TAIL_SOURCE}`, "i");
+const DONE_AT_END_RE = new RegExp(`\\b${DONE_WORDS_SOURCE}${STATUS_TAIL_SOURCE}`, "i");
+/**
+ * Opening the status segment counts too, so `codex: done (3 files changed)` and
+ * `omo: permission required` still report status. The negative lookahead keeps
+ * hyphenated compounds out: `done-state handler` names work, not completion.
+ */
+const WAITING_AT_SEGMENT_START_RE = new RegExp(`^${WAITING_WORDS_SOURCE}(?![\\w-])`, "i");
+const DONE_AT_SEGMENT_START_RE = new RegExp(`^${DONE_WORDS_SOURCE}(?![\\w-])`, "i");
 const DONE_GLYPH_RE = /^[◇*](?:\s|$)/u;
 const WORKING_RE = /\b(working|thinking|running|executing|processing)\b/i;
 
@@ -44,6 +56,19 @@ export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
   { pattern: /\bmimo\b/i, type: "mimo", name: "Mimo" },
 ];
 
+/** `omo: done` -> `done`: the status segment is whatever follows the agent name. */
+const AGENT_PREFIX_RE = new RegExp(
+  `^(?:${KNOWN_AGENT_MATCHERS.map((agent) => agent.pattern.source).join("|")})\\s*[:\\-–—|]?\\s*`,
+  "i",
+);
+/** Agents decorate titles with glyphs beyond the known spinner set, so drop any leading non-word run. */
+const LEADING_DECORATION_RE = /^[^\p{L}\p{N}]+/u;
+
+function statusSegment(normalized: string): string {
+  const withoutGlyphs = normalized.replace(LEADING_DECORATION_RE, "").trim();
+  return withoutGlyphs.replace(AGENT_PREFIX_RE, "").trim() || withoutGlyphs;
+}
+
 export type ParsedAgentInfo = {
   isAgent: boolean;
   agentType: string;
@@ -70,8 +95,17 @@ export function classifyTerminalTitleActivity(rawTitle: string): TerminalActivit
   const normalized = normalizeTerminalTitle(rawTitle);
   if (!normalized) return null;
 
-  if (normalized.includes("✋") || WAITING_RE.test(normalized)) return "waiting";
-  if (DONE_RE.test(normalized) || DONE_GLYPH_RE.test(normalized)) return "done";
+  if (normalized.includes("✋") || WAITING_AT_END_RE.test(normalized)) return "waiting";
+  if (DONE_AT_END_RE.test(normalized) || DONE_GLYPH_RE.test(normalized)) return "done";
+
+  // A live spinner is direct evidence of active work, so a status word that merely
+  // opens the task description ('idle connection cleanup') never ends the run.
+  if (!containsAgentSpinnerGlyph(normalized)) {
+    const segment = statusSegment(normalized);
+    if (WAITING_AT_SEGMENT_START_RE.test(segment)) return "waiting";
+    if (DONE_AT_SEGMENT_START_RE.test(segment)) return "done";
+  }
+
   if (containsAgentSpinnerGlyph(normalized) || WORKING_RE.test(normalized)) return "working";
 
   const cleaned = stripLeadingActivityGlyphs(normalized);

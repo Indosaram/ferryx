@@ -6,8 +6,6 @@ import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 type TerminalPaneProps = {
   session: TerminalSession;
   active: boolean;
-  onBell?: () => void;
-  onTitleChange?: (title: string) => void;
   searchOpen?: boolean;
   onCloseSearch?: () => void;
 };
@@ -15,8 +13,6 @@ type TerminalPaneProps = {
 export function TerminalPane({
   session,
   active: _active,
-  onBell,
-  onTitleChange,
   searchOpen,
   onCloseSearch,
 }: TerminalPaneProps) {
@@ -30,8 +26,6 @@ export function TerminalPane({
       <NativeTerminalPane
         sessionId={session.id}
         session={session}
-        onBell={onBell}
-        onTitleChange={onTitleChange}
       />
       {searchOpen ? (
         <TerminalSearchOverlay

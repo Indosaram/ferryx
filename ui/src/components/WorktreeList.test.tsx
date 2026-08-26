@@ -267,4 +267,24 @@ describe("WorktreeList actions", () => {
     expect(screen.queryByText(/unavailable for non-Git/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/detached HEAD/i)).not.toBeInTheDocument();
   });
+
+  it("renders idle status dot using theme token without hardcoded hex class", () => {
+    render(
+      <WorktreeList
+        worktrees={[worktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const dotContainer = screen.getByTestId("worktree-status-dot");
+    expect(dotContainer).toHaveAttribute("data-activity-state", "idle");
+    const idleDot = dotContainer.firstElementChild;
+    expect(idleDot).not.toBeNull();
+    expect(idleDot?.className).toContain("bg-status-idle");
+    expect(idleDot?.className).not.toContain("#00bc7d");
+  });
 });

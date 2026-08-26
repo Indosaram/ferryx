@@ -1,83 +1,107 @@
-import { Cpu, SplitSquareHorizontal, Bot, ShieldCheck, Zap, Smartphone } from "lucide-react";
-import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
+import {
+  AgentsVisual,
+  GhosttyVisual,
+  MobileVisual,
+  PersistenceVisual,
+  SplitVisual,
+  ZeroElectronVisual,
+} from "@/components/FeatureVisuals";
 
 export function Features() {
   const features = [
     {
-      icon: <Cpu className="h-6 w-6 text-zinc-200" />,
-      badge: "Performance",
+      visual: GhosttyVisual,
+      eyebrow: "Rendering",
       title: "Native Ghostty & wgpu Engine",
       description: "Desktop terminal panes render directly via native libghostty and a GPU-accelerated wgpu pipeline for crisp font rasterization and low-latency throughput.",
+      points: ["libghostty terminal core", "wgpu GPU pipeline", "Sub-frame input latency"],
     },
     {
-      icon: <Bot className="h-6 w-6 text-zinc-200" />,
-      badge: "Agentic AI",
+      visual: AgentsVisual,
+      eyebrow: "Agents",
       title: "Multi-Agent Workspaces",
       description: "Orchestrate parallel AI coding agents (Claude, Codex, Gemini Flash) in isolated split-panes with real-time status indicators.",
+      points: ["Isolated worktree per agent", "Live status indicators", "Launch from the tab bar"],
     },
     {
-      icon: <SplitSquareHorizontal className="h-6 w-6 text-zinc-200" />,
-      badge: "Productivity",
+      visual: SplitVisual,
+      eyebrow: "Layout",
       title: "Flexible Split-Pane Tiling",
       description: "Arbitrary vertical and horizontal terminal splits with responsive pointer drag resizing and smooth layout transitions.",
+      points: ["Vertical & horizontal splits", "Pointer drag resizing", "Drag tabs into any pane"],
     },
     {
-      icon: <Smartphone className="h-6 w-6 text-zinc-200" />,
-      badge: "Remote Control",
+      visual: MobileVisual,
+      eyebrow: "Remote",
       title: "Mobile Web Pairing",
       description: "Secure, authenticated remote web access via QR/PIN code. Stream terminal output via lightweight browser xterm.js and steer agent workflows on the go.",
+      points: ["6-digit PIN pairing", "Streamed terminal grid", "Steer agents from a phone"],
     },
     {
-      icon: <Zap className="h-6 w-6 text-zinc-200" />,
-      badge: "Architecture",
+      visual: ZeroElectronVisual,
+      eyebrow: "Architecture",
       title: "Zero Electron Overhead",
       description: "Built on Tauri v2 and native Webview2/WebKit engines paired with a headless Rust PTY daemon. Instant startup with minimal footprint.",
+      points: ["Tauri v2 shell", "Headless Rust PTY daemon", "macOS, Windows, Linux"],
     },
     {
-      icon: <ShieldCheck className="h-6 w-6 text-zinc-200" />,
-      badge: "Reliability",
+      visual: PersistenceVisual,
+      eyebrow: "Reliability",
       title: "Resilient Persistence",
       description: "Automatic workspace state snapshotting and background daemon reattachment guarantee you never lose work on crash or exit.",
+      points: ["Layout snapshots", "Daemon survives the GUI", "Reattach with replay"],
     },
   ];
 
   return (
-    <section id="features" className="py-20 border-t border-zinc-800/60 bg-zinc-950/40 relative">
+    <section id="features" className="py-24 sm:py-28 border-t border-line bg-page-raised relative">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
-        <div className="text-center max-w-2xl mx-auto mb-16">
-          <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-zinc-100">
-            Speed. Isolation. Total Control.
+        <div className="text-center max-w-2xl mx-auto mb-16 sm:mb-20">
+          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
+            Why Ferryx
+          </p>
+          <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+            Speed. Isolation. Total control.
           </h2>
-          <p className="mt-4 text-zinc-400 text-base">
+          <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
             Every layer in Ferryx is engineered from scratch for minimal latency, zero memory leaks, and seamless autonomous agent collaboration.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {features.map((feature, idx) => (
-            <Card key={idx} className="group relative overflow-hidden bg-zinc-900/30 border-zinc-800/80 hover:border-zinc-700 transition-all hover:bg-zinc-900/50">
-              <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                {feature.icon}
-              </div>
-              <CardHeader className="p-6 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-200 shadow-inner group-hover:scale-105 transition-transform">
-                    {feature.icon}
-                  </div>
-                  <Badge variant="outline" className="text-[10px] text-zinc-400 border-zinc-800">
-                    {feature.badge}
-                  </Badge>
+        <div className="flex flex-col gap-4">
+          {features.map((feature, idx) => {
+            const Visual = feature.visual;
+            const flip = idx % 2 === 1;
+            return (
+              <div
+                key={feature.title}
+                className="grid grid-cols-1 items-center gap-8 rounded-2xl border border-line bg-surface p-8 shadow-card transition-colors hover:border-line-strong sm:p-10 lg:grid-cols-2 lg:gap-12"
+              >
+                <div className={flip ? "lg:order-2" : undefined}>
+                  <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
+                    {feature.eyebrow}
+                  </p>
+                  <h3 className="text-[clamp(1.375rem,2.2vw,1.875rem)] font-medium tracking-[-0.025em] leading-[1.15] text-ink">
+                    {feature.title}
+                  </h3>
+                  <p className="mt-4 text-[16px] leading-relaxed text-ink-soft">
+                    {feature.description}
+                  </p>
+                  <ul className="mt-6 flex flex-col gap-2.5">
+                    {feature.points.map((point) => (
+                      <li key={point} className="flex items-center gap-2.5 text-[14px] text-ink-soft">
+                        <span className="h-1 w-1 shrink-0 rounded-full bg-ink-faint" />
+                        {point}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-                <CardTitle className="text-lg font-semibold text-zinc-100 group-hover:text-white transition-colors">
-                  {feature.title}
-                </CardTitle>
-                <CardDescription className="text-zinc-400 text-sm leading-relaxed">
-                  {feature.description}
-                </CardDescription>
-              </CardHeader>
-            </Card>
-          ))}
+                <div className={flip ? "lg:order-1" : undefined}>
+                  <Visual />
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </section>

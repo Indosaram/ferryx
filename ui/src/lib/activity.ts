@@ -18,9 +18,17 @@ export type ActivitySummary = {
   hasWaiting: boolean;
   hasDone: boolean;
   hasUnread: boolean;
+  agentType?: string;
 };
 
 export type ActivityIndicatorState = TerminalActivityState | "unread" | null;
+
+function stateRank(state: TerminalActivityState): number {
+  if (state === "waiting") return 3;
+  if (state === "working") return 2;
+  if (state === "done") return 1;
+  return 0;
+}
 
 export function summarizeActivities(
   activities: Iterable<TerminalActivity>,
@@ -29,11 +37,21 @@ export function summarizeActivities(
   let workingCount = 0;
   let waitingCount = 0;
   let doneCount = 0;
+  let bestRank = 0;
+  let agentType: string | undefined = undefined;
 
   for (const activity of activities) {
     if (activity.state === "working") workingCount += 1;
     else if (activity.state === "waiting") waitingCount += 1;
     else doneCount += 1;
+
+    if (activity.agentType !== undefined) {
+      const rank = stateRank(activity.state);
+      if (rank > bestRank) {
+        bestRank = rank;
+        agentType = activity.agentType;
+      }
+    }
   }
 
   return {
@@ -45,7 +63,15 @@ export function summarizeActivities(
     hasWaiting: waitingCount > 0,
     hasDone: doneCount > 0,
     hasUnread,
+    agentType,
   };
+}
+
+function summaryRank(summary: ActivitySummary): number {
+  if (summary.hasWaiting) return 3;
+  if (summary.hasWorking) return 2;
+  if (summary.hasDone) return 1;
+  return 0;
 }
 
 export function combineActivitySummaries(
@@ -56,12 +82,22 @@ export function combineActivitySummaries(
   let waitingCount = 0;
   let doneCount = 0;
   let unread = hasUnread;
+  let bestRank = 0;
+  let agentType: string | undefined = undefined;
 
   for (const summary of summaries) {
     workingCount += summary.workingCount;
     waitingCount += summary.waitingCount;
     doneCount += summary.doneCount;
     unread ||= summary.hasUnread;
+
+    if (summary.agentType !== undefined) {
+      const rank = summaryRank(summary);
+      if (rank > bestRank) {
+        bestRank = rank;
+        agentType = summary.agentType;
+      }
+    }
   }
 
   return {
@@ -73,6 +109,7 @@ export function combineActivitySummaries(
     hasWaiting: waitingCount > 0,
     hasDone: doneCount > 0,
     hasUnread: unread,
+    agentType,
   };
 }
 

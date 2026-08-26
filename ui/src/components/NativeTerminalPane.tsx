@@ -1,7 +1,6 @@
 import type { CSSProperties, KeyboardEvent, ReactElement } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
 import { cn } from "../lib/cn";
 import {
@@ -25,8 +24,6 @@ export interface NativeTerminalPaneProps {
   session?: TerminalSession;
   className?: string;
   style?: CSSProperties;
-  onTitleChange?: (title: string) => void;
-  onBell?: () => void;
 }
 
 interface GeometryState {
@@ -74,16 +71,6 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_send_input"
   | "cmd_native_terminal_scroll"
   | "cmd_native_terminal_copy_selection";
-
-interface NativeTerminalTitlePayload {
-  sessionId: string;
-  title: string;
-}
-
-interface NativeTerminalBellPayload {
-  sessionId: string;
-  count?: number;
-}
 
 const ignoredBrowserKeys = new Set([
   "Alt",
@@ -163,8 +150,6 @@ export function NativeTerminalPane({
   session,
   className,
   style,
-  onTitleChange,
-  onBell,
 }: NativeTerminalPaneProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -253,56 +238,6 @@ export function NativeTerminalPane({
     }
   }, [sendInput, targetSessionId, visible]);
 
-  // Title and Bell event subscriptions
-  useEffect(() => {
-    if (!isTauri() || !targetSessionId) {
-      return;
-    }
-
-    let isSubscribed = true;
-    let unlistenTitle: (() => void) | undefined;
-    let unlistenBell: (() => void) | undefined;
-
-    void listen<NativeTerminalTitlePayload>("native_terminal_title", (event) => {
-      const payload =
-        (event as unknown as { payload?: NativeTerminalTitlePayload }).payload ??
-        (event as unknown as NativeTerminalTitlePayload);
-      if (isSubscribed && payload?.sessionId === targetSessionId) {
-        onTitleChange?.(payload.title);
-      }
-    })
-      .then((unlisten) => {
-        if (!isSubscribed) {
-          unlisten();
-        } else {
-          unlistenTitle = unlisten;
-        }
-      })
-      .catch(() => undefined);
-
-    void listen<NativeTerminalBellPayload>("native_terminal_bell", (event) => {
-      const payload =
-        (event as unknown as { payload?: NativeTerminalBellPayload }).payload ??
-        (event as unknown as NativeTerminalBellPayload);
-      if (isSubscribed && payload?.sessionId === targetSessionId) {
-        onBell?.();
-      }
-    })
-      .then((unlisten) => {
-        if (!isSubscribed) {
-          unlisten();
-        } else {
-          unlistenBell = unlisten;
-        }
-      })
-      .catch(() => undefined);
-
-    return () => {
-      isSubscribed = false;
-      unlistenTitle?.();
-      unlistenBell?.();
-    };
-  }, [targetSessionId, onTitleChange, onBell]);
 
   useEffect(() => {
     const element = viewportRef.current;

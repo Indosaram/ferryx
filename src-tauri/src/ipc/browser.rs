@@ -1,12 +1,789 @@
 use crate::browser::{
-    cookie_from_imported, parse_cookie_file, BrowserError, BrowserManager, BrowserProfileId,
-    BrowserSessionSummary, BrowserState, BrowserStateChangedPayload, CreateBrowserRequest,
-    ImportBrowserCookiesRequest, ImportBrowserCookiesResult, LogicalRect,
+    cookie_from_imported, parse_cookie_file, BrowserAutomationAction, BrowserAutomationElement,
+    BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserError,
+    BrowserManager, BrowserProfileId, BrowserSessionSummary, BrowserState,
+    BrowserStateChangedPayload, CreateBrowserRequest, ImportBrowserCookiesRequest,
+    ImportBrowserCookiesResult, LogicalRect,
 };
 use crate::ipc::error::IpcError;
+#[cfg(target_os = "macos")]
+use parking_lot::Mutex;
+use serde::Deserialize;
 use std::sync::Arc;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationSnapshotResult {
+    url: String,
+    title: String,
+    elements: Vec<AutomationSnapshotElement>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationSnapshotElement {
+    reference: String,
+    selector: String,
+    role: String,
+    name: String,
+    tag_name: String,
+}
+
+const AUTOMATION_SNAPSHOT_SCRIPT: &str = r#"(() => {
+  const candidates = Array.from(document.querySelectorAll(
+    'a[href], button, input, select, textarea, [role="button"], [role="link"], [contenteditable="true"]'
+  ));
+  const escape = (value) => CSS.escape(value);
+  const selectorFor = (element) => {
+    if (element.id) return `#${escape(element.id)}`;
+    const segments = [];
+    let current = element;
+    while (current && current.nodeType === Node.ELEMENT_NODE && segments.length < 8) {
+      const tag = current.tagName.toLowerCase();
+      const siblings = current.parentElement
+        ? Array.from(current.parentElement.children).filter((sibling) => sibling.tagName === current.tagName)
+        : [];
+      const index = siblings.indexOf(current) + 1;
+      segments.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${index})` : tag);
+      current = current.parentElement;
+    }
+    return segments.join(' > ');
+  };
+  const roleFor = (element) => element.getAttribute('role') || element.tagName.toLowerCase();
+  const nameFor = (element) => element.getAttribute('aria-label') || element.getAttribute('title') ||
+    element.getAttribute('placeholder') || element.textContent.trim().replace(/\s+/g, ' ').slice(0, 160);
+  return JSON.stringify({
+    url: location.href,
+    title: document.title,
+    elements: candidates.slice(0, 200).map((element, index) => ({
+      reference: `e${index + 1}`,
+      selector: selectorFor(element),
+      role: roleFor(element),
+      name: nameFor(element),
+      tagName: element.tagName.toLowerCase(),
+    })),
+  });
+})()"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedKeypress {
+    pub key: String,
+    pub meta_key: bool,
+    pub ctrl_key: bool,
+    pub alt_key: bool,
+    pub shift_key: bool,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacosKeypressSpec {
+    characters: String,
+    key_code: u16,
+    meta_key: bool,
+    ctrl_key: bool,
+    alt_key: bool,
+    shift_key: bool,
+}
+
+fn tokenize_keypress(raw: &str) -> Result<Vec<&str>, BrowserError> {
+    if raw.is_empty() {
+        return Err(BrowserError::AutomationFailed(
+            "keypress cannot be empty".into(),
+        ));
+    }
+
+    if raw == "+" {
+        return Ok(vec!["+"]);
+    }
+
+    let (prefix, has_trailing_plus) = if raw.ends_with("++") {
+        (&raw[..raw.len() - 2], true)
+    } else {
+        (raw, false)
+    };
+
+    let mut tokens = Vec::new();
+    for part in prefix.split('+') {
+        if part.is_empty() {
+            return Err(BrowserError::AutomationFailed(format!(
+                "invalid keypress format: '{raw}'"
+            )));
+        }
+        tokens.push(part);
+    }
+
+    if has_trailing_plus {
+        tokens.push("+");
+    }
+
+    Ok(tokens)
+}
+
+pub fn parse_keypress(raw: &str) -> Result<ParsedKeypress, BrowserError> {
+    let tokens = tokenize_keypress(raw)?;
+    let mut meta_key = false;
+    let mut ctrl_key = false;
+    let mut alt_key = false;
+    let mut shift_key = false;
+    let mut base_key: Option<String> = None;
+
+    for token in tokens {
+        match token {
+            "Meta" => {
+                if meta_key {
+                    return Err(BrowserError::AutomationFailed(format!(
+                        "duplicate modifier 'Meta' in keypress '{raw}'"
+                    )));
+                }
+                meta_key = true;
+            }
+            "Control" | "Ctrl" => {
+                if ctrl_key {
+                    return Err(BrowserError::AutomationFailed(format!(
+                        "duplicate modifier '{token}' in keypress '{raw}'"
+                    )));
+                }
+                ctrl_key = true;
+            }
+            "Alt" => {
+                if alt_key {
+                    return Err(BrowserError::AutomationFailed(format!(
+                        "duplicate modifier 'Alt' in keypress '{raw}'"
+                    )));
+                }
+                alt_key = true;
+            }
+            "Shift" => {
+                if shift_key {
+                    return Err(BrowserError::AutomationFailed(format!(
+                        "duplicate modifier 'Shift' in keypress '{raw}'"
+                    )));
+                }
+                shift_key = true;
+            }
+            "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End" | "PageUp"
+            | "PageDown" | "Backspace" | "Delete" | "Enter" | "Escape" | "Tab" => {
+                if base_key.is_some() {
+                    return Err(BrowserError::AutomationFailed(format!(
+                        "multiple base keys in keypress '{raw}'"
+                    )));
+                }
+                base_key = Some(token.to_string());
+            }
+            single if single.chars().count() == 1 => {
+                if base_key.is_some() {
+                    return Err(BrowserError::AutomationFailed(format!(
+                        "multiple base keys in keypress '{raw}'"
+                    )));
+                }
+                base_key = Some(single.to_string());
+            }
+            unsupported => {
+                return Err(BrowserError::AutomationFailed(format!(
+                    "unsupported key or modifier '{unsupported}' in keypress '{raw}'"
+                )));
+            }
+        }
+    }
+
+    let key = base_key.ok_or_else(|| {
+        BrowserError::AutomationFailed(format!("missing base key in keypress '{raw}'"))
+    })?;
+
+    Ok(ParsedKeypress {
+        key,
+        meta_key,
+        ctrl_key,
+        alt_key,
+        shift_key,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keypress_spec(keypress: &ParsedKeypress) -> Option<MacosKeypressSpec> {
+    let (characters, key_code) = match keypress.key.as_str() {
+        "ArrowUp" => ('\u{f700}', 126),
+        "ArrowDown" => ('\u{f701}', 125),
+        "ArrowLeft" => ('\u{f702}', 123),
+        "ArrowRight" => ('\u{f703}', 124),
+        "Home" => ('\u{f729}', 115),
+        "End" => ('\u{f72b}', 119),
+        "PageUp" => ('\u{f72c}', 116),
+        "PageDown" => ('\u{f72d}', 121),
+        "Backspace" => ('\u{8}', 51),
+        "Delete" => ('\u{f728}', 117),
+        "Enter" => ('\r', 36),
+        "Escape" => ('\u{1b}', 53),
+        "Tab" => ('\t', 48),
+        _ => return None,
+    };
+
+    Some(MacosKeypressSpec {
+        characters: characters.to_string(),
+        key_code,
+        meta_key: keypress.meta_key,
+        ctrl_key: keypress.ctrl_key,
+        alt_key: keypress.alt_key,
+        shift_key: keypress.shift_key,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_macos_keypress<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    keypress: &ParsedKeypress,
+) -> Result<bool, BrowserError> {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+    use objc2_foundation::{NSPoint, NSString};
+
+    let Some(spec) = macos_keypress_spec(keypress) else {
+        return Ok(false);
+    };
+
+    let mut modifiers = NSEventModifierFlags::empty();
+    if spec.meta_key {
+        modifiers.insert(NSEventModifierFlags::Command);
+    }
+    if spec.ctrl_key {
+        modifiers.insert(NSEventModifierFlags::Control);
+    }
+    if spec.alt_key {
+        modifiers.insert(NSEventModifierFlags::Option);
+    }
+    if spec.shift_key {
+        modifiers.insert(NSEventModifierFlags::Shift);
+    }
+
+    let dispatch_result = Arc::new(Mutex::new(None));
+    let result_slot = Arc::clone(&dispatch_result);
+    webview
+        .with_webview(move |platform_webview| unsafe {
+            // SAFETY: Tauri invokes `with_webview` on this app-owned WebView's UI thread.
+            // The platform handle is a WKWebView on macOS, as in the existing history and
+            // navigation-state bridges above. The retained AppKit events live through both
+            // synchronous responder calls and never escape this closure.
+            let outcome = (|| -> Result<(), BrowserError> {
+                let native: &objc2_web_kit::WKWebView = &*platform_webview.inner().cast();
+                let characters = NSString::from_str(&spec.characters);
+                let location = NSPoint { x: 0.0, y: 0.0 };
+                let key_down = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    NSEventType::KeyDown,
+                    location,
+                    modifiers,
+                    0.0,
+                    0,
+                    None,
+                    &characters,
+                    &characters,
+                    false,
+                    spec.key_code,
+                )
+                .ok_or_else(|| BrowserError::AutomationFailed("failed to create native keydown event".into()))?;
+                let key_up = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    NSEventType::KeyUp,
+                    location,
+                    modifiers,
+                    0.0,
+                    0,
+                    None,
+                    &characters,
+                    &characters,
+                    false,
+                    spec.key_code,
+                )
+                .ok_or_else(|| BrowserError::AutomationFailed("failed to create native keyup event".into()))?;
+
+                native.keyDown(&key_down);
+                native.keyUp(&key_up);
+                Ok(())
+            })();
+            *result_slot.lock() = Some(outcome);
+        })
+        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+    dispatch_result.lock().take().ok_or_else(|| {
+        BrowserError::AutomationFailed("native key dispatch did not execute".into())
+    })??;
+
+    Ok(true)
+}
+
+fn automation_script(
+    action: &BrowserAutomationAction,
+    selector: Option<&str>,
+) -> Result<String, BrowserError> {
+    match action {
+        BrowserAutomationAction::Click { .. } => {
+            let selector = serde_json::to_string(selector.ok_or_else(|| {
+                BrowserError::AutomationFailed("missing snapshot selector".into())
+            })?)
+            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+            Ok(format!(
+                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.click(); return 'ok'; }})()"
+            ))
+        }
+        BrowserAutomationAction::Fill { value, .. } => {
+            let selector = serde_json::to_string(selector.ok_or_else(|| {
+                BrowserError::AutomationFailed("missing snapshot selector".into())
+            })?)
+            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+            let value = serde_json::to_string(value)
+                .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+            Ok(format!(
+                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); element.value = {value}; element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); return 'ok'; }})()"
+            ))
+        }
+        BrowserAutomationAction::Keypress { key } => {
+            let parsed = parse_keypress(key)?;
+            let key = serde_json::to_string(&parsed.key)
+                .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+            let meta_key = parsed.meta_key;
+            let ctrl_key = parsed.ctrl_key;
+            let alt_key = parsed.alt_key;
+            let shift_key = parsed.shift_key;
+            Ok(format!(
+                "(() => {{ const target = document.activeElement || document.body || document.documentElement; const init = {{ bubbles: true, cancelable: true, key: {key}, metaKey: {meta_key}, ctrlKey: {ctrl_key}, altKey: {alt_key}, shiftKey: {shift_key} }}; const keydown = new KeyboardEvent('keydown', init); const notPrevented = target ? target.dispatchEvent(keydown) : true; const keyup = new KeyboardEvent('keyup', init); if (target) {{ target.dispatchEvent(keyup); }} if (!notPrevented) {{ throw new Error('keydown prevented'); }} return 'ok'; }})()"
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod automation_tests {
+    use super::*;
+
+    #[test]
+    fn fill_script_encodes_untrusted_values_as_json_strings() {
+        let script = automation_script(
+            &BrowserAutomationAction::Fill {
+                reference: "e1".into(),
+                value: "hello'); window.bad = true; //".into(),
+            },
+            Some("#email"),
+        )
+        .expect("build fill script");
+
+        assert!(script.contains("element.value = \"hello'); window.bad = true; //\""));
+        assert!(!script.contains("element.value = hello');"));
+    }
+
+    #[test]
+    fn click_requires_snapshot_selector() {
+        let error = automation_script(
+            &BrowserAutomationAction::Click {
+                reference: "e1".into(),
+            },
+            None,
+        )
+        .expect_err("click requires resolved snapshot target");
+
+        assert_eq!(
+            error,
+            BrowserError::AutomationFailed("missing snapshot selector".into())
+        );
+    }
+
+    #[test]
+    fn parse_keypress_valid_combinations() {
+        assert_eq!(
+            parse_keypress("Meta+ArrowLeft").unwrap(),
+            ParsedKeypress {
+                key: "ArrowLeft".into(),
+                meta_key: true,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Control+Shift+ArrowRight").unwrap(),
+            ParsedKeypress {
+                key: "ArrowRight".into(),
+                meta_key: false,
+                ctrl_key: true,
+                alt_key: false,
+                shift_key: true,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Ctrl+Shift+ArrowRight").unwrap(),
+            ParsedKeypress {
+                key: "ArrowRight".into(),
+                meta_key: false,
+                ctrl_key: true,
+                alt_key: false,
+                shift_key: true,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Alt+Backspace").unwrap(),
+            ParsedKeypress {
+                key: "Backspace".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: true,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Meta+Delete").unwrap(),
+            ParsedKeypress {
+                key: "Delete".into(),
+                meta_key: true,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Shift+Home").unwrap(),
+            ParsedKeypress {
+                key: "Home".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: true,
+            }
+        );
+        assert_eq!(
+            parse_keypress("End").unwrap(),
+            ParsedKeypress {
+                key: "End".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("PageUp").unwrap(),
+            ParsedKeypress {
+                key: "PageUp".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("PageDown").unwrap(),
+            ParsedKeypress {
+                key: "PageDown".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Enter").unwrap(),
+            ParsedKeypress {
+                key: "Enter".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Escape").unwrap(),
+            ParsedKeypress {
+                key: "Escape".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Tab").unwrap(),
+            ParsedKeypress {
+                key: "Tab".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("ArrowUp").unwrap(),
+            ParsedKeypress {
+                key: "ArrowUp".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("ArrowDown").unwrap(),
+            ParsedKeypress {
+                key: "ArrowDown".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("a").unwrap(),
+            ParsedKeypress {
+                key: "a".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("ñ").unwrap(),
+            ParsedKeypress {
+                key: "ñ".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("+").unwrap(),
+            ParsedKeypress {
+                key: "+".into(),
+                meta_key: false,
+                ctrl_key: false,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Ctrl++").unwrap(),
+            ParsedKeypress {
+                key: "+".into(),
+                meta_key: false,
+                ctrl_key: true,
+                alt_key: false,
+                shift_key: false,
+            }
+        );
+        assert_eq!(
+            parse_keypress("Meta+Alt+Control+Shift+Tab").unwrap(),
+            ParsedKeypress {
+                key: "Tab".into(),
+                meta_key: true,
+                ctrl_key: true,
+                alt_key: true,
+                shift_key: true,
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_keypress_spec_preserves_navigation_editing_and_modifiers() {
+        let meta_left = macos_keypress_spec(&parse_keypress("Meta+ArrowLeft").unwrap())
+            .expect("map Meta+ArrowLeft");
+        assert_eq!(meta_left.characters, '\u{f702}'.to_string());
+        assert_eq!(meta_left.key_code, 123);
+        assert!(meta_left.meta_key);
+
+        let ctrl_shift_right =
+            macos_keypress_spec(&parse_keypress("Ctrl+Shift+ArrowRight").unwrap())
+                .expect("map Ctrl+Shift+ArrowRight");
+        assert_eq!(ctrl_shift_right.characters, '\u{f703}'.to_string());
+        assert_eq!(ctrl_shift_right.key_code, 124);
+        assert!(ctrl_shift_right.ctrl_key);
+        assert!(ctrl_shift_right.shift_key);
+
+        let alt_backspace = macos_keypress_spec(&parse_keypress("Alt+Backspace").unwrap())
+            .expect("map Alt+Backspace");
+        assert_eq!(alt_backspace.characters, '\u{8}'.to_string());
+        assert_eq!(alt_backspace.key_code, 51);
+        assert!(alt_backspace.alt_key);
+
+        let meta_delete =
+            macos_keypress_spec(&parse_keypress("Meta+Delete").unwrap()).expect("map Meta+Delete");
+        assert_eq!(meta_delete.characters, '\u{f728}'.to_string());
+        assert_eq!(meta_delete.key_code, 117);
+        assert!(meta_delete.meta_key);
+
+        assert!(macos_keypress_spec(&parse_keypress("ñ").unwrap()).is_none());
+    }
+
+    #[test]
+    fn keypress_script_encodes_modifiers_and_events() {
+        let cases = [
+            (
+                "Meta+ArrowLeft",
+                "\"ArrowLeft\"",
+                "metaKey: true",
+                "ctrlKey: false",
+                "altKey: false",
+                "shiftKey: false",
+            ),
+            (
+                "Control+Shift+ArrowRight",
+                "\"ArrowRight\"",
+                "metaKey: false",
+                "ctrlKey: true",
+                "altKey: false",
+                "shiftKey: true",
+            ),
+            (
+                "Ctrl+Shift+ArrowRight",
+                "\"ArrowRight\"",
+                "metaKey: false",
+                "ctrlKey: true",
+                "altKey: false",
+                "shiftKey: true",
+            ),
+            (
+                "Alt+Backspace",
+                "\"Backspace\"",
+                "metaKey: false",
+                "ctrlKey: false",
+                "altKey: true",
+                "shiftKey: false",
+            ),
+            (
+                "Meta+Delete",
+                "\"Delete\"",
+                "metaKey: true",
+                "ctrlKey: false",
+                "altKey: false",
+                "shiftKey: false",
+            ),
+            (
+                "a",
+                "\"a\"",
+                "metaKey: false",
+                "ctrlKey: false",
+                "altKey: false",
+                "shiftKey: false",
+            ),
+            (
+                "ñ",
+                "\"ñ\"",
+                "metaKey: false",
+                "ctrlKey: false",
+                "altKey: false",
+                "shiftKey: false",
+            ),
+        ];
+
+        for (input, expected_key, expected_meta, expected_ctrl, expected_alt, expected_shift) in
+            cases
+        {
+            let script = automation_script(
+                &BrowserAutomationAction::Keypress {
+                    key: input.to_string(),
+                },
+                None,
+            )
+            .unwrap_or_else(|err| panic!("failed to build script for '{input}': {err:?}"));
+
+            assert!(
+                script.contains(&format!("key: {expected_key}")),
+                "script for '{input}' should contain key: {expected_key}, got: {script}"
+            );
+            assert!(
+                script.contains(expected_meta),
+                "script for '{input}' should contain {expected_meta}, got: {script}"
+            );
+            assert!(
+                script.contains(expected_ctrl),
+                "script for '{input}' should contain {expected_ctrl}, got: {script}"
+            );
+            assert!(
+                script.contains(expected_alt),
+                "script for '{input}' should contain {expected_alt}, got: {script}"
+            );
+            assert!(
+                script.contains(expected_shift),
+                "script for '{input}' should contain {expected_shift}, got: {script}"
+            );
+            assert!(
+                script.contains("bubbles: true"),
+                "script for '{input}' should contain bubbles: true"
+            );
+            assert!(
+                script.contains("cancelable: true"),
+                "script for '{input}' should contain cancelable: true"
+            );
+            assert!(
+                script.contains("'keydown'"),
+                "script for '{input}' should dispatch keydown"
+            );
+            assert!(
+                script.contains("'keyup'"),
+                "script for '{input}' should dispatch keyup"
+            );
+            assert!(
+                script.contains("throw new Error(") || script.contains("throw new Error"),
+                "script for '{input}' should throw error if keydown was prevented"
+            );
+        }
+    }
+
+    #[test]
+    fn keypress_script_rejects_invalid_inputs() {
+        let invalid_cases = [
+            "",
+            "Meta",
+            "Ctrl",
+            "Control",
+            "Alt",
+            "Shift",
+            "Ctrl+Shift",
+            "Meta+Alt",
+            "ArrowLeft+ArrowRight",
+            "a+b",
+            "Ctrl+a+b",
+            "Enter+Tab",
+            "Ctrl+",
+            "+a",
+            "++",
+            "Ctrl+++",
+            "Command+ArrowLeft",
+            "Super+a",
+            "F1",
+            "Ctrl+Ctrl+a",
+        ];
+
+        for input in invalid_cases {
+            let res = automation_script(
+                &BrowserAutomationAction::Keypress {
+                    key: input.to_string(),
+                },
+                None,
+            );
+            assert!(
+                res.is_err(),
+                "keypress input '{input}' should fail validation, but succeeded with: {:?}",
+                res.ok()
+            );
+        }
+    }
+}
+
+async fn eval_webview<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    script: String,
+) -> Result<String, BrowserError> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let sender = Arc::new(std::sync::Mutex::new(Some(sender)));
+    webview
+        .eval_with_callback(script, move |result| {
+            if let Some(sender) = sender.lock().ok().and_then(|mut slot| slot.take()) {
+                let _ = sender.send(result);
+            }
+        })
+        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), receiver)
+        .await
+        .map_err(|_| BrowserError::AutomationFailed("webview evaluation timed out".into()))?
+        .map_err(|_| BrowserError::AutomationFailed("webview evaluation was cancelled".into()))
+}
 
 pub const BROWSER_STATE_CHANGED_EVENT: &str = "browser_state_changed";
 
@@ -144,9 +921,7 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                         }),
                     });
                 }
-                let is_visible = creation_manager
-                    .is_visible(&browser_id)
-                    .unwrap_or(visible);
+                let is_visible = creation_manager.is_visible(&browser_id).unwrap_or(visible);
                 if !is_visible {
                     let _ = child.hide();
                 } else {
@@ -409,6 +1184,102 @@ pub async fn cmd_browser_get_state(
 ) -> Result<BrowserState, IpcError> {
     let state = manager.get_state(&browser_id)?;
     Ok(state)
+}
+
+#[tauri::command]
+pub async fn cmd_browser_automation_snapshot<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+) -> Result<BrowserAutomationSnapshot, IpcError> {
+    browser_automation_snapshot(app, manager.inner(), browser_id).await
+}
+
+pub async fn browser_automation_snapshot<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    browser_id: String,
+) -> Result<BrowserAutomationSnapshot, IpcError> {
+    let state = manager.get_state(&browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let result = eval_webview(webview, AUTOMATION_SNAPSHOT_SCRIPT.to_string()).await?;
+    let snapshot_json: String = serde_json::from_str(&result).map_err(|error| {
+        BrowserError::AutomationFailed(format!("invalid snapshot callback result: {error}"))
+    })?;
+    let snapshot: AutomationSnapshotResult =
+        serde_json::from_str(&snapshot_json).map_err(|error| {
+            BrowserError::AutomationFailed(format!("invalid snapshot response: {error}"))
+        })?;
+    let targets = snapshot
+        .elements
+        .iter()
+        .map(|element| BrowserAutomationTarget {
+            reference: element.reference.clone(),
+            selector: element.selector.clone(),
+        })
+        .collect();
+    manager.record_automation_targets(&browser_id, state.generation, targets)?;
+
+    Ok(BrowserAutomationSnapshot {
+        browser_id,
+        generation: state.generation,
+        url: snapshot.url,
+        title: snapshot.title,
+        elements: snapshot
+            .elements
+            .into_iter()
+            .map(|element| BrowserAutomationElement {
+                reference: element.reference,
+                role: element.role,
+                name: element.name,
+                tag_name: element.tag_name,
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn cmd_browser_automation_act<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    request: BrowserAutomationRequest,
+) -> Result<(), IpcError> {
+    browser_automation_act(app, manager.inner(), request).await
+}
+
+pub async fn browser_automation_act<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    request: BrowserAutomationRequest,
+) -> Result<(), IpcError> {
+    let selector = match &request.action {
+        BrowserAutomationAction::Click { reference }
+        | BrowserAutomationAction::Fill { reference, .. } => {
+            Some(manager.automation_target(&request.browser_id, request.generation, reference)?)
+        }
+        BrowserAutomationAction::Keypress { .. } => {
+            manager.assert_automation_generation(&request.browser_id, request.generation)?;
+            None
+        }
+    };
+    let state = manager.get_state(&request.browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+
+    #[cfg(target_os = "macos")]
+    if let BrowserAutomationAction::Keypress { key } = &request.action {
+        let keypress = parse_keypress(key)?;
+        if dispatch_macos_keypress(&webview, &keypress)? {
+            return Ok(());
+        }
+    }
+
+    let script = automation_script(&request.action, selector.as_deref())?;
+    let _ = eval_webview(webview, script).await?;
+    Ok(())
 }
 
 #[tauri::command]

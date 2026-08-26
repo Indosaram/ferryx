@@ -147,8 +147,6 @@ type TerminalSplitViewProps = {
   onSetGroupRatio?: (path: string, ratio: number) => void;
   onSwapPanes?: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane?: (tabId: string, leafId: string) => void;
-  onTitleChange?: (tabId: string, title: string, sessionId?: string) => void;
-  onBell?: (sessionId: string, tabId: string) => void;
   unreadTabIds?: Record<string, boolean>;
   activityByTabId?: Record<string, ActivitySummary | undefined>;
   leadingSpacer?: number;
@@ -191,8 +189,6 @@ export function TerminalSplitView({
   onSetGroupRatio = () => undefined,
   onSwapPanes = () => undefined,
   onFocusPane = () => undefined,
-  onTitleChange = () => undefined,
-  onBell,
   unreadTabIds,
   activityByTabId,
   leadingSpacer = 0,
@@ -410,8 +406,6 @@ export function TerminalSplitView({
     onSetRatio,
     onSwapPanes,
     onFocusPane,
-    onTitleChange,
-    onBell,
     unreadTabIds,
     activityByTabId,
     searchLeafId,
@@ -569,8 +563,6 @@ type TabGroupViewProps = {
   onSetRatio: (tabId: string, path: string, ratio: number) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-  onTitleChange: (tabId: string, title: string, sessionId?: string) => void;
-  onBell?: (sessionId: string, tabId: string) => void;
   unreadTabIds?: Record<string, boolean>;
   activityByTabId?: Record<string, ActivitySummary | undefined>;
   searchLeafId?: string | null;
@@ -609,8 +601,6 @@ function TabGroupView({
   onSetRatio,
   onSwapPanes,
   onFocusPane,
-  onTitleChange,
-  onBell,
   unreadTabIds,
   activityByTabId,
   searchLeafId,
@@ -718,8 +708,6 @@ function TabGroupView({
             onSetRatio={onSetRatio}
             onSwapPanes={onSwapPanes}
             onFocusPane={onFocusPane}
-            onTitleChange={onTitleChange}
-            onBell={onBell}
           />
         ) : null}
       </TabGroupDropSurface>
@@ -758,8 +746,6 @@ type PaneRendererProps = {
   onSetRatio: (tabId: string, path: string, ratio: number) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-  onTitleChange: (tabId: string, title: string, sessionId?: string) => void;
-  onBell?: (sessionId: string, tabId: string) => void;
 };
 
 const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) {
@@ -789,8 +775,6 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         onSplitPane={props.onSplitPane}
         onClosePane={props.onClosePane}
         onFocusPane={props.onFocusPane}
-        onTitleChange={props.onTitleChange}
-        onBell={props.onBell}
       />
     );
   }
@@ -835,8 +819,6 @@ type PaneLeafViewProps = {
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-  onTitleChange: (tabId: string, title: string, sessionId?: string) => void;
-  onBell?: (sessionId: string, tabId: string) => void;
 };
 
 const PaneLeafView = React.memo(function PaneLeafView({
@@ -855,8 +837,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onSplitPane,
   onClosePane,
   onFocusPane,
-  onTitleChange,
-  onBell,
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
   const droppable = useDroppable({
@@ -977,8 +957,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 <TerminalPane
                   session={session}
                   active={isActive}
-                  onTitleChange={(title) => onTitleChange(tab.id, title, session.id)}
-                  onBell={() => onBell?.(session.id, tab.id)}
                   searchOpen={searchOpen}
                   onCloseSearch={onCloseSearch}
                 />

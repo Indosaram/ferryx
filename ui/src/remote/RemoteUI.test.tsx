@@ -33,6 +33,24 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as unknown as Response;
 }
 
+class EventWebSocket {
+  static latest: EventWebSocket | null = null;
+  readonly url: string;
+  close = vi.fn();
+  onmessage: ((event: MessageEvent) => void) | null = null;
+
+  constructor(url: string) {
+    this.url = url;
+    EventWebSocket.latest = this;
+  }
+}
+
+function eventSocket(): EventWebSocket {
+  const socket = EventWebSocket.latest;
+  if (!socket) throw new Error("Expected active-selection event socket");
+  return socket;
+}
+
 const focusedState = {
   activeContext: {
     workspaceId: "ferryx-ui",
@@ -119,6 +137,55 @@ const confirmedNoFocusState = {
   sessions: focusedState.sessions,
 };
 
+const secondFocusedState = {
+  activeContext: {
+    workspaceId: "api-service",
+    worktreeSlug: "feature/remote-safe",
+    worktreeLabel: "feature/remote-safe",
+    sessionId: "new-focused-terminal",
+  },
+  activeWorkspaceId: "api-service",
+  projects: focusedState.projects,
+  worktrees: [{ worktreeSlug: "feature/remote-safe", worktreeLabel: "feature/remote-safe" }],
+  sessions: [
+    {
+      sessionId: "new-focused-terminal",
+      workspaceId: "api-service",
+      worktreeLabel: "feature/remote-safe",
+      running: true,
+    },
+  ],
+};
+
+const safeServerWorkspaceState = {
+  activeContext: {
+    workspaceId: "remote-e2e",
+    worktreeSlug: "mobile-control",
+    worktreeLabel: "mobile-control",
+    sessionId: "focused-terminal",
+  },
+  activeWorkspaceId: "remote-e2e",
+  projects: [
+    {
+      workspaceId: "remote-e2e",
+      worktrees: [{ worktreeSlug: "mobile-control", worktreeLabel: "mobile-control" }],
+    },
+    {
+      workspaceId: "other-project",
+      worktrees: [{ worktreeSlug: "other-worktree", worktreeLabel: "other-worktree" }],
+    },
+  ],
+  worktrees: [{ worktreeSlug: "mobile-control", worktreeLabel: "mobile-control" }],
+  sessions: [
+    {
+      sessionId: "focused-terminal",
+      workspaceId: "remote-e2e",
+      worktreeLabel: "mobile-control",
+      running: true,
+    },
+  ],
+};
+
 beforeEach(() => {
   localStorage.clear();
   vi.restoreAllMocks();
@@ -127,6 +194,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  EventWebSocket.latest = null;
   vi.unstubAllGlobals();
 });
 
@@ -157,6 +225,30 @@ describe("Remote UI Components", () => {
     expect(document.body).not.toHaveTextContent("/Users/alice/secret");
   });
 
+  it("renders the current safe server workspace contract without local paths", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(safeServerWorkspaceState)),
+    );
+
+    render(<RemoteApp />);
+
+    expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
+      "data-session-id",
+      "focused-terminal",
+    );
+    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+      "remote-e2e / mobile-control",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
+    expect(
+      within(selector).getByRole("button", { name: /other-project.*other-worktree/i }),
+    ).toBeEnabled();
+    expect(document.body.textContent).not.toMatch(/\/(Users|private|Volumes)\//);
+  });
+
   it("mirrors only the server-declared terminal and safely confirms a context selection", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const selectionResponse = deferred<Response>();
@@ -166,6 +258,7 @@ describe("Remote UI Components", () => {
       .mockImplementationOnce(() => selectionResponse.promise)
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
     vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
 
@@ -209,6 +302,20 @@ describe("Remote UI Components", () => {
       await selectionResponse.promise;
     });
 
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "api-service",
+              worktreeSlug: "feature/remote-safe",
+            },
+          }),
+        }),
+      );
+    });
+
     await waitFor(() => {
       expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
         "api-service / feature/remote-safe",
@@ -221,6 +328,173 @@ describe("Remote UI Components", () => {
       screen.getByText(/Focus a terminal in Ferryx Desktop to mirror it here/i),
     ).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("background-terminal");
+  });
+
+  it("waits for the desktop active-selection event when the first confirmation read is stale", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(focusedState))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(focusedState))
+      .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+    expect(eventSocket().url).toMatch(/\/api\/v1\/events\?token=test-token$/);
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
+    fireEvent.click(
+      within(selector).getByRole("button", {
+        name: /api-service.*feature\/remote-safe/i,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /Waiting for Ferryx Desktop confirmation/i,
+      );
+    });
+
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "api-service",
+              worktreeSlug: "feature/remote-safe",
+              sessionId: "new-focused-terminal",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+        "api-service / feature/remote-safe",
+      );
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/Desktop context confirmed/i);
+  });
+
+  it("refreshes the mirrored terminal after an unsolicited desktop focus change", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(focusedState))
+      .mockResolvedValueOnce(jsonResponse(secondFocusedState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
+      "data-session-id",
+      "focused-terminal",
+    );
+
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "api-service",
+              worktreeSlug: "feature/remote-safe",
+              sessionId: "new-focused-terminal",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "new-focused-terminal",
+      );
+    });
+    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+      "api-service / feature/remote-safe",
+    );
+  });
+
+  it("keeps the newest desktop focus when focus events arrive during a refresh", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const firstFocusRefresh = deferred<Response>();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(focusedState))
+      .mockImplementationOnce(() => firstFocusRefresh.promise)
+      .mockResolvedValueOnce(jsonResponse(secondFocusedState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: { workspaceId: "ferryx-ui", worktreeSlug: "main" },
+          }),
+        }),
+      );
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: { workspaceId: "api-service", worktreeSlug: "feature/remote-safe" },
+          }),
+        }),
+      );
+    });
+
+    await act(async () => {
+      firstFocusRefresh.resolve(jsonResponse(focusedState));
+      await firstFocusRefresh.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "new-focused-terminal",
+      );
+    });
+  });
+
+  it("clears the mirrored terminal when desktop no longer focuses a terminal", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(focusedState))
+      .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: null,
+          }),
+        }),
+      );
+    });
+
+    expect(await screen.findByText("No focused terminal")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
   });
 
   it("shows no focused terminal when only undeclared background sessions are present", async () => {
@@ -264,5 +538,534 @@ describe("Remote UI Components", () => {
     const header = await screen.findByRole("banner");
     expect(header).toHaveTextContent("Ferryx Remote");
     expect(header.textContent?.toLowerCase()).not.toContain("orca");
+  });
+
+  it("sets browser document.title to active tab or terminal title on initial authenticated load", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithTabs = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-2",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Dev Server" },
+        ],
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithTabs)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await waitFor(() => {
+      expect(document.title).toBe("Dev Server - Ferryx");
+    });
+  });
+
+  it("updates document.title on unsolicited desktop focus and active tab change and falls back to Ferryx", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const firstState = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Dev Server" },
+        ],
+      },
+    };
+    const secondState = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-2",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Dev Server" },
+        ],
+      },
+    };
+
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(firstState))
+      .mockResolvedValueOnce(jsonResponse(secondState))
+      .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    const { unmount } = render(<RemoteApp />);
+
+    await waitFor(() => {
+      expect(document.title).toBe("Editor - Ferryx");
+    });
+
+    // Unsolicited desktop tab change
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "ferryx-ui",
+              worktreeSlug: "main",
+              tabId: "tab-2",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(document.title).toBe("Dev Server - Ferryx");
+    });
+
+    // Desktop unfocuses terminal/tab
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: null,
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(document.title).toBe("Ferryx");
+    });
+
+    unmount();
+    expect(document.title).toBe("Ferryx");
+  });
+
+  it("resets document.title to Ferryx when unpaired or disconnected", async () => {
+    render(<RemoteApp />);
+    expect(document.title).toBe("Ferryx");
+  });
+
+  it("allows sequential traversal using previous and next terminal tab controls and ordinal indicator", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const multiTabState1 = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        sessionId: "session-tab-1",
+        activeTerminal: {
+          sessionId: "session-tab-1",
+          title: "Editor",
+          running: true,
+        },
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Build" },
+          { id: "tab-3", label: "Server" },
+        ],
+      },
+      sessions: [
+        { sessionId: "session-tab-1", title: "Editor", workspaceId: "ferryx-ui", worktreeLabel: "main", running: true },
+        { sessionId: "session-tab-2", title: "Build", workspaceId: "ferryx-ui", worktreeLabel: "main", running: true },
+        { sessionId: "session-tab-3", title: "Server", workspaceId: "ferryx-ui", worktreeLabel: "main", running: true },
+      ],
+    };
+    const multiTabState2 = {
+      ...multiTabState1,
+      activeContext: {
+        ...multiTabState1.activeContext,
+        tabId: "tab-2",
+        sessionId: "session-tab-2",
+        activeTerminal: {
+          sessionId: "session-tab-2",
+          title: "Build",
+          running: true,
+        },
+      },
+    };
+    const multiTabState3 = {
+      ...multiTabState1,
+      activeContext: {
+        ...multiTabState1.activeContext,
+        tabId: "tab-3",
+        sessionId: "session-tab-3",
+        activeTerminal: {
+          sessionId: "session-tab-3",
+          title: "Server",
+          running: true,
+        },
+      },
+    };
+
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(multiTabState1))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(multiTabState2))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(multiTabState3))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(multiTabState2));
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    const terminal = await screen.findByTestId("remote-terminal");
+    expect(terminal).toHaveAttribute("data-session-id", "session-tab-1");
+
+    // Ordinal indicator
+    expect(screen.getByText("1 / 3")).toBeInTheDocument();
+
+    const prevBtn = screen.getByRole("button", { name: /Previous terminal tab/i });
+    const nextBtn = screen.getByRole("button", { name: /Next terminal tab/i });
+    expect(prevBtn).toBeDisabled();
+    expect(nextBtn).toBeEnabled();
+
+    // Traverse to next tab (tab-2)
+    fireEvent.click(nextBtn);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/workspace/select?token=test-token",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: "ferryx-ui",
+          worktreeSlug: "main",
+          tabId: "tab-2",
+        }),
+      }),
+    );
+
+    // Simulate desktop focus event
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "ferryx-ui",
+              worktreeSlug: "main",
+              tabId: "tab-2",
+              sessionId: "session-tab-2",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "session-tab-2",
+      );
+    });
+    expect(screen.getByText("2 / 3")).toBeInTheDocument();
+    expect(prevBtn).toBeEnabled();
+    expect(nextBtn).toBeEnabled();
+
+    // Traverse to next tab (tab-3)
+    fireEvent.click(nextBtn);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      "/api/v1/workspace/select?token=test-token",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          workspaceId: "ferryx-ui",
+          worktreeSlug: "main",
+          tabId: "tab-3",
+        }),
+      }),
+    );
+
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "ferryx-ui",
+              worktreeSlug: "main",
+              tabId: "tab-3",
+              sessionId: "session-tab-3",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "session-tab-3",
+      );
+    });
+    expect(screen.getByText("3 / 3")).toBeInTheDocument();
+    expect(prevBtn).toBeEnabled();
+    expect(nextBtn).toBeDisabled();
+
+    // Traverse back to previous tab (tab-2)
+    fireEvent.click(prevBtn);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      6,
+      "/api/v1/workspace/select?token=test-token",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          workspaceId: "ferryx-ui",
+          worktreeSlug: "main",
+          tabId: "tab-2",
+        }),
+      }),
+    );
+
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "ferryx-ui",
+              worktreeSlug: "main",
+              tabId: "tab-2",
+              sessionId: "session-tab-2",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "session-tab-2",
+      );
+    });
+    expect(screen.getByText("2 / 3")).toBeInTheDocument();
+    expect(prevBtn).toBeEnabled();
+    expect(nextBtn).toBeEnabled();
+  });
+
+  it("renders safe tab items under active worktree and dispatches tab switch request", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithTabs = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Dev Server" },
+          { id: "tab-3", label: "/Users/secret/path/run" },
+        ],
+      },
+    };
+
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithTabs));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    expect(tablist).toBeInTheDocument();
+
+    const editorTab = within(tablist).getByRole("tab", { name: /editor/i });
+    const devServerTab = within(tablist).getByRole("tab", { name: /dev server/i });
+    expect(editorTab).toHaveAttribute("aria-selected", "true");
+    expect(devServerTab).toHaveAttribute("aria-selected", "false");
+
+    expect(within(tablist).queryByText("/Users/secret/path/run")).not.toBeInTheDocument();
+    expect(within(tablist).getByText("Terminal")).toBeInTheDocument();
+
+    fireEvent.click(devServerTab);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/workspace/select"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            workspaceId: "ferryx-ui",
+            worktreeSlug: "main",
+            tabId: "tab-2",
+          }),
+        }),
+      );
+    });
+  });
+
+  it("cycles published terminal tabs only after Desktop confirms the selected tab", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const editorState = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: {
+          sessionId: "focused-terminal",
+          title: "Editor",
+          running: true,
+        },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Dev Server" },
+          { id: "tab-3", label: "Tests" },
+        ],
+      },
+    };
+    const devServerState = {
+      ...editorState,
+      activeContext: {
+        ...editorState.activeContext,
+        activeTerminal: {
+          sessionId: "dev-server-terminal",
+          title: "Dev Server",
+          running: true,
+        },
+        tabId: "tab-2",
+      },
+      sessions: [
+        {
+          sessionId: "dev-server-terminal",
+          workspaceId: "ferryx-ui",
+          worktreeLabel: "main",
+          running: true,
+        },
+      ],
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(editorState))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(editorState))
+      .mockResolvedValueOnce(jsonResponse(devServerState))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(devServerState))
+      .mockResolvedValueOnce(jsonResponse(editorState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    expect(await screen.findByTestId("remote-terminal")).toHaveAttribute(
+      "data-session-id",
+      "focused-terminal",
+    );
+    expect(screen.getByLabelText("Terminal position: Tab 1 of 3")).toHaveTextContent("1 / 3");
+
+    fireEvent.click(screen.getByRole("button", { name: "Next terminal tab" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/workspace/select"),
+        expect.objectContaining({
+          body: JSON.stringify({
+            workspaceId: "ferryx-ui",
+            worktreeSlug: "main",
+            tabId: "tab-2",
+          }),
+        }),
+      );
+    });
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+      "data-session-id",
+      "focused-terminal",
+    );
+
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: { workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-2" },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "dev-server-terminal",
+      );
+    });
+    expect(screen.getByLabelText("Terminal position: Tab 2 of 3")).toHaveTextContent("2 / 3");
+    expect(screen.getByRole("status")).toHaveTextContent("Desktop context confirmed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous terminal tab" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/workspace/select"),
+        expect.objectContaining({
+          body: JSON.stringify({
+            workspaceId: "ferryx-ui",
+            worktreeSlug: "main",
+            tabId: "tab-1",
+          }),
+        }),
+      );
+    });
+
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: { workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-1" },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "focused-terminal",
+      );
+    });
+    expect(screen.getByLabelText("Terminal position: Tab 1 of 3")).toHaveTextContent("1 / 3");
+  });
+
+  it("retains authorization across normal page reload when server returns transient error", async () => {
+    localStorage.setItem("ferryx_remote_token", "paired-device-token");
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ error: "gateway busy" }, false));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RemoteApp />);
+
+    // Wait for the fetch attempt
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    // Authorization token must NOT be cleared from localStorage on non-401/403 failure
+    expect(localStorage.getItem("ferryx_remote_token")).toBe("paired-device-token");
+    expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
+  });
+
+  it("clears authorization and returns to PairingPage when token is revoked (401)", async () => {
+    localStorage.setItem("ferryx_remote_token", "revoked-device-token");
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: vi.fn(async () => ({ error: "Invalid or revoked token" })),
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RemoteApp />);
+
+    // Must navigate to pairing page and clear token
+    expect(await screen.findByPlaceholderText(/6-digit PIN/i)).toBeInTheDocument();
+    expect(localStorage.getItem("ferryx_remote_token")).toBeNull();
   });
 });

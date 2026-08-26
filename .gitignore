@@ -9,6 +9,8 @@ node_modules/
 ui/node_modules/
 dist/
 ui/dist/
+ui/coverage/
+site/.astro/
 
 # OS
 .DS_Store

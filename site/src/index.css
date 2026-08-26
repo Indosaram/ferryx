@@ -4,6 +4,44 @@
 
 @layer base {
   :root {
+    /* Landing palette - light theme. Every landing-chrome color resolves through these.
+       RGB triplets so Tailwind can apply alpha (bg-page/85). */
+    --page-rgb: 246 244 241;
+    --page-raised-rgb: 251 250 248;
+    --surface-rgb: 255 255 255;
+    --ink-rgb: 13 13 14;
+    --ink-hover-rgb: 38 38 42;
+    --ink-soft-rgb: 86 86 90;
+    --ink-faint-rgb: 138 138 144;
+    --line-rgb: 228 224 218;
+    --line-strong-rgb: 213 208 200;
+    --mark-off-rgb: 196 191 183;
+    --code-bg-rgb: 14 14 16;
+    --code-border-rgb: 28 28 31;
+    --code-ink-rgb: 231 229 226;
+
+    --shadow-nav: 0 8px 30px rgba(13, 13, 14, 0.08);
+    --shadow-card: 0 1px 2px rgba(13, 13, 14, 0.04);
+    --shadow-menu: 0 20px 50px rgba(13, 13, 14, 0.14);
+    --shadow-window: 0 40px 80px -20px rgba(13, 13, 14, 0.45);
+
+    --scrollbar-thumb: #d5d0c8;
+    --scrollbar-thumb-hover: #b9b3a9;
+
+    /* Floating navbar fill. Pre-composited over the page so the translucent pill keeps
+       its original lightness instead of darkening against the warm page behind it. */
+    --nav-fill-rgb: 250 249 246;
+
+    /* Demo stage wash: keeps the backdrop photo readable through a mid-band plateau. */
+    --demo-wash: linear-gradient(
+      to bottom,
+      rgb(var(--page-rgb)) 0%,
+      rgb(var(--page-rgb) / 0.12) 22%,
+      rgb(var(--page-rgb) / 0.12) 58%,
+      rgb(var(--page-rgb)) 96%
+    );
+
+    /* Desktop UI Tokens for LiveFerryxDemo */
     --background: 240 10% 3.9%;
     --foreground: 0 0% 98%;
     --card: 240 10% 3.9%;
@@ -72,17 +110,45 @@
     --status-idle: #737373;
     --status-idle-rgb: 115 115 115;
   }
+
+  /* Landing palette - dark theme. Desktop demo tokens above are theme-independent
+     because the embedded app always renders dark, exactly like the real product. */
+  .dark {
+    --page-rgb: 11 11 13;
+    --page-raised-rgb: 17 17 19;
+    --surface-rgb: 21 21 24;
+    --ink-rgb: 244 243 241;
+    --ink-hover-rgb: 217 216 212;
+    --ink-soft-rgb: 168 168 174;
+    --ink-faint-rgb: 117 117 124;
+    --line-rgb: 38 38 43;
+    --line-strong-rgb: 53 53 60;
+    --mark-off-rgb: 74 74 82;
+    --code-bg-rgb: 23 23 26;
+    --code-border-rgb: 43 43 49;
+    --code-ink-rgb: 231 229 226;
+
+    --shadow-nav: 0 8px 30px rgba(0, 0, 0, 0.55);
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-menu: 0 20px 50px rgba(0, 0, 0, 0.6);
+    --shadow-window: 0 40px 80px -20px rgba(0, 0, 0, 0.75);
+
+    --nav-fill-rgb: 20 20 23;
+
+    --scrollbar-thumb: #35353c;
+    --scrollbar-thumb-hover: #4a4a52;
+  }
 }
 
 ::selection {
-  background-color: #27272a;
-  color: #fafafa;
+  background-color: rgb(var(--ink-rgb));
+  color: rgb(var(--page-rgb));
 }
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background-color: #09090b;
-  color: #f4f4f5;
+  background-color: rgb(var(--page-rgb));
+  color: rgb(var(--ink-rgb));
   overflow-x: hidden;
   letter-spacing: -0.015em;
 }
@@ -94,8 +160,8 @@ code, pre, kbd {
 .bg-grid-pattern {
   background-size: 32px 32px;
   background-image: 
-    linear-gradient(to right, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    linear-gradient(to right, rgb(var(--ink-rgb) / 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(var(--ink-rgb) / 0.04) 1px, transparent 1px);
 }
 
 ::-webkit-scrollbar {
@@ -104,14 +170,21 @@ code, pre, kbd {
 }
 
 ::-webkit-scrollbar-track {
-  background: #09090b;
+  background: rgb(var(--page-rgb));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3f3f46;
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* The landing demo is pinned to its two-pane layout. TerminalSplitView always renders
+   the pane split/close affordances, so hide them instead of forking the desktop component. */
+.demo-locked-split [data-testid="pane-toolbar"],
+.demo-locked-split [data-testid="pane-toolbar-hotspot"] {
+  display: none;
 }

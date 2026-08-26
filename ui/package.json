@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run --maxWorkers=1",
+    "test:coverage": "vitest run --maxWorkers=1 --coverage",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -314,6 +314,7 @@ describe("App project workspace flow", () => {
       syncWorktrees: workspace.syncWorktrees,
       restoreWorkspace: workspace.restoreWorkspace,
       createBrowserTab: workspace.createBrowserTab,
+      subscribeTerminalBell: () => () => undefined,
     })) as any);
     localStorage.clear();
     native.createWorktree.mockReset();
@@ -2120,6 +2121,7 @@ describe("App project workspace flow", () => {
       restoreWorkspace: workspace.restoreWorkspace,
       ensureSessionBackends: workspace.ensureSessionBackends,
       createBrowserTab: workspace.createBrowserTab,
+      subscribeTerminalBell: () => () => undefined,
     })) as any);
 
     render(<App />);
@@ -2184,6 +2186,7 @@ describe("App project workspace flow", () => {
       restoreWorkspace: workspace.restoreWorkspace,
       ensureSessionBackends: workspace.ensureSessionBackends,
       createBrowserTab: workspace.createBrowserTab,
+      subscribeTerminalBell: () => () => undefined,
     })) as any);
 
     try {
@@ -2258,11 +2261,73 @@ describe("App project workspace flow", () => {
         worktreeSlug: "feature-branch",
         worktreeLabel: "orca/orca-lite/feature-branch",
         backendSessionId: "backend-pty-3b",
+        activeTabId: "tab-3",
+        tabId: "tab-3",
+        tabs: [
+          { id: "tab-2", label: "feature" },
+          { id: "tab-3", label: "split-term" },
+        ],
+        terminalTabs: [
+          { id: "tab-2", label: "feature" },
+          { id: "tab-3", label: "split-term" },
+        ],
       });
 
       // Verify no absolute paths in derived result
       const serialized = JSON.stringify(result);
       expect(serialized).not.toContain("/repo/");
+    });
+
+    it("publishes only same-worktree terminal tabs with safe labels", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const result = deriveFocusedTerminal("orca-lite", {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "tab-active",
+          tabs: [
+            { id: "tab-active", label: "Editor", sessionId: "session-active" },
+            { id: "tab-sibling", label: "/Users/alice/private", sessionId: "session-sibling" },
+            { id: "tab-other-worktree", label: "Other worktree", sessionId: "session-other" },
+            { id: "browser-tab", label: "Browser", kind: "browser" },
+          ],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "session-active": { id: "session-active", backendSessionId: "pty-active", worktreePath: "/repo/main" },
+          "session-sibling": { id: "session-sibling", backendSessionId: "pty-sibling", worktreePath: "/repo/main" },
+          "session-other": { id: "session-other", backendSessionId: "pty-other", worktreePath: "/repo/feature" },
+        },
+        worktrees: [
+          { path: "/repo/main", branch: "refs/heads/main" },
+          { path: "/repo/feature", branch: "refs/heads/orca/orca-lite/feature" },
+        ],
+      } as any);
+
+      expect(result?.terminalTabs).toEqual([
+        { id: "tab-active", label: "Editor" },
+        { id: "tab-sibling", label: "Terminal" },
+      ]);
+      expect(JSON.stringify(result)).not.toContain("/Users/alice/private");
+      expect(JSON.stringify(result)).not.toContain("tab-other-worktree");
+    });
+
+    it("publishes the primary worktree with no managed slug", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const result = deriveFocusedTerminal("orca-lite", {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "tab-main",
+          tabs: [{ id: "tab-main", label: "main", sessionId: "session-main" }],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "session-main": { id: "session-main", backendSessionId: "pty-main", worktreePath: "/repo/main" },
+        },
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+      } as any);
+
+      expect(result?.worktreeSlug).toBeNull();
+      expect(result?.worktreeLabel).toBe("main");
     });
 
     it("clears active terminal (returns null) when active tab is a browser tab", async () => {
@@ -2319,6 +2384,7 @@ describe("App project workspace flow", () => {
         syncWorktrees: workspace.syncWorktrees,
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
+        subscribeTerminalBell: () => () => undefined,
       })) as any);
 
       render(<App />);
@@ -2327,9 +2393,17 @@ describe("App project workspace flow", () => {
       const lastCall = native.publishFocusedTerminal.mock.calls.at(-1)?.[0];
       expect(lastCall).toEqual({
         workspaceId: "orca-lite",
-        worktreeSlug: "main",
+        worktreeSlug: null,
         worktreeLabel: "main",
         backendSessionId: "pty-focused-live",
+        activeTabId: "tab-1",
+        tabId: "tab-1",
+        tabs: [
+          { id: "tab-1", label: "main" },
+        ],
+        terminalTabs: [
+          { id: "tab-1", label: "main" },
+        ],
       });
       // Absolute path must not leak
       expect(JSON.stringify(lastCall)).not.toContain("/repo/");
@@ -2357,6 +2431,94 @@ describe("App project workspace flow", () => {
         expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
           expect.objectContaining({ path: "/repo/feature" }),
         );
+      });
+    });
+
+    it("handles same-worktree tab selection request and activates exact tab", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      render(<App />);
+
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+      expect(native.remoteSelectionHandler).toBeTypeOf("function");
+
+      workspace.activateTab.mockClear();
+      const previousCwd = workspace.storeState.sessions["sess-2"].cwd;
+      workspace.storeState.sessions["sess-2"].cwd = "/repo/main";
+
+      // Dispatch remote selection for same active worktree with specific tabId
+      act(() => {
+        native.remoteSelectionHandler!({
+          workspaceId: "orca-lite",
+          worktreeSlug: "main",
+          tabId: "tab-2",
+        });
+      });
+
+      await waitFor(() => {
+        expect(workspace.activateTab).toHaveBeenCalledWith("tab-2");
+      });
+      workspace.storeState.sessions["sess-2"].cwd = previousCwd;
+    });
+
+    it("handles primary worktree selection within current project when on secondary worktree", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      // Simulate currently active on secondary worktree
+      const prevActivePath = workspace.storeState.activeWorktreePath;
+      workspace.storeState.activeWorktreePath = "/repo/feature";
+
+      render(<App />);
+
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+      workspace.ensureTabForWorktree.mockClear();
+      workspace.activateTab.mockClear();
+
+      // Dispatch remote selection for project without worktreeSlug (selecting primary worktree) and with tabId
+      act(() => {
+        native.remoteSelectionHandler!({
+          workspaceId: "orca-lite",
+          tabId: "tab-1",
+        });
+      });
+
+      await waitFor(() => {
+        expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/repo/main" }),
+        );
+      });
+
+      workspace.storeState.activeWorktreePath = prevActivePath;
+    });
+
+    it("handles cross-worktree selection with tabId activating tab after worktree switch", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      render(<App />);
+
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+      workspace.ensureTabForWorktree.mockClear();
+      workspace.activateTab.mockClear();
+
+      act(() => {
+        native.remoteSelectionHandler!({
+          workspaceId: "orca-lite",
+          worktreeSlug: "feature",
+          tabId: "tab-2",
+        });
+      });
+
+      await waitFor(() => {
+        expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/repo/feature" }),
+        );
+        expect(workspace.activateTab).toHaveBeenCalledWith("tab-2");
       });
     });
 
@@ -2442,6 +2604,7 @@ describe("App project workspace flow", () => {
         syncWorktrees: workspace.syncWorktrees,
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
+        subscribeTerminalBell: () => () => undefined,
       }));
 
       render(<App />);
@@ -2474,6 +2637,7 @@ describe("App project workspace flow", () => {
         syncWorktrees: workspace.syncWorktrees,
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
+        subscribeTerminalBell: () => () => undefined,
       }));
 
       render(<App />);

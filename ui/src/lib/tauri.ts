@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type {
   AttachTerminalRequest,
   AttachTerminalResponse,
+  CliLauncherStatus,
   NotificationBadgeResult,
   SetBadgeCountResult,
   TerminalLifecyclePayload,
@@ -20,7 +21,10 @@ import type {
   AttachTerminalRequest,
   AttachTerminalResponse,
   BranchDeletionPreview,
+  CliLauncherStatus,
   DirtyState,
+  NativeTerminalBellPayload,
+  NativeTerminalTitlePayload,
   NotificationBadgeResult,
   SetBadgeCountResult,
   StructuredIpcError,
@@ -305,6 +309,26 @@ export async function onTerminalLifecycle(handler: (payload: TerminalLifecyclePa
   return listen<TerminalLifecyclePayload>("terminal_lifecycle", (event) => handler(event.payload));
 }
 
+/**
+ * Native title and bell events are emitted from the daemon stream pump task, one per attached
+ * session, so they arrive for background tabs whose panes are unmounted. Subscribe once at the
+ * store rather than per pane: `TerminalSplitView` only mounts the active tab's panes, and a
+ * per-pane listener would therefore observe only the foreground session.
+ */
+export async function onNativeTerminalTitle(
+  handler: (payload: NativeTerminalTitlePayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<NativeTerminalTitlePayload>("native_terminal_title", (event) => handler(event.payload));
+}
+
+export async function onNativeTerminalBell(
+  handler: (payload: NativeTerminalBellPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<NativeTerminalBellPayload>("native_terminal_bell", (event) => handler(event.payload));
+}
+
 export async function onNewTerminalTabMenu(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<void>("menu_new_terminal_tab", () => handler());
@@ -531,21 +555,35 @@ export async function clearSession(): Promise<void> {
   return invokeCommand<void>('cmd_session_clear');
 }
 
+export type RemoteTerminalTabInfo = {
+  id: string;
+  label: string;
+};
+
 export type FocusedTerminalPayload = {
   workspaceId: string;
   worktreeSlug?: string | null;
   worktreeLabel?: string | null;
   backendSessionId?: string | null;
+  activeTabId?: string | null;
+  tabId?: string | null;
+  tabs?: RemoteTerminalTabInfo[];
+  terminalTabs?: RemoteTerminalTabInfo[];
 };
 
 export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {
   if (!isTauri()) return;
+  const terminalTabs = payload?.terminalTabs ?? payload?.tabs ?? [];
   return invokeCommand<void>("cmd_remote_set_active_selection", {
     request: {
       workspaceId: payload?.workspaceId ?? null,
       worktreeSlug: payload?.worktreeSlug ?? null,
       worktreeLabel: payload?.worktreeLabel ?? null,
       sessionId: payload?.backendSessionId ?? null,
+      tabId: payload?.tabId ?? payload?.activeTabId ?? null,
+      activeTabId: payload?.activeTabId ?? payload?.tabId ?? null,
+      tabs: terminalTabs,
+      terminalTabs,
     },
   }).catch(() => undefined);
 }
@@ -554,6 +592,9 @@ export type RemoteSelectionRequestedPayload = {
   workspaceId: string;
   worktreeSlug?: string | null;
   worktreeLabel?: string | null;
+  sessionId?: string | null;
+  tabId?: string | null;
+  activeTabId?: string | null;
 };
 
 export async function onRemoteSelectionRequested(
@@ -561,4 +602,25 @@ export async function onRemoteSelectionRequested(
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<RemoteSelectionRequestedPayload>("remote_selection_requested", (event) => handler(event.payload));
+}
+
+export async function getCliLauncherStatus(): Promise<CliLauncherStatus> {
+  if (!isTauri()) {
+    return {
+      launcherPath: "~/.local/bin/ferryx",
+      isInstalled: false,
+      isSymlink: false,
+      currentTarget: null,
+      activeExecutable: null,
+      isSupported: false,
+    };
+  }
+  return invokeCommand<CliLauncherStatus>("cmd_cli_launcher_status");
+}
+
+export async function installCliLauncher(): Promise<CliLauncherStatus> {
+  if (!isTauri()) {
+    throw new Error("Ferryx CLI installation is available only in the desktop app");
+  }
+  return invokeCommand<CliLauncherStatus>("cmd_cli_launcher_install");
 }

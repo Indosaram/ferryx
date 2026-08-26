@@ -23,6 +23,18 @@ function checkIsTauri(): boolean {
   }
 }
 
+/// IPC failures arrive as structured `{ code, message }` objects (not `Error`
+/// instances), so extract the reason from both shapes before falling back.
+function extractErrorMessage(cause: unknown, fallback: string): string {
+  if (cause instanceof Error && cause.message) return cause.message;
+  if (typeof cause === "string" && cause) return cause;
+  if (typeof cause === "object" && cause !== null) {
+    const message = (cause as { message?: unknown }).message;
+    if (typeof message === "string" && message) return message;
+  }
+  return fallback;
+}
+
 export function deriveWorkspaceId(folderPath: string, existingProjects: RegisteredProject[] = []): string {
   const normalized = folderPath.replace(/[/\\]+$/, "");
   const basename = normalized.split(/[/\\]/).pop() || "";
@@ -65,16 +77,18 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
   const isTauri = checkIsTauri();
 
   useEffect(() => {
+    // `pickerOpenedRef` alone guards against duplicate invocations (parent
+    // re-renders and StrictMode's double-mounted effects). The selection must
+    // NOT be discarded when StrictMode runs the effect cleanup, or a picked
+    // folder would silently vanish — hence no "alive" cancellation flag.
     if (!isTauri || pickerOpenedRef.current) return;
     pickerOpenedRef.current = true;
-    let alive = true;
     void open({
       directory: true,
       multiple: false,
       title: "Add Project",
     })
       .then((selected) => {
-        if (!alive) return;
         if (typeof selected === "string" && selected.length > 0) {
           setSelectedPath(selected);
         } else {
@@ -83,13 +97,9 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
       })
       .catch((cause) => {
         console.error(cause);
-        if (!alive) return;
         const message = cause instanceof Error ? cause.message : String(cause);
         setError(message || "Could not open folder picker.");
       });
-    return () => {
-      alive = false;
-    };
   }, [isTauri]);
 
   if (isTauri && selectedPath) {
@@ -103,7 +113,7 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
         onRegisteredRef.current(project);
         onCloseRef.current();
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : "Could not register this project.");
+        setError(extractErrorMessage(cause, "Could not register this project."));
       } finally {
         setSubmitting(false);
       }
@@ -166,8 +176,50 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
     );
   }
 
+  // The native folder picker is a sheet on the main window, and it resolves
+  // asynchronously. Rendering nothing while it is pending broke two things:
+  // the `[role="dialog"]` surface that makes the native terminal compositor
+  // yield (`lib/nativeTerminalVisibility.tsx`) never existed, and a picker that
+  // never resolves left `isAddProjectOpen` latched true with no visible dialog,
+  // so every later "Add project" click was a silent no-op. Mount a real dialog
+  // surface for the pending phase instead.
   if (isTauri && !error) {
-    return null;
+    return (
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
+        <div
+          role="dialog"
+          aria-label="Add Project"
+          aria-busy="true"
+          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        >
+          <div className="flex h-9 items-center border-b border-border px-3">
+            <FolderGit2 className="mr-2 size-3.5 text-muted-foreground" />
+            <h2 className="text-[13px] font-medium">Add Project</h2>
+            <button
+              type="button"
+              aria-label="Close Add Project"
+              className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              onClick={() => onCloseRef.current()}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+          <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
+            <LoaderCircle className="size-3.5 animate-spin" />
+            <span>Waiting for the folder picker.</span>
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
+            <button
+              type="button"
+              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"
+              onClick={() => onCloseRef.current()}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const submit = async (event: FormEvent) => {
@@ -182,7 +234,7 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
       onRegisteredRef.current(project);
       onCloseRef.current();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not register this project.");
+      setError(extractErrorMessage(cause, "Could not register this project."));
     } finally {
       setSubmitting(false);
     }
@@ -255,6 +307,7 @@ type AddWorktreeDialogProps = {
 };
 
 export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDialogProps) {
+  const isGitBacked = project.gitRoot !== null;
   const [branches, setBranches] = useState<LocalBranch[]>([]);
   const [baseRef, setBaseRef] = useState("");
   const [slug, setSlug] = useState("");
@@ -263,6 +316,12 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!isGitBacked) {
+      setBranches([]);
+      setBaseRef("");
+      setLoadingBranches(false);
+      return;
+    }
     let alive = true;
     setLoadingBranches(true);
     setError(null);
@@ -275,7 +334,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
       })
       .catch((cause) => {
         if (!alive) return;
-        setError(cause instanceof Error ? cause.message : "Could not load local branches.");
+        setError(extractErrorMessage(cause, "Could not load local branches."));
       })
       .finally(() => {
         if (alive) setLoadingBranches(false);
@@ -283,7 +342,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
     return () => {
       alive = false;
     };
-  }, [project.workspaceId]);
+  }, [project.workspaceId, isGitBacked]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -300,7 +359,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
       await onCreated(worktree);
       onClose();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not create the worktree.");
+      setError(extractErrorMessage(cause, "Could not create the worktree."));
     } finally {
       setSubmitting(false);
     }
@@ -326,47 +385,58 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
           </button>
         </div>
         <div className="space-y-3 p-3">
-          <label className="block space-y-1 text-[11px] text-muted-foreground">
-            <span>Worktree slug</span>
-            <input
-              aria-label="Worktree slug"
-              className={fieldClass}
-              value={slug}
-              onChange={(event) => setSlug(event.target.value)}
-              placeholder="feature-ui"
-              autoFocus
-            />
-          </label>
-          <label className="block space-y-1 text-[11px] text-muted-foreground">
-            <span>Base branch</span>
-            <select
-              aria-label="Base branch"
-              className={fieldClass}
-              value={baseRef}
-              disabled={loadingBranches || branches.length === 0}
-              onChange={(event) => setBaseRef(event.target.value)}
-            >
-              {branches.map((branch) => (
-                <option key={branch.name} value={branch.name}>
-                  {branch.name}{branch.isCurrent ? " (current)" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+          {isGitBacked ? (
+            <>
+              <label className="block space-y-1 text-[11px] text-muted-foreground">
+                <span>Worktree slug</span>
+                <input
+                  aria-label="Worktree slug"
+                  className={fieldClass}
+                  value={slug}
+                  onChange={(event) => setSlug(event.target.value)}
+                  placeholder="feature-ui"
+                  autoFocus
+                />
+              </label>
+              <label className="block space-y-1 text-[11px] text-muted-foreground">
+                <span>Base branch</span>
+                <select
+                  aria-label="Base branch"
+                  className={fieldClass}
+                  value={baseRef}
+                  disabled={loadingBranches || branches.length === 0}
+                  onChange={(event) => setBaseRef(event.target.value)}
+                >
+                  {branches.map((branch) => (
+                    <option key={branch.name} value={branch.name}>
+                      {branch.name}{branch.isCurrent ? " (current)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : (
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              This project is not a Git repository, so it has no branches to base a worktree on. Open a terminal on the
+              folder instead, or add a Git repository as a separate project.
+            </p>
+          )}
           <p className="truncate text-[10px] text-muted-foreground/70">{project.repoRoot}</p>
           {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
         </div>
         <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
           <button type="button" className="h-7 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-accent" onClick={onClose}>
-            Cancel
+            {isGitBacked ? "Cancel" : "Close"}
           </button>
-          <button
-            type="submit"
-            disabled={submitting || loadingBranches || !slug.trim() || !baseRef}
-            className="h-7 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
-          >
-            Create Worktree
-          </button>
+          {isGitBacked ? (
+            <button
+              type="submit"
+              disabled={submitting || loadingBranches || !slug.trim() || !baseRef}
+              className="h-7 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
+            >
+              Create Worktree
+            </button>
+          ) : null}
         </div>
       </form>
     </div>

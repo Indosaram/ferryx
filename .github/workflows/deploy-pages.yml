@@ -47,6 +47,7 @@ jobs:
         working-directory: ./site
         env:
           BASE_URL: ${{ steps.pages.outputs.base_path }}
+          SITE_URL: ${{ steps.pages.outputs.origin }}
         run: bun run build
 
       - name: Upload GitHub Pages artifact

@@ -96,7 +96,7 @@ No Critical finding was identified. The daemon remains the PTY owner and there i
 - **UI-only persistence as the solution:** not present. Persisted UI state coexists with a standalone daemon backend.
 - **Unconditional terminal respawn on startup:** not present in the current restore path; missing sessions become `exited` (`ui/src/lib/sessionPersistence.ts:334-364`).
 - **StrictMode disabled to mask races:** not present; the coordinator explicitly handles cleanup/re-entry (`ui/src/state/workspaceRestore.ts:63-128`).
-- **HMR keeps only xterm DOM without backend identity:** not present; backend IDs/epoch/sequence are part of persisted session state (`ui/src/lib/sessionPersistence.ts:316-379`).
+- **HMR keeps only a renderer surface without backend identity:** not present; backend IDs/epoch/sequence are part of persisted session state (`ui/src/lib/sessionPersistence.ts:316-379`).
 - **Background task inside GUI as PTY persistence:** not the production ownership model; daemon constructs the terminal backend (`src-tauri/src/daemon/server.rs:207-225`).
 - **`nohup` shell while PTY master remains GUI-owned:** not present.
 - **Reuse backend ID without output attach:** not present; terminal host setup attaches through the sequenced scheduler (`ui/src/lib/terminalInstanceFactory.ts:176-187`).

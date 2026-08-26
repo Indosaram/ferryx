@@ -5,13 +5,11 @@ import type { TerminalSession } from "../lib/types";
 import { TerminalPane } from "./TerminalPane";
 
 vi.mock("./NativeTerminalPane", () => ({
-  NativeTerminalPane: vi.fn(({ sessionId, session, onBell, onTitleChange }) => (
+  NativeTerminalPane: vi.fn(({ sessionId, session }) => (
     <div
       data-testid="native-terminal-pane"
       data-session-id={sessionId}
       data-backend-id={session.backendSessionId}
-      data-has-bell-handler={typeof onBell === "function"}
-      data-has-title-handler={typeof onTitleChange === "function"}
     />
   )),
 }));
@@ -42,14 +40,10 @@ describe("TerminalPane native routing contract", () => {
   it("mounts NativeTerminalPane for active and inactive states and conditionally renders search overlay", () => {
     const session = createSession();
     const onCloseSearch = vi.fn();
-    const onBell = vi.fn();
-    const onTitleChange = vi.fn();
     const { rerender } = render(
       <TerminalPane
         session={session}
         active={true}
-        onBell={onBell}
-        onTitleChange={onTitleChange}
         searchOpen={false}
         onCloseSearch={onCloseSearch}
       />,
@@ -57,8 +51,6 @@ describe("TerminalPane native routing contract", () => {
 
     expect(screen.getByTestId("native-terminal-pane")).toBeInTheDocument();
     expect(screen.queryByTestId("terminal-search-overlay")).toBeNull();
-    expect(screen.getByTestId("native-terminal-pane")).toHaveAttribute("data-has-bell-handler", "true");
-    expect(screen.getByTestId("native-terminal-pane")).toHaveAttribute("data-has-title-handler", "true");
 
     rerender(
       <TerminalPane

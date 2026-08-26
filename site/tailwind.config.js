@@ -16,6 +16,20 @@ export default {
   theme: {
     extend: {
       colors: {
+        page: opaque("page"),
+        "nav-fill": opaque("nav-fill"),
+        "page-raised": opaque("page-raised"),
+        surface: opaque("surface"),
+        ink: opaque("ink"),
+        "ink-hover": opaque("ink-hover"),
+        "ink-soft": opaque("ink-soft"),
+        "ink-faint": opaque("ink-faint"),
+        line: opaque("line"),
+        "line-strong": opaque("line-strong"),
+        "mark-off": opaque("mark-off"),
+        "code-bg": opaque("code-bg"),
+        "code-border": opaque("code-border"),
+        "code-ink": opaque("code-ink"),
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
@@ -70,6 +84,15 @@ export default {
           success: opaque("status-success"),
           idle: opaque("status-idle"),
         },
+      },
+      boxShadow: {
+        nav: "var(--shadow-nav)",
+        card: "var(--shadow-card)",
+        menu: "var(--shadow-menu)",
+        window: "var(--shadow-window)",
+      },
+      backgroundImage: {
+        "demo-wash": "var(--demo-wash)",
       },
       spacing: {
         sidebar: "14.75rem",

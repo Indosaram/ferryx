@@ -65,6 +65,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../ui/dist": "ui/dist"
+    },
     "windows": {
       "allowDowngrades": true,
       "webviewInstallMode": {

@@ -432,7 +432,8 @@ fn encode_terminal_output_frame(
         flags |= TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH;
     }
 
-    let mut frame = Vec::with_capacity(TERMINAL_OUTPUT_FRAME_FIXED_BYTES + session_id.len() + data.len());
+    let mut frame =
+        Vec::with_capacity(TERMINAL_OUTPUT_FRAME_FIXED_BYTES + session_id.len() + data.len());
     frame.push(TERMINAL_OUTPUT_FRAME_VERSION);
     frame.push(flags);
     frame.extend_from_slice(&session_id_len.to_le_bytes());
@@ -461,7 +462,9 @@ fn flush_terminal_output<R: Runtime>(
 
     let channel = TERMINAL_OUTPUT_CHANNEL.lock().clone();
     if let Some(channel) = channel {
-        if let Some(frame) = encode_terminal_output_frame(session_id, buffer, sequence, daemon_epoch) {
+        if let Some(frame) =
+            encode_terminal_output_frame(session_id, buffer, sequence, daemon_epoch)
+        {
             match channel.send(Response::new(frame)) {
                 Ok(()) => {
                     crate::terminal::metrics::record_channel_send_for_session(session_id);
@@ -553,6 +556,13 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     registry: State<'_, WorkspaceRegistry>,
     request: SpawnTerminalRequest,
 ) -> Result<SpawnTerminalResponse, IpcError> {
+    let has_worktree = request.worktree.is_some();
+    let has_cwd = request.cwd.is_some();
+    let has_client_request_id = request.client_request_id.is_some();
+    eprintln!(
+        "[cmd_terminal_spawn] request received has_worktree={has_worktree} has_cwd={has_cwd} has_client_request_id={has_client_request_id}"
+    );
+
     let cols = request.cols.unwrap_or(80);
     let rows = request.rows.unwrap_or(24);
     let registry = (*registry).clone();
@@ -560,16 +570,26 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let identity = request.worktree.clone();
     let requested_cwd = request.cwd.clone();
 
-    let (worktree_manager, worktree_root) = run_blocking(move || {
+    let (worktree_manager, worktree_root) = match run_blocking(move || {
         registry
             .resolve_terminal_target(&workspace_id, identity.as_ref())
             .map_err(IpcError::from)
     })
-    .await?;
+    .await
+    {
+        Ok(target) => target,
+        Err(err) => {
+            eprintln!(
+                "[cmd_terminal_spawn] stage=resolve_target failed code={:?}",
+                err.code
+            );
+            return Err(err);
+        }
+    };
 
     let worktree_for_validation = worktree_manager.clone();
     let worktree_root_for_validation = worktree_root.clone();
-    let cwd = run_blocking(move || {
+    let cwd = match run_blocking(move || {
         let Some(requested) = requested_cwd else {
             return Ok(worktree_root_for_validation);
         };
@@ -592,17 +612,34 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         }
         Ok(canonical)
     })
-    .await?;
+    .await
+    {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            eprintln!(
+                "[cmd_terminal_spawn] stage=validate_cwd failed code={:?}",
+                err.code
+            );
+            return Err(err);
+        }
+    };
 
     let repo_root_str = worktree_manager.repo_root().to_string_lossy().to_string();
-    daemon_client
+    if let Err(err) = daemon_client
         .register_workspace(&request.workspace_id, &repo_root_str)
-        .await?;
+        .await
+    {
+        eprintln!(
+            "[cmd_terminal_spawn] stage=daemon_register failed code={:?}",
+            err.code
+        );
+        return Err(err);
+    }
 
     let client_request_id = request
         .client_request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let session_id = daemon_client
+    let session_id = match daemon_client
         .spawn_terminal(
             client_request_id,
             request.workspace_id,
@@ -611,9 +648,28 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             cols,
             rows,
         )
-        .await?;
+        .await
+    {
+        Ok(session_id) => session_id,
+        Err(err) => {
+            eprintln!(
+                "[cmd_terminal_spawn] stage=daemon_spawn failed code={:?}",
+                err.code
+            );
+            return Err(err);
+        }
+    };
 
-    let attachment = daemon_client.attach(&session_id, None).await?;
+    let attachment = match daemon_client.attach(&session_id, None).await {
+        Ok(attachment) => attachment,
+        Err(err) => {
+            eprintln!(
+                "[cmd_terminal_spawn] stage=daemon_attach failed code={:?}",
+                err.code
+            );
+            return Err(err);
+        }
+    };
     start_managed_pump(session_id.clone(), app.clone(), attachment);
 
     let started = TerminalLifecyclePayload {
@@ -623,6 +679,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         reason: None,
     };
     if let Err(error) = app.emit(TERMINAL_LIFECYCLE_EVENT, started) {
+        eprintln!("[cmd_terminal_spawn] stage=emit_lifecycle failed");
         let _ = daemon_client.close_terminal(&session_id).await;
         return Err(IpcError::internal(format!(
             "failed to emit terminal lifecycle event: {error}"

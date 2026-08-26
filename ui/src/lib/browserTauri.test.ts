@@ -1,7 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { closeBrowser, setBrowserBounds, setBrowserVisible } from "./browserTauri";
+import {
+  browserAutomationAct,
+  browserAutomationSnapshot,
+  closeBrowser,
+  setBrowserBounds,
+  setBrowserVisible,
+} from "./browserTauri";
+import type { BrowserAutomationRequest, BrowserAutomationSnapshot } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -105,5 +112,93 @@ describe("setBrowserBounds retry on WebviewNotFound", () => {
     });
 
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("browser automation ipc", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("invokes cmd_browser_automation_snapshot with browserId and returns snapshot", async () => {
+    const expectedSnapshot: BrowserAutomationSnapshot = {
+      browserId: "browser-1",
+      generation: 3,
+      url: "https://example.com",
+      title: "Example Domain",
+      elements: [
+        {
+          reference: "e1",
+          role: "link",
+          name: "More information...",
+          tagName: "a",
+        },
+      ],
+    };
+
+    vi.mocked(invoke).mockResolvedValueOnce(expectedSnapshot);
+
+    const snapshot = await browserAutomationSnapshot("browser-1");
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("cmd_browser_automation_snapshot", {
+      browserId: "browser-1",
+    });
+    expect(snapshot).toEqual(expectedSnapshot);
+  });
+
+  it("invokes cmd_browser_automation_act with click request", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    const request: BrowserAutomationRequest = {
+      browserId: "browser-1",
+      generation: 3,
+      action: {
+        type: "click",
+        reference: "e1",
+      },
+    };
+
+    await browserAutomationAct(request);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("cmd_browser_automation_act", { request });
+  });
+
+  it("invokes cmd_browser_automation_act with fill request", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    const request: BrowserAutomationRequest = {
+      browserId: "browser-1",
+      generation: 3,
+      action: {
+        type: "fill",
+        reference: "e2",
+        value: "hello world",
+      },
+    };
+
+    await browserAutomationAct(request);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("cmd_browser_automation_act", { request });
+  });
+
+  it("invokes cmd_browser_automation_act with keypress request", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    const request: BrowserAutomationRequest = {
+      browserId: "browser-1",
+      generation: 3,
+      action: {
+        type: "keypress",
+        key: "Enter",
+      },
+    };
+
+    await browserAutomationAct(request);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("cmd_browser_automation_act", { request });
   });
 });

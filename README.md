@@ -72,7 +72,7 @@ cd src-tauri && cargo check
 ```text
 ferryx/
 ├── src-tauri/   # Rust Tauri v2 desktop core, PTY daemon, IPC, notifications, and mobile remote server
-├── ui/          # React 18 frontend with xterm.js WebGL canvas, layout management, and remote pairing UI
+├── ui/          # React 18 frontend with native terminal surface integration, layout management, and remote pairing UI
 ├── site/        # Astro + Starlight static showcase and documentation deployed to GitHub Pages
 └── docs/        # Project specifications, architectural audit logs, and reference docs
 ```

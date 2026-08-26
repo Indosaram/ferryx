@@ -1396,6 +1396,7 @@ mod tests {
                 worktree_slug: None,
                 worktree_label: None,
                 session_id: Some("session-1".to_string()),
+                ..Default::default()
             }),
         };
         let mut json = serde_json::to_string(&sel_req).unwrap();

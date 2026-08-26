@@ -103,8 +103,7 @@ pub async fn cmd_terminal_preferences<R: Runtime>(
     daemon_client: State<'_, Arc<DaemonClient>>,
     state: State<'_, NativeTerminalSurfaceHostState>,
 ) -> Result<TerminalPreferences, IpcError> {
-    let imported =
-        run_blocking(|| Ok(reload_terminal_preferences().as_ref().clone())).await?;
+    let imported = run_blocking(|| Ok(reload_terminal_preferences().as_ref().clone())).await?;
     rerender_native_sessions(&app, daemon_client.inner(), state.inner()).await?;
     Ok(imported)
 }

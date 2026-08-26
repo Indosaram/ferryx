@@ -24,21 +24,21 @@ export function CopySnippet({ code, prefix = "$", className }: CopySnippetProps)
   return (
     <div
       className={cn(
-        "flex items-center justify-between space-x-3 rounded-lg border border-zinc-800 bg-zinc-900/80 px-4 py-2.5 font-mono text-xs text-zinc-300 backdrop-blur transition-colors hover:border-zinc-700",
+        "flex items-center justify-between space-x-3 rounded-xl border border-code-border bg-code-bg px-4 py-2.5 font-mono text-xs text-code-ink transition-colors",
         className
       )}
     >
       <div className="flex items-center space-x-2 truncate">
-        {prefix && <span className="select-none text-zinc-500 font-semibold">{prefix}</span>}
-        <span className="truncate select-all text-zinc-200">{code}</span>
+        {prefix && <span className="select-none text-ink-faint font-semibold">{prefix}</span>}
+        <span className="truncate select-all text-code-ink">{code}</span>
       </div>
       <button
         onClick={handleCopy}
-        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-ink-faint hover:bg-white/10 hover:text-code-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
         title="Copy to clipboard"
       >
         {copied ? (
-          <Check className="h-3.5 w-3.5 text-emerald-400" />
+          <Check className="h-3.5 w-3.5 text-code-ink" />
         ) : (
           <Copy className="h-3.5 w-3.5" />
         )}

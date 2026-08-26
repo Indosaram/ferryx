@@ -284,6 +284,8 @@ describe("Tauri IPC wrapper contract", () => {
       worktreeSlug: "main",
       worktreeLabel: "main",
       backendSessionId: "pty-1",
+      activeTabId: "tab-1",
+      tabs: [{ id: "tab-1", label: "main" }],
     });
 
     expect(core.invoke).toHaveBeenCalledWith("cmd_remote_set_active_selection", {
@@ -292,6 +294,10 @@ describe("Tauri IPC wrapper contract", () => {
         worktreeSlug: "main",
         worktreeLabel: "main",
         sessionId: "pty-1",
+        tabId: "tab-1",
+        activeTabId: "tab-1",
+        tabs: [{ id: "tab-1", label: "main" }],
+        terminalTabs: [{ id: "tab-1", label: "main" }],
       },
     });
 
@@ -303,6 +309,10 @@ describe("Tauri IPC wrapper contract", () => {
         worktreeSlug: null,
         worktreeLabel: null,
         sessionId: null,
+        tabId: null,
+        activeTabId: null,
+        tabs: [],
+        terminalTabs: [],
       },
     });
   });
@@ -321,10 +331,10 @@ describe("Tauri IPC wrapper contract", () => {
     expect(listener).toBeTypeOf("function");
     if (typeof listener === "function") {
       (listener as (event: { payload: any }) => void)({
-        payload: { workspaceId: "orca-lite", worktreeSlug: "feature-1" },
+        payload: { workspaceId: "orca-lite", worktreeSlug: "feature-1", tabId: "tab-2" },
       });
     }
-    expect(handler).toHaveBeenCalledWith({ workspaceId: "orca-lite", worktreeSlug: "feature-1" });
+    expect(handler).toHaveBeenCalledWith({ workspaceId: "orca-lite", worktreeSlug: "feature-1", tabId: "tab-2" });
   });
 
   it("sets native app badge count with normalized integer payload", async () => {

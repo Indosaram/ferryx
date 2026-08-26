@@ -49,6 +49,46 @@ describe("agentTitle parser & normalizer", () => {
       expect(classifyTerminalTitleActivity("* codex result")).toBe("done");
       expect(classifyTerminalTitleActivity("zsh /repo")).toBeNull();
     });
+
+    it("does not classify mid-sentence done or waiting keywords as done/waiting", () => {
+      expect(classifyTerminalTitleActivity("\u280b omo: fixing the done-state handler")).toBe("working");
+      expect(classifyTerminalTitleActivity("\u280b omo: checking permission handling")).toBe("working");
+      expect(classifyTerminalTitleActivity("\u2733 claude code: done")).toBe("done");
+      expect(classifyTerminalTitleActivity("\u2726 codex: needs input")).toBe("waiting");
+    });
+
+    it("still classifies status words that carry trailing detail", () => {
+      expect(classifyTerminalTitleActivity("codex: done (3 files changed)")).toBe("done");
+      expect(classifyTerminalTitleActivity("omo: completed in 4m12s")).toBe("done");
+      expect(classifyTerminalTitleActivity("claude: finished 12 tasks")).toBe("done");
+      expect(classifyTerminalTitleActivity("omo: permission required")).toBe("waiting");
+      expect(classifyTerminalTitleActivity("claude: permission needed to edit file")).toBe("waiting");
+      expect(classifyTerminalTitleActivity("omo: waiting for approval: user must confirm")).toBe("waiting");
+    });
+
+    it("lets a live spinner outrank a status word that merely opens the work description", () => {
+      expect(classifyTerminalTitleActivity("\u280b omo: done tasks handler")).toBe("working");
+      expect(classifyTerminalTitleActivity("\u280b omo: idle connection cleanup")).toBe("working");
+      expect(classifyTerminalTitleActivity("\u280b codex: completed items migration")).toBe("working");
+      expect(classifyTerminalTitleActivity("\u280b omo: waiting room refactor")).toBe("working");
+    });
+
+    it("still reports a real completion that ends the title even with a spinner present", () => {
+      expect(classifyTerminalTitleActivity("\u2733 claude code: done")).toBe("done");
+      expect(classifyTerminalTitleActivity("\u280b codex: run finished")).toBe("done");
+      expect(classifyTerminalTitleActivity("\u280b omo: needs input")).toBe("waiting");
+    });
+
+    it("reads the status segment through an unrecognized leading decoration glyph", () => {
+      expect(classifyTerminalTitleActivity("\u274b omo: permission required")).toBe("waiting");
+      expect(classifyTerminalTitleActivity("\u25b8 codex: done (3 files changed)")).toBe("done");
+    });
+
+    it("keeps a status word embedded in work description out of done/waiting", () => {
+      expect(classifyTerminalTitleActivity("\u280b omo: refactoring the completed-badge logic")).toBe("working");
+      expect(classifyTerminalTitleActivity("\u280b omo: done-state handler under repair")).toBe("working");
+      expect(classifyTerminalTitleActivity("\u280b claude: writing docs for the approval flow")).toBe("working");
+    });
   });
 
   describe("agy / antigravity agent detection and state parsing", () => {

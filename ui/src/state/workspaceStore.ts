@@ -10,7 +10,7 @@ import {
 import { classifyTerminalTitleActivity, formatTabLabelFromTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import { worktreeIdentity } from "../lib/types";
@@ -165,6 +165,11 @@ export function useWorkspaceStore({
   const [state, reactDispatch] = useReducer(workspaceReducer, initialRef.current.state);
   const stateRef = useRef(state);
   const spawningSessionIdsRef = useRef(new Set<string>());
+  /**
+   * Bell subscribers keyed by nothing: the native bell event is global, so App registers one
+   * listener here instead of a per-pane prop that only exists for the mounted foreground tab.
+   */
+  const bellListenersRef = useRef(new Set<(sessionId: string, tabId: string) => void>());
   const mountedWorkspaceIdRef = useRef(workspaceId);
   // Provenance belongs to the workspace currently mounted; keeping the first
   // one would make restore pick the wrong HMR-vs-disk path after a switch.
@@ -223,20 +228,53 @@ export function useWorkspaceStore({
         lifecycle: mapBackendLifecycle(payload),
       });
     });
-    const unsubscribeTitle = terminalEventBus.subscribeTitle((backendSessionId, title) => {
+
+    // Native title and bell events carry the BACKEND session id and are emitted by the daemon
+    // stream pump, so they arrive for every attached session -- including background tabs whose
+    // panes `TerminalSplitView` has unmounted. That is the whole point: the notification exists
+    // for the tab the user is NOT watching.
+    const resolveSession = (backendSessionId: string) => {
       const snapshot = stateRef.current;
       const session = Object.values(snapshot.sessions).find(
         (candidate) => candidate.backendSessionId === backendSessionId,
       );
-      if (!session) return;
+      if (!session) return null;
       const tabId = findTabIdForSession(snapshot, session.id);
-      if (!tabId) return;
-      dispatch({ type: "SESSION_TITLE_ACTIVITY", tabId, sessionId: session.id, title });
-    });
+      if (!tabId) return null;
+      return { sessionId: session.id, tabId };
+    };
+
+    let unlistenTitle: (() => void) | undefined;
+    let unlistenBell: (() => void) | undefined;
+    let subscribed = true;
+
+    void onNativeTerminalTitle((payload) => {
+      const resolved = resolveSession(payload.sessionId);
+      if (!resolved) return;
+      dispatch({ type: "SESSION_TITLE_ACTIVITY", tabId: resolved.tabId, sessionId: resolved.sessionId, title: payload.title });
+    })
+      .then((unlisten) => {
+        if (subscribed) unlistenTitle = unlisten;
+        else unlisten();
+      })
+      .catch(() => undefined);
+
+    void onNativeTerminalBell((payload) => {
+      const resolved = resolveSession(payload.sessionId);
+      if (!resolved) return;
+      bellListenersRef.current.forEach((listener) => listener(resolved.sessionId, resolved.tabId));
+    })
+      .then((unlisten) => {
+        if (subscribed) unlistenBell = unlisten;
+        else unlisten();
+      })
+      .catch(() => undefined);
 
     return () => {
+      subscribed = false;
       unsubscribeLifecycle();
-      unsubscribeTitle();
+      unlistenTitle?.();
+      unlistenBell?.();
     };
   }, [dispatch]);
 
@@ -716,6 +754,14 @@ export function useWorkspaceStore({
     [dispatch],
   );
 
+  const subscribeTerminalBell = useCallback((listener: (sessionId: string, tabId: string) => void) => {
+    const listeners = bellListenersRef.current;
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  }, []);
+
   const createBrowserTab = useCallback(
     async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string }) => {
       const capturedWorktreePath = options?.worktreePath ?? stateRef.current.activeWorktreePath ?? undefined;
@@ -838,6 +884,7 @@ export function useWorkspaceStore({
     syncWorktrees,
     restoreWorkspace,
     updateSessionTitleActivity,
+    subscribeTerminalBell,
     markTabUnread: (tabId: string) => dispatch({ type: "MARK_TAB_UNREAD", tabId }),
     clearTabUnread: (tabId: string) => dispatch({ type: "CLEAR_TAB_UNREAD", tabId }),
     markWorktreeUnread: (worktreePath: string) => dispatch({ type: "MARK_WORKTREE_UNREAD", worktreePath }),

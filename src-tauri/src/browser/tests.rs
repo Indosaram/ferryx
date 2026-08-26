@@ -160,6 +160,111 @@ fn test_history_navigation_marks_loading_without_overwriting_url() {
 }
 
 #[test]
+fn test_browser_automation_target_rejects_stale_generation() {
+    let manager = BrowserManager::new();
+    let state = manager
+        .register_session(CreateBrowserRequest {
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .expect("register browser");
+
+    manager
+        .record_automation_targets(
+            &state.browser_id,
+            state.generation,
+            vec![BrowserAutomationTarget {
+                reference: "e1".into(),
+                selector: "button:nth-of-type(1)".into(),
+            }],
+        )
+        .expect("record snapshot targets");
+
+    let selector = manager
+        .automation_target(&state.browser_id, state.generation, "e1")
+        .expect("resolve current snapshot target");
+    assert_eq!(selector, "button:nth-of-type(1)");
+
+    manager
+        .update_url(&state.browser_id, "https://example.com/next")
+        .expect("navigate");
+
+    let error = manager
+        .automation_target(&state.browser_id, state.generation, "e1")
+        .expect_err("reject target from prior page generation");
+    assert_eq!(error, BrowserError::AutomationSnapshotStale);
+}
+
+#[test]
+fn test_browser_automation_target_requires_current_snapshot_reference() {
+    let manager = BrowserManager::new();
+    let state = manager
+        .register_session(CreateBrowserRequest {
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .expect("register browser");
+
+    let error = manager
+        .automation_target(&state.browser_id, state.generation, "e1")
+        .expect_err("snapshot must create element references first");
+    assert_eq!(error, BrowserError::AutomationTargetNotFound("e1".into()));
+}
+
+#[test]
+fn test_page_load_url_change_invalidates_automation_targets() {
+    let manager = BrowserManager::new();
+    let state = manager
+        .register_session(CreateBrowserRequest {
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .expect("register browser");
+    manager
+        .record_automation_targets(
+            &state.browser_id,
+            state.generation,
+            vec![BrowserAutomationTarget {
+                reference: "e1".into(),
+                selector: "a".into(),
+            }],
+        )
+        .expect("record snapshot targets");
+
+    let updated = manager
+        .update_navigation_state(
+            &state.browser_id,
+            Some("https://example.com/next".into()),
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .expect("handle page load URL change");
+
+    assert_eq!(updated.generation, state.generation + 1);
+    assert_eq!(
+        manager
+            .automation_target(&state.browser_id, state.generation, "e1")
+            .expect_err("previous document target is stale"),
+        BrowserError::AutomationSnapshotStale
+    );
+}
+
+#[test]
 fn test_browser_manager_get_bounds_and_visibility() {
     let mgr = BrowserManager::new();
     let state = mgr
@@ -200,7 +305,8 @@ fn test_browser_manager_get_bounds_and_visibility() {
     )
     .expect("set bounds");
     assert_eq!(
-        mgr.get_bounds(&state.browser_id).expect("get bounds after set"),
+        mgr.get_bounds(&state.browser_id)
+            .expect("get bounds after set"),
         Some(LogicalRect {
             x: 10.0,
             y: 50.0,

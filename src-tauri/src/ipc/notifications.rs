@@ -6,13 +6,14 @@
 //! mockable contract, and avoids granting broad guest plugin capabilities.
 
 use crate::ipc::{run_blocking, IpcError};
+#[cfg(target_os = "macos")]
+use crate::notification::format_badge_label;
 use crate::notification::{
-    format_badge_label, open_system_notification_settings, picked_audio_file,
-    DispatchNotificationRequest, DispatchNotificationResult, NativeNotificationBackend,
-    NotificationAudioPlayer, NotificationContent, NotificationPermissionRequestDto,
-    NotificationPermissionStatusDto, NotificationProbeResult, NotificationService,
-    OpenSystemSettingsResult, PickedAudioFile, PlaySoundResult, SetBadgeCountResult,
-    SUPPORTED_AUDIO_EXTENSIONS,
+    open_system_notification_settings, picked_audio_file, DispatchNotificationRequest,
+    DispatchNotificationResult, NativeNotificationBackend, NotificationAudioPlayer,
+    NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+    NotificationProbeResult, NotificationService, OpenSystemSettingsResult, PickedAudioFile,
+    PlaySoundResult, SetBadgeCountResult, SUPPORTED_AUDIO_EXTENSIONS,
 };
 use std::path::PathBuf;
 use std::sync::Arc;

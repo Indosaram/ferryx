@@ -59,6 +59,11 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_terminal_resize': case 'cmd_terminal_signal': return undefined;
     case 'cmd_terminal_close': sessions.delete(a.sessionId); return undefined;
     case 'cmd_terminal_preferences': return { fontFamily: 'monospace', fontSize: 13, macosOptionAsAlt: false, cursorStyle: 'block', theme: {}, source: 'defaults', status: 'absent', sourcePath: null };
+    // The web demo has no libghostty compositor; acknowledge the surface commands so
+    // NativeTerminalPane does not surface an attach failure over the preview.
+    case 'cmd_native_terminal_attach': case 'cmd_native_terminal_set_focus': case 'cmd_native_terminal_set_bounds': return { cursorCol: 0, cursorRow: 0, cellWidthPx: 8, cellHeightPx: 17 };
+    case 'cmd_native_terminal_detach': case 'cmd_native_terminal_send_input': case 'cmd_native_terminal_scroll': return undefined;
+    case 'cmd_native_terminal_copy_selection': return null;
     case 'cmd_browser_create': { const browserId = id('browser'); const b: BrowserState = { browserId, webviewLabel: browserId, workspaceId: request.workspaceId, worktreePath: request.worktreePath, profileId: request.profile ?? 'default', generation: 0, url: request.url, title: request.url, loading: false, canGoBack: false, canGoForward: false, zoomFactor: 1, loadError: null, visible: request.visible ?? true }; browsers.set(browserId, b); return b; }
     case 'cmd_browser_navigate': { const b = browsers.get(a.browserId); if (b) { b.url = a.url; b.title = a.url; b.generation++; } return undefined; }
     case 'cmd_browser_reload': { const b = browsers.get(a.browserId); if (b) b.generation++; return undefined; }

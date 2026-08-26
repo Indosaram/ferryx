@@ -53,9 +53,11 @@ import {
   detectAgents,
   disableRemoteGateway,
   enableRemoteGateway,
+  getCliLauncherStatus,
   getNotificationPermissionStatus,
   getRemoteStatus,
   getTailscaleStatus,
+  installCliLauncher,
   listRemoteDevices,
   openNotificationSystemSettings,
   pickNotificationAudio,
@@ -64,6 +66,7 @@ import {
   requestNotificationPermission,
   revokeRemoteDevice,
   type AgentDetection,
+  type CliLauncherStatus,
   type DeviceInfo,
   type RegisteredProject,
   type RemoteGatewayStatus,
@@ -982,7 +985,113 @@ export function BrowserSettings() {
           )}
         </div>
       </div>
+
+      <CliLauncherCard />
     </section>
+  );
+}
+
+function CliLauncherCard() {
+  const [status, setStatus] = useState<CliLauncherStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [installing, setInstalling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      setError(null);
+      const s = await getCliLauncherStatus();
+      setStatus(s);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to retrieve CLI launcher status");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    setError(null);
+    try {
+      const s = await installCliLauncher();
+      setStatus(s);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to install CLI launcher");
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  return (
+    <div className="mt-8 rounded-lg border border-border bg-card p-4">
+      <div className="flex items-center gap-2">
+        <TerminalSquare className="size-4 text-muted-foreground" />
+        <h3 className="text-[12px] font-semibold">Ferryx CLI</h3>
+      </div>
+      <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
+        Ferryx does not alter shell profiles or PATH. Ensure{" "}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-foreground">~/.local/bin</code> is on
+        PATH, then open a new terminal.
+      </p>
+
+      {error ? (
+        <div
+          role="alert"
+          className="mt-3 flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5 text-xs text-destructive"
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-0.5 text-xs">
+          <div className="text-muted-foreground">
+            Launcher location:{" "}
+            <code className="font-mono text-foreground">{status?.launcherPath ?? "~/.local/bin/ferryx"}</code>
+          </div>
+          {status?.currentTarget ? (
+            <div className="truncate font-mono text-[10px] text-muted-foreground">
+              Target: {status.currentTarget}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {status?.isSupported === false ? (
+            <span className="text-xs text-muted-foreground">Available in the Ferryx desktop app on Unix-like systems.</span>
+          ) : status?.isInstalled ? (
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-status-success">
+              <CheckCircle2 className="size-3.5" />
+              Installed
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleInstall()}
+              disabled={installing || loading}
+              className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-foreground hover:bg-accent disabled:opacity-50 transition-colors"
+            >
+              {installing ? (
+                <>
+                  <RotateCw className="size-3 animate-spin" />
+                  Installing Ferryx CLI…
+                </>
+              ) : (
+                <>
+                  <Download className="size-3" />
+                  Install Ferryx CLI
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1264,11 +1373,15 @@ export function NotificationSettings() {
 
 function RemoteAccessSettings() {
   const [status, setStatus] = useState<RemoteGatewayStatus | null>(null);
+  const statusRef = useRef<RemoteGatewayStatus | null>(null);
+  statusRef.current = status;
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [tailscaleStatus, setTailscaleStatus] = useState<TailscaleStatus | null>(null);
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [isGeneratingQr, setIsGeneratingQr] = useState(false);
+  const [qrError, setQrError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [pinCopied, setPinCopied] = useState(false);
@@ -1291,60 +1404,29 @@ function RemoteAccessSettings() {
 
   useEffect(() => () => clearCopyTimer(), [clearCopyTimer]);
 
-  const refreshStatus = useCallback(async () => {
+  const refreshStatus = useCallback(async (): Promise<RemoteGatewayStatus | null> => {
     try {
       const [s, devList, ts] = await Promise.all([
         getRemoteStatus().catch(() => null),
         listRemoteDevices().catch(() => []),
         getTailscaleStatus().catch(() => null),
       ]);
-      if (s) setStatus(s);
+      if (s) {
+        statusRef.current = s;
+        setStatus(s);
+      }
       setDevices(devList);
       setTailscaleStatus(ts);
+      return s;
     } catch {
-      // ignore
+      return null;
     }
   }, []);
 
-  useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
-
-  const handleToggle = async (enabled: boolean) => {
-    setLoading(true);
-    try {
-      if (!enabled) {
-        const s = await disableRemoteGateway();
-        setStatus(s);
-        setPairingCode(null);
-        setQrDataUrl(null);
-        setPinCopied(false);
-        await refreshStatus();
-      } else {
-        const s = await enableRemoteGateway({ mode: "localNetwork" });
-        setStatus(s);
-        await refreshStatus();
-        await generatePairing(s);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRevoke = async (deviceId: string) => {
-    try {
-      await revokeRemoteDevice(deviceId);
-      setConfirmRevokeId(null);
-      await refreshStatus();
-    } catch {
-      // ignore
-    }
-  };
-
-  const generatePairing = async (currentStatus?: RemoteGatewayStatus | null) => {
-    const s = currentStatus ?? status;
+  const generatePairing = useCallback(async (currentStatus?: RemoteGatewayStatus | null) => {
+    const s = currentStatus ?? statusRef.current;
+    setIsGeneratingQr(true);
+    setQrError(null);
     try {
       const res = await createPairingCode("control");
       setPairingCode(res.code);
@@ -1366,6 +1448,59 @@ function RemoteAccessSettings() {
         color: { dark: "#ffffff", light: "#171717" },
       });
       setQrDataUrl(dataUrl);
+    } catch (error: unknown) {
+      setQrError(error instanceof Error ? error.message : "Failed to generate pairing QR code");
+      setPairingCode(null);
+      setQrDataUrl(null);
+    } finally {
+      setIsGeneratingQr(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const s = await refreshStatus();
+      if (active && s?.enabled) {
+        void generatePairing(s);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [refreshStatus, generatePairing]);
+
+  const handleToggle = async (enabled: boolean) => {
+    setLoading(true);
+    try {
+      if (!enabled) {
+        const s = await disableRemoteGateway();
+        statusRef.current = s;
+        setStatus(s);
+        setPairingCode(null);
+        setQrDataUrl(null);
+        setQrError(null);
+        setPinCopied(false);
+        await refreshStatus();
+      } else {
+        const s = await enableRemoteGateway({ mode: "localNetwork" });
+        statusRef.current = s;
+        setStatus(s);
+        await refreshStatus();
+        await generatePairing(s);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRevoke = async (deviceId: string) => {
+    try {
+      await revokeRemoteDevice(deviceId);
+      setConfirmRevokeId(null);
+      await refreshStatus();
     } catch {
       // ignore
     }
@@ -1380,7 +1515,7 @@ function RemoteAccessSettings() {
       <SettingsHeading
         icon={<Radio />}
         title="Remote Access"
-        description="Access desktop terminal sessions from your mobile browser. The gateway stops when Ferryx quits and must be enabled again after relaunch."
+        description="Access desktop terminal sessions from your mobile browser. Existing authorized browser profiles reconnect while Remote remains enabled; re-pair only after browser storage is cleared, a device is revoked, or a different browser profile/device is used."
       />
       <h2 id="settings-remote-heading" className="sr-only">Remote Access</h2>
       <div className="border-y border-border">
@@ -1433,12 +1568,41 @@ function RemoteAccessSettings() {
               <div className="flex flex-col items-center gap-2 rounded-lg border border-border bg-card p-3">
                 {qrDataUrl ? (
                   <img src={qrDataUrl} alt="Pairing QR Code" className="w-[160px] h-[160px] rounded" />
-                ) : (
+                ) : isGeneratingQr ? (
                   <div className="w-[160px] h-[160px] flex items-center justify-center text-xs text-muted-foreground">
                     Generating...
                   </div>
+                ) : qrError ? (
+                  <div className="w-[160px] h-[160px] flex flex-col items-center justify-center p-2 text-center text-xs text-destructive gap-2">
+                    <span>{qrError}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearCopyTimer();
+                        setPinCopied(false);
+                        void generatePairing();
+                      }}
+                      className="px-2.5 py-1 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 text-xs font-medium transition-colors"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <div className="w-[160px] h-[160px] flex flex-col items-center justify-center text-xs text-muted-foreground gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearCopyTimer();
+                        setPinCopied(false);
+                        void generatePairing();
+                      }}
+                      className="px-3 py-1.5 rounded bg-primary text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                    >
+                      Generate QR Code
+                    </button>
+                  </div>
                 )}
-                {pairingCode && (
+                {pairingCode ? (
                   <div className="flex items-center justify-between w-full px-1">
                     <button
                       type="button"
@@ -1454,17 +1618,30 @@ function RemoteAccessSettings() {
                     </button>
                     <button
                       type="button"
+                      disabled={isGeneratingQr}
                       onClick={() => {
                         clearCopyTimer();
                         setPinCopied(false);
                         void generatePairing();
                       }}
-                      className="text-[10px] text-muted-foreground hover:text-foreground underline"
+                      className="text-[10px] text-muted-foreground hover:text-foreground underline disabled:opacity-50"
                     >
-                      New Code
+                      {isGeneratingQr ? "Generating..." : "New Code"}
                     </button>
                   </div>
-                )}
+                ) : !isGeneratingQr && !qrError ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearCopyTimer();
+                      setPinCopied(false);
+                      void generatePairing();
+                    }}
+                    className="text-[10px] text-muted-foreground hover:text-foreground underline"
+                  >
+                    Generate Code
+                  </button>
+                ) : null}
               </div>
             </SettingRow>
 

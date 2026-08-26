@@ -141,6 +141,48 @@ export type BrowserSessionSummary = {
   visible: boolean;
 };
 
+export type BrowserAutomationElement = {
+  reference: string;
+  role: string;
+  name: string;
+  tagName: string;
+};
+
+export type BrowserAutomationSnapshot = {
+  browserId: string;
+  generation: number;
+  url: string;
+  title: string;
+  elements: BrowserAutomationElement[];
+};
+
+export type BrowserAutomationClickAction = {
+  type: "click";
+  reference: string;
+};
+
+export type BrowserAutomationFillAction = {
+  type: "fill";
+  reference: string;
+  value: string;
+};
+
+export type BrowserAutomationKeypressAction = {
+  type: "keypress";
+  key: string;
+};
+
+export type BrowserAutomationAction =
+  | BrowserAutomationClickAction
+  | BrowserAutomationFillAction
+  | BrowserAutomationKeypressAction;
+
+export type BrowserAutomationRequest = {
+  browserId: string;
+  generation: number;
+  action: BrowserAutomationAction;
+};
+
 export type Pane = {
   id: string;
   tabId: string;
@@ -305,6 +347,17 @@ export type TerminalLifecyclePayload = {
   state: "started" | "exited" | "failed";
   exitCode: number | null;
   reason: string | null;
+};
+
+/** Emitted per attached session by the native daemon stream pump, independent of pane mounting. */
+export type NativeTerminalTitlePayload = {
+  sessionId: string;
+  title: string;
+};
+
+export type NativeTerminalBellPayload = {
+  sessionId: string;
+  count: number;
 };
 
 export type WorktreeChangedPayload = {
@@ -493,5 +546,14 @@ export interface PersistedWorkspaceSession {
   activeWorkspaceId: string;
   workspaces: Record<string, PersistedWorkspace>;
 }
+
+export type CliLauncherStatus = {
+  launcherPath: string;
+  isInstalled: boolean;
+  isSymlink: boolean;
+  currentTarget: string | null;
+  activeExecutable: string | null;
+  isSupported: boolean;
+};
 
 export type { RegisteredProject } from "./tauri";

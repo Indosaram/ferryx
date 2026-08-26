@@ -580,6 +580,7 @@ export function deserializeWorkspaceState(
   );
 
   return {
+    workspaceId,
     worktrees,
     activeWorktreePath: ws.activeWorktreePath || (worktrees[0]?.path ?? null),
     sessions: referencedSessions,

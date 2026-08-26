@@ -202,6 +202,13 @@ fn load_persisted_auth(path: &Path) -> Option<PersistedAuthState> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Writes `value` as JSON, restricting access to the current user.
+///
+/// On Unix the owner-only modes are applied explicitly, and the file is written to a temporary
+/// path first so it is never briefly visible with the default umask under its final name.
+/// On Windows the enclosing per-user directory (`LOCALAPPDATA`, chosen by
+/// `remote::state::resolve_remote_data_dir`) already carries an ACL that excludes other standard
+/// users, and both the temporary and final file inherit it.
 pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
