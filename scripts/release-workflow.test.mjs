@@ -15,13 +15,23 @@ test("the bundle step receives the updater signing secrets", () => {
   );
 });
 
-test("the macOS unsigned fallback never unsets the updater signing key", () => {
-  const fallback = WORKFLOW.slice(
-    WORKFLOW.indexOf("Skipping macOS codesigning"),
-    WORKFLOW.indexOf("bunx @tauri-apps/cli build"),
-  );
-  assert.notEqual(fallback.length, 0);
-  assert.equal(fallback.includes("unset TAURI_SIGNING_PRIVATE_KEY"), false);
+test("the macOS build imports its Developer ID identity and configures notarization", () => {
+  assert.match(WORKFLOW, /name: Import macOS signing and notarization credentials/);
+  assert.match(WORKFLOW, /APPLE_CERTIFICATE: \$\{\{ secrets\.APPLE_CERTIFICATE \}\}/);
+  assert.match(WORKFLOW, /APPLE_CERTIFICATE_PASSWORD: \$\{\{ secrets\.APPLE_CERTIFICATE_PASSWORD \}\}/);
+  assert.match(WORKFLOW, /KEYCHAIN_PASSWORD: \$\{\{ secrets\.KEYCHAIN_PASSWORD \}\}/);
+  assert.match(WORKFLOW, /security import "\$CERTIFICATE_PATH"/);
+  assert.match(WORKFLOW, /security set-key-partition-list/);
+  assert.match(WORKFLOW, /APPLE_API_KEY_CONTENT: \$\{\{ secrets\.APPLE_API_KEY_CONTENT \}\}/);
+  assert.match(WORKFLOW, /APPLE_API_KEY_PATH=/);
+  assert.match(WORKFLOW, /APPLE_API_ISSUER: \$\{\{ secrets\.APPLE_API_ISSUER \}\}/);
+});
+
+test("the macOS bundle inherits its imported identity and App Store Connect key path", () => {
+  assert.match(WORKFLOW, /APPLE_SIGNING_IDENTITY: \$\{\{ secrets\.APPLE_SIGNING_IDENTITY \}\}/);
+  assert.match(WORKFLOW, /APPLE_API_KEY_PATH: \$\{\{ env\.APPLE_API_KEY_PATH \}\}/);
+  assert.doesNotMatch(WORKFLOW, /Skipping macOS codesigning/);
+  assert.doesNotMatch(WORKFLOW, /unset TAURI_SIGNING_PRIVATE_KEY/);
 });
 
 test("both bundling jobs and the manifest derive a semver from the release tag", () => {
