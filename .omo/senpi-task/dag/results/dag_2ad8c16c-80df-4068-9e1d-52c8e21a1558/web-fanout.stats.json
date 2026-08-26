@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_2ad8c16c-80df-4068-9e1d-52c8e21a1558","nodeId":"web-fanout","runStats":{"runtime_ms":2069015,"turns":6,"tool_calls":3,"output_tokens":1032,"total_tokens":15362,"generation_ms":7050,"tokens_per_second":146,"cost_usd":0.083638,"cache_hit_rate_last":0.4169716150726931,"cache_hit_rate_run":0.2942079553384508}}

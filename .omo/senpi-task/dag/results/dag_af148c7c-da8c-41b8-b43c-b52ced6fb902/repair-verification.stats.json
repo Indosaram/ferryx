@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_af148c7c-da8c-41b8-b43c-b52ced6fb902","nodeId":"repair-verification","runStats":{"runtime_ms":72701,"turns":8,"tool_calls":7,"output_tokens":3330,"total_tokens":202729,"generation_ms":7891,"tokens_per_second":422,"cost_usd":0,"cache_hit_rate_last":0.779510022271715,"cache_hit_rate_run":0.6545920491075683}}

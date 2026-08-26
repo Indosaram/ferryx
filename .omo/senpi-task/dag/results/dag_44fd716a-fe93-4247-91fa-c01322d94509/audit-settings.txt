@@ -1,6 +1,0 @@
-I have completed the static performance audit of settings and modal dialogs and saved the lane report to `docs/frontend-perf/audit-settings.md`.
-
-### Summary of Findings
-- **F-settings-01 (High)**: Always-on global `MutationObserver` on `document.documentElement` (`ui/src/lib/settingsRuntimeBridge.ts:122`) running `loadAppearanceSettings()` (`localStorage` read + `JSON.parse`) and multiple unindexed full-DOM searches (`document.querySelectorAll("div")`) on every single DOM mutation across the application.
-- **F-settings-02 (High)**: `SettingsDialog.tsx` (1,833 lines, 10 panels, full agent detection and QR generator) is statically imported in `App.tsx` without code splitting (`React.lazy`), bundling ~70KB+ into the initial application module evaluation.
-- **F-settings-03 (Medium)**: `useTerminalSettings()` hook runs unconditionally in `SettingsDialog` before the `if (!open) return null;` guard, maintaining background subscriptions and re-rendering when the dialog is closed.

@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_1fa93a04-6ee9-4789-8ae9-fc932d9b0fcd","nodeId":"frontend-seams","runStats":{"runtime_ms":123083,"turns":17,"tool_calls":45,"output_tokens":9643,"total_tokens":1458957,"generation_ms":46537,"cost_usd":0,"cache_hit_rate_last":0.9654582913251216,"cache_hit_rate_run":0.895565764216726}}

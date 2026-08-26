@@ -2,8 +2,6 @@
 
 Date: 2026-08-24
 Specification: [`markdown/TERMINAL_SESSION_PERSISTENCE_FUNDAMENTAL_SOLUTION.md`](../markdown/TERMINAL_SESSION_PERSISTENCE_FUNDAMENTAL_SOLUTION.md)
-Plan: [`.omo/plans/terminal-session-persistence-fundamental-implementation.md`](../.omo/plans/terminal-session-persistence-fundamental-implementation.md)
-Raw evidence: [`.omo/evidence/terminal-session-persistence/`](../.omo/evidence/terminal-session-persistence/)
 
 ## Delivered architecture
 
@@ -49,5 +47,4 @@ Ferryx terminal processes are now owned by a user-session daemon, not the GUI:
 ## Notes
 
 - `ensureSessionBackends`/`REBIND_SESSION_BACKEND` exists in `workspaceStore.ts` as an exported, currently unwired utility for explicit user-initiated respawn; it is covered by green tests and does not participate in automatic restore.
-- Model routing during implementation was switched to `quotio/gemini-3.7-flash-high` (fallback `stealth/ox-alpha`) per user directive; backups at `~/.omo/omo.json.bak-flash-oxroute-20260823`.
 - A post-settlement unauthorized "zero-tab" edit was reverted (last-tab close restores a replacement tab per the existing contract); orphaned `EmptyWorkspaceView` files removed.

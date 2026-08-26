@@ -1,7 +1,0 @@
-> I read this as verification - confirming the P-pty-poll fix is fully implemented and documented with clean RED and GREEN evidence.
-
-Task is complete:
-- The 20ms continuous polling loop in `pty.rs` has been replaced with event-driven completion awaiting on the master PTY reader task plus a relaxed 250ms interval.
-- Unit test `test_lifecycle_poll_interval_is_relaxed_and_event_driven` is in place and verified.
-- Evidence written to `/Users/indo/code/project/orca-lite/docs/backend-perf/fix-P-pty-poll.md`.
-- Final verification passed with `cargo test --manifest-path /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml --lib terminal::` (16 passed, 0 failed).

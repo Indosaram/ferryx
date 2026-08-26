@@ -1,1 +1,0 @@
-`/Users/indo/code/project/orca-lite/docs/frontend-perf/PRIORITIZED.md` has been written with the prioritized, disjoint fix-packet ledger covering all High and Medium findings across the six audit lanes, with exclusive write scopes, proofs, invariants, deferred items, and dropped items.

@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_ae2d4801-ab01-4515-a487-d72369a1f69b","nodeId":"parity-contract","runStats":{"runtime_ms":28885,"turns":3,"tool_calls":8,"output_tokens":2073,"total_tokens":126083,"generation_ms":6376,"tokens_per_second":325,"cost_usd":0,"cache_hit_rate_last":0.6992601251657234,"cache_hit_rate_run":0.39554068220304817}}

@@ -1,8 +1,0 @@
-I read this as an audit request for backend terminal performance - I inspected the scoped terminal source files and wrote the complete audit report to `docs/backend-perf/audit-terminal.md`.
-
-### Summary of Findings in `docs/backend-perf/audit-terminal.md`
-- **F-terminal-01 (High)**: 20ms active polling loop in PTY lifecycle watcher issuing non-blocking `try_wait` (`waitpid`) syscalls and acquiring mutexes 50 times/sec per session while idle.
-- **F-terminal-02 (High)**: Double heap allocation per 4KB chunk (`buf[..n].to_vec()` + `hub.buffer.push(chunk.clone())`) across a 3-hop async queue pipeline (`spawn_blocking` -> `mpsc` -> pump task -> `output_hub` -> `broadcast`).
-- **F-terminal-03 (High)**: Per-chunk Base64 string encoding and unbatched Tauri IPC event emission flooding the webview bridge and triggering subscriber buffer drops (`RecvError::Lagged`).
-- **F-terminal-04 (Medium)**: Blocking subprocess execution of `/usr/sbin/lsof` for macOS CWD resolution on IPC calls taking 20–100ms per invocation.
-- **F-terminal-05 (Low)**: 8 distinct `Arc<Mutex<Option<T>>>` field allocations inside each `PtySession`.

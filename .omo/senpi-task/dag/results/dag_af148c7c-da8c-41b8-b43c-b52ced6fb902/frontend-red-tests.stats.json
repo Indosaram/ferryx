@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_af148c7c-da8c-41b8-b43c-b52ced6fb902","nodeId":"frontend-red-tests","runStats":{"runtime_ms":659591,"turns":109,"tool_calls":108,"output_tokens":15127,"total_tokens":11800426,"generation_ms":7946,"cost_usd":0,"cache_hit_rate_last":0.9395749961913892,"cache_hit_rate_run":0.9513887598439378}}

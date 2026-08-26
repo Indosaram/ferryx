@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_af148c7c-da8c-41b8-b43c-b52ced6fb902","nodeId":"native-implementation","runStats":{"runtime_ms":304622,"turns":34,"tool_calls":36,"output_tokens":8596,"total_tokens":2628999,"generation_ms":2640,"cost_usd":0,"cache_hit_rate_last":0.9745227995758219,"cache_hit_rate_run":0.8928424368312813}}

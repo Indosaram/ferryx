@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_03305a67-242d-4c16-b45b-804c74a84fb3","nodeId":"test-surface-audit","runStats":{"runtime_ms":62415,"turns":7,"tool_calls":10,"output_tokens":1712,"total_tokens":111520,"generation_ms":3506,"cost_usd":0,"cache_hit_rate_last":0.7430647593802843,"cache_hit_rate_run":0.29618971295351887}}

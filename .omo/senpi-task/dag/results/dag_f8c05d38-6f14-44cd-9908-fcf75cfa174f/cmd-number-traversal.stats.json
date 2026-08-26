@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_f8c05d38-6f14-44cd-9908-fcf75cfa174f","nodeId":"cmd-number-traversal","runStats":{"runtime_ms":495912,"turns":64,"tool_calls":67,"output_tokens":26149,"total_tokens":4172124,"generation_ms":278729,"tokens_per_second":94,"cost_usd":3.2445379999999986,"cache_hit_rate_last":0.9967518383325398,"cache_hit_rate_run":0.9782719384463244}}

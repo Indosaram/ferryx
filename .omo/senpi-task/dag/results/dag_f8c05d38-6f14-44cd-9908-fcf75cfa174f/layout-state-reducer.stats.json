@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_f8c05d38-6f14-44cd-9908-fcf75cfa174f","nodeId":"layout-state-reducer","runStats":{"runtime_ms":574269,"turns":52,"tool_calls":63,"output_tokens":48863,"total_tokens":3958970,"generation_ms":429127,"tokens_per_second":114,"cost_usd":3.8827645000000004,"cache_hit_rate_last":0.9688042141122292,"cache_hit_rate_run":0.9685870488966158}}

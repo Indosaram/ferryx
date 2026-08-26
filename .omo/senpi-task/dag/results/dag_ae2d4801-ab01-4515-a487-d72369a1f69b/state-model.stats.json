@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_ae2d4801-ab01-4515-a487-d72369a1f69b","nodeId":"state-model","runStats":{"runtime_ms":370155,"turns":5,"tool_calls":42,"output_tokens":19249,"total_tokens":316557,"generation_ms":338634,"tokens_per_second":57,"cost_usd":0,"cache_hit_rate_last":0.8820030552877063,"cache_hit_rate_run":0.6819594494598195}}

@@ -1,3 +1,0 @@
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
-{"type":"assistant_message","payload":{"text":"ready"}}
-{"type":"transition_applied","payload":{"type":"transition_applied","status":"completed","residency_state":"resident"}}

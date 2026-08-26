@@ -1,3 +1,0 @@
-> I read this as confirming no further action is requested - work is complete and verified.
-
-All requirements for the focused-terminal publisher, selection event consumption, RED-to-GREEN verification, and Tauri IPC contract alignment are satisfied and verified green.

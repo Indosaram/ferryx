@@ -1,1 +1,0 @@
-{"schemaVersion":1,"runId":"dag_03305a67-242d-4c16-b45b-804c74a84fb3","nodeId":"frontend-persistence-audit","runStats":{"runtime_ms":141215,"turns":20,"tool_calls":19,"output_tokens":2745,"total_tokens":475791,"generation_ms":6500,"cost_usd":0,"cache_hit_rate_last":0.7937553101104503,"cache_hit_rate_run":0.6880705047712062}}

@@ -1,8 +1,0 @@
-> I read this as auditing Vite, bundle, assets, and CSS configurations for load and style performance degradations and generating the lane report - inspecting the scoped configuration and asset files, analyzing bundle chunking and styling patterns, and writing the structured report to `docs/frontend-perf/audit-bundle.md`.
-
-The static audit for the `bundle` lane has been completed and written to `/Users/indo/code/project/orca-lite/docs/frontend-perf/audit-bundle.md`.
-
-### Summary of Audit:
-- **`F-bundle-01` (Medium)**: Eager static import of both `App` and `RemoteApp` in `ui/src/main.tsx`, bundling the full desktop application alongside the remote web client into the root chunk (`490.8 KB`).
-- **`F-bundle-02` (Low)**: Missing `ferryx-icon.svg` link in `ui/index.html` causing a 404 network request on webview initialization.
-- **Accepted / Non-findings**: Vite dev polling (`server.watch.usePolling: 100ms`) is scoped to dev server HMR; `xterm` and its addons are dynamically chunked; CSS contains zero layout animations; local `Geist` variable font is served via woff2; service worker registration is gated on `!isTauriApp`.

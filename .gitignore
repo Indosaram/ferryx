@@ -13,3 +13,6 @@ ui/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent session runtime state
+.omo/

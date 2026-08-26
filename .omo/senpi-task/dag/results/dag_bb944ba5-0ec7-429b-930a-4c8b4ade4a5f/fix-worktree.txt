@@ -1,8 +1,0 @@
-> I read this as confirming task completion - all deliverables for packet `P-worktree` are done and verified.
-
-- **RED Phase**: Verified that `WorktreeList.test.tsx` caught `agents.find` linear searching in render loops, and `Sidebar.test.tsx` caught eager `new Set(projects.map(...))` allocation in `useRef`.
-- **Production Implementation**:
-  - `ui/src/components/WorktreeList.tsx`: Pre-indexed agents into a `Map` with `useMemo`, extracted memoized `WorktreeRow` via `React.memo`.
-  - `ui/src/components/Sidebar.tsx`: Initialized `knownProjectsRef` lazily (`useRef<Set<string> | null>(null)`).
-- **GREEN Phase**: Verified with `cd /Users/indo/code/project/orca-lite/ui && bun run test src/components/WorktreeList.test.tsx src/components/Sidebar.test.tsx src/components/Sidebar.activity.test.tsx` (31 tests passed).
-- **Evidence File**: Written to `/Users/indo/code/project/orca-lite/docs/frontend-perf/fix-P-worktree.md`.
