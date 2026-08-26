@@ -211,7 +211,7 @@ bun run --cwd site build
 Before releasing a new version of Ferryx:
 
 - [ ] **1. Bump Version**: Update version in `package.json`, `ui/package.json`, `site/package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
-- [ ] **2. Verify Rust Backend**: Run `cargo check --manifest-path src-tauri/Cargo.toml` and `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1`.
+- [ ] **2. Verify Rust Backend**: Run `cargo check --manifest-path src-tauri/Cargo.toml` and `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1`. This includes `native_terminal_renderer_contract`, which needs real GPU hardware and is therefore skipped by CI — running it locally before a release is the only coverage it gets.
 - [ ] **3. Verify Frontend UI**: Run `bun run --cwd ui build` and `bun test --cwd ui`.
 - [ ] **4. Verify Landing Page**: Run `bun test --cwd site` and `bun run --cwd site build`.
 - [ ] **5. Validate GitHub Workflows**: Ensure `.github/workflows/release.yml` and `build-test.yml` syntax are valid.

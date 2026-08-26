@@ -34,6 +34,12 @@ jobs:
       - name: Build Frontend UI
         run: bun run --cwd ui build
 
+      - name: Test Frontend UI
+        run: bun run --cwd ui test
+
+      - name: Test Landing Site
+        run: bun test --cwd site
+
   # =========================================================================
   # 2. RUST BACKEND VALIDATION ACROSS PLATFORMS
   # =========================================================================
@@ -107,3 +113,28 @@ jobs:
 
       - name: Cargo Check
         run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      # The renderer contract suite constructs a real WGPU device (GpuContext::new) and is
+      # verified locally on GPU hardware instead; hosted runners have no reliable adapter.
+      # daemon_persistence_contract shares on-disk daemon state, so tests run single-threaded.
+      - name: Cargo Test (renderer contract excluded)
+        if: matrix.os_name == 'linux'
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --target ${{ matrix.target }} \
+            --lib \
+            --test backend_hardening \
+            --test daemon_persistence_contract \
+            --test e2e_agent_workflow \
+            --test ghostty_build_contract \
+            --test ghostty_build_info_ffi \
+            --test ipc_hardening_contract \
+            --test native_terminal_capability_contract \
+            --test native_terminal_composition_contract \
+            --test native_terminal_engine_contract \
+            --test native_terminal_input_boundary_contract \
+            --test native_terminal_surface_host_contract \
+            --test rorca_native_contract \
+            --test session_persistence_integration \
+            --test worktree_safety \
+            -- --test-threads=1
