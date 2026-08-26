@@ -81,7 +81,7 @@ describe("updater status machine", () => {
     });
   });
 
-  it("reports monotonic download progress and ends downloaded", async () => {
+  it("reports monotonic download progress and relaunches after installation", async () => {
     check.mockResolvedValue(
       updateHandle([
         { event: "Started", data: { contentLength: 100 } },
@@ -103,6 +103,7 @@ describe("updater status machine", () => {
     expect(progress).toEqual([...progress].sort((a, b) => a - b));
     expect(progress.at(-1)).toBe(1);
     expect(updater.getUpdateStatus().state).toBe("downloaded");
+    expect(relaunch).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a download failure as an error state", async () => {

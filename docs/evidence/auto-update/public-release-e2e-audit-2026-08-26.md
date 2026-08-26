@@ -93,8 +93,8 @@ version `0.1.0`. Complete the documented user-operated sequence in
 
 1. Open **Settings > General > Software Update** in that old app.
 2. Select **Check for Updates** and confirm `2026.826.1` is offered.
-3. Select **Download Update** and wait for completion.
-4. Select **Install and Relaunch**.
-5. Confirm the same app bundle reopens at `2026.826.1`.
+3. Select the highlighted **Install and Relaunch** control and wait for its signed
+   download, install, and automatic relaunch.
+4. Confirm the same app bundle reopens at `2026.826.1`.
 
 Only that observed install/relaunch result can close the in-app E2E gate.

@@ -29,10 +29,11 @@
    `https://github.com/Indosaram/ferryx/releases/latest/download/latest.json`을 조회한다.
 2. 매니페스트의 `version`이 설치된 앱 버전보다 새로우면 상태가 `available`로 바뀌고 버전과 릴리스
    노트가 표시된다.
-3. Download Update를 누르면 플러그인이 해당 플랫폼 아티팩트를 내려받으며 진행률을 0~1로 보고한다.
-   내려받은 바이트는 `tauri.conf.json`에 박힌 공개키로 minisign 서명 검증을 통과해야 한다.
-4. 검증에 성공하면 상태가 `downloaded`가 되고 Install and Relaunch 버튼이 활성화된다. 누르면
-   `tauri-plugin-process`의 `relaunch()`가 앱을 재시작한다.
+3. 사용자가 강조된 Install and Relaunch를 누르면 플러그인이 해당 플랫폼 아티팩트를 내려받으며
+   진행률을 0~1로 보고한다. 내려받은 바이트는 `tauri.conf.json`에 박힌 공개키로 minisign 서명
+   검증을 통과해야 한다.
+4. 검증과 설치에 성공하면 `tauri-plugin-process`의 `relaunch()`가 앱을 자동으로 재시작한다.
+   Software Update에는 Check for Updates와 Install and Relaunch 두 동작만 표시한다.
 5. 서명 검증 자체가 실제로 동작함은 `docs/evidence/auto-update/c6-signature-verification.md`가
    증명한다. 정상 서명은 `VERIFY=OK`, 위조 아티팩트는 `VERIFY=FAIL`이며, 로컬 HTTP 엔드포인트에서
    매니페스트를 받아 아티팩트를 내려받고 검증하는 전체 경로도 `ENDPOINT_CONTRACT=PASS`로 통과했다.

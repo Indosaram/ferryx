@@ -342,8 +342,18 @@ function SoftwareUpdateCard() {
   }, []);
 
   const busy = status.state === "checking" || status.state === "downloading";
+  const isAvailable = status.state === "available";
   const isDownloaded = status.state === "downloaded";
+  const isActionable = isAvailable || isDownloaded;
   const percent = Math.round((status.downloadProgress ?? 0) * 100);
+
+  const handleInstallAndRelaunch = () => {
+    if (isAvailable) {
+      void downloadAndInstallUpdate();
+    } else if (isDownloaded) {
+      void relaunchApp();
+    }
+  };
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -394,20 +404,11 @@ function SoftwareUpdateCard() {
         </button>
         <button
           type="button"
-          onClick={() => void downloadAndInstallUpdate()}
-          disabled={status.state !== "available"}
-          className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-        >
-          <Download className="size-3" />
-          Download Update
-        </button>
-        <button
-          type="button"
-          onClick={() => void relaunchApp()}
-          disabled={!isDownloaded}
-          data-variant={isDownloaded ? "primary" : "secondary"}
+          onClick={handleInstallAndRelaunch}
+          disabled={!isActionable}
+          data-variant={isActionable ? "primary" : "secondary"}
           className={`no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-colors ${
-            isDownloaded
+            isActionable
               ? "bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm"
               : "border border-border text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
           }`}

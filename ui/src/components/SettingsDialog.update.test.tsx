@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { UpdateStatus } from "../lib/updater";
@@ -37,6 +37,13 @@ async function renderGeneralSection() {
   return render(<SettingsDialog open onClose={() => {}} />);
 }
 
+function getSoftwareUpdateCard() {
+  const heading = screen.getByRole("heading", { name: "Software Update" });
+  const card = heading.closest(".rounded-lg");
+  expect(card).not.toBeNull();
+  return card as HTMLElement;
+}
+
 describe("Settings > General software update control", () => {
   beforeEach(() => {
     cleanup();
@@ -48,54 +55,83 @@ describe("Settings > General software update control", () => {
     getCurrentVersion.mockClear();
   });
 
-  it("shows the running version and checks for updates on demand", async () => {
+  it("shows running version, renders exactly two update buttons, and checks for updates on demand", async () => {
     await renderGeneralSection();
 
     expect(await screen.findByText(/2026\.08\.25/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /check for updates/i }));
+    const card = getSoftwareUpdateCard();
+    const buttons = within(card).getAllByRole("button");
+    expect(buttons).toHaveLength(2);
+    expect(within(card).getByRole("button", { name: /check for updates/i })).toBeEnabled();
+    expect(within(card).getByRole("button", { name: /install and relaunch/i })).toBeDisabled();
+    expect(within(card).queryByRole("button", { name: /download update/i })).not.toBeInTheDocument();
 
+    fireEvent.click(within(card).getByRole("button", { name: /check for updates/i }));
     expect(checkForUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it("announces an available version and offers to download it", async () => {
+  it("promotes Install and Relaunch to primary action when update is available and triggers download on click", async () => {
     await renderGeneralSection();
     await screen.findByRole("button", { name: /check for updates/i });
 
     act(() => emit({ state: "available", version: "2026.08.26.1", releaseNotes: "Adds in-app updates" }));
 
-    const status = await screen.findByTestId("settings-update-status");
-    expect(status).toHaveTextContent(/2026\.08\.26\.1/);
+    const card = getSoftwareUpdateCard();
+    const buttons = within(card).getAllByRole("button");
+    expect(buttons).toHaveLength(2);
+    expect(within(card).queryByRole("button", { name: /download update/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /download update/i }));
+    const status = await screen.findByTestId("settings-update-status");
+    expect(status).toHaveTextContent(/Version 2026\.08\.26\.1 is available\./);
+
+    const installAndRelaunch = within(card).getByRole("button", { name: /install and relaunch/i });
+    expect(installAndRelaunch).toBeEnabled();
+    expect(installAndRelaunch).toHaveAttribute("data-variant", "primary");
+    expect(installAndRelaunch).toHaveClass("bg-primary");
+    expect(installAndRelaunch).toHaveClass("text-primary-foreground");
+
+    fireEvent.click(installAndRelaunch);
 
     expect(downloadAndInstallUpdate).toHaveBeenCalledTimes(1);
+    expect(relaunchApp).not.toHaveBeenCalled();
   });
 
-  it("reports download progress while downloading", async () => {
+  it("disables Install and Relaunch during download while keeping two-action layout and reporting progress", async () => {
     await renderGeneralSection();
     await screen.findByRole("button", { name: /check for updates/i });
 
     act(() => emit({ state: "downloading", version: "2026.08.26.1", downloadProgress: 0.42 }));
 
+    const card = getSoftwareUpdateCard();
+    const buttons = within(card).getAllByRole("button");
+    expect(buttons).toHaveLength(2);
+    expect(within(card).queryByRole("button", { name: /download update/i })).not.toBeInTheDocument();
+
+    const checkBtn = within(card).getByRole("button", { name: /check for updates/i });
+    expect(checkBtn).toBeDisabled();
+
+    const installAndRelaunch = within(card).getByRole("button", { name: /install and relaunch/i });
+    expect(installAndRelaunch).toBeDisabled();
+    expect(installAndRelaunch).toHaveAttribute("data-variant", "secondary");
+    expect(installAndRelaunch).not.toHaveClass("bg-primary");
+
     const progress = await screen.findByRole("progressbar");
     expect(progress).toHaveAttribute("aria-valuenow", "42");
   });
 
-  it("enables install and relaunch only once the update is downloaded", async () => {
+  it("keeps Install and Relaunch as primary action when downloaded and relaunches on click", async () => {
     await renderGeneralSection();
     await screen.findByRole("button", { name: /check for updates/i });
 
-    act(() => emit({ state: "downloading", version: "2026.08.26.1", downloadProgress: 0.5 }));
-    await waitFor(() => {
-      const pendingInstall = screen.getByRole("button", { name: /install and relaunch/i });
-      expect(pendingInstall).toBeDisabled();
-      expect(pendingInstall).toHaveAttribute("data-variant", "secondary");
-      expect(pendingInstall).not.toHaveClass("bg-primary");
-    });
-
     act(() => emit({ state: "downloaded", version: "2026.08.26.1", downloadProgress: 1 }));
-    const install = await screen.findByRole("button", { name: /install and relaunch/i });
+
+    const card = getSoftwareUpdateCard();
+    const buttons = within(card).getAllByRole("button");
+    expect(buttons).toHaveLength(2);
+    expect(within(card).queryByRole("button", { name: /download update/i })).not.toBeInTheDocument();
+
+    const install = within(card).getByRole("button", { name: /install and relaunch/i });
     expect(install).toBeEnabled();
     expect(install).toHaveAttribute("data-variant", "primary");
     expect(install).toHaveClass("bg-primary");
@@ -108,6 +144,7 @@ describe("Settings > General software update control", () => {
     fireEvent.click(install);
 
     expect(relaunchApp).toHaveBeenCalledTimes(1);
+    expect(downloadAndInstallUpdate).not.toHaveBeenCalled();
   });
 
   it("surfaces an updater failure in the live status region", async () => {

@@ -122,6 +122,7 @@ export async function downloadAndInstallUpdate(): Promise<void> {
       setStatus({ state: "downloading", version, releaseNotes, downloadProgress: progress });
     });
     setStatus({ state: "downloaded", version, releaseNotes, downloadProgress: 1 });
+    await relaunchApp();
   } catch (error) {
     setStatus({ state: "error", version, releaseNotes, error: describe(error) });
   }
