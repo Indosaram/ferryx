@@ -36,7 +36,7 @@ function outputChunkToText(chunk: TerminalOutputChunk): string {
 }
 
 describe("terminalEventBus title tracking", () => {
-  it("publishes OSC title changes even when no xterm output subscriber is mounted", async () => {
+  it("publishes OSC title changes even when no terminal output subscriber is mounted", async () => {
     await terminalEventBus.ensureStarted();
     const titles: Array<[string, string]> = [];
     const unsubscribe = terminalEventBus.subscribeTitle((sessionId, title) => titles.push([sessionId, title]));

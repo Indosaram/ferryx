@@ -1,0 +1,93 @@
+//! Platform-specific compositor targets for native terminal rendering.
+
+#[cfg(target_os = "macos")]
+pub mod macos;
+
+#[cfg(target_os = "windows")]
+pub mod windows;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+pub mod fallback;
+
+use std::sync::Arc;
+use tauri::{Runtime, WebviewWindow};
+
+use crate::native_terminal::composition::{LogicalBounds, PlatformCompositorDescriptor};
+use crate::native_terminal::error::NativeTerminalError;
+
+#[cfg(target_os = "macos")]
+pub use macos::NativeChildViewHandle;
+
+#[cfg(target_os = "windows")]
+pub use windows::NativeChildViewHandle;
+
+#[cfg(target_os = "linux")]
+pub use linux::NativeChildViewHandle;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+pub use fallback::NativeChildViewHandle;
+
+/// Platform-agnostic compositor target wrapping platform-specific child view handles.
+pub struct PlatformCompositorTarget {
+    #[cfg(target_os = "macos")]
+    inner: macos::MacosCompositorTarget,
+    #[cfg(target_os = "windows")]
+    inner: windows::WindowsCompositorTarget,
+    #[cfg(target_os = "linux")]
+    inner: linux::LinuxCompositorTarget,
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    inner: fallback::FallbackCompositorTarget,
+}
+
+impl PlatformCompositorTarget {
+    /// Creates and attaches the platform compositor target for the given window.
+    pub fn new<R: Runtime>(window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
+        #[cfg(target_os = "macos")]
+        {
+            let inner = macos::MacosCompositorTarget::new(window)?;
+            Ok(Self { inner })
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let inner = windows::WindowsCompositorTarget::new(window)?;
+            Ok(Self { inner })
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let inner = linux::LinuxCompositorTarget::new(window)?;
+            Ok(Self { inner })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let inner = fallback::FallbackCompositorTarget::new(window)?;
+            Ok(Self { inner })
+        }
+    }
+
+    /// Returns the target descriptor for this platform compositor target.
+    pub fn descriptor(&self) -> PlatformCompositorDescriptor {
+        self.inner.descriptor()
+    }
+
+    /// Sets the child view frame to match the active terminal viewport in platform coordinates.
+    pub fn update_viewport(&self, bounds: Option<LogicalBounds>) {
+        self.inner.update_viewport(bounds);
+    }
+
+    /// Reveals the compositor target after a frame has been presented successfully.
+    ///
+    /// macOS creates its child view hidden so WindowServer never composites an
+    /// unconfigured Metal layer. Other platforms do not yet expose child views.
+    pub fn reveal_after_present(&self) {
+        #[cfg(target_os = "macos")]
+        self.inner.reveal();
+    }
+
+    /// Returns the raw-window-handle target for wgpu surface creation.
+    pub fn surface_target(&self) -> Arc<NativeChildViewHandle> {
+        self.inner.surface_target()
+    }
+}

@@ -38,17 +38,18 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({ onSendKey }) => {
     let finalAction = action;
     if (ctrlLatched) {
       finalAction = `ctrl-${action}`;
-      setCtrlLatched(false);
     } else if (altLatched) {
       finalAction = `alt-${action}`;
-      setAltLatched(false);
     }
+
+    setCtrlLatched(false);
+    setAltLatched(false);
 
     onSendKey(finalAction);
   };
 
   return (
-    <div className="w-full bg-card border-t border-border select-none touch-manipulation z-30">
+    <div className="w-full bg-card border-t border-border select-none touch-manipulation z-30 pb-[env(safe-area-inset-bottom)]">
       {/* Expanded utility row */}
       {isExpanded && (
         <div className="flex gap-1.5 px-2 pt-2 pb-1 overflow-x-auto no-scrollbar text-xs font-mono">
@@ -133,7 +134,7 @@ function KeyButton({
       type="button"
       onClick={onClick}
       title={title}
-      className={`min-w-[38px] h-8 px-2 flex items-center justify-center rounded border text-xs font-mono font-medium transition-all active:scale-95 ${
+      className={`min-w-[44px] min-h-11 px-2 flex items-center justify-center rounded border text-xs font-mono font-medium transition-all active:scale-95 ${
         active
           ? "bg-primary border-primary text-primary-foreground shadow-sm"
           : highlight

@@ -260,6 +260,25 @@ describe("SettingsDialog", () => {
     expect(screen.getByText("Local override")).toBeInTheDocument();
   });
 
+  it("labels a font-size-only override as a local override and clears it with Use imported", async () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    await waitFor(() => expect(native.getTerminalPreferences).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("Font size"), { target: { value: "18" } });
+
+    expect(screen.getByText("Local override")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Use imported/i }));
+
+    expect(JSON.parse(localStorage.getItem(TERMINAL_SETTINGS_STORAGE_KEY)!)).toMatchObject({
+      fontFamily: null,
+      fontSize: null,
+      macosOptionAsAlt: null,
+    });
+    await waitFor(() => expect(screen.getByText(/Ghostty · Imported/i)).toBeInTheDocument());
+  });
+
   it("shows the registered shortcuts in the dedicated Keyboard Shortcuts section", () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Keyboard Shortcuts" }));

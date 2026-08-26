@@ -172,7 +172,10 @@ fn record_read_to_channel_send(read_unix_micros: Option<u64>) {
 }
 
 fn unix_micros_now() -> Option<u64> {
-    let micros = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_micros();
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_micros();
     u64::try_from(micros).ok()
 }
 

@@ -1,5 +1,9 @@
 pub mod browser;
 pub mod error;
+#[cfg(feature = "native-terminal")]
+pub mod native_terminal;
+#[cfg(not(feature = "native-terminal"))]
+pub mod native_terminal_disabled;
 pub mod notifications;
 pub mod preferences;
 pub mod project;
@@ -25,6 +29,10 @@ mod tests;
 
 pub use browser::*;
 pub use error::*;
+#[cfg(feature = "native-terminal")]
+pub use native_terminal::*;
+#[cfg(not(feature = "native-terminal"))]
+pub use native_terminal_disabled::*;
 pub use notifications::*;
 pub use preferences::*;
 pub use project::*;

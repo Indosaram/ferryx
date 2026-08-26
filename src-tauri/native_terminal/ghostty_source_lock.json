@@ -1,0 +1,20 @@
+{
+  "package": "ghostty",
+  "repository": "https://github.com/ghostty-org/ghostty.git",
+  "commit": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "zig_version": "0.16.0",
+  "artifact": "libghostty-vt.a",
+  "artifacts": {
+    "unix": "libghostty-vt.a",
+    "windows_static": "ghostty-vt-static.lib",
+    "windows_import": "ghostty-vt.lib"
+  },
+  "build_flags": [
+    "-Demit-lib-vt=true",
+    "-Demit-xcframework=false",
+    "-Demit-docs=false",
+    "-Demit-exe=false",
+    "-Demit-test-exe=false",
+    "-Doptimize=ReleaseFast"
+  ]
+}

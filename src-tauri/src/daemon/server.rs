@@ -21,12 +21,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+#[cfg(not(unix))]
+use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 #[cfg(all(test, unix))]
 use tokio::net::UnixStream;
-#[cfg(not(unix))]
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
 #[cfg(unix)]
@@ -401,16 +401,16 @@ impl DaemonServer {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
 
-        let socket_path = runtime_dir.join("daemon.sock");
-        let lock_path = runtime_dir.join("daemon.lock");
+        let socket_path = get_socket_path();
+        let lock_path = get_lock_path();
 
         // Flock lock for atomic bind & stale socket recovery.
-        let lock_file = open_secure_lock_file(&lock_path)?;
+        let _lock_file = open_secure_lock_file(&lock_path)?;
 
         #[cfg(unix)]
         unsafe {
             use std::os::unix::io::AsRawFd;
-            let fd = lock_file.as_raw_fd();
+            let fd = _lock_file.as_raw_fd();
             if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
                 return Err("Another daemon instance is already holding the lock.".into());
             }
@@ -428,14 +428,18 @@ impl DaemonServer {
         })?;
 
         #[cfg(not(unix))]
-        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
-            format!("Failed to bind TCP listener on localhost: {e}")
-        })?;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("Failed to bind TCP listener on localhost: {e}"))?;
 
         #[cfg(not(unix))]
         {
-            let port = listener.local_addr().map_err(|e| format!("Failed to get local port: {e}"))?.port();
-            fs::write(&socket_path, port.to_string()).map_err(|e| format!("Failed to write daemon.port: {e}"))?;
+            let port = listener
+                .local_addr()
+                .map_err(|e| format!("Failed to get local port: {e}"))?
+                .port();
+            fs::write(&socket_path, port.to_string())
+                .map_err(|e| format!("Failed to write daemon.port: {e}"))?;
         }
 
         // Ensure 0600 mode
@@ -871,6 +875,7 @@ impl DaemonServer {
         };
 
         let mut cmd = CommandBuilder::new_default_prog();
+        cmd.env("PROMPT_EOL_MARK", "");
         cmd.cwd(&resolved_cwd);
 
         let (session_id, _) = self
@@ -1150,9 +1155,17 @@ mod tests {
             .await;
         assert!(spawn_res.is_ok());
 
-        // 4. Invalid repo root (e.g. non-git directory) fails registration
+        // 4. Plain (non-git) directories register as terminal-only workspaces
         let non_git = tempdir().unwrap();
-        let bad_reg = server.handle_register_workspace("ws-bad", non_git.path().to_str().unwrap());
+        let plain_reg =
+            server.handle_register_workspace("ws-plain", non_git.path().to_str().unwrap());
+        assert!(
+            plain_reg.is_ok(),
+            "plain folders register successfully (terminal-only)"
+        );
+
+        // 5. Nonexistent roots still fail registration
+        let bad_reg = server.handle_register_workspace("ws-bad", "/definitely/not/a/real/path");
         assert!(bad_reg.is_err());
     }
 

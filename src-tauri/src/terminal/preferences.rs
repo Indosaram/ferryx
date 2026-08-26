@@ -4,6 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "monospace";
@@ -396,6 +397,127 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
     })
 }
 
+/// Selects the theme name that applies to the terminal surface.
+///
+/// Ghostty supports `light:<name>,dark:<name>`; Ferryx composites the terminal on a dark
+/// surface, so the dark variant is authoritative when both are declared.
+fn theme_name_for_appearance(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut light = None;
+    let mut dark = None;
+    for part in trimmed.split(',') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("dark:") {
+            dark = Some(rest.trim().to_string());
+        } else if let Some(rest) = part.strip_prefix("light:") {
+            light = Some(rest.trim().to_string());
+        }
+    }
+    if let Some(dark) = dark {
+        return Some(dark);
+    }
+    if let Some(light) = light {
+        return Some(light);
+    }
+    Some(trimmed.to_string())
+}
+
+/// Ghostty theme lookup order: user theme dir, then the shipped resources theme dir.
+/// A theme name containing path separators is only honored when absolute.
+fn theme_config_candidates(name: &str) -> Vec<PathBuf> {
+    let Some(name) = theme_name_for_appearance(name) else {
+        return Vec::new();
+    };
+    let path = Path::new(&name);
+    if path.is_absolute() {
+        return vec![path.to_path_buf()];
+    }
+    if name.contains(std::path::MAIN_SEPARATOR) {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(xdg_config_home) = env::var_os("XDG_CONFIG_HOME") {
+        candidates.push(
+            PathBuf::from(xdg_config_home)
+                .join("ghostty")
+                .join("themes")
+                .join(&name),
+        );
+    }
+    if let Some(home) = env::var_os("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".config")
+                .join("ghostty")
+                .join("themes")
+                .join(&name),
+        );
+    }
+    if let Some(resources_dir) = env::var_os("GHOSTTY_RESOURCES_DIR") {
+        candidates.push(PathBuf::from(resources_dir).join("themes").join(&name));
+    }
+    if cfg!(target_os = "macos") {
+        candidates.push(
+            PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes")
+                .join(&name),
+        );
+    }
+    candidates
+}
+
+fn load_theme_config(name: &str) -> Option<GhosttyTerminalConfig> {
+    for candidate in theme_config_candidates(name) {
+        let Ok(contents) = fs::read_to_string(&candidate) else {
+            continue;
+        };
+        if let Ok(theme) = parse_ghostty_config(&contents) {
+            return Some(theme);
+        }
+    }
+    None
+}
+
+/// Applies theme colors underneath the config's own colors.
+///
+/// Ghostty semantics: a theme supplies the color baseline and any explicit `background`,
+/// `foreground`, `palette`, ... entry in the config overrides it. Non-color options declared by a
+/// theme file are ignored so a theme can never change font metrics.
+pub(crate) fn merge_theme_defaults(
+    config: &mut GhosttyTerminalConfig,
+    theme: GhosttyTerminalConfig,
+) {
+    for (target, value) in [
+        (&mut config.background, theme.background),
+        (&mut config.foreground, theme.foreground),
+        (&mut config.cursor_color, theme.cursor_color),
+        (&mut config.cursor_text, theme.cursor_text),
+        (&mut config.selection_background, theme.selection_background),
+        (&mut config.selection_foreground, theme.selection_foreground),
+    ] {
+        if target.is_none() {
+            *target = value;
+        }
+    }
+
+    for (index, color) in theme.palette {
+        config.palette.entry(index).or_insert(color);
+    }
+}
+
+fn resolve_theme(mut config: GhosttyTerminalConfig) -> GhosttyTerminalConfig {
+    if let Some(name) = config.theme_name.clone() {
+        if let Some(theme) = load_theme_config(&name) {
+            merge_theme_defaults(&mut config, theme);
+        }
+    }
+    config
+}
+
 fn try_load_from_ghostty_cli() -> Option<GhosttyTerminalConfig> {
     let mut cmd = Command::new("ghostty");
     cmd.arg("+show-config");
@@ -406,13 +528,13 @@ fn try_load_from_ghostty_cli() -> Option<GhosttyTerminalConfig> {
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    parse_ghostty_config(&text).ok()
+    parse_ghostty_config(&text).ok().map(resolve_theme)
 }
 
 pub fn load_terminal_preferences_from_path(path: &Path) -> TerminalPreferences {
     match fs::read_to_string(path) {
         Ok(contents) => match parse_ghostty_config(&contents) {
-            Ok(config) => TerminalPreferences::imported(config, path.to_path_buf()),
+            Ok(config) => TerminalPreferences::imported(resolve_theme(config), path.to_path_buf()),
             Err(_) => TerminalPreferences::defaults(
                 TerminalPreferencesStatus::Malformed,
                 Some(path.to_path_buf()),
@@ -488,6 +610,126 @@ pub fn load_terminal_preferences() -> TerminalPreferences {
         TerminalPreferencesStatus::Absent,
         candidates.into_iter().next(),
     )
+}
+
+/// Local, user-set terminal preferences that take precedence over the Ghostty import.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TerminalPreferenceOverrides {
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
+    pub macos_option_as_alt: Option<bool>,
+}
+
+struct PreferenceCache {
+    imported: Arc<TerminalPreferences>,
+    overrides: TerminalPreferenceOverrides,
+    effective: Arc<TerminalPreferences>,
+}
+
+static PREFERENCE_CACHE: Mutex<Option<PreferenceCache>> = Mutex::new(None);
+
+pub fn apply_terminal_preference_overrides(
+    imported: &TerminalPreferences,
+    overrides: &TerminalPreferenceOverrides,
+) -> TerminalPreferences {
+    let mut effective = imported.clone();
+    if let Some(font_family) = overrides
+        .font_family
+        .as_deref()
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+    {
+        effective.font_family = font_family.to_string();
+    }
+    if let Some(font_size) = overrides
+        .font_size
+        .filter(|size| size.is_finite() && *size > 0.0 && *size <= 200.0)
+    {
+        effective.font_size = font_size;
+    }
+    if let Some(option_as_alt) = overrides.macos_option_as_alt {
+        effective.macos_option_as_alt = option_as_alt;
+    }
+    effective
+}
+
+fn rebuild_cache(
+    imported: Arc<TerminalPreferences>,
+    overrides: TerminalPreferenceOverrides,
+) -> PreferenceCache {
+    let effective = Arc::new(apply_terminal_preference_overrides(&imported, &overrides));
+    PreferenceCache {
+        imported,
+        overrides,
+        effective,
+    }
+}
+
+fn cache_guard() -> std::sync::MutexGuard<'static, Option<PreferenceCache>> {
+    PREFERENCE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Effective terminal preferences: the Ghostty import with local overrides applied.
+///
+/// Cached because the import shells out to `ghostty +show-config`, while render and input paths
+/// read it per frame and per keystroke.
+pub fn cached_terminal_preferences() -> Arc<TerminalPreferences> {
+    let mut guard = cache_guard();
+    let cache = guard.get_or_insert_with(|| {
+        rebuild_cache(
+            Arc::new(load_terminal_preferences()),
+            TerminalPreferenceOverrides::default(),
+        )
+    });
+    Arc::clone(&cache.effective)
+}
+
+/// Cached Ghostty import without local overrides applied.
+pub fn cached_imported_terminal_preferences() -> Arc<TerminalPreferences> {
+    let mut guard = cache_guard();
+    let cache = guard.get_or_insert_with(|| {
+        rebuild_cache(
+            Arc::new(load_terminal_preferences()),
+            TerminalPreferenceOverrides::default(),
+        )
+    });
+    Arc::clone(&cache.imported)
+}
+
+/// Re-reads the Ghostty configuration, preserving the active local overrides.
+///
+/// Returns the freshly imported preferences so callers can surface the on-disk state.
+pub fn reload_terminal_preferences() -> Arc<TerminalPreferences> {
+    let imported = Arc::new(load_terminal_preferences());
+    let mut guard = cache_guard();
+    let overrides = guard
+        .as_ref()
+        .map(|cache| cache.overrides.clone())
+        .unwrap_or_default();
+    let cache = guard.insert(rebuild_cache(imported, overrides));
+    Arc::clone(&cache.imported)
+}
+
+/// Replaces the local overrides layered on top of the Ghostty import.
+pub fn set_terminal_preference_overrides(
+    overrides: TerminalPreferenceOverrides,
+) -> Arc<TerminalPreferences> {
+    let mut guard = cache_guard();
+    let imported = match guard.take() {
+        Some(cache) => cache.imported,
+        None => Arc::new(load_terminal_preferences()),
+    };
+    let cache = guard.insert(rebuild_cache(imported, overrides));
+    Arc::clone(&cache.effective)
+}
+
+pub fn terminal_preference_overrides() -> TerminalPreferenceOverrides {
+    cache_guard()
+        .as_ref()
+        .map(|cache| cache.overrides.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

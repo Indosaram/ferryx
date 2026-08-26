@@ -235,9 +235,8 @@ impl PtySession {
     #[cfg(not(unix))]
     pub fn signal(&self, signal: TerminalSignal) -> Result<(), PtyError> {
         match signal {
-            TerminalSignal::Interrupt | TerminalSignal::Terminate | TerminalSignal::Kill => {
-                self.kill()
-            }
+            TerminalSignal::Interrupt => self.write_input(&[0x03]),
+            TerminalSignal::Terminate | TerminalSignal::Kill => self.kill(),
         }
     }
 

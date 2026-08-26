@@ -493,3 +493,5 @@ export interface PersistedWorkspaceSession {
   activeWorkspaceId: string;
   workspaces: Record<string, PersistedWorkspace>;
 }
+
+export type { RegisteredProject } from "./tauri";

@@ -11,12 +11,13 @@ if (typeof window === "undefined") {
 }
 
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab, LayoutState, TerminalSession, TerminalTab, Worktree } from "../lib/types";
 import * as browserTauri from "../lib/browserTauri";
 import { createLayoutState } from "./layout";
-const { terminalHostManager } = await import("../lib/terminalHostManager");
+import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
+import { clearWorkspaceSnapshot } from "./workspaceSnapshotCache";
 const { useWorkspaceStore, workspaceReducer } = await import("./workspaceStore");
 type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
@@ -189,6 +190,16 @@ function groupForTab(state: WorkspaceState, tabId: string) {
   return Object.values(state.layout.tabGroups ?? {}).find((group) => group.tabIds.includes(tabId));
 }
 
+function openedTab(tabId: string | null): string {
+  if (tabId === null) throw new Error("expected openTab to return a tab id");
+  return tabId;
+}
+
+afterEach(() => {
+  clearHmrWorkspaceState();
+  clearWorkspaceSnapshot();
+});
+
 describe("useWorkspaceStore terminal ownership", () => {
   it("splits a pane by creating an independent backend PTY and local session", async () => {
     const { services } = createServices();
@@ -216,6 +227,83 @@ describe("useWorkspaceStore terminal ownership", () => {
     const newSession = result.current.state.sessions[updatedLayout.sessionIdsByLeafId[updatedLayout.activeLeafId!]];
     expect(newSession.backendSessionId).toBe("backend-2");
     expect(newSession.cwd).toBe("/repo/main/packages/api");
+  });
+
+  it("dispatches split layout immediately while deferred spawn is unresolved, then rebinds when spawn resolves", async () => {
+    let resolveDeferredSpawn!: (backendId: string) => void;
+    const deferredSpawnPromise = new Promise<string>((resolve) => {
+      resolveDeferredSpawn = resolve;
+    });
+
+    const { services } = createServices();
+    (services.spawnTerminal as any).mockImplementation(async () => deferredSpawnPromise);
+    (services.getTerminalCwd as any).mockImplementation(async () => "/repo/main/resolved-cwd");
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+
+    act(() => result.current.restoreWorkspace(restoredSplitState()));
+
+    const initialLayout = result.current.state.layout.layoutsByTabId["tab-primary"];
+    expect(initialLayout.root.type).toBe("split");
+
+    let splitPromise!: Promise<void>;
+    act(() => {
+      splitPromise = result.current.splitPane("tab-primary", "leaf-2", "vertical");
+    });
+
+    const inFlightLayout = result.current.state.layout.layoutsByTabId["tab-primary"];
+    const inFlightLeafId = inFlightLayout.activeLeafId!;
+    expect(inFlightLeafId).not.toBe("leaf-2");
+    const inFlightSessionId = inFlightLayout.sessionIdsByLeafId[inFlightLeafId];
+    expect(inFlightSessionId).toBeDefined();
+
+    const inFlightSession = result.current.state.sessions[inFlightSessionId];
+    expect(inFlightSession).toBeDefined();
+    expect(inFlightSession.backendSessionId).toBeNull();
+    expect(inFlightSession.cwd).toBe(worktree.path);
+
+    await act(async () => {
+      resolveDeferredSpawn("backend-deferred-split");
+      await splitPromise;
+    });
+
+    const reboundSession = result.current.state.sessions[inFlightSessionId];
+    expect(reboundSession).toBeDefined();
+    expect(reboundSession.backendSessionId).toBe("backend-deferred-split");
+    expect(reboundSession.cwd).toBe("/repo/main/resolved-cwd");
+    expect(reboundSession.lifecycle).toBe("running");
+  });
+
+  it("closes deferred spawned backend session if the pane is closed before spawn resolves", async () => {
+    let resolveDeferredSpawn!: (backendId: string) => void;
+    const deferredSpawnPromise = new Promise<string>((resolve) => {
+      resolveDeferredSpawn = resolve;
+    });
+
+    const { services } = createServices();
+    (services.spawnTerminal as any).mockImplementation(async () => deferredSpawnPromise);
+
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    act(() => result.current.restoreWorkspace(restoredSplitState()));
+
+    let splitPromise!: Promise<void>;
+    act(() => {
+      splitPromise = result.current.splitPane("tab-primary", "leaf-2", "vertical");
+    });
+
+    const layout = result.current.state.layout.layoutsByTabId["tab-primary"];
+    const inFlightLeafId = layout.activeLeafId!;
+    expect(inFlightLeafId).not.toBe("leaf-2");
+
+    await act(async () => {
+      await result.current.closePane("tab-primary", inFlightLeafId);
+    });
+
+    await act(async () => {
+      resolveDeferredSpawn("backend-orphaned");
+      await splitPromise;
+    });
+
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-orphaned");
   });
 
   it("uses the target leaf session when splitting restored independent panes", async () => {
@@ -392,9 +480,9 @@ describe("useWorkspaceStore terminal ownership", () => {
     let featureTabId = "";
     let docsTabId = "";
     await act(async () => {
-      mainTabId = await result.current.openTab(worktree, "main");
-      featureTabId = await result.current.openTab(worktree, "feature");
-      docsTabId = await result.current.openTab(worktree, "docs");
+      mainTabId = openedTab(await result.current.openTab(worktree, "main"));
+      featureTabId = openedTab(await result.current.openTab(worktree, "feature"));
+      docsTabId = openedTab(await result.current.openTab(worktree, "docs"));
     });
 
     act(() => {
@@ -530,7 +618,7 @@ describe("session title activity", () => {
 
     let tabId!: string;
     await act(async () => {
-      tabId = await result.current.openTab(worktree);
+      tabId = openedTab(await result.current.openTab(worktree));
     });
     const workingTab = result.current.state.layout.tabs.find((tab) => tab.id === tabId);
     if (!workingTab || workingTab.kind === "browser") throw new Error("terminal tab expected");
@@ -553,7 +641,7 @@ describe("session title activity", () => {
 
     let tabId!: string;
     await act(async () => {
-      tabId = await result.current.openTab(worktree);
+      tabId = openedTab(await result.current.openTab(worktree));
     });
     const idleTab = result.current.state.layout.tabs.find((tab) => tab.id === tabId);
     if (!idleTab || idleTab.kind === "browser") throw new Error("terminal tab expected");
@@ -565,8 +653,7 @@ describe("session title activity", () => {
     expect(result.current.state.activityBySessionId?.[sessionId]).toBeUndefined();
   });
 
-  it("invokes terminalHostManager.destroy when closing a tab", async () => {
-    const destroySpy = vi.spyOn(terminalHostManager, "destroy");
+  it("closes the backend session when closing a tab", async () => {
     const { services } = createServices();
     const { result } = renderHook(() =>
       useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
@@ -574,41 +661,35 @@ describe("session title activity", () => {
 
     let tab1Id!: string;
     await act(async () => {
-      tab1Id = await result.current.openTab(worktree, "tab-1");
+      tab1Id = openedTab(await result.current.openTab(worktree, "tab-1"));
       await result.current.openTab(worktree, "tab-2");
     });
 
     const tab1 = result.current.state.layout.tabs.find((t) => t.id === tab1Id);
     if (!tab1 || tab1.kind === "browser") throw new Error("terminal tab expected");
-    const session1Id = tab1.sessionId;
+    const backendId = result.current.state.sessions[tab1.sessionId]?.backendSessionId;
 
-    destroySpy.mockClear();
     await act(async () => {
       await result.current.closeTab(tab1Id);
     });
 
-    expect(destroySpy).toHaveBeenCalledWith(session1Id);
-    destroySpy.mockRestore();
+    expect(services.closeTerminal).toHaveBeenCalledWith(backendId);
   });
 
-  it("invokes terminalHostManager.destroy when closing a pane", async () => {
-    const destroySpy = vi.spyOn(terminalHostManager, "destroy");
+  it("closes the backend session when closing a pane", async () => {
     const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
     act(() => result.current.restoreWorkspace(restoredSplitState()));
 
-    destroySpy.mockClear();
     await act(async () => {
       await result.current.closePane("tab-primary", "leaf-2");
     });
 
-    expect(destroySpy).toHaveBeenCalledWith("session-2");
-    destroySpy.mockRestore();
+    expect(services.closeTerminal).toHaveBeenCalledWith("restored-backend-2");
   });
 
-  it("invokes terminalHostManager.destroy when closing a sole tab", async () => {
-    const destroySpy = vi.spyOn(terminalHostManager, "destroy");
+  it("closes the backend session when closing a sole tab", async () => {
     const { services } = createServices();
     const { result } = renderHook(() =>
       useWorkspaceStore({ initialWorktrees: [worktree], services }),
@@ -616,20 +697,18 @@ describe("session title activity", () => {
 
     let tabId!: string;
     await act(async () => {
-      tabId = await result.current.openTab(worktree);
+      tabId = openedTab(await result.current.openTab(worktree));
     });
 
     const tab = result.current.state.layout.tabs.find((t) => t.id === tabId);
     if (!tab || tab.kind === "browser") throw new Error("terminal tab expected");
-    const sessionId = tab.sessionId;
+    const backendId = result.current.state.sessions[tab.sessionId]?.backendSessionId;
 
-    destroySpy.mockClear();
     await act(async () => {
       await result.current.closeTab(tabId);
     });
 
-    expect(destroySpy).toHaveBeenCalledWith(sessionId);
-    destroySpy.mockRestore();
+    expect(services.closeTerminal).toHaveBeenCalledWith(backendId);
   });
 });
 
@@ -645,15 +724,15 @@ describe("worktree tab and session isolation", () => {
     let tabB1!: string;
 
     await act(async () => {
-      tabA1 = await result.current.openTab(worktree, "main-1");
-      tabA2 = await result.current.openTab(worktree, "main-2");
+      tabA1 = openedTab(await result.current.openTab(worktree, "main-1"));
+      tabA2 = openedTab(await result.current.openTab(worktree, "main-2"));
     });
 
     expect(result.current.state.activeWorktreePath).toBe(worktree.path);
     expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabA1, tabA2]);
 
     await act(async () => {
-      tabB1 = await result.current.openTab(featureWorktree, "feature-1");
+      tabB1 = openedTab(await result.current.openTab(featureWorktree, "feature-1"));
     });
 
     // Selecting worktree B must display only worktree B's tabs, without worktree A's tabs
@@ -704,15 +783,15 @@ describe("worktree tab and session isolation", () => {
     let terminalTabB!: string;
 
     await act(async () => {
-      terminalTabA = await result.current.openTab(worktree, "terminal-A");
-      browserTabA = await result.current.createBrowserTab("http://localhost:3000/docs", "Docs");
+      terminalTabA = openedTab(await result.current.openTab(worktree, "terminal-A"));
+      browserTabA = openedTab(await result.current.createBrowserTab("http://localhost:3000/docs", "Docs"));
     });
 
     expect(result.current.state.activeWorktreePath).toBe(worktree.path);
     expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([terminalTabA, browserTabA]);
 
     await act(async () => {
-      terminalTabB = await result.current.openTab(featureWorktree, "terminal-B");
+      terminalTabB = openedTab(await result.current.openTab(featureWorktree, "terminal-B"));
     });
 
     // Worktree B should have its own tab set and not show Worktree A's browser tab

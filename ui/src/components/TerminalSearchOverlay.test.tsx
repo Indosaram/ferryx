@@ -1,51 +1,33 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { TerminalInstance } from "../lib/terminalHostManager";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 
-function createMockInstance(): TerminalInstance {
-  const terminal = {
-    focus: vi.fn(),
-    dispose: vi.fn(),
-  } as any;
+const tauriCoreMocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  isTauri: vi.fn(() => true),
+}));
 
-  const searchAddon = {
-    findNext: vi.fn().mockReturnValue(true),
-    findPrevious: vi.fn().mockReturnValue(true),
-    clearDecorations: vi.fn(),
-    dispose: vi.fn(),
-    onDidChangeResults: vi.fn(() => ({ dispose: vi.fn() })),
-  } as any;
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: tauriCoreMocks.invoke,
+  isTauri: tauriCoreMocks.isTauri,
+}));
 
-  return {
-    element: document.createElement("div"),
-    terminal,
-    fitAddon: { fit: vi.fn() } as any,
-    searchAddon,
-    disposeWebgl: vi.fn(),
-    resizeObserver: { observe: vi.fn(), unobserve: vi.fn(), disconnect: vi.fn() } as any,
-    disposables: [],
-    session: {
-      id: "s1",
-      cwd: "/repo",
-      workspaceId: "ws1",
-      worktree: null,
-      backendSessionId: "b1",
-      lifecycle: "working",
-    },
-    active: true,
-  };
-}
+describe("TerminalSearchOverlay native session search", () => {
+  beforeEach(() => {
+    tauriCoreMocks.invoke.mockReset();
+    tauriCoreMocks.isTauri.mockReset();
+    tauriCoreMocks.isTauri.mockReturnValue(true);
+  });
 
-describe("TerminalSearchOverlay", () => {
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
   });
+
   it("renders search input, navigation buttons, and close button", () => {
-    const instance = createMockInstance();
     const onClose = vi.fn();
-    render(<TerminalSearchOverlay instance={instance} onClose={onClose} />);
+    render(<TerminalSearchOverlay sessionId="backend-term-1" onClose={onClose} />);
 
     expect(screen.getByRole("search")).toBeInTheDocument();
     expect(screen.getByTestId("terminal-search-input")).toBeInTheDocument();
@@ -54,53 +36,87 @@ describe("TerminalSearchOverlay", () => {
     expect(screen.getByLabelText("Close search")).toBeInTheDocument();
   });
 
-  it("triggers incremental search on typing and next/prev on Enter/Shift+Enter", () => {
-    const instance = createMockInstance();
+  it("triggers native search on query input and displays match counter", async () => {
+    tauriCoreMocks.invoke.mockResolvedValue([
+      [0, 5, 10],
+      [1, 2, 7],
+    ]);
     const onClose = vi.fn();
-    render(<TerminalSearchOverlay instance={instance} onClose={onClose} />);
+    render(<TerminalSearchOverlay sessionId="backend-term-1" onClose={onClose} />);
 
     const input = screen.getByTestId("terminal-search-input");
     fireEvent.change(input, { target: { value: "error" } });
 
-    expect(instance.searchAddon.findNext).toHaveBeenCalledWith("error", { incremental: true });
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_search", {
+        sessionId: "backend-term-1",
+        query: "error",
+        caseSensitive: false,
+      });
+    });
 
-    fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
-    expect(instance.searchAddon.findNext).toHaveBeenCalledWith("error", { incremental: false });
-
-    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
-    expect(instance.searchAddon.findPrevious).toHaveBeenCalledWith("error", { incremental: false });
+    await waitFor(() => {
+      expect(screen.getByText("1/2")).toBeInTheDocument();
+    });
   });
 
-  it("navigates matches with arrow buttons", () => {
-    const instance = createMockInstance();
+  it("navigates matches with Enter, Shift+Enter, and arrow buttons", async () => {
+    tauriCoreMocks.invoke.mockResolvedValue([
+      [0, 5, 10],
+      [1, 2, 7],
+      [3, 0, 5],
+    ]);
     const onClose = vi.fn();
-    render(<TerminalSearchOverlay instance={instance} onClose={onClose} />);
+    render(<TerminalSearchOverlay sessionId="backend-term-1" onClose={onClose} />);
 
     const input = screen.getByTestId("terminal-search-input");
-    fireEvent.change(input, { target: { value: "build" } });
+    fireEvent.change(input, { target: { value: "warn" } });
 
+    await waitFor(() => {
+      expect(screen.getByText("1/3")).toBeInTheDocument();
+    });
+
+    // Next match via Enter
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
+    expect(screen.getByText("2/3")).toBeInTheDocument();
+
+    // Next match via button
     fireEvent.click(screen.getByLabelText("Next match"));
-    expect(instance.searchAddon.findNext).toHaveBeenCalledWith("build", { incremental: false });
+    expect(screen.getByText("3/3")).toBeInTheDocument();
 
+    // Wrap around to first match
+    fireEvent.click(screen.getByLabelText("Next match"));
+    expect(screen.getByText("1/3")).toBeInTheDocument();
+
+    // Previous match via Shift+Enter
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(screen.getByText("3/3")).toBeInTheDocument();
+
+    // Previous match via button
     fireEvent.click(screen.getByLabelText("Previous match"));
-    expect(instance.searchAddon.findPrevious).toHaveBeenCalledWith("build", { incremental: false });
+    expect(screen.getByText("2/3")).toBeInTheDocument();
   });
 
-  it("closes on Escape and close button, clearing decorations and refocusing terminal", () => {
-    const instance = createMockInstance();
+  it("closes on Escape and close button, triggering onFocusTerminal", () => {
     const onClose = vi.fn();
-    const { unmount } = render(<TerminalSearchOverlay instance={instance} onClose={onClose} />);
+    const onFocusTerminal = vi.fn();
+    const { unmount } = render(
+      <TerminalSearchOverlay
+        sessionId="backend-term-1"
+        onClose={onClose}
+        onFocusTerminal={onFocusTerminal}
+      />,
+    );
 
     const input = screen.getByTestId("terminal-search-input");
     fireEvent.keyDown(input, { key: "Escape" });
 
     expect(onClose).toHaveBeenCalledTimes(1);
-    expect(instance.searchAddon.clearDecorations).toHaveBeenCalled();
-    expect(instance.terminal.focus).toHaveBeenCalled();
+    expect(onFocusTerminal).toHaveBeenCalledTimes(1);
 
     unmount();
     const onClose2 = vi.fn();
-    render(<TerminalSearchOverlay instance={instance} onClose={onClose2} />);
+    render(<TerminalSearchOverlay sessionId="backend-term-1" onClose={onClose2} />);
 
     fireEvent.click(screen.getByLabelText("Close search"));
     expect(onClose2).toHaveBeenCalledTimes(1);

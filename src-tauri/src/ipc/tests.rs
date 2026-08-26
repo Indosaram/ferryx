@@ -555,15 +555,12 @@ async fn remote_status_after_reopen_persists_config_mode_until_started() {
     )
     .expect("write stale enabled config");
 
-    let (_daemon_dir, daemon_client, server_task) = setup_test_daemon_with_remote_paths(
-        Some(config_path),
-        Some(auth_path),
-    )
-    .await;
+    let (_daemon_dir, daemon_client, server_task) =
+        setup_test_daemon_with_remote_paths(Some(config_path), Some(auth_path)).await;
 
-    let remote_manager = Arc::new(RemoteGatewayManager::from_daemon(
-        Arc::clone(&daemon_client),
-    ));
+    let remote_manager = Arc::new(RemoteGatewayManager::from_daemon(Arc::clone(
+        &daemon_client,
+    )));
     let app = tauri::test::mock_builder()
         .manage(Arc::clone(&daemon_client))
         .manage(remote_manager)

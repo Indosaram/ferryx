@@ -2,7 +2,12 @@ import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getMigratedItem, TERMINAL_SETTINGS_STORAGE_KEY } from "./storageKeys";
-import { getTerminalPreferences, type TerminalPreferences, type TerminalThemeColors } from "./tauri";
+import {
+  applyTerminalOverrides,
+  getTerminalPreferences,
+  type TerminalPreferences,
+  type TerminalThemeColors,
+} from "./tauri";
 
 export type TerminalSettings = {
   fontFamily: string | null;
@@ -76,17 +81,6 @@ export const FALLBACK_PREFERENCES: TerminalPreferences = {
   source: "defaults",
   status: "absent",
   sourcePath: null,
-};
-
-type TerminalOptionsTarget = {
-  options: {
-    fontFamily?: string;
-    macOptionIsMeta?: boolean;
-    fontSize?: number;
-    scrollback?: number;
-    cursorStyle?: "bar" | "block" | "underline";
-    theme?: import("@xterm/xterm").ITheme;
-  };
 };
 
 export function loadTerminalSettings(storage: Pick<Storage, "getItem" | "setItem"> | null = browserStorage()): TerminalSettings {
@@ -178,43 +172,28 @@ export function resolveTerminalSettings(
   };
 }
 
-export function applyTerminalSettings(terminal: TerminalOptionsTarget, settings: EffectiveTerminalSettings) {
-  terminal.options.fontFamily = settings.fontFamily;
-  terminal.options.macOptionIsMeta = settings.macosOptionAsAlt;
-  terminal.options.fontSize = settings.fontSize;
-  terminal.options.scrollback = settings.scrollback;
-  terminal.options.cursorStyle = settings.cursorStyle;
-  terminal.options.theme = {
-    background: settings.theme.background,
-    foreground: settings.theme.foreground,
-    cursor: settings.theme.cursor,
-    cursorAccent: settings.theme.cursorAccent,
-    selectionBackground: settings.theme.selectionBackground,
-    selectionForeground: settings.theme.selectionForeground,
-    black: settings.theme.black,
-    red: settings.theme.red,
-    green: settings.theme.green,
-    yellow: settings.theme.yellow,
-    blue: settings.theme.blue,
-    magenta: settings.theme.magenta,
-    cyan: settings.theme.cyan,
-    white: settings.theme.white,
-    brightBlack: settings.theme.brightBlack,
-    brightRed: settings.theme.brightRed,
-    brightGreen: settings.theme.brightGreen,
-    brightYellow: settings.theme.brightYellow,
-    brightBlue: settings.theme.brightBlue,
-    brightMagenta: settings.theme.brightMagenta,
-    brightCyan: settings.theme.brightCyan,
-    brightWhite: settings.theme.brightWhite,
-    extendedAnsi: settings.theme.extendedAnsi,
-  };
-}
-
 let globalPreferencesPromise: Promise<TerminalPreferences> | null = null;
+let pushedOverrides: string | null = null;
 
 export function resetTerminalPreferencesCache() {
   globalPreferencesPromise = null;
+  pushedOverrides = null;
+}
+
+async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
+  const payload = {
+    fontFamily: settings.fontFamily,
+    fontSize: settings.fontSize,
+    macosOptionAsAlt: settings.macosOptionAsAlt,
+  };
+  const serialized = JSON.stringify(payload);
+  if (pushedOverrides === serialized) return;
+  pushedOverrides = serialized;
+  try {
+    await applyTerminalOverrides(payload);
+  } catch {
+    pushedOverrides = null;
+  }
 }
 
 export async function fetchCachedNativePreferences(force = false): Promise<TerminalPreferences> {
@@ -270,6 +249,10 @@ export function useTerminalSettings() {
     () => resolveTerminalSettings(localSettings, nativePreferences),
     [localSettings, nativePreferences],
   );
+
+  useEffect(() => {
+    void syncNativeOverrides(localSettings);
+  }, [localSettings]);
 
   useEffect(() => {
     syncTerminalBackground(settings.theme.background);

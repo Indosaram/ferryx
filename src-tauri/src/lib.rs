@@ -1,6 +1,8 @@
 pub mod browser;
 pub mod daemon;
 pub mod ipc;
+#[cfg(feature = "native-terminal")]
+pub mod native_terminal;
 pub mod notification;
 pub mod remote;
 pub mod session;
@@ -8,6 +10,8 @@ pub mod terminal;
 pub mod worktree;
 
 use crate::daemon::DaemonClient;
+#[cfg(feature = "native-terminal")]
+use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
 use ipc::*;
 use notification::audio::NotificationAudioPlayer;
 use std::sync::Arc;
@@ -184,6 +188,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     // Lazily initialized: a machine with no audio output device must still launch.
     let notification_audio = Arc::new(NotificationAudioPlayer::new());
     let browser_manager = Arc::new(browser::BrowserManager::new());
+    #[cfg(feature = "native-terminal")]
+    let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
 
     // Exactly one canonical workspace is registered for the startup root; the
     // legacy `default` alias is intentionally not registered, and persisted
@@ -195,7 +201,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         );
     }
 
-    builder
+    let builder = builder
         .setup(move |app| {
             #[cfg(desktop)]
             install_app_menu(app)?;
@@ -211,62 +217,78 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(remote_manager)
         .manage(workspace_registry)
         .manage(notification_audio)
-        .manage(browser_manager)
-        .invoke_handler(tauri::generate_handler![
-            cmd_terminal_output_channel,
-            cmd_terminal_spawn,
-            cmd_terminal_attach,
-            cmd_terminal_get_cwd,
-            cmd_terminal_write,
-            cmd_terminal_resize,
-            cmd_terminal_signal,
-            cmd_terminal_close,
-            cmd_terminal_list,
-            cmd_terminal_preferences,
-            cmd_remote_status,
-            cmd_remote_enable,
-            cmd_remote_disable,
-            cmd_remote_pairing_create,
-            cmd_remote_devices,
-            cmd_remote_device_revoke,
-            cmd_remote_set_active_selection,
-            cmd_remote_get_active_selection,
-            cmd_tailscale_status,
-            cmd_project_initial,
-            cmd_project_register,
-            cmd_project_branches,
-            cmd_worktree_list,
-            cmd_worktree_create,
-            cmd_worktree_delete,
-            cmd_worktree_delete_destructive,
-            cmd_worktree_delete_preview,
-            cmd_worktree_status,
-            cmd_notification_dispatch,
-            cmd_notification_get_permission_status,
-            cmd_notification_request_permission,
-            cmd_notification_probe_delivery,
-            cmd_notification_open_system_settings,
-            cmd_notification_play_sound,
-            cmd_notification_pick_audio,
-            cmd_notification_set_badge_count,
-            cmd_session_save,
-            cmd_session_load,
-            cmd_session_clear,
-            cmd_browser_create,
-            cmd_browser_navigate,
-            cmd_browser_go_back,
-            cmd_browser_go_forward,
-            cmd_browser_import_cookies,
-            cmd_browser_reload,
-            cmd_browser_set_bounds,
-            cmd_browser_set_visible,
-            cmd_browser_set_zoom,
-            cmd_browser_focus,
-            cmd_browser_get_state,
-            cmd_browser_close,
-            cmd_browser_list,
-            cmd_browser_open_external,
-        ])
+        .manage(browser_manager);
+
+    #[cfg(feature = "native-terminal")]
+    let builder = builder.manage(native_terminal_surface_host);
+
+    builder.invoke_handler(tauri::generate_handler![
+        cmd_terminal_output_channel,
+        cmd_terminal_spawn,
+        cmd_terminal_attach,
+        cmd_terminal_get_cwd,
+        cmd_terminal_write,
+        cmd_terminal_resize,
+        cmd_terminal_signal,
+        cmd_terminal_close,
+        cmd_terminal_list,
+        cmd_terminal_preferences,
+        cmd_terminal_apply_overrides,
+        cmd_native_terminal_attach,
+        cmd_native_terminal_detach,
+        cmd_native_terminal_set_bounds,
+        cmd_native_terminal_set_focus,
+        cmd_native_terminal_send_input,
+        cmd_native_terminal_scroll,
+        cmd_native_terminal_select,
+        cmd_native_terminal_copy_selection,
+        cmd_native_terminal_paste,
+        cmd_native_terminal_mouse,
+        cmd_native_terminal_search,
+        cmd_remote_status,
+        cmd_remote_enable,
+        cmd_remote_disable,
+        cmd_remote_pairing_create,
+        cmd_remote_devices,
+        cmd_remote_device_revoke,
+        cmd_remote_set_active_selection,
+        cmd_remote_get_active_selection,
+        cmd_tailscale_status,
+        cmd_project_initial,
+        cmd_project_register,
+        cmd_project_branches,
+        cmd_worktree_list,
+        cmd_worktree_create,
+        cmd_worktree_delete,
+        cmd_worktree_delete_destructive,
+        cmd_worktree_delete_preview,
+        cmd_worktree_status,
+        cmd_notification_dispatch,
+        cmd_notification_get_permission_status,
+        cmd_notification_request_permission,
+        cmd_notification_probe_delivery,
+        cmd_notification_open_system_settings,
+        cmd_notification_play_sound,
+        cmd_notification_pick_audio,
+        cmd_notification_set_badge_count,
+        cmd_session_save,
+        cmd_session_load,
+        cmd_session_clear,
+        cmd_browser_create,
+        cmd_browser_navigate,
+        cmd_browser_go_back,
+        cmd_browser_go_forward,
+        cmd_browser_import_cookies,
+        cmd_browser_reload,
+        cmd_browser_set_bounds,
+        cmd_browser_set_visible,
+        cmd_browser_set_zoom,
+        cmd_browser_focus,
+        cmd_browser_get_state,
+        cmd_browser_close,
+        cmd_browser_list,
+        cmd_browser_open_external,
+    ])
 }
 
 #[cfg(test)]

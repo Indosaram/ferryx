@@ -446,7 +446,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn close_escalates_term_ignoring_process_group_and_reaps_bounded_without_touching_sibling() {
+    async fn close_escalates_term_ignoring_process_group_and_reaps_bounded_without_touching_sibling(
+    ) {
         let manager = PtyManager::new();
 
         let mut stubborn_cmd = CommandBuilder::new("/bin/sh");
@@ -468,12 +469,10 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let started = tokio::time::Instant::now();
-        let close_result = tokio::time::timeout(
-            Duration::from_secs(6),
-            manager.close_session(&stubborn_id),
-        )
-        .await
-        .expect("close must be bounded");
+        let close_result =
+            tokio::time::timeout(Duration::from_secs(6), manager.close_session(&stubborn_id))
+                .await
+                .expect("close must be bounded");
         close_result.expect("TERM-resistant close should escalate and succeed");
 
         assert!(started.elapsed() < Duration::from_secs(6));

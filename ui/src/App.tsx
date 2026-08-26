@@ -50,7 +50,15 @@ import {
 } from "./lib/tauri";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
-import { worktreeIdentity, type DirtyState, type WorkspaceTab, type Worktree } from "./lib/types";
+import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
+import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
+import {
+  worktreeIdentity,
+  type DirtyState,
+  type StructuredIpcError,
+  type WorkspaceTab,
+  type Worktree,
+} from "./lib/types";
 import { registerWindowCloseGuard } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useWorkspaceRestore } from "./state/workspaceRestore";
@@ -58,7 +66,7 @@ import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
-const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: "." };
+const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
 const SettingsDialog = lazy(() =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog })),
 );
@@ -191,6 +199,16 @@ function WorkspaceApp({
 }) {
   const [projects, setProjects] = useState<RegisteredProject[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState(initialActiveProjectId);
+  const [registeredProjectId, setRegisteredProjectId] = useState<string | null>(null);
+  const [registrationAttempt, setRegistrationAttempt] = useState(0);
+  const registeredProjectIdRef = useRef<string | null>(null);
+  registeredProjectIdRef.current = registeredProjectId;
+  const [pendingBackendRecovery, setPendingBackendRecovery] = useState<{ workspaceId: string; sessionIds: string[] } | null>(
+    null,
+  );
+  const [runtimeErrorCopyAcknowledged, setRuntimeErrorCopyAcknowledged] = useState(false);
+  const [lastRuntimeError, setLastRuntimeError] = useState<StructuredIpcError | null>(null);
+  const [runtimeErrorDismissed, setRuntimeErrorDismissed] = useState(false);
   const { settings: generalSettings } = useGeneralSettings();
   const activeProject = useMemo(
     () => projects.find((project) => project.workspaceId === activeProjectId) ?? projects[0] ?? DEFAULT_PROJECT,
@@ -271,31 +289,144 @@ function WorkspaceApp({
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
+    ensureSessionBackends,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
   const stateRef = useRef(state);
   stateRef.current = state;
+  const plainRootWorktree = useMemo(
+    () =>
+      activeProject.gitRoot === null
+        ? {
+            path: activeProject.repoRoot,
+            head: "",
+            branch: null,
+            bare: false,
+            detached: false,
+            locked: null,
+            prunable: null,
+          }
+        : null,
+    [activeProject.gitRoot, activeProject.repoRoot],
+  );
+
   const { runtimeError, refreshWorktrees, reportRuntimeError } = useWorkspaceRuntime({
     workspaceId: activeProject.workspaceId,
     activeWorktreePath: state.activeWorktreePath,
     syncWorktrees,
     ensureTabForWorktree,
+    // Plain (non-Git) projects have no git worktrees; their folder root acts
+    // as the primary "worktree" so a terminal opens there like anywhere else.
+    plainRootWorktree,
+    registeredWorkspaceId: registeredProjectId,
   });
 
+  const inactiveProjectWorktrees = useInactiveProjectWorktrees(projects, activeProject.workspaceId);
+  const inactiveProjectWorktreesRef = useRef(inactiveProjectWorktrees);
+  inactiveProjectWorktreesRef.current = inactiveProjectWorktrees;
+
   useEffect(() => {
+    if (runtimeError) {
+      setLastRuntimeError(runtimeError);
+      setRuntimeErrorDismissed(false);
+    }
+  }, [runtimeError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRegisteredProjectId(null);
     void registerProject({
       workspaceId: activeProject.workspaceId,
       repoPath: activeProject.repoRoot,
     })
-      .then(() => refreshWorktrees())
-      .catch(reportRuntimeError);
-  }, [activeProject.repoRoot, activeProject.workspaceId, refreshWorktrees, reportRuntimeError]);
+      .then(async (registered) => {
+        if (cancelled) return;
+        // The backend owns one workspace ID per canonical root and returns the
+        // existing project when this root is already registered under another
+        // ID, so adopt that ID instead of keeping a stale alias.
+        const adopted =
+          registered.workspaceId !== activeProject.workspaceId && registered.repoRoot === activeProject.repoRoot;
+        setProjects((current) => {
+          if (
+            !adopted &&
+            current.some(
+              (candidate) =>
+                candidate.workspaceId === registered.workspaceId &&
+                candidate.repoRoot === registered.repoRoot &&
+                candidate.gitRoot === registered.gitRoot,
+            )
+          ) {
+            return current;
+          }
+          const replaced = current.map((candidate) =>
+            (adopted && candidate.workspaceId === activeProject.workspaceId) ||
+            candidate.workspaceId === registered.workspaceId
+              ? registered
+              : candidate,
+          );
+          const next = replaced.filter(
+            (candidate, index) =>
+              replaced.findIndex((other) => other.workspaceId === candidate.workspaceId) === index,
+          );
+          persistProjects(next);
+          return next;
+        });
+        if (adopted) {
+          setActiveProjectId(registered.workspaceId);
+          persistActiveProjectId(registered.workspaceId);
+          return;
+        }
+        await refreshWorktrees({ allowCreate: false });
+        if (cancelled) return;
+        setRegisteredProjectId(activeProject.workspaceId);
+      })
+      .catch((error) => {
+        if (!cancelled) reportRuntimeError(error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject.repoRoot, activeProject.workspaceId, registrationAttempt, refreshWorktrees, reportRuntimeError]);
+
+  // A failed registration leaves the runtime gated, so retry when the window
+  // regains focus rather than staying empty until the app restarts.
+  useEffect(() => {
+    const retryRegistration = () => {
+      if (registeredProjectIdRef.current === null) setRegistrationAttempt((attempt) => attempt + 1);
+    };
+    window.addEventListener("focus", retryRegistration);
+    return () => window.removeEventListener("focus", retryRegistration);
+  }, []);
+
+  const restoreWorkspaceAndReconnect = useCallback(
+    (restoredState: WorkspaceState) => {
+      restoreWorkspace(restoredState);
+      setPendingBackendRecovery({
+        workspaceId: activeProjectRef.current.workspaceId,
+        sessionIds: Object.values(restoredState.sessions)
+          .filter((session) => session.backendSessionId === null)
+          .map((session) => session.id),
+      });
+    },
+    [restoreWorkspace],
+  );
 
   // Initial session restore on startup & HMR recovery managed by coordinator.
   useWorkspaceRestore({
     workspaceId: activeProject.workspaceId,
     recoveredFromHmr,
-    restoreWorkspace,
+    restoreWorkspace: restoreWorkspaceAndReconnect,
+    enabled: registeredProjectId === activeProject.workspaceId,
   });
+
+  useEffect(() => {
+    if (registeredProjectId !== activeProject.workspaceId || pendingBackendRecovery === null) return;
+    setPendingBackendRecovery(null);
+    // Recovery targets sessions of the project that was restored; after a
+    // switch those IDs belong to another workspace and must not be respawned.
+    if (pendingBackendRecovery.workspaceId !== activeProject.workspaceId) return;
+    if (pendingBackendRecovery.sessionIds.length === 0) return;
+    void ensureSessionBackends(pendingBackendRecovery.sessionIds).catch(reportRuntimeError);
+  }, [activeProject.workspaceId, ensureSessionBackends, pendingBackendRecovery, registeredProjectId, reportRuntimeError]);
 
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const persistSession = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
@@ -318,7 +449,10 @@ function WorkspaceApp({
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
-      await persistSession(activeProjectRef.current.workspaceId, activeProjectRef.current.repoRoot, stateRef.current);
+      const snapshot = stateRef.current;
+      const target = activeProjectRef.current;
+      if (snapshot.workspaceId !== undefined && snapshot.workspaceId !== target.workspaceId) return;
+      await persistSession(target.workspaceId, target.repoRoot, snapshot);
     });
     return unregister;
   }, [persistSession]);
@@ -328,8 +462,20 @@ function WorkspaceApp({
       state.layout.tabs.length > 0 ||
       Object.values(state.worktreeLayouts ?? {}).some((l) => l.tabs.length > 0);
     if (state.worktrees.length === 0 || !hasTabs) return;
+    // On the render that switches projects, `state` still holds the outgoing
+    // project's data. Saving it under the incoming id would overwrite that
+    // project's persisted session, so save it under its own owner instead of
+    // discarding the newest state of the project being left.
+    const owner = state.workspaceId ?? activeProject.workspaceId;
+    if (owner !== activeProject.workspaceId) {
+      const outgoing = projectsRef.current.find((project) => project.workspaceId === owner);
+      if (outgoing) void persistSession(owner, outgoing.repoRoot, state);
+      return;
+    }
     const timer = setTimeout(() => {
-      void persistSession(activeProject.workspaceId, activeProject.repoRoot, stateRef.current);
+      const snapshot = stateRef.current;
+      if (snapshot.workspaceId !== undefined && snapshot.workspaceId !== activeProject.workspaceId) return;
+      void persistSession(activeProject.workspaceId, activeProject.repoRoot, snapshot);
     }, 500);
     return () => clearTimeout(timer);
   }, [activeProject.repoRoot, activeProject.workspaceId, persistSession, state]);
@@ -345,7 +491,7 @@ function WorkspaceApp({
   const [pendingTabClose, setPendingTabClose] = useState<{ id: string; label: string } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
-  const [pendingRemoteSlug, setPendingRemoteSlug] = useState<string | null>(null);
+  const [pendingRemoteSlug, setPendingRemoteSlug] = useState<{ workspaceId: string; slug: string } | null>(null);
 
   const focusedTerminalPayload = useMemo(
     () => deriveFocusedTerminal(activeProject.workspaceId, state),
@@ -405,8 +551,10 @@ function WorkspaceApp({
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
-      const ownerId = worktreeIdentity(worktree)?.wsId;
-      const owner = ownerId ? projectsRef.current.find((project) => project.workspaceId === ownerId) : undefined;
+      const ownerId = resolveWorktreeOwnerId(worktree, projectsRef.current);
+      const owner = ownerId
+        ? projectsRef.current.find((project) => project.workspaceId === ownerId)
+        : undefined;
       if (owner && owner.workspaceId !== activeProjectRef.current.workspaceId) {
         handleSelectProject(owner);
         setPendingWorktreePath(worktree.path);
@@ -427,11 +575,17 @@ function WorkspaceApp({
 
   useEffect(() => {
     if (!pendingRemoteSlug) return;
-    const target = matchWorktreeBySlug(state.worktrees, pendingRemoteSlug);
+    // The slug was queued for one project; after a switch elsewhere it must not
+    // open a same-named worktree in whichever project is now active.
+    if (pendingRemoteSlug.workspaceId !== activeProject.workspaceId) {
+      setPendingRemoteSlug(null);
+      return;
+    }
+    const target = matchWorktreeBySlug(state.worktrees, pendingRemoteSlug.slug);
     if (!target) return;
     setPendingRemoteSlug(null);
     void ensureTabForWorktree(target).catch(reportRuntimeError);
-  }, [ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
+  }, [activeProject.workspaceId, ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
 
   const handleRemoteSelectionRequested = useCallback(
     (payload: RemoteSelectionRequestedPayload) => {
@@ -447,7 +601,7 @@ function WorkspaceApp({
           }
         } else if (targetProject) {
           handleSelectProject(targetProject);
-          setPendingRemoteSlug(payload.worktreeSlug);
+          setPendingRemoteSlug({ workspaceId: targetProject.workspaceId, slug: payload.worktreeSlug });
         }
       } else {
         if (!isCurrentProject && targetProject) {
@@ -648,7 +802,12 @@ function WorkspaceApp({
 
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
-      const visible = listVisibleWorktrees(projectsRef.current, stateRef.current.worktrees, activeProjectRef.current.workspaceId);
+      const visible = listVisibleWorktrees(
+        projectsRef.current,
+        stateRef.current.worktrees,
+        activeProjectRef.current.workspaceId,
+        inactiveProjectWorktreesRef.current,
+      );
       const target = visible[index];
       if (target) handleSelectWorktree(target);
     },
@@ -826,6 +985,7 @@ function WorkspaceApp({
           projects={projects}
           activeProjectId={activeProject.workspaceId}
           worktrees={state.worktrees}
+          inactiveProjectWorktrees={inactiveProjectWorktrees}
           agents={agents}
           activePath={activeWorktree?.path || ""}
           statuses={worktreeStatuses}
@@ -971,9 +1131,40 @@ function WorkspaceApp({
         />
       ) : null}
 
-      {runtimeError && activeWorktree ? (
-        <div className="pointer-events-none fixed bottom-3 right-3 z-40 max-w-error border border-destructive/30 bg-card/95 px-3 py-2 text-[11px] text-destructive shadow-lg">
-          {runtimeError.code}: {runtimeError.message}
+      {lastRuntimeError && !runtimeErrorDismissed ? (
+        <div className="fixed bottom-3 right-3 z-40 max-w-error border border-destructive/30 bg-card/95 text-[11px] text-destructive shadow-lg">
+          <div className="flex items-start gap-1 px-3 py-2">
+            <button
+              type="button"
+              title="Click to copy error details"
+              onClick={() => {
+                const details = lastRuntimeError.details
+                  ? `\n${JSON.stringify(lastRuntimeError.details, null, 2)}`
+                  : "";
+                void navigator.clipboard
+                  .writeText(`${lastRuntimeError.code}: ${lastRuntimeError.message}${details}`)
+                  .then(() => {
+                    setRuntimeErrorCopyAcknowledged(true);
+                    window.setTimeout(() => setRuntimeErrorCopyAcknowledged(false), 1600);
+                  })
+                  .catch(() => {});
+              }}
+              className="cursor-pointer text-left"
+            >
+              {runtimeErrorCopyAcknowledged
+                ? "Copied error to clipboard"
+                : `${lastRuntimeError.code}: ${lastRuntimeError.message}`}
+            </button>
+            <button
+              type="button"
+              aria-label="Dismiss error"
+              title="Dismiss"
+              onClick={() => setRuntimeErrorDismissed(true)}
+              className="ml-1 shrink-0 cursor-pointer text-destructive/60 hover:text-destructive"
+            >
+              ×
+            </button>
+          </div>
         </div>
       ) : null}
     </div>
@@ -984,17 +1175,28 @@ function listVisibleWorktrees(
   projects: RegisteredProject[],
   worktrees: Worktree[],
   activeProjectId: string,
+  inactiveProjectWorktrees: Record<string, Worktree[]> = {},
 ): Worktree[] {
   const collapsed = loadCollapsedProjectIds(projects, activeProjectId);
-  const known = new Set(projects.map((project) => project.workspaceId));
+  // Cmd+N counts the rows the sidebar actually renders, so this must mirror
+  // `groupWorktreesByProject`: inactive projects contribute their own listed
+  // rows, and ownership comes from the shared resolver rather than a bare
+  // branch identity that would attribute every branch-less row to the active
+  // project.
   const visible: Worktree[] = [];
 
   for (const project of projects) {
     if (collapsed.has(project.workspaceId)) continue;
-    for (const worktree of worktrees) {
-      const ownerId = worktreeIdentity(worktree)?.wsId;
-      const owner = ownerId && known.has(ownerId) ? ownerId : activeProjectId;
-      if (owner === project.workspaceId) visible.push(worktree);
+    const owned = worktrees.filter(
+      (worktree) => resolveWorktreeOwnerId(worktree, projects, activeProjectId) === project.workspaceId,
+    );
+    const rows =
+      project.workspaceId === activeProjectId
+        ? owned
+        : [...owned, ...(inactiveProjectWorktrees[project.workspaceId] ?? [])];
+    for (const row of rows) {
+      if (visible.some((candidate) => candidate.path === row.path)) continue;
+      visible.push(row);
     }
   }
 
@@ -1018,9 +1220,23 @@ function loadProjects(): RegisteredProject[] {
     if (!raw) return [DEFAULT_PROJECT];
     const parsed = JSON.parse(raw) as RegisteredProject[];
     if (!Array.isArray(parsed)) return [DEFAULT_PROJECT];
-    const valid = parsed.filter(
-      (project) => project && typeof project.workspaceId === "string" && typeof project.repoRoot === "string",
-    );
+    const valid = parsed
+      .filter(
+        (project) => project && typeof project.workspaceId === "string" && typeof project.repoRoot === "string",
+      )
+      .map((project) => ({
+        workspaceId: project.workspaceId,
+        repoRoot: project.repoRoot,
+        // Entries persisted before gitRoot existed can only be git projects
+        // (the old backend rejected non-git folders), and their repoRoot was
+        // already the canonical git root. Only an explicit null means non-git.
+        gitRoot:
+          typeof project.gitRoot === "string"
+            ? project.gitRoot
+            : project.gitRoot === null
+              ? null
+              : project.repoRoot,
+      }));
     return valid.length > 0 ? valid : [DEFAULT_PROJECT];
   } catch {
     return [DEFAULT_PROJECT];

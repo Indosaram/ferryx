@@ -72,6 +72,7 @@ const workspace = {
   setPaneRatio: vi.fn(),
   swapPanes: vi.fn(),
   ensureTabForWorktree: vi.fn().mockResolvedValue(undefined),
+  ensureSessionBackends: vi.fn().mockResolvedValue(undefined),
   openTab: vi.fn(),
   refreshWorktrees: vi.fn(),
   syncWorktrees: vi.fn(),
@@ -103,7 +104,7 @@ const workspace = {
       { path: "/repo/feature", branch: "refs/heads/feature" },
       { path: "/repo/bugfix", branch: "refs/heads/bugfix" },
       { path: "/repo/docs", branch: "refs/heads/docs" },
-    ],
+    ] as Array<{ path: string; branch: string | null }>,
     unreadTabIds: {} as Record<string, boolean>,
   },
 };
@@ -178,7 +179,7 @@ vi.mock("./components/Sidebar", () => ({
     onSelectWorktree?: (worktree: { path: string }) => void;
     onToggle?: () => void;
     onOpenSettings?: () => void;
-    projects?: Array<{ workspaceId: string }>;
+    projects?: Array<{ workspaceId: string; gitRoot?: string | null }>;
     worktrees?: Array<{ path: string }>;
     activeProjectId?: string;
   }) => (
@@ -201,9 +202,12 @@ vi.mock("./components/Sidebar", () => ({
               <button type="button" onClick={() => onSelectProject?.(project)}>
                 Project {project.workspaceId}
               </button>
-              <button type="button" onClick={() => onCreateWorktree(project)}>
-                Add worktree to {project.workspaceId}
-              </button>
+              {/* Mirrors the real Sidebar: non-git projects expose no worktree creation. */}
+              {project.gitRoot !== null ? (
+                <button type="button" onClick={() => onCreateWorktree(project)}>
+                  Add worktree to {project.workspaceId}
+                </button>
+              ) : null}
               {project.workspaceId === activeProjectId
                 ? worktrees.map((worktree) => (
                     <button key={worktree.path} type="button" onClick={() => onSelectWorktree?.(worktree)}>
@@ -301,6 +305,7 @@ describe("App project workspace flow", () => {
       setPaneRatio: workspace.setPaneRatio,
       swapPanes: workspace.swapPanes,
       ensureTabForWorktree: workspace.ensureTabForWorktree,
+      ensureSessionBackends: workspace.ensureSessionBackends,
       openTab: workspace.openTab,
       syncWorktrees: workspace.syncWorktrees,
       restoreWorkspace: workspace.restoreWorkspace,
@@ -357,6 +362,8 @@ describe("App project workspace flow", () => {
     workspace.activatePrimary.mockReset();
     workspace.ensureTabForWorktree.mockReset();
     workspace.ensureTabForWorktree.mockResolvedValue(undefined);
+    workspace.ensureSessionBackends.mockReset();
+    workspace.ensureSessionBackends.mockResolvedValue(undefined);
     workspace.refreshWorktrees.mockReset();
     workspace.restoreWorkspace.mockReset();
     workspace.restoreWorkspace.mockResolvedValue(undefined);
@@ -495,6 +502,25 @@ describe("App project workspace flow", () => {
     expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
   });
 
+  it("heals a legacy project entry (no gitRoot) into a git-backed project on startup", async () => {
+    const legacy = { workspaceId: "legacy-git", repoRoot: "/repos/legacy-git" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([legacy]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, legacy.workspaceId);
+    native.registerProject.mockResolvedValue({
+      workspaceId: legacy.workspaceId,
+      repoRoot: legacy.repoRoot,
+      gitRoot: legacy.repoRoot,
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project legacy-git")).toBeInTheDocument();
+    expect(screen.queryByText("Worktrees are unavailable for non-Git projects.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add worktree to legacy-git" })).toBeInTheDocument();
+    const persisted = JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) ?? "[]");
+    expect(persisted).toEqual([legacy]);
+  });
+
   it("re-registers the active persisted project before refreshing its worktrees", async () => {
     const project = { workspaceId: "rorca", repoRoot: "/repos/rorca" };
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([project]));
@@ -623,6 +649,166 @@ describe("App project workspace flow", () => {
     );
   });
 
+  it("shows the original project's worktrees again after switching away and clicking back", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: `/repos/${workspaceId}`,
+    }));
+
+    const listedByWorkspace: Record<string, Array<{ path: string; branch: string }>> = {
+      alpha: [{ path: "/repos/alpha", branch: "refs/heads/main" }],
+      beta: [{ path: "/repos/beta", branch: "refs/heads/main" }],
+    };
+    const original = workspace.storeState.worktrees;
+    workspace.refreshWorktrees.mockImplementation(async () => {
+      const active = screen.queryByText(/^Active project /)?.textContent?.replace("Active project ", "") ?? "alpha";
+      workspace.storeState.worktrees = listedByWorkspace[active] ?? [];
+    });
+
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Worktree /repos/alpha" })).toBeInTheDocument());
+
+      fireEvent.click(screen.getByRole("button", { name: "Project beta" }));
+      await waitFor(() => expect(screen.getByText("Active project beta")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByRole("button", { name: "Project alpha" }));
+      await waitFor(() => expect(screen.getByText("Active project alpha")).toBeInTheDocument());
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Worktree /repos/alpha" })).toBeInTheDocument(),
+      );
+    } finally {
+      workspace.storeState.worktrees = original;
+      workspace.refreshWorktrees.mockReset();
+    }
+  });
+
+  it("adopts the canonical workspaceId the backend returns for an already-registered root", async () => {
+    const stale = { workspaceId: "default", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([stale]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({
+      workspaceId: "alpha",
+      repoRoot: "/repos/alpha",
+      gitRoot: "/repos/alpha",
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Active project alpha")).toBeInTheDocument());
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("alpha");
+    const persisted = JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) ?? "[]");
+    expect(persisted.map((project: { workspaceId: string }) => project.workspaceId)).toEqual(["alpha"]);
+  });
+
+  it("retries registration on window focus after a transient failure instead of gating forever", async () => {
+    const project = { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([project]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockRejectedValueOnce({ code: "DAEMON_UNAVAILABLE", message: "daemon down" });
+    native.registerProject.mockResolvedValue(project);
+
+    render(<App />);
+
+    await waitFor(() => expect(native.registerProject).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new Event("focus"));
+
+    await waitFor(() => expect(native.registerProject).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(workspace.refreshWorktrees).toHaveBeenCalled());
+  });
+
+  it("persists the outgoing project's session when switching away", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: `/repos/${workspaceId}`,
+    }));
+    (workspace.storeState as { workspaceId?: string }).workspaceId = "alpha";
+
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByText("Active project alpha")).toBeInTheDocument());
+      native.saveSession.mockClear();
+
+      fireEvent.click(screen.getByRole("button", { name: "Project beta" }));
+
+      await waitFor(() =>
+        expect(native.saveSession).toHaveBeenCalledWith(
+          expect.objectContaining({ activeWorkspaceId: "alpha" }),
+        ),
+      );
+    } finally {
+      delete (workspace.storeState as { workspaceId?: string }).workspaceId;
+    }
+  });
+
+  it("discards a parked worktree selection that belongs to a project no longer active", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: `/repos/${workspaceId}`,
+    }));
+
+    workspace.storeState.worktrees.push({ path: "/repos/beta/feature", branch: "refs/heads/orca/beta/feature" });
+
+    try {
+      render(<App />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Worktree /repos/beta/feature" }));
+      await waitFor(() => expect(screen.getByText("Active project beta")).toBeInTheDocument());
+
+      workspace.ensureTabForWorktree.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "Project alpha" }));
+      await waitFor(() => expect(screen.getByText("Active project alpha")).toBeInTheDocument());
+
+      expect(workspace.ensureTabForWorktree).not.toHaveBeenCalledWith(
+        expect.objectContaining({ path: "/repos/beta/feature" }),
+      );
+    } finally {
+      workspace.storeState.worktrees.pop();
+    }
+  });
+
+  it("surfaces a genuine same-id different-root registration conflict instead of silently listing", async () => {
+    const project = { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([project]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockRejectedValue({
+      code: "WORKSPACE_ALREADY_REGISTERED",
+      message: "Workspace 'alpha' is already registered",
+    });
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(workspace.reportRuntimeError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "WORKSPACE_ALREADY_REGISTERED" }),
+      ),
+    );
+    expect(workspace.refreshWorktrees).not.toHaveBeenCalled();
+  });
+
   it("switches project instead of activating when the worktree belongs to another project", async () => {
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha" },
@@ -651,6 +837,32 @@ describe("App project workspace flow", () => {
           branch: "refs/heads/orca/beta/feature",
         }),
       );
+    } finally {
+      workspace.storeState.worktrees.pop();
+    }
+  });
+
+  it("switches project for a branch-less worktree nested under another project's root", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: null },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: workspaceId === "alpha" ? `/repos/${workspaceId}` : null,
+    }));
+
+    workspace.storeState.worktrees.push({ path: "/repos/beta/nested", branch: null });
+
+    try {
+      render(<App />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Worktree /repos/beta/nested" }));
+
+      await waitFor(() => expect(screen.getByText("Active project beta")).toBeInTheDocument());
     } finally {
       workspace.storeState.worktrees.pop();
     }
@@ -714,6 +926,42 @@ describe("App project workspace flow", () => {
       // Crossing projects switches the active project and still focuses that worktree's tab.
       await waitFor(() => expect(screen.getByText("Active project beta")).toBeInTheDocument());
       await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(betaDocs));
+    } finally {
+      workspace.storeState.worktrees.length = 4;
+    }
+  });
+
+  it("skips a collapsed project's rows when counting Cmd+N positions", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    // beta expanded, alpha collapsed: only beta's rows are visible.
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify(["alpha"]));
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: `/repos/${workspaceId}`,
+    }));
+
+    // A branch-less row living under beta's root: only path-based ownership
+    // attributes it to beta. Branch-only logic hands it to the active project.
+    const betaRoot = { path: "/repos/beta/nested", branch: null };
+    workspace.storeState.worktrees.push(betaRoot);
+
+    try {
+      render(<App />);
+
+      // Cmd+1 must hit beta's row, not alpha's hidden rows.
+      fireEvent.keyDown(window, { key: "1", metaKey: true });
+
+      await waitFor(() =>
+        expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/repos/beta/nested" }),
+        ),
+      );
     } finally {
       workspace.storeState.worktrees.length = 4;
     }
@@ -813,7 +1061,7 @@ describe("App project workspace flow", () => {
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
   });
 
-  it("retains missing backend sessions as exited without auto-respawning on app restart", async () => {
+  it("requests fresh backends for restored tabs whose daemon sessions are gone", async () => {
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
     native.listTerminalSessions.mockResolvedValue([]);
     native.spawnTerminal.mockResolvedValue("new-spawned-session-id");
@@ -851,6 +1099,7 @@ describe("App project workspace flow", () => {
     render(<App />);
 
     await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+    await waitFor(() => expect(workspace.ensureSessionBackends).toHaveBeenCalledWith(["dead-sess-1"]));
     expect(native.spawnTerminal).not.toHaveBeenCalled();
 
     const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
@@ -860,6 +1109,85 @@ describe("App project workspace flow", () => {
       backendSessionId: null,
       lifecycle: "exited",
       cwd: "/repo/main",
+    });
+  });
+
+  it("waits until project registration and authoritative worktree refresh complete before restoring workspace and recovering stale session backends", async () => {
+    let resolveRegister!: (value: any) => void;
+    const registerPromise = new Promise((resolve) => {
+      resolveRegister = resolve;
+    });
+    native.registerProject.mockImplementation(() => registerPromise);
+
+    let resolveRefreshWorktrees!: () => void;
+    const refreshWorktreesPromise = new Promise<void>((resolve) => {
+      resolveRefreshWorktrees = resolve;
+    });
+    workspace.refreshWorktrees.mockImplementation(() => refreshWorktreesPromise);
+
+    const savedSession = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: ".",
+          worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [{ id: "tab-1", sessionId: "dead-sess-1", label: "main", worktreePath: "/repo/main" }],
+          },
+          terminalSessions: {
+            "dead-sess-1": {
+              sessionId: "dead-sess-1",
+              worktreePath: "/repo/main",
+              cwd: "/repo/main",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+    native.loadSession.mockResolvedValue(savedSession as any);
+    native.listTerminalSessions.mockResolvedValue([]);
+    workspace.restoreWorkspace.mockClear();
+    workspace.ensureSessionBackends.mockClear();
+
+    render(<App />);
+
+    // 1. While project registration is in flight, restore must not begin
+    expect(native.registerProject).toHaveBeenCalled();
+    expect(workspace.refreshWorktrees).not.toHaveBeenCalled();
+    expect(workspace.restoreWorkspace).not.toHaveBeenCalled();
+    expect(workspace.ensureSessionBackends).not.toHaveBeenCalled();
+
+    // 2. Resolve project registration - worktree refresh begins, but restore must still wait
+    await act(async () => {
+      resolveRegister({ workspaceId: "default", repoRoot: "." });
+    });
+    expect(workspace.refreshWorktrees).toHaveBeenCalled();
+    expect(workspace.restoreWorkspace).not.toHaveBeenCalled();
+    expect(workspace.ensureSessionBackends).not.toHaveBeenCalled();
+
+    // 3. Resolve worktree refresh - now readiness gate is satisfied and restore + session recovery execute
+    await act(async () => {
+      resolveRefreshWorktrees();
+    });
+
+    await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+    await waitFor(() => expect(workspace.ensureSessionBackends).toHaveBeenCalledWith(["dead-sess-1"]));
+
+    const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
+    expect(restoredState).toBeDefined();
+    expect(restoredState.sessions["dead-sess-1"]).toMatchObject({
+      id: "dead-sess-1",
+      backendSessionId: null,
+      lifecycle: "exited",
     });
   });
 
@@ -1097,7 +1425,8 @@ describe("App project workspace flow", () => {
       backendSessionId: "live-backend-1",
       lifecycle: "working",
       daemonEpoch: "epoch-10",
-      lastOutputSequence: "777",
+      // Cold restore starts with an empty terminal; replay must not be suppressed.
+      lastOutputSequence: null,
     });
     // Mismatching epoch -> exited / lost
     expect(restoredState.sessions["sess-mismatch"]).toMatchObject({
@@ -1314,8 +1643,8 @@ describe("App project workspace flow", () => {
 
   it("passes live workspace state and project callbacks to SettingsDialog", async () => {
     const projects = [
-      { workspaceId: "alpha", repoRoot: "/repos/alpha" },
-      { workspaceId: "beta", repoRoot: "/repos/beta" },
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
     ];
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "beta");
@@ -1552,7 +1881,7 @@ describe("App project workspace flow", () => {
     expect(native.spawnTerminal).not.toHaveBeenCalled();
   });
 
-  it("skips native disk session restore when store was hydrated from HMR handoff", async () => {
+  it("skips native disk session restore when store was hydrated from HMR handoff and no HMR state exists", async () => {
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.loadSession.mockClear();
     workspace.restoreWorkspace.mockClear();
@@ -1572,6 +1901,7 @@ describe("App project workspace flow", () => {
       openTab: workspace.openTab,
       syncWorktrees: workspace.syncWorktrees,
       restoreWorkspace: workspace.restoreWorkspace,
+      ensureSessionBackends: workspace.ensureSessionBackends,
       createBrowserTab: workspace.createBrowserTab,
     })) as any);
 
@@ -1580,6 +1910,82 @@ describe("App project workspace flow", () => {
     await waitFor(() => expect(native.registerProject).toHaveBeenCalled());
     expect(native.loadSession).not.toHaveBeenCalled();
     expect(workspace.restoreWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("reconciles stale sessions and triggers ensureSessionBackends on HMR handoff when daemon restarted", async () => {
+    const { setHmrWorkspaceState, clearHmrWorkspaceState } = await import("./state/hmrWorkspaceState");
+    const workspaceId = "default";
+    const hmrState = {
+      ...workspace.storeState,
+      sessions: {
+        "dead-sess-1": {
+          id: "dead-sess-1",
+          backendSessionId: "stale-backend-pty-888",
+          worktreePath: "/repo/main",
+          cwd: "/repo/main",
+          lifecycle: "working" as const,
+        },
+      },
+      layout: {
+        ...workspace.storeState.layout,
+        tabs: [{ id: "tab-1", sessionId: "dead-sess-1", label: "main" }],
+        layoutsByTabId: {
+          "tab-1": {
+            root: { type: "leaf" as const, leafId: "leaf-1" },
+            activeLeafId: "leaf-1",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-1": "dead-sess-1" },
+            contentsByLeafId: {
+              "leaf-1": { kind: "terminal" as const, sessionId: "dead-sess-1" },
+            },
+          },
+        },
+      },
+    };
+
+    setHmrWorkspaceState(workspaceId, hmrState as any);
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+    native.listTerminalSessions.mockResolvedValue([]);
+    native.loadSession.mockClear();
+    workspace.restoreWorkspace.mockClear();
+    workspace.ensureSessionBackends.mockClear();
+
+    storeSpy.mockImplementation((() => ({
+      state: hmrState,
+      recoveredFromHmr: true,
+      agents: [],
+      activateTab: workspace.activateTab,
+      closeTab: workspace.closeTab,
+      splitPane: workspace.splitPane,
+      closePane: workspace.closePane,
+      focusPane: workspace.focusPane,
+      setPaneRatio: workspace.setPaneRatio,
+      swapPanes: workspace.swapPanes,
+      ensureTabForWorktree: workspace.ensureTabForWorktree,
+      openTab: workspace.openTab,
+      syncWorktrees: workspace.syncWorktrees,
+      restoreWorkspace: workspace.restoreWorkspace,
+      ensureSessionBackends: workspace.ensureSessionBackends,
+      createBrowserTab: workspace.createBrowserTab,
+    })) as any);
+
+    try {
+      render(<App />);
+
+      await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+      await waitFor(() => expect(workspace.ensureSessionBackends).toHaveBeenCalledWith(["dead-sess-1"]));
+      expect(native.loadSession).not.toHaveBeenCalled();
+
+      const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
+      expect(restoredState).toBeDefined();
+      expect(restoredState.sessions["dead-sess-1"]).toMatchObject({
+        id: "dead-sess-1",
+        backendSessionId: null,
+        lifecycle: "exited",
+      });
+    } finally {
+      clearHmrWorkspaceState(workspaceId);
+    }
   });
 
   describe("Ferryx desktop focused-terminal publisher and remote selection listener", () => {
@@ -1760,6 +2166,38 @@ describe("App project workspace flow", () => {
       await waitFor(() => {
         expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("project-2");
       });
+    });
+
+    it("drops a queued remote slug when the user switches to a third project first", async () => {
+      localStorage.setItem(
+        PROJECTS_STORAGE_KEY,
+        JSON.stringify([
+          { workspaceId: "project-1", repoRoot: "/repo/p1" },
+          { workspaceId: "project-2", repoRoot: "/repo/p2" },
+          { workspaceId: "project-3", repoRoot: "/repo/p3" },
+        ]),
+      );
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "project-1");
+
+      render(<App />);
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+      workspace.ensureTabForWorktree.mockClear();
+
+      // Remote asks for project-2's "feature" worktree, so the slug is queued
+      // while project-2 registers. Before that queue drains the user lands on
+      // project-3, which happens to own a worktree with the same slug. Both
+      // land in one batch, so the queued slug is already stale when the effect
+      // that consumes it first runs.
+      await act(async () => {
+        native.remoteSelectionHandler!({ workspaceId: "project-2", worktreeSlug: "feature" });
+        native.remoteSelectionHandler!({ workspaceId: "project-3" });
+      });
+
+      await waitFor(() => expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("project-3"));
+
+      expect(workspace.ensureTabForWorktree).not.toHaveBeenCalledWith(
+        expect.objectContaining({ path: "/repo/feature" }),
+      );
     });
   });
 

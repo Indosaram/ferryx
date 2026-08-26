@@ -39,6 +39,7 @@ export const DEFAULT_WORKSPACE_ID = "default";
 export type RegisteredProject = {
   workspaceId: string;
   repoRoot: string;
+  gitRoot?: string | null;
 };
 
 export type LocalBranch = {
@@ -159,6 +160,19 @@ export async function getTerminalPreferences(): Promise<TerminalPreferences> {
     };
   }
   return invokeCommand<TerminalPreferences>("cmd_terminal_preferences");
+}
+
+export type TerminalOverrides = {
+  fontFamily: string | null;
+  fontSize: number | null;
+  macosOptionAsAlt: boolean | null;
+};
+
+export async function applyTerminalOverrides(
+  overrides: TerminalOverrides,
+): Promise<TerminalPreferences | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<TerminalPreferences>("cmd_terminal_apply_overrides", { overrides });
 }
 
 export async function listWorktrees(workspaceId: string) {

@@ -123,9 +123,7 @@ struct TestDaemonClient {
 }
 
 impl TestDaemonClient {
-    async fn connect(
-        socket_path: &Path,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    async fn connect(socket_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let stream = UnixStream::connect(socket_path).await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -439,8 +437,7 @@ fn extract_pid_and_ppid(output: &str) -> Option<(u32, u32)> {
             let pid_clean: String = pid_str.chars().filter(|c| c.is_ascii_digit()).collect();
             let ppid_clean: String = ppid_str.chars().filter(|c| c.is_ascii_digit()).collect();
             if !pid_clean.is_empty() && !ppid_clean.is_empty() {
-                if let (Ok(pid), Ok(ppid)) = (pid_clean.parse::<u32>(), ppid_clean.parse::<u32>())
-                {
+                if let (Ok(pid), Ok(ppid)) = (pid_clean.parse::<u32>(), ppid_clean.parse::<u32>()) {
                     return Some((pid, ppid));
                 }
             }
@@ -534,10 +531,7 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
         .await
         .expect("Failed to start daemon harness");
     let repo_dir = create_test_git_repo();
-    let canonical_repo = repo_dir
-        .path()
-        .canonicalize()
-        .expect("canonical repo path");
+    let canonical_repo = repo_dir.path().canonicalize().expect("canonical repo path");
 
     // Client A connects and registers workspace
     let mut client_a = daemon
@@ -780,10 +774,7 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
     );
 
     client_b
-        .write_input(
-            &session_b,
-            b"echo __SESSION_B_STILL_$(expr 1000 + 234)__\n",
-        )
+        .write_input(&session_b, b"echo __SESSION_B_STILL_$(expr 1000 + 234)__\n")
         .await
         .expect("Write input to Session B failed");
 
@@ -797,10 +788,7 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
 
     if !hist_b.contains("__SESSION_B_STILL_1234__") {
         let out_resp = attach_b_b
-            .await_pattern_in_history_or_stream(
-                "__SESSION_B_STILL_1234__",
-                Duration::from_secs(5),
-            )
+            .await_pattern_in_history_or_stream("__SESSION_B_STILL_1234__", Duration::from_secs(5))
             .await
             .expect("Session B failed to respond to input");
         assert!(out_resp.contains("__SESSION_B_STILL_1234__"));
@@ -1018,7 +1006,9 @@ async fn test_daemon_gui_process_non_ownership_and_process_tree() {
         .output()
         .expect("ps command failed");
     if ps_output.status.success() {
-        let ps_ppid_str = String::from_utf8_lossy(&ps_output.stdout).trim().to_string();
+        let ps_ppid_str = String::from_utf8_lossy(&ps_output.stdout)
+            .trim()
+            .to_string();
         if let Ok(ps_ppid) = ps_ppid_str.parse::<u32>() {
             assert_eq!(ps_ppid, daemon.daemon_pid);
             assert_ne!(ps_ppid, current_test_pid);

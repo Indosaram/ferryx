@@ -191,14 +191,29 @@ impl ActiveConnection {
                 format!("Request flush failed: {e}"),
             ))
         })?;
-
+        // A daemon that never answers must not hold the shared connection mutex
+        // forever: without a response timeout, one stalled handler on the daemon
+        // silently deadlocks every subsequent terminal request in this process.
         let mut line = String::new();
-        let bytes_read = self.reader.read_line(&mut line).await.map_err(|e| {
-            RequestAttemptError::ambiguous(IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Response read failed: {e}"),
-            ))
-        })?;
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.reader.read_line(&mut line),
+        )
+        .await;
+        let bytes_read = match read_result {
+            Err(_) => {
+                return Err(RequestAttemptError::ambiguous(IpcError::new(
+                    IpcErrorCode::IoError,
+                    "Timed out waiting for daemon response (15s)",
+                )))
+            }
+            Ok(result) => result.map_err(|e| {
+                RequestAttemptError::ambiguous(IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Response read failed: {e}"),
+                ))
+            })?,
+        };
         if bytes_read == 0 || line.trim().is_empty() {
             return Err(RequestAttemptError::ambiguous(IpcError::new(
                 IpcErrorCode::IoError,
@@ -1652,11 +1667,9 @@ mod tests {
         symlink(&real_socket, &symlinked_socket).unwrap();
         let current_uid = unsafe { libc::getuid() };
 
-        let error = DaemonClient::validate_existing_socket_path_for_uid(
-            &symlinked_socket,
-            current_uid,
-        )
-        .expect_err("symlinked daemon socket must be rejected before connect");
+        let error =
+            DaemonClient::validate_existing_socket_path_for_uid(&symlinked_socket, current_uid)
+                .expect_err("symlinked daemon socket must be rejected before connect");
         assert_eq!(error.code, IpcErrorCode::IoError);
         assert_eq!(
             error

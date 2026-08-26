@@ -158,3 +158,20 @@ body {
     min-height: 0;
   }
 }
+
+html:has([data-testid="native-terminal-pane"]),
+body:has([data-testid="native-terminal-pane"]),
+#root:has([data-testid="native-terminal-pane"]),
+#root > div:has([data-testid="native-terminal-pane"]),
+div:has(> main [data-testid="native-terminal-pane"]),
+main:has([data-testid="native-terminal-pane"]),
+[data-testid="terminal-layout"]:has([data-testid="native-terminal-pane"]),
+[data-testid="tab-group-split"]:has([data-testid="native-terminal-pane"]),
+[data-testid="tab-group-panel"]:has([data-testid="native-terminal-pane"]),
+[data-testid="pane-split"]:has([data-testid="native-terminal-pane"]),
+[data-testid="pane-leaf"]:has([data-testid="native-terminal-pane"]),
+[data-testid="terminal-pane-surface"]:has([data-testid="native-terminal-pane"]),
+[data-testid="native-terminal-pane"] {
+  background-color: transparent !important;
+  background: transparent !important;
+}

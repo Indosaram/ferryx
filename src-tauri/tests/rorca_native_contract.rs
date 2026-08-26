@@ -1,4 +1,6 @@
 #![cfg(unix)]
+use ferryx_lib::daemon::client::DaemonClient;
+use ferryx_lib::daemon::server::DaemonServer;
 use ferryx_lib::ipc::{
     cmd_project_branches, cmd_project_initial, cmd_project_register, derive_workspace_id,
     initial_project, IpcErrorCode, ProjectBranchesRequest, RegisterProjectRequest,
@@ -8,9 +10,7 @@ use ferryx_lib::terminal::{
     load_terminal_preferences_from_path, parse_ghostty_config, TerminalPreferencesSource,
     TerminalPreferencesStatus, DEFAULT_TERMINAL_FONT_FAMILY,
 };
-use ferryx_lib::daemon::client::DaemonClient;
-use ferryx_lib::daemon::server::DaemonServer;
-use ferryx_lib::worktree::{run_git, WorkspaceRegistry};
+use ferryx_lib::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
@@ -292,9 +292,13 @@ async fn project_registration_is_idempotent_for_the_same_workspace_and_root() {
         repo_path: repo.path().to_path_buf(),
     };
 
-    let first = cmd_project_register(daemon_state.clone(), registry_state.clone(), request.clone())
-        .await
-        .expect("first registration");
+    let first = cmd_project_register(
+        daemon_state.clone(),
+        registry_state.clone(),
+        request.clone(),
+    )
+    .await
+    .expect("first registration");
     let repeated = cmd_project_register(daemon_state, registry_state, request)
         .await
         .expect("same project registration");
@@ -502,8 +506,61 @@ fn workspace_ids_derive_safely_from_repository_folder_names() {
     }
 }
 
+#[test]
+fn foreign_identity_ws_id_cannot_escape_the_registered_repo_root() {
+    let repo = setup_git_project();
+    let registry = WorkspaceRegistry::new();
+    registry
+        .register("workspace-a", repo.path())
+        .expect("register workspace-a");
+
+    // A ws_id that does not match the registered workspace ID is accepted by
+    // design (worktrees created under a previous ID must stay resolvable), but
+    // it must never resolve a path outside the registered root.
+    for hostile in ["../../etc", "..", "a/b", "-x"] {
+        let identity = WorktreeIdentity {
+            ws_id: hostile.to_string(),
+            slug: "task".into(),
+        };
+        match registry.target_path("workspace-a", &identity) {
+            Ok(path) => panic!("hostile ws_id {hostile:?} produced a path: {path:?}"),
+            Err(_) => {}
+        }
+    }
+
+    let benign = WorktreeIdentity {
+        ws_id: "previous-id".into(),
+        slug: "task".into(),
+    };
+    let path = registry
+        .target_path("workspace-a", &benign)
+        .expect("a differently-named ws_id still resolves inside the root");
+    let root = std::fs::canonicalize(repo.path()).expect("canonical root");
+    assert!(
+        path.starts_with(&root),
+        "resolved path {path:?} escaped root {root:?}"
+    );
+}
+
+#[test]
+fn registry_binds_one_workspace_id_per_canonical_root() {
+    let repo = TempDir::new().expect("repo tempdir");
+    let registry = WorkspaceRegistry::new();
+
+    let first = registry
+        .register_unique_root("first", repo.path())
+        .expect("first registration succeeds");
+    let second = registry
+        .register_unique_root("second", repo.path())
+        .expect("a second registration resolves to the existing owner");
+
+    assert_eq!(first, "first");
+    assert_eq!(second, "first", "a canonical root must not gain a second ID");
+    assert_eq!(registry.list().len(), 1);
+}
+
 #[tokio::test]
-async fn project_registration_rejects_non_git_roots_and_unregistered_branch_queries() {
+async fn project_registration_accepts_non_git_roots_and_rejects_unregistered_branch_queries() {
     let non_repo = TempDir::new().expect("non-repo tempdir");
     let daemon = spawn_test_daemon().await;
     let registry = WorkspaceRegistry::new();
@@ -515,17 +572,30 @@ async fn project_registration_rejects_non_git_roots_and_unregistered_branch_quer
     let registry_state = app.state::<WorkspaceRegistry>();
     let daemon_state = app.state::<Arc<DaemonClient>>();
 
-    let error = cmd_project_register(
+    // Plain (non-Git) folders register as terminal-only workspaces.
+    let registered = cmd_project_register(
         daemon_state,
         registry_state.clone(),
         RegisterProjectRequest {
-            workspace_id: "bad-project".into(),
+            workspace_id: "plain-project".into(),
             repo_path: non_repo.path().to_path_buf(),
         },
     )
     .await
-    .expect_err("non-Git roots must be rejected");
-    assert_eq!(error.code, IpcErrorCode::InvalidRepoRoot);
+    .expect("plain folders register successfully");
+    assert_eq!(registered.git_root, None);
+
+    // Plain workspaces have no branches; the dialog must receive an empty list
+    // instead of a raw git failure.
+    let branches = cmd_project_branches(
+        registry_state.clone(),
+        ProjectBranchesRequest {
+            workspace_id: "plain-project".into(),
+        },
+    )
+    .await
+    .expect("plain workspaces report zero branches");
+    assert!(branches.is_empty());
 
     let error = cmd_project_branches(
         registry_state,
@@ -536,4 +606,94 @@ async fn project_registration_rejects_non_git_roots_and_unregistered_branch_quer
     .await
     .expect_err("unregistered projects must not accept raw branch queries");
     assert_eq!(error.code, IpcErrorCode::WorkspaceNotFound);
+}
+
+#[test]
+fn ghostty_theme_resolution_merges_palette_prefers_dark_and_yields_to_explicit_colors() {
+    let temp = TempDir::new().expect("tempdir");
+    let themes = temp.path().join("ghostty").join("themes");
+    std::fs::create_dir_all(&themes).expect("create theme dir");
+    std::fs::write(
+        themes.join("ferryx-test-theme"),
+        "palette = 0=#111111\npalette = 1=#222222\nbackground = #303030\nforeground = #f0f0f0\ncursor-color = #abcdef\n",
+    )
+    .expect("write theme");
+    std::fs::write(themes.join("Bright Day"), "background = #ffffff\n").expect("write light theme");
+    std::fs::write(themes.join("Deep Night"), "background = #101010\n").expect("write dark theme");
+
+    let named_path = temp.path().join("config-named");
+    std::fs::write(
+        &named_path,
+        "theme = ferryx-test-theme\nbackground = #000000\n",
+    )
+    .expect("write named-theme config");
+    let dual_path = temp.path().join("config-dual");
+    std::fs::write(&dual_path, "theme = light:Bright Day,dark:Deep Night\n")
+        .expect("write dual-theme config");
+
+    // Serialized inside one test: XDG_CONFIG_HOME is process-global, so parallel tests would race.
+    let previous = std::env::var_os("XDG_CONFIG_HOME");
+    std::env::set_var("XDG_CONFIG_HOME", temp.path());
+    let named = load_terminal_preferences_from_path(&named_path);
+    let dual = load_terminal_preferences_from_path(&dual_path);
+    match previous {
+        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+
+    assert_eq!(named.theme.black, "#111111");
+    assert_eq!(named.theme.red, "#222222");
+    assert_eq!(named.theme.foreground, "#f0f0f0");
+    assert_eq!(named.theme.cursor, "#abcdef");
+    assert_eq!(
+        named.theme.background, "#000000",
+        "explicit config colors must override theme colors"
+    );
+
+    assert_eq!(
+        dual.theme.background, "#101010",
+        "the dark variant applies to the dark terminal surface"
+    );
+}
+
+#[test]
+fn local_overrides_replace_imported_font_and_option_as_alt() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = temp.path().join("config");
+    std::fs::write(
+        &config_path,
+        "font-family = MesloLGS NF\nfont-size = 13\nmacos-option-as-alt = true\n",
+    )
+    .expect("write config");
+    let imported = load_terminal_preferences_from_path(&config_path);
+    assert_eq!(imported.font_size, 13.0);
+    assert!(imported.macos_option_as_alt);
+
+    let effective = ferryx_lib::terminal::apply_terminal_preference_overrides(
+        &imported,
+        &ferryx_lib::terminal::TerminalPreferenceOverrides {
+            font_family: Some("JetBrains Mono".into()),
+            font_size: Some(17.0),
+            macos_option_as_alt: Some(false),
+        },
+    );
+    assert_eq!(effective.font_family, "JetBrains Mono");
+    assert_eq!(effective.font_size, 17.0);
+    assert!(!effective.macos_option_as_alt);
+
+    let untouched = ferryx_lib::terminal::apply_terminal_preference_overrides(
+        &imported,
+        &ferryx_lib::terminal::TerminalPreferenceOverrides::default(),
+    );
+    assert_eq!(untouched, imported);
+
+    let rejected = ferryx_lib::terminal::apply_terminal_preference_overrides(
+        &imported,
+        &ferryx_lib::terminal::TerminalPreferenceOverrides {
+            font_family: Some("   ".into()),
+            font_size: Some(0.0),
+            macos_option_as_alt: None,
+        },
+    );
+    assert_eq!(rejected, imported, "blank/non-positive overrides are ignored");
 }

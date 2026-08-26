@@ -827,7 +827,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   return (
     <div
       ref={droppable.setNodeRef}
-      className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal transition-all ${
+      className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal ${
         droppable.isOver ? "ring-2 ring-primary/80 ring-inset" : ""
       }`}
       data-testid="pane-leaf"
@@ -863,7 +863,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         ref={draggable.setNodeRef}
         {...draggable.attributes}
         {...draggable.listeners}
-        className={`absolute inset-x-0 top-0 z-30 flex h-3 items-center justify-end overflow-visible border-b border-border/30 bg-[#4b4b4b] px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
+        className={`absolute inset-x-0 top-0 z-30 flex h-3 items-center justify-end overflow-visible border-b border-border/30 bg-background/85 backdrop-blur-md px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
           isHoveredTop ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
         } ${draggable.isDragging ? "opacity-30" : ""}`}
         data-testid="pane-toolbar"

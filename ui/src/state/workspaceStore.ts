@@ -5,7 +5,6 @@ import { classifyTerminalTitleActivity, formatTabLabelFromTitle, normalizeTermin
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
 import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
-import { terminalHostManager } from "../lib/terminalHostManager";
 import { worktreeIdentity } from "../lib/types";
 import type {
   ActiveAgent,
@@ -26,6 +25,7 @@ import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
 
 export type WorkspaceState = {
+  workspaceId?: string;
   worktrees: Worktree[];
   activeWorktreePath: string | null;
   sessions: Record<string, TerminalSession>;
@@ -64,6 +64,7 @@ export {
 } from "./hmrWorkspaceState";
 
 import { getHmrWorkspaceState, setHmrWorkspaceState } from "./hmrWorkspaceState";
+import { getWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 
 export type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
@@ -123,7 +124,7 @@ export type WorkspaceAction =
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
-  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string }
+  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
   | { type: "MARK_TAB_UNREAD"; tabId: string }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
@@ -153,21 +154,34 @@ export function useWorkspaceStore({
   if (!initialRef.current) {
     initialRef.current = initWorkspaceState({ workspaceId, initialWorktrees });
   }
-  const recoveredFromHmr = initialRef.current.recoveredFromHmr;
-
   const [state, reactDispatch] = useReducer(workspaceReducer, initialRef.current.state);
   const stateRef = useRef(state);
   stateRef.current = state;
   const spawningSessionIdsRef = useRef(new Set<string>());
+  const mountedWorkspaceIdRef = useRef(workspaceId);
+  // Provenance belongs to the workspace currently mounted; keeping the first
+  // one would make restore pick the wrong HMR-vs-disk path after a switch.
+  const recoveredFromHmrRef = useRef(initialRef.current.recoveredFromHmr);
+  if (mountedWorkspaceIdRef.current !== workspaceId) {
+    setWorkspaceSnapshot(mountedWorkspaceIdRef.current, stateRef.current);
+    mountedWorkspaceIdRef.current = workspaceId;
+    const swapped = initWorkspaceState({ workspaceId, initialWorktrees });
+    stateRef.current = swapped.state;
+    recoveredFromHmrRef.current = swapped.recoveredFromHmr;
+    reactDispatch({ type: "RESTORE_WORKSPACE", state: swapped.state });
+  }
+  const recoveredFromHmr = recoveredFromHmrRef.current;
 
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
       const nextState = workspaceReducer(stateRef.current, action);
       stateRef.current = nextState;
-      setHmrWorkspaceState(workspaceId, nextState);
+      const owningWorkspaceId = mountedWorkspaceIdRef.current;
+      setHmrWorkspaceState(owningWorkspaceId, nextState);
+      setWorkspaceSnapshot(owningWorkspaceId, nextState);
       reactDispatch(action);
     },
-    [workspaceId],
+    [],
   );
 
   useEffect(() => {
@@ -234,6 +248,15 @@ export function useWorkspaceStore({
     async (worktree: Worktree, label?: string, backendSessionIdOverride?: string) => {
       const capturedWorktreePath = worktree.path;
       const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride);
+      // The active project can change while the spawn is in flight; landing this
+      // tab now would inject one project's worktree into another's state, and
+      // dropping it silently would orphan the backend PTY we just created.
+      if (mountedWorkspaceIdRef.current !== workspaceId) {
+        if (backendSessionIdOverride === undefined) {
+          await closeBackendSession(binding.session, services);
+        }
+        return null;
+      }
       if (!stateRef.current.worktrees.some((candidate) => candidate.path === capturedWorktreePath)) {
         dispatch({ type: "SET_WORKTREES", worktrees: [...stateRef.current.worktrees, worktree] });
       }
@@ -241,7 +264,7 @@ export function useWorkspaceStore({
       dispatch({ type: "SELECT_WORKTREE", path: capturedWorktreePath });
       return binding.tab.id;
     },
-    [createSpawnedTab, dispatch],
+    [createSpawnedTab, dispatch, services, workspaceId],
   );
 
   const ensureSessionBackends = useCallback(
@@ -269,6 +292,12 @@ export function useWorkspaceStore({
               worktree: session.worktree,
               cwd: session.cwd ?? session.worktreePath,
             });
+            // Recovery spawns can outlive a project switch; rebinding now would
+            // point another project's session at this PTY.
+            if (mountedWorkspaceIdRef.current !== workspaceId) {
+              await closeBackendSession({ ...session, backendSessionId }, services);
+              return;
+            }
             dispatch({
               type: "REBIND_SESSION_BACKEND",
               sessionId,
@@ -344,30 +373,15 @@ export function useWorkspaceStore({
       const sourceSession = snapshot.sessions[sourceLocalSessionId];
       if (!sourceSession) return;
 
-      await services.ensureTerminalEvents();
-      let inheritedCwd = sourceSession.cwd;
-      if (sourceSession.backendSessionId) {
-        try {
-          inheritedCwd = (await services.getTerminalCwd(sourceSession.backendSessionId)) ?? sourceSession.cwd;
-        } catch {
-          inheritedCwd = sourceSession.cwd;
-        }
-      }
-
-      const backendSessionId = await spawnTerminalForLogicalAction(services, {
-        workspaceId,
-        worktree: sourceSession.worktree,
-        cwd: inheritedCwd,
-      });
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
       const session: TerminalSession = {
         id: localSessionId,
-        cwd: inheritedCwd,
+        cwd: sourceSession.cwd,
         worktreePath: sessionWorktreePath(sourceSession),
         workspaceId: sourceSession.workspaceId || workspaceId,
         worktree: sourceSession.worktree,
-        backendSessionId,
+        backendSessionId: null,
         lifecycle: "working",
       };
 
@@ -381,9 +395,41 @@ export function useWorkspaceStore({
         session,
       });
 
-      if (!stateRef.current.sessions[localSessionId]) {
-        terminalEventBus.clearSession(backendSessionId);
-        await services.closeTerminal(backendSessionId).catch(() => undefined);
+      let backendSessionId: string | null = null;
+      try {
+        await services.ensureTerminalEvents();
+        let inheritedCwd = sourceSession.cwd;
+        if (sourceSession.backendSessionId) {
+          try {
+            inheritedCwd = (await services.getTerminalCwd(sourceSession.backendSessionId)) ?? sourceSession.cwd;
+          } catch {
+            inheritedCwd = sourceSession.cwd;
+          }
+        }
+
+        backendSessionId = await spawnTerminalForLogicalAction(services, {
+          workspaceId,
+          worktree: sourceSession.worktree,
+          cwd: inheritedCwd,
+        });
+
+        if (stateRef.current.sessions[localSessionId]) {
+          dispatch({
+            type: "REBIND_SESSION_BACKEND",
+            sessionId: localSessionId,
+            backendSessionId,
+            cwd: inheritedCwd,
+          });
+        } else {
+          terminalEventBus.clearSession(backendSessionId);
+          await services.closeTerminal(backendSessionId).catch(() => undefined);
+        }
+      } catch (error) {
+        if (backendSessionId) {
+          terminalEventBus.clearSession(backendSessionId);
+          await services.closeTerminal(backendSessionId).catch(() => undefined);
+        }
+        throw error;
       }
     },
     [dispatch, services, workspaceId],
@@ -453,27 +499,15 @@ export function useWorkspaceStore({
       }
 
       const disposableSessions = getDisposableSessionsForTab(snapshot, tabId);
-      const tabSessionIds = getTabSessionIds(snapshot, tabId);
-
       if (snapshot.layout.tabs.length === 1) {
         await Promise.all(
           disposableSessions.map((session) => closeBackendSessionAndWait(session, services)),
         );
-        for (const sessionId of tabSessionIds) {
-          if (!isSessionReferencedOutsideTab(snapshot, sessionId, tabId)) {
-            terminalHostManager.destroy(sessionId);
-          }
-        }
         dispatch({ type: "CLOSE_TAB", tabId });
         return;
       }
 
       dispatch({ type: "CLOSE_TAB", tabId });
-      for (const sessionId of tabSessionIds) {
-        if (!isSessionReferencedOutsideTab(snapshot, sessionId, tabId)) {
-          terminalHostManager.destroy(sessionId);
-        }
-      }
       await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services)));
     },
     [dispatch, services],
@@ -493,7 +527,6 @@ export function useWorkspaceStore({
       const closingSession = closingSessionId ? snapshot.sessions[closingSessionId] : undefined;
       dispatch({ type: "CLOSE_PANE", tabId, leafId });
       if (closingSessionId && !isSessionReferenced(stateRef.current, closingSessionId)) {
-        terminalHostManager.destroy(closingSessionId);
         await closeBackendSession(closingSession, services);
       }
     },
@@ -547,9 +580,6 @@ export function useWorkspaceStore({
       const validWorktreePaths = new Set(worktrees.map((worktree) => worktree.path));
       const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(sessionWorktreePath(session)));
       dispatch({ type: "SET_WORKTREES", worktrees });
-      for (const session of staleSessions) {
-        terminalHostManager.destroy(session.id);
-      }
       await Promise.allSettled(staleSessions.map((session) => closeBackendSession(session, services)));
     },
     [dispatch, services],
@@ -611,6 +641,13 @@ export function useWorkspaceStore({
         url,
         visible: true,
       });
+      // Landing this tab after a project switch would attach one project's
+      // browser to another's layout, and dropping it silently would orphan the
+      // webview we just created.
+      if (mountedWorkspaceIdRef.current !== workspaceId) {
+        await closeBrowser(browserState.browserId).catch(() => undefined);
+        return null;
+      }
 
       const tabId = createId("tab");
       const browserTab: BrowserTab = {
@@ -807,13 +844,18 @@ function initWorkspaceState({
 }): { state: WorkspaceState; recoveredFromHmr: boolean } {
   const hmrState = getHmrWorkspaceState(workspaceId);
   if (hmrState) {
-    return { state: hmrState, recoveredFromHmr: true };
+    return { state: { ...hmrState, workspaceId }, recoveredFromHmr: true };
   }
-  return { state: createInitialState(initialWorktrees), recoveredFromHmr: false };
+  const snapshot = getWorkspaceSnapshot(workspaceId);
+  if (snapshot) {
+    return { state: { ...snapshot, workspaceId }, recoveredFromHmr: false };
+  }
+  return { state: createInitialState(initialWorktrees, workspaceId), recoveredFromHmr: false };
 }
 
-function createInitialState(worktrees: Worktree[]): WorkspaceState {
+function createInitialState(worktrees: Worktree[], workspaceId?: string): WorkspaceState {
   return {
+    workspaceId,
     worktrees,
     activeWorktreePath: worktrees[0]?.path ?? null,
     sessions: {},
@@ -1221,6 +1263,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           [action.sessionId]: {
             ...session,
             backendSessionId: action.backendSessionId,
+            cwd: action.cwd ?? session.cwd,
             lifecycle: "running",
           },
         },

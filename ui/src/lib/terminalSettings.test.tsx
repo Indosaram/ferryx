@@ -4,11 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
   getTerminalPreferences: vi.fn(),
+  applyTerminalOverrides: vi.fn(),
 }));
 
 vi.mock("./tauri", () => ({
   DEFAULT_TERMINAL_FONT_STACK: 'MesloLGS NF, "Noto Sans KR", monospace',
   getTerminalPreferences: native.getTerminalPreferences,
+  applyTerminalOverrides: native.applyTerminalOverrides,
 }));
 
 import {
@@ -16,8 +18,8 @@ import {
   TERMINAL_BACKGROUND_STORAGE_KEY,
   TERMINAL_SETTINGS_STORAGE_KEY,
   applyCachedTerminalBackground,
-  applyTerminalSettings,
   loadTerminalSettings,
+  resetTerminalPreferencesCache,
   resolveTerminalSettings,
   syncTerminalBackground,
   useTerminalSettings,
@@ -62,6 +64,9 @@ beforeEach(() => {
   document.documentElement.style.removeProperty("--terminal");
   native.getTerminalPreferences.mockReset();
   native.getTerminalPreferences.mockResolvedValue(ghosttyPreferences);
+  native.applyTerminalOverrides.mockReset();
+  native.applyTerminalOverrides.mockResolvedValue(ghosttyPreferences);
+  resetTerminalPreferencesCache();
 });
 
 describe("terminal settings", () => {
@@ -118,22 +123,7 @@ describe("terminal settings", () => {
     });
   });
 
-  it("applies effective font, option-as-alt, font size, scrollback, and theme to live xterm options", () => {
-    const terminal = {
-      options: { fontFamily: DEFAULT_TERMINAL_FONT_STACK, macOptionIsMeta: false, fontSize: 13, scrollback: 10_000 },
-    };
-    const settings = resolveTerminalSettings(DEFAULT_TERMINAL_SETTINGS, ghosttyPreferences);
-    applyTerminalSettings(terminal, settings);
-    expect(terminal.options).toMatchObject({
-      fontFamily: "Noto Sans KR",
-      macOptionIsMeta: true,
-      fontSize: 13,
-      scrollback: 10_000,
-      cursorStyle: "block",
-    });
-  });
-
-  it("restores the cached xterm background before terminal settings finish loading", () => {
+  it("restores the cached terminal background before terminal settings finish loading", () => {
     localStorage.setItem(TERMINAL_BACKGROUND_STORAGE_KEY, "#282c34");
 
     expect(applyCachedTerminalBackground()).toBe("#282c34");
@@ -152,5 +142,43 @@ describe("terminal settings", () => {
 
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#282c34"));
     expect(localStorage.getItem(TERMINAL_BACKGROUND_STORAGE_KEY)).toBe("#282c34");
+  });
+
+  it("pushes local font overrides to the native runtime that owns the renderer", async () => {
+    const { result } = renderHook(() => useTerminalSettings());
+    await waitFor(() => expect(native.applyTerminalOverrides).toHaveBeenCalled());
+    expect(native.applyTerminalOverrides).toHaveBeenLastCalledWith({
+      fontFamily: null,
+      fontSize: null,
+      macosOptionAsAlt: null,
+    });
+
+    act(() => result.current.updateSettings({ fontSize: 17 }));
+    await waitFor(() =>
+      expect(native.applyTerminalOverrides).toHaveBeenLastCalledWith({
+        fontFamily: null,
+        fontSize: 17,
+        macosOptionAsAlt: null,
+      }),
+    );
+
+    const callsAfterChange = native.applyTerminalOverrides.mock.calls.length;
+    act(() => result.current.updateSettings({ fontSize: 17 }));
+    await waitFor(() => expect(result.current.settings.fontSize).toBe(17));
+    expect(native.applyTerminalOverrides).toHaveBeenCalledTimes(callsAfterChange);
+  });
+
+  it("reports a font-size-only override as a local override", () => {
+    const resolved = resolveTerminalSettings(
+      { ...DEFAULT_TERMINAL_SETTINGS, fontSize: 17 },
+      ghosttyPreferences,
+    );
+
+    expect(resolved).toMatchObject({
+      fontSize: 17,
+      fontSizeSource: "local",
+      fontFamilySource: "ghostty",
+      macosOptionAsAltSource: "ghostty",
+    });
   });
 });

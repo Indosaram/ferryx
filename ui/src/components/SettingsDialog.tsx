@@ -120,7 +120,10 @@ function SettingsDialogBody({
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [onClose]);
 
-  const hasLocalTerminalOverride = settings.fontFamilySource === "local" || settings.macosOptionAsAltSource === "local";
+  const hasLocalTerminalOverride =
+    settings.fontFamilySource === "local" ||
+    settings.macosOptionAsAltSource === "local" ||
+    settings.fontSizeSource === "local";
   const terminalSource = hasLocalTerminalOverride
     ? "Local override"
     : nativePreferences.source === "ghostty" && nativePreferences.status === "imported"
@@ -180,7 +183,7 @@ function SettingsDialogBody({
               onScrollback={(scrollback) => updateSettings({ scrollback })}
               onOptionAsAlt={(macosOptionAsAlt) => updateSettings({ macosOptionAsAlt })}
               onUseImported={() => {
-                updateSettings({ fontFamily: null, macosOptionAsAlt: null });
+                updateSettings({ fontFamily: null, macosOptionAsAlt: null, fontSize: null });
                 void refreshNativePreferences();
               }}
             />
@@ -458,7 +461,7 @@ function TerminalSettings({
         <label className="flex items-center justify-between gap-4 border-y border-border py-3 text-[11px]">
           <div>
             <div className="font-medium text-foreground">macOS Option as Alt</div>
-            <div className="mt-0.5 text-[10px] text-muted-foreground">Maps the Option key to xterm Meta/Alt behavior.</div>
+            <div className="mt-0.5 text-[10px] text-muted-foreground">Maps the Option key to terminal Meta/Alt behavior.</div>
           </div>
           <input
             aria-label="macOS Option as Alt"
@@ -495,7 +498,7 @@ function ShortcutSettings({ isMac }: { isMac: boolean }) {
       <SettingsHeading
         icon={<Keyboard />}
         title="Keyboard Shortcuts"
-        description="Only registered modifier chords are intercepted by the shell. Ordinary terminal typing and Ctrl-C remain with xterm."
+        description="Only registered modifier chords are intercepted by the shell. Ordinary terminal typing and Ctrl-C remain with the terminal."
       />
       <h2 id="settings-shortcuts-heading" className="sr-only">Keyboard Shortcuts</h2>
 

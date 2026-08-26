@@ -22,6 +22,13 @@ type UseWorkspaceRuntimeOptions = {
   activeWorktreePath: string | null;
   syncWorktrees: (worktrees: Worktree[]) => Promise<void>;
   ensureTabForWorktree: (worktree: Worktree, options?: { allowCreate?: boolean }) => Promise<string | null>;
+  /// Synthesized primary "worktree" for plain (non-Git) workspaces whose root
+  /// is the project folder itself. Used when the backend lists no worktrees.
+  plainRootWorktree?: Worktree | null;
+  /// Workspace ID the backend registry has accepted. Listing worktrees before
+  /// registration completes fails with WORKSPACE_NOT_FOUND and leaves the
+  /// sidebar empty, so syncing waits for this to match `workspaceId`.
+  registeredWorkspaceId?: string | null;
   services?: WorkspaceRuntimeServices;
 };
 
@@ -47,26 +54,59 @@ export function useWorkspaceRuntime({
   activeWorktreePath,
   syncWorktrees,
   ensureTabForWorktree,
+  plainRootWorktree = null,
+  registeredWorkspaceId,
   services = defaultServices,
 }: UseWorkspaceRuntimeOptions) {
   const [runtimeError, setRuntimeError] = useState<StructuredIpcError | null>(null);
   const activeWorktreePathRef = useRef(activeWorktreePath);
-  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshInFlightRef = useRef<{ workspaceId: string; promise: Promise<void> } | null>(null);
+  // A->B->A can leave an older refresh for the same workspace still pending;
+  // only the newest generation per workspace may sync its result.
+  const refreshGenerationRef = useRef(new Map<string, number>());
+  const currentWorkspaceIdRef = useRef(workspaceId);
+  currentWorkspaceIdRef.current = workspaceId;
   activeWorktreePathRef.current = activeWorktreePath;
 
   const reportRuntimeError = useCallback((error: unknown) => {
     setRuntimeError(toIpcError(error));
   }, []);
 
+  // Callers may build this per render; depending on the object identity would
+  // re-run the initialize effect (listener re-registration + refresh) forever.
+  const plainRootPath = plainRootWorktree?.path ?? null;
+  const plainRootRef = useRef(plainRootWorktree);
+  plainRootRef.current = plainRootWorktree;
+
   const refreshWorktrees = useCallback(
     (options?: { allowCreate?: boolean }) => {
-      if (refreshInFlightRef.current) return refreshInFlightRef.current;
+      // Dedupe only within one workspace: a refresh started for the previous
+      // project must never be handed to its replacement, and its result must
+      // never be synced into the workspace that replaced it.
+      const inFlight = refreshInFlightRef.current;
+      if (inFlight && inFlight.workspaceId === workspaceId) return inFlight.promise;
+
+      const generation = (refreshGenerationRef.current.get(workspaceId) ?? 0) + 1;
+      refreshGenerationRef.current.set(workspaceId, generation);
+      const isCurrent = () =>
+        currentWorkspaceIdRef.current === workspaceId &&
+        refreshGenerationRef.current.get(workspaceId) === generation;
 
       const refreshPromise = (async () => {
         try {
           const listed = await services.listWorktrees(workspaceId);
-          const worktrees = listed.length > 0 || services.isTauriRuntime() ? listed : [PREVIEW_WORKTREE];
+          if (!isCurrent()) return;
+          let worktrees = listed;
+          if (worktrees.length === 0) {
+            const plainRoot = plainRootRef.current;
+            if (plainRoot) {
+              worktrees = [plainRoot];
+            } else if (!services.isTauriRuntime()) {
+              worktrees = [PREVIEW_WORKTREE];
+            }
+          }
           await syncWorktrees(worktrees);
+          if (!isCurrent()) return;
           const preferred = worktrees.find((worktree) => worktree.path === activeWorktreePathRef.current) ?? worktrees[0];
           if (preferred) {
             if (options && options.allowCreate !== undefined) {
@@ -80,16 +120,20 @@ export function useWorkspaceRuntime({
           reportRuntimeError(error);
         }
       })().finally(() => {
-        refreshInFlightRef.current = null;
+        if (refreshInFlightRef.current?.promise === refreshPromise) {
+          refreshInFlightRef.current = null;
+        }
       });
 
-      refreshInFlightRef.current = refreshPromise;
+      refreshInFlightRef.current = { workspaceId, promise: refreshPromise };
       return refreshPromise;
     },
-    [ensureTabForWorktree, reportRuntimeError, services, syncWorktrees, workspaceId],
+    [ensureTabForWorktree, plainRootPath, reportRuntimeError, services, syncWorktrees, workspaceId],
   );
 
   useEffect(() => {
+    if (registeredWorkspaceId !== undefined && registeredWorkspaceId !== workspaceId) return;
+
     let disposed = false;
     let unlistenWorktreeChanged: (() => void) | undefined;
 
@@ -118,7 +162,7 @@ export function useWorkspaceRuntime({
       window.removeEventListener("focus", handleFocus);
       unlistenWorktreeChanged?.();
     };
-  }, [refreshWorktrees, reportRuntimeError, services]);
+  }, [refreshWorktrees, registeredWorkspaceId, reportRuntimeError, services, workspaceId]);
 
   return { runtimeError, refreshWorktrees, reportRuntimeError };
 }

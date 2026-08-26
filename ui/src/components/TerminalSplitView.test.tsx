@@ -8,11 +8,20 @@ import * as TerminalSplitViewModule from "./TerminalSplitView";
 import { TerminalSplitView } from "./TerminalSplitView";
 
 vi.mock("./TerminalPane", () => ({
-  TerminalPane: ({ session, searchOpen }: { session: TerminalSession; searchOpen?: boolean }) => (
+  TerminalPane: ({
+    session,
+    searchOpen,
+    headerHovered,
+  }: {
+    session: TerminalSession;
+    searchOpen?: boolean;
+    headerHovered?: boolean;
+  }) => (
     <div
       data-testid="terminal-pane"
       data-backend-session-id={session.backendSessionId ?? session.id}
       data-search-open={String(Boolean(searchOpen))}
+      data-header-hovered={String(Boolean(headerHovered))}
     />
   ),
 }));
@@ -92,6 +101,27 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(screen.getByRole("button", { name: "Split pane right" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Split pane down" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close split view" })).not.toBeInTheDocument();
+  });
+
+  it("does not pass header hover chrome-suppression signal to TerminalPane on top hover hotspot activation while revealing toolbar", () => {
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
+
+    const pane = screen.getByTestId("terminal-pane");
+    const hotspot = screen.getByTestId("pane-toolbar-hotspot");
+    const toolbar = screen.getByTestId("pane-toolbar");
+
+    expect(hotspot).toHaveClass("h-4");
+    expect(pane).toHaveAttribute("data-header-hovered", "false");
+    expect(toolbar).toHaveClass("pointer-events-none");
+
+    fireEvent.mouseEnter(hotspot);
+
+    expect(toolbar).toHaveClass("pointer-events-auto");
+    expect(pane).toHaveAttribute("data-header-hovered", "false");
+
+    fireEvent.mouseLeave(hotspot);
+    expect(toolbar).toHaveClass("pointer-events-none");
+    expect(pane).toHaveAttribute("data-header-hovered", "false");
   });
 
   it("keeps an empty tab bar usable when all tabs have been closed", () => {
@@ -465,5 +495,14 @@ describe("TerminalSplitView group and pane rendering", () => {
     // Move mouse below 16px (e.g. clientY = 150, relativeY = 50)
     fireEvent.mouseMove(paneLeaf, { clientY: 150 });
     expect(toolbar).toHaveClass("pointer-events-none");
+  });
+
+  it("applies drop feedback without transitioning pane layout", () => {
+    render(<TerminalSplitView layout={singleTabLayout()} sessions={{ "session-1": session("session-1", "backend-1") }} />);
+
+    const paneLeaf = screen.getByTestId("pane-leaf");
+    expect(paneLeaf).not.toHaveClass("transition-all");
+    expect(paneLeaf).not.toHaveClass("transition-[width]");
+    expect(paneLeaf).not.toHaveClass("transition-[height]");
   });
 });

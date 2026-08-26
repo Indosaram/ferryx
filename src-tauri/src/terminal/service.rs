@@ -56,13 +56,11 @@ impl TerminalService {
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
             while let Some(chunk) = pty_rx.recv().await {
-                let read_unix_micros =
-                    crate::terminal::metrics::take_pty_read_timestamp(&session_id_clone, chunk.len());
-                output_hub.publish_with_read_timestamp(
+                let read_unix_micros = crate::terminal::metrics::take_pty_read_timestamp(
                     &session_id_clone,
-                    chunk,
-                    read_unix_micros,
+                    chunk.len(),
                 );
+                output_hub.publish_with_read_timestamp(&session_id_clone, chunk, read_unix_micros);
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id_clone);
             output_hub.remove_session(&session_id_clone);

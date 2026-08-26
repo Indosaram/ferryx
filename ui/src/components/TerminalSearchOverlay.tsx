@@ -1,18 +1,24 @@
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import type { TerminalInstance } from "../lib/terminalHostManager";
 import { IconButton } from "./ui/IconButton";
 
 export type TerminalSearchOverlayProps = {
-  instance?: TerminalInstance;
+  sessionId?: string;
   onClose: () => void;
+  onFocusTerminal?: () => void;
 };
 
-export function TerminalSearchOverlay({ instance, onClose }: TerminalSearchOverlayProps) {
+export function TerminalSearchOverlay({
+  sessionId,
+  onClose,
+  onFocusTerminal,
+}: TerminalSearchOverlayProps) {
   const [query, setQuery] = useState("");
   const [resultIndex, setResultIndex] = useState<number | null>(null);
   const [resultCount, setResultCount] = useState<number | null>(null);
+  const [nativeMatches, setNativeMatches] = useState<Array<[number, number, number]>>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -20,43 +26,80 @@ export function TerminalSearchOverlay({ instance, onClose }: TerminalSearchOverl
     inputRef.current?.select();
   }, []);
 
-  useEffect(() => {
-    if (!instance?.searchAddon?.onDidChangeResults) return;
-    const disposable = instance.searchAddon.onDidChangeResults((e) => {
-      setResultIndex(e.resultIndex);
-      setResultCount(e.resultCount);
-    });
-    return () => {
-      disposable?.dispose?.();
-    };
-  }, [instance]);
+  const performNativeSearch = useCallback((searchQuery: string) => {
+    if (!sessionId || !isTauri() || !searchQuery) {
+      setResultIndex(null);
+      setResultCount(searchQuery ? 0 : null);
+      setNativeMatches([]);
+      return;
+    }
+
+    void invoke<Array<[number, number, number]>>("cmd_native_terminal_search", {
+      sessionId,
+      query: searchQuery,
+      caseSensitive: false,
+    })
+      .then((matches) => {
+        if (Array.isArray(matches)) {
+          setNativeMatches(matches);
+          setResultCount(matches.length);
+          setResultIndex(matches.length > 0 ? 0 : null);
+        } else {
+          setNativeMatches([]);
+          setResultCount(0);
+          setResultIndex(null);
+        }
+      })
+      .catch(() => {
+        setNativeMatches([]);
+        setResultCount(0);
+        setResultIndex(null);
+      });
+  }, [sessionId]);
 
   const handleFindNext = useCallback(() => {
-    if (!query || !instance?.searchAddon) return;
-    instance.searchAddon.findNext(query, { incremental: false });
-  }, [instance, query]);
+    if (!query) return;
+    if (sessionId) {
+      if (nativeMatches.length > 0) {
+        setResultIndex((prev) => {
+          const current = prev ?? 0;
+          return (current + 1) % nativeMatches.length;
+        });
+      } else {
+        performNativeSearch(query);
+      }
+    }
+  }, [nativeMatches.length, performNativeSearch, query, sessionId]);
 
   const handleFindPrevious = useCallback(() => {
-    if (!query || !instance?.searchAddon) return;
-    instance.searchAddon.findPrevious(query, { incremental: false });
-  }, [instance, query]);
+    if (!query) return;
+    if (sessionId) {
+      if (nativeMatches.length > 0) {
+        setResultIndex((prev) => {
+          const current = prev ?? 0;
+          return (current - 1 + nativeMatches.length) % nativeMatches.length;
+        });
+      } else {
+        performNativeSearch(query);
+      }
+    }
+  }, [nativeMatches.length, performNativeSearch, query, sessionId]);
 
   const handleQueryChange = (newQuery: string) => {
     setQuery(newQuery);
     if (!newQuery) {
-      instance?.searchAddon?.clearDecorations();
       setResultIndex(null);
       setResultCount(null);
-    } else {
-      instance?.searchAddon?.findNext(newQuery, { incremental: true });
+      setNativeMatches([]);
+    } else if (sessionId) {
+      performNativeSearch(newQuery);
     }
   };
 
   const handleClose = useCallback(() => {
-    instance?.searchAddon?.clearDecorations();
     onClose();
-    instance?.terminal?.focus();
-  }, [instance, onClose]);
+    onFocusTerminal?.();
+  }, [onClose, onFocusTerminal]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {

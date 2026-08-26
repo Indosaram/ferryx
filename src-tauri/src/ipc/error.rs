@@ -38,6 +38,7 @@ pub enum IpcErrorCode {
     PtyResizeError,
     PtyKillError,
     ChannelError,
+    NativeTerminalUnsupported,
     InternalError,
 }
 
@@ -66,6 +67,13 @@ impl IpcError {
 
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(IpcErrorCode::InternalError, message)
+    }
+
+    pub fn native_terminal_unsupported() -> Self {
+        Self::new(
+            IpcErrorCode::NativeTerminalUnsupported,
+            "Native terminal support is not compiled into this build (cargo feature `native-terminal` is disabled)",
+        )
     }
 }
 
@@ -148,6 +156,10 @@ impl From<WorktreeError> for IpcError {
                     .with_details(json!({ "reason": reason }))
             }
             WorktreeError::InvalidRepoRoot { path } => {
+                Self::new(IpcErrorCode::InvalidRepoRoot, message)
+                    .with_details(json!({ "path": path }))
+            }
+            WorktreeError::NotAGitRepository { path } => {
                 Self::new(IpcErrorCode::InvalidRepoRoot, message)
                     .with_details(json!({ "path": path }))
             }

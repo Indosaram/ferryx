@@ -49,7 +49,9 @@ if (!globalThis.cancelAnimationFrame) {
 
 const { beforeEach: setupBeforeEach } = await import("vitest");
 const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
+const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache");
 
 setupBeforeEach(() => {
   clearHmrWorkspaceState();
+  clearWorkspaceSnapshot();
 });

@@ -56,7 +56,7 @@ export type OscTitleScanResult = {
 
 /**
  * Extracts OSC 0/1/2 terminal titles from decoded PTY output while preserving an incomplete
- * sequence for the next chunk. This runs independently of xterm, so background/unmounted tabs
+ * sequence for the next chunk. This runs independently of the active terminal view, so background/unmounted tabs
  * still produce activity title updates.
  */
 export function scanTerminalOscTitles(text: string, carry = ""): OscTitleScanResult {

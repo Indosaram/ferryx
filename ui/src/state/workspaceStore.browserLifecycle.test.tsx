@@ -68,7 +68,9 @@ describe("useWorkspaceStore browser lifecycle", () => {
 
     let tabId = "";
     await act(async () => {
-      tabId = await result.current.createBrowserTab();
+      const created = await result.current.createBrowserTab();
+      if (created === null) throw new Error("expected createBrowserTab to return a tab id");
+      tabId = created;
     });
 
     expect(result.current.state.layout.tabs).toHaveLength(1);

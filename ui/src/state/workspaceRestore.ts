@@ -1,8 +1,10 @@
 import { useEffect } from "react";
 
-import { deserializeWorkspaceState } from "../lib/sessionPersistence";
+import { deserializeWorkspaceState, serializeWorkspaceState } from "../lib/sessionPersistence";
 import { isTauriRuntime, listTerminalSessions, loadSession } from "../lib/tauri";
 import { defaultTauriTransport } from "../lib/terminalTransport/tauriTransport";
+import { getHmrWorkspaceState } from "./hmrWorkspaceState";
+import { getWorkspaceSnapshot } from "./workspaceSnapshotCache";
 import type { WorkspaceState } from "./workspaceStore";
 
 export type WorkspaceRestoreStatus = "idle" | "loading" | "restored" | "failed";
@@ -15,6 +17,17 @@ export function getWorkspaceRestoreStatus(workspaceId: string): WorkspaceRestore
 
 export function setWorkspaceRestoreStatus(workspaceId: string, status: WorkspaceRestoreStatus): void {
   restoreStatusByWorkspace.set(workspaceId, status);
+}
+
+/**
+ * Switching back to a project must recover its tabs. When the in-memory snapshot
+ * for that workspace is gone (fresh mount, cleared cache), a previously
+ * "restored" workspace has to read from disk again instead of short-circuiting.
+ */
+export function reopenWorkspaceRestore(workspaceId: string): void {
+  if (restoreStatusByWorkspace.get(workspaceId) === "restored") {
+    restoreStatusByWorkspace.delete(workspaceId);
+  }
 }
 
 export function resetWorkspaceRestore(workspaceId?: string): void {
@@ -40,6 +53,7 @@ export type UseWorkspaceRestoreOptions = {
       }
     | null
   >;
+  enabled?: boolean;
 };
 
 export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null }>> {
@@ -65,13 +79,14 @@ export function useWorkspaceRestore({
   restoreWorkspace,
   loadSessionFn = loadSession,
   listLiveBackendSessionIdsFn = defaultListLiveBackendSessionIds,
+  enabled = true,
 }: UseWorkspaceRestoreOptions): WorkspaceRestoreStatus {
   useEffect(() => {
-    if (recoveredFromHmr) {
-      setWorkspaceRestoreStatus(workspaceId, "restored");
-      return;
-    }
+    if (!enabled) return;
 
+    if (!recoveredFromHmr && getWorkspaceSnapshot(workspaceId) === null) {
+      reopenWorkspaceRestore(workspaceId);
+    }
     const currentStatus = getWorkspaceRestoreStatus(workspaceId);
     if (currentStatus === "restored") return;
 
@@ -80,7 +95,21 @@ export function useWorkspaceRestore({
 
     async function runRestore() {
       try {
-        const session = (await loadSessionFn()) as any;
+        let session: any = null;
+        if (recoveredFromHmr) {
+          const hmrState = getHmrWorkspaceState(workspaceId);
+          if (!hmrState) {
+            setWorkspaceRestoreStatus(workspaceId, "restored");
+            return;
+          }
+          session = serializeWorkspaceState(
+            workspaceId,
+            hmrState.activeWorktreePath ?? "",
+            hmrState,
+          );
+        } else {
+          session = (await loadSessionFn()) as any;
+        }
         if (cancelled) return;
 
         if (!session) {
@@ -100,7 +129,18 @@ export function useWorkspaceRestore({
             Object.values(restoredState.worktreeLayouts ?? {}).some((l) => l.tabs.length > 0));
 
         if (hasRestoredTabs) {
-          restoreWorkspace(restoredState);
+          const stateToRestore = recoveredFromHmr
+            ? restoredState
+            : {
+                ...restoredState,
+                sessions: Object.fromEntries(
+                  Object.entries(restoredState.sessions).map(([id, sess]) => [
+                    id,
+                    { ...sess, lastOutputSequence: null },
+                  ]),
+                ),
+              };
+          restoreWorkspace(stateToRestore);
           setWorkspaceRestoreStatus(workspaceId, "restored");
           return;
         }
@@ -122,7 +162,7 @@ export function useWorkspaceRestore({
         setWorkspaceRestoreStatus(workspaceId, "idle");
       }
     };
-  }, [workspaceId, recoveredFromHmr, restoreWorkspace, loadSessionFn, listLiveBackendSessionIdsFn]);
+  }, [enabled, workspaceId, recoveredFromHmr, restoreWorkspace, loadSessionFn, listLiveBackendSessionIdsFn]);
 
   return getWorkspaceRestoreStatus(workspaceId);
 }

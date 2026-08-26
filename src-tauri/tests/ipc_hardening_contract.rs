@@ -24,11 +24,7 @@ fn setup_repo() -> TempDir {
     repo
 }
 
-async fn setup_test_daemon() -> (
-    TempDir,
-    Arc<DaemonClient>,
-    tokio::task::JoinHandle<()>,
-) {
+async fn setup_test_daemon() -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHandle<()>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("test_daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind unix listener");

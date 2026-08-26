@@ -137,10 +137,24 @@ fn git_error_command_log_escapes_control_characters() {
 
 #[test]
 fn worktree_manager_validates_repo_root_during_construction() {
-    let non_repo = TempDir::new().expect("non-repo tempdir");
-    let result = std::panic::catch_unwind(|| WorktreeManager::new(non_repo.path()));
+    // Nonexistent roots are rejected immediately.
+    let result = std::panic::catch_unwind(|| WorktreeManager::new("/definitely/not/a/real/path"));
     assert!(
         result.is_err(),
-        "invalid/non-Git repo roots must be rejected immediately"
+        "nonexistent repo roots must be rejected immediately"
     );
+
+    // Plain (non-Git) directories are accepted as terminal-only workspaces.
+    let non_repo = TempDir::new().expect("non-repo tempdir");
+    let manager = WorktreeManager::try_new(non_repo.path()).expect("plain folder is a valid root");
+    assert!(
+        !manager.is_git_backed(),
+        "plain folder must not be git-backed"
+    );
+
+    // Git repositories keep git-backed construction.
+    let repo = TempDir::new().expect("repo tempdir");
+    run_git(repo.path(), &["init"]).expect("git init");
+    let git_manager = WorktreeManager::try_new(repo.path()).expect("git repo is a valid root");
+    assert!(git_manager.is_git_backed());
 }

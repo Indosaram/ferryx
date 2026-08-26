@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ferryx/ferryx"
 homepage = "https://ferryx.app"
 edition = "2021"
+default-run = "ferryx"
 
 [lib]
 name = "ferryx_lib"
@@ -16,11 +17,29 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "ferryx"
 path = "src/main.rs"
 
+[[bin]]
+name = "native_terminal_renderer_poc"
+path = "src/bin/native_terminal_renderer_poc.rs"
+required-features = ["native-terminal"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = ["native-terminal"]
+native-terminal = [
+    "dep:wgpu",
+    "dep:raw-window-handle",
+    "dep:winit",
+    "dep:png",
+    "dep:bytemuck",
+    "dep:pollster",
+    "dep:fontdb",
+    "dep:ab_glyph",
+]
+
 [dependencies]
-tauri = { version = "2", features = ["test", "unstable"] }
+tauri = { version = "2", features = ["macos-private-api", "test", "unstable"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.43", features = ["full"] }
@@ -41,6 +60,12 @@ sha2 = "0.10"
 futures-util = "0.3"
 cookie = "0.18"
 time = "0.3"
+wgpu = { version = "24", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+winit = { version = "0.30", optional = true }
+png = { version = "0.17", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 rodio = { version = "0.22", default-features = false, features = [
@@ -51,6 +76,8 @@ rodio = { version = "0.22", default-features = false, features = [
     "vorbis",
     "mp4",
 ] }
+fontdb = { version = "0.16", optional = true }
+ab_glyph = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", features = ["exception"] }
@@ -59,12 +86,17 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSEvent",
     "NSApplication",
     "NSDockTile",
+    "NSView",
+    "NSWindow",
+    "NSResponder",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSBundle",
     "NSError",
     "NSString",
+    "NSGeometry",
+    "NSObject",
 ] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebView", "WKNavigation"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
@@ -73,6 +105,7 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNUserNotificationCenter",
     "UNNotificationSettings",
 ] }
+dispatch2 = "0.3"
 block2 = "0.6"
 
 [dev-dependencies]
