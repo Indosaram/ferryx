@@ -188,6 +188,9 @@ pub enum WorktreeError {
     #[error("Repository root invalid or not found at '{path}'")]
     InvalidRepoRoot { path: PathBuf },
 
+    #[error("'{path}' is not inside a git repository; worktree operations are unavailable")]
+    NotAGitRepository { path: PathBuf },
+
     #[error("Failed to parse git output: {0}")]
     ParseError(String),
 
