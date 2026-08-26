@@ -1,31 +1,19 @@
 name: Release Ferryx
 
+# Releases are cut exclusively by pushing a date-versioned tag: vYYYY.MM.DD, with an
+# optional same-day revision (vYYYY.MM.DD.N). There is no manual dispatch, so every
+# release corresponds to a tag in the history.
 'on':
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Release tag (e.g. v0.1.0; defaults to GITHUB_REF_NAME or v<package.json version>)'
-        required: false
-        type: string
-      draft:
-        description: 'Publish as Draft Release'
-        required: false
-        type: boolean
-        default: false
-      prerelease:
-        description: 'Publish as Pre-release'
-        required: false
-        type: boolean
-        default: false
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*'
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name || github.run_id }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -207,16 +195,8 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [ -n "${{ inputs.release_tag }}" ]; then
-            TAG="${{ inputs.release_tag }}"
-          elif [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG="${{ github.ref_name }}"
-          else
-            PKG_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
-            TAG="v${PKG_VER}"
-          fi
-          CLEAN_VER="${TAG#v}"
-          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+          CLEAN_VER="${GITHUB_REF_NAME#v}"
+          echo "version=${CLEAN_VER}" >> "$GITHUB_OUTPUT"
           echo "Building MSIX for version: ${CLEAN_VER}"
 
       - name: Compile Ferryx Release Binary
@@ -247,21 +227,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Determine Release Tag
-        id: version
-        shell: bash
-        run: |
-          if [ -n "${{ inputs.release_tag }}" ]; then
-            TAG="${{ inputs.release_tag }}"
-          elif [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG="${{ github.ref_name }}"
-          else
-            PKG_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
-            TAG="v${PKG_VER}"
-          fi
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Publishing release for tag: ${TAG}"
 
       - name: Download all platform artifacts
         uses: actions/download-artifact@v4
@@ -299,13 +264,13 @@ jobs:
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Ferryx ${{ steps.version.outputs.tag }}
-          draft: ${{ inputs.draft || false }}
-          prerelease: ${{ inputs.prerelease || false }}
+          tag_name: ${{ github.ref_name }}
+          name: Ferryx ${{ github.ref_name }}
+          draft: false
+          prerelease: false
           files: release-dist/*
           body: |
-            ## Ferryx ${{ steps.version.outputs.tag }}
+            ## Ferryx ${{ github.ref_name }}
 
             Ultra-lightweight workspace and AI agent launcher powered by Tauri v2 and Rust.
 

@@ -37,12 +37,20 @@ Write-Host "Output Dir     : $OutputDir"
 Write-Host "======================================================="
 
 # Normalize version for MSIX (must be Quad: Major.Minor.Patch.Revision)
+# Date versions carry zero-padded parts (2026.08.26); MSIX rejects leading zeros, so each
+# part is cast to an integer. A same-day revision (2026.08.26.2) becomes the quad revision
+# so two releases on one date never produce the same package version.
 $cleanVersion = $Version.Trim().TrimStart('v')
 $versionParts = $cleanVersion.Split('.')
-$major = if ($versionParts.Length -ge 1 -and $versionParts[0] -match '^\d+$') { $versionParts[0] } else { "0" }
-$minor = if ($versionParts.Length -ge 2 -and $versionParts[1] -match '^\d+$') { $versionParts[1] } else { "1" }
-$patch = if ($versionParts.Length -ge 3 -and $versionParts[2] -match '^\d+$') { $versionParts[2] } else { "0" }
-$msixVersion = "$major.$minor.$patch.0"
+$asNumber = {
+    param($value, $fallback)
+    if ($value -match '^\d+$') { [string][int]$value } else { $fallback }
+}
+$major = & $asNumber $versionParts[0] "0"
+$minor = if ($versionParts.Length -ge 2) { & $asNumber $versionParts[1] "1" } else { "1" }
+$patch = if ($versionParts.Length -ge 3) { & $asNumber $versionParts[2] "0" } else { "0" }
+$revision = if ($versionParts.Length -ge 4) { & $asNumber $versionParts[3] "0" } else { "0" }
+$msixVersion = "$major.$minor.$patch.$revision"
 Write-Host "[1/6] Normalized MSIX Quad Version: $msixVersion"
 
 # Locate Windows SDK Binaries (MakeAppx, SignTool, MakePri)

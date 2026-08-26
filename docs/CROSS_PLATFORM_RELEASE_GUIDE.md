@@ -19,13 +19,21 @@ Ferryx is built on **Tauri v2** with a Rust backend and React/Vite/Bun frontend.
 
 ---
 
-## 2. GitHub Actions Release Triggers
+## 2. GitHub Actions Release Trigger
 
-The automated release pipeline is defined in `.github/workflows/release.yml`. It can be triggered via two methods:
+The automated release pipeline is defined in `.github/workflows/release.yml`. It runs on exactly one trigger: pushing a date-versioned tag. There is no manual dispatch, so every published release corresponds to a tag in the history.
 
-### Method A: Git Tag Push (Recommended for Official Releases)
+### Date-Based Version Tags
 
-Creating and pushing a version tag matching `v*` automatically triggers the complete build, packaging, checksumming, and release publication workflow.
+Tags use `vYYYY.MM.DD` with zero-padded month and day. To cut more than one release on the same date, append a revision: `vYYYY.MM.DD.N`.
+
+| Tag | Triggers a release |
+| :--- | :--- |
+| `v2026.08.26` | Yes |
+| `v2026.08.26.2` | Yes (second release that day) |
+| `v2026.8.26` | No (month and day must be zero-padded) |
+| `v0.1.0` | No (semantic versions are not release tags) |
+| `v2026.08.26-alpha` | No (suffixes are not matched) |
 
 ```bash
 # 1. Ensure working directory is clean and tests pass
@@ -33,39 +41,20 @@ bun run --cwd ui build
 bun test --cwd site
 cargo check --manifest-path src-tauri/Cargo.toml
 
-# 2. Create an annotated semantic version tag
-git tag -a v0.1.0 -m "Release v0.1.0"
+# 2. Create an annotated date version tag
+TAG="v$(date +%Y.%m.%d)"
+git tag -a "$TAG" -m "Release $TAG"
 
 # 3. Push the tag to GitHub
-git push origin v0.1.0
+git push origin "$TAG"
 ```
 
-### Method B: Manual Dispatch (`workflow_dispatch`)
-
-For release dry-runs, draft releases, or pre-releases, use the GitHub Actions manual dispatch interface:
-
-#### Via GitHub Web UI:
-1. Navigate to repository **Actions** tab.
-2. Select **Release Ferryx** workflow in the left sidebar.
-3. Click **Run workflow**.
-4. Configure inputs:
-   - `release_tag`: Target release tag (e.g. `v0.1.0`; leave blank to use `v<package.json version>`).
-   - `draft`: Check to publish as a private Draft Release for validation.
-   - `prerelease`: Check to mark as a Pre-release (e.g. for alpha/beta milestones).
-
-#### Via GitHub CLI (`gh`):
-```bash
-# Trigger a standard release
-gh workflow run release.yml -f release_tag=v0.1.0 -f draft=false -f prerelease=false
-
-# Trigger a draft release for manual QA verification
-gh workflow run release.yml -f release_tag=v0.1.0-alpha -f draft=true -f prerelease=true
-```
+The workflow derives the release name, the MSIX package version, and the artifact version from the tag itself. MSIX requires integer version parts, so `scripts/build-msix.ps1` strips the zero padding and maps a same-day revision onto the quad revision field: `v2026.08.26` becomes `2026.8.26.0` and `v2026.08.26.2` becomes `2026.8.26.2`.
 
 ### CI Workflow Architecture
 
 ```text
-[Push Tag: v* / workflow_dispatch]
+[Push Tag: vYYYY.MM.DD]
         │
         ├───► [Job: build-desktop (macos-latest)] ──► .dmg / .app.tar.gz
         ├───► [Job: build-desktop (windows-latest)] ─► .exe (NSIS) / .msi (WiX)
@@ -226,6 +215,6 @@ Before releasing a new version of Ferryx:
 - [ ] **3. Verify Frontend UI**: Run `bun run --cwd ui build` and `bun test --cwd ui`.
 - [ ] **4. Verify Landing Page**: Run `bun test --cwd site` and `bun run --cwd site build`.
 - [ ] **5. Validate GitHub Workflows**: Ensure `.github/workflows/release.yml` and `build-test.yml` syntax are valid.
-- [ ] **6. Tag & Push**: Execute `git tag -a v<version> -m "Release v<version>"` and `git push origin v<version>`.
+- [ ] **6. Tag & Push**: Execute `TAG="v$(date +%Y.%m.%d)"; git tag -a "$TAG" -m "Release $TAG"` and `git push origin "$TAG"`. This is the only way to publish a release.
 - [ ] **7. Verify Release Artifacts**: Confirm all `.dmg`, `.exe`, `.msi`, `.msix`, `.AppImage`, `.deb`, and `SHA256SUMS.txt` are published on GitHub Releases.
 - [ ] **8. Submit to Microsoft Store**: Upload the generated `Ferryx_<version>_x64.msix` to Microsoft Partner Center.
