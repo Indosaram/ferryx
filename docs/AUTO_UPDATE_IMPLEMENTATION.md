@@ -3,7 +3,8 @@
 `docs/AUTO_UPDATE_VERIFICATION_2026-08-26.md`가 기록한 "구현되어 있지 않음" 상태를 실제 동작하는
 인앱 자동 업데이트로 대체했다. 사용자는 Settings > General의 Software Update 항목에서 현재 버전을
 확인하고, 업데이트를 조회하고, 진행률을 보며 내려받고, 설치 후 재시작할 수 있다. 배포 측에서는
-릴리스 담당자가 로컬에서 번들을 서명하고 `latest.json`과 함께 GitHub Release에 직접 업로드한다.
+날짜 버전 태그를 푸시하면 릴리스 파이프라인이 번들을 서명하고 `latest.json`과 함께 GitHub Release에
+업로드한다.
 
 ## 구성 요소
 
@@ -82,10 +83,11 @@ TAURI_SIGNING_PRIVATE_KEY_PASSWORD="…"
 dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEwQzk5REI1QzI1QzY3Q0IKUldUTFoxekN0WjNKRU8zWGhqWlo2VXEzclF0RXoyRmJCY2Z4eGwvK2FGbE5LSmVwcW9RTmoyWm0K
 ```
 
-릴리스는 검증된 커밋을 원격에 푸시한 뒤 로컬에서 만든 자산을 `gh release create`로 직접 올린다.
-날짜 태그 `v2026.08.26.1`은 `scripts/sync-version.mjs`에서 `2026.826.1`로 변환되어 임시 릴리스
-작업 트리의 앱과 `latest.json`에 함께 주입된다. `gh release create --target <commit>`은 Release API로
-태그와 릴리스를 만들므로, 이 절차에서는 GitHub Actions를 빌드나 게시에 사용하지 않는다.
+릴리스는 검증된 커밋에 날짜 태그를 만든 뒤 그 태그를 원격에 푸시해 시작한다. 날짜 태그
+`v2026.08.26.1`은 `scripts/sync-version.mjs`에서 `2026.826.1`로 변환되어 CI 빌드의 앱과
+`latest.json`에 함께 주입된다. `.github/workflows/release.yml`은 날짜 버전 태그를 받아 서명된
+updater 번들, 동반 `.sig`, 그리고 `latest.json`을 같은 GitHub Release에 게시한다. 수동 실행은
+Actions UI에서 같은 날짜 태그 ref를 선택할 때만 사용한다.
 
 ## 한계
 

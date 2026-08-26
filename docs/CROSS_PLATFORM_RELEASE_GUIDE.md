@@ -21,7 +21,7 @@ Ferryx is built on **Tauri v2** with a Rust backend and React/Vite/Bun frontend.
 
 ## 2. GitHub Actions Release Trigger
 
-The automated release pipeline is defined in `.github/workflows/release.yml`. It runs on exactly one trigger: pushing a date-versioned tag. There is no manual dispatch, so every published release corresponds to a tag in the history.
+The automated release pipeline is defined in `.github/workflows/release.yml`. It triggers automatically on pushing a date-versioned tag (`vYYYY.MM.DD` or `vYYYY.MM.DD.N`), while retaining manual workflow dispatch capability.
 
 ### Date-Based Version Tags
 
@@ -77,9 +77,10 @@ To enable code signing and notarization, configure the following secrets in **Se
   - `APPLE_CERTIFICATE`: Base64-encoded Developer ID Application `.p12` certificate.
   - `APPLE_CERTIFICATE_PASSWORD`: Password for the `.p12` certificate.
   - `APPLE_SIGNING_IDENTITY`: Common Name on the certificate (e.g. `Developer ID Application: Your Name (TEAM_ID)`).
-  - `APPLE_ID`: Apple ID email address used for notarization.
-  - `APPLE_PASSWORD`: App-specific password generated on appleid.apple.com.
-  - `APPLE_TEAM_ID`: 10-character Apple Developer Team ID.
+  - `APPLE_API_KEY`: App Store Connect API key identifier.
+  - `APPLE_API_ISSUER`: App Store Connect API issuer identifier.
+  - `APPLE_API_KEY_CONTENT`: Contents of the App Store Connect API `.p8` private key.
+  - `KEYCHAIN_PASSWORD`: Password for the temporary CI signing keychain.
 
 ---
 
@@ -208,23 +209,23 @@ bun run --cwd site build
 
 ## 6. 자동 업데이트
 
-로컬 릴리스 절차는 태그 `vYYYY.MM.DD[.N]`을 `YYYY.MMDD.revision` SemVer로 변환해 번들과
+릴리스 절차는 태그 `vYYYY.MM.DD[.N]`을 `YYYY.MMDD.revision` SemVer로 변환해 번들과
 `latest.json`에 함께 주입한다. 예: `v2026.08.26.1`은 `2026.826.1`이다.
 
-- 로컬 `.env`에 `TAURI_SIGNING_PRIVATE_KEY`와 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`를 둔다.
+- 저장소 시크릿 / 환경에 `TAURI_SIGNING_PRIVATE_KEY`와 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`를 둔다.
 - `src-tauri/tauri.conf.json`의 공개키와 위 개인키는 같은 키쌍이어야 한다.
-- 로컬 빌드는 `.app.tar.gz`와 `.sig`를 수집하고, `latest.json`을 생성해 GitHub Release에 직접
+- 릴리스 파이프라인은 `.app.tar.gz`, `.nsis.zip`, `.AppImage.tar.gz`와 `.sig`를 수집하고, `latest.json`을 생성해 GitHub Release에
   업로드한다. 서명이 없는 updater 아티팩트는 매니페스트에 넣지 않는다.
 
 ## 7. End-to-End Release Checklist
 
 Before releasing a new version of Ferryx:
 
-- [ ] **1. Verify Version Mapping**: `node scripts/sync-version.mjs --tag "$TAG" --conf <temp-conf> --cargo <temp-cargo>`가 유효한 SemVer를 출력하는지 확인한다. 로컬 임시 작업 트리에만 실제 번들 버전을 주입하므로 저장소 버전 파일을 수동 편집하지 않는다.
+- [ ] **1. Verify Version Mapping**: `node scripts/sync-version.mjs --tag "$TAG" --conf <temp-conf> --cargo <temp-cargo>`가 유효한 SemVer를 출력하는지 확인한다. 저장소 버전 파일은 CI가 태그로부터 자동 주입하므로 수동 편집하지 않는다.
 - [ ] **2. Verify Rust Backend**: Run `cargo check --manifest-path src-tauri/Cargo.toml` and `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1`. This includes `native_terminal_renderer_contract`, which needs real GPU hardware and is therefore skipped by CI — running it locally before a release is the only coverage it gets.
 - [ ] **3. Verify Frontend UI**: Run `bun run --cwd ui build` and `bun run --cwd ui test`.
 - [ ] **4. Verify Landing Page**: Run `bun test --cwd site` and `bun run --cwd site build`.
 - [ ] **5. Validate GitHub Workflows**: Ensure `.github/workflows/release.yml` and `build-test.yml` syntax are valid.
-- [ ] **6. Local Build & Release**: 로컬 임시 작업 트리에서 `bunx @tauri-apps/cli build --target aarch64-apple-darwin`으로 서명된 updater 번들을 만들고, `scripts/build-latest-json.mjs`로 매니페스트를 생성한다. `gh release create "$TAG" --target <commit> <assets...>`로 자산을 직접 업로드한다. 태그를 `git push`하지 않아 GitHub Actions를 실행하지 않는다.
+- [ ] **6. Tag & Push**: Execute `TAG="v$(date +%Y.%m.%d)"; git tag -a "$TAG" -m "Release $TAG"` and `git push origin "$TAG"`. This triggers the automated release pipeline in GitHub Actions.
 - [ ] **7. Verify Release Artifacts**: Confirm all `.dmg`, `.exe`, `.msi`, `.msix`, `.AppImage`, `.deb`, `SHA256SUMS.txt`, `latest.json`, updater bundles, and matching `.sig` files are published on GitHub Releases.
 - [ ] **8. Submit to Microsoft Store**: Upload the generated `Ferryx_<version>_x64.msix` to Microsoft Partner Center.

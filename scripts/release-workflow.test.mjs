@@ -57,7 +57,11 @@ test("the publish job generates latest.json into the uploaded directory", () => 
   assert.match(WORKFLOW, /files: release-dist\/\*/);
 });
 
-test("release workflow never runs from a tag push", () => {
-  assert.doesNotMatch(WORKFLOW, /^\s*push:\s*$/m);
+test("release workflow triggers on date-versioned tag pushes and retains manual dispatch", () => {
+  assert.match(
+    WORKFLOW,
+    /push:\s*\n\s*tags:\s*\n\s*-\s*['"]v\[0-9\]\[0-9\]\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]['"]\s*\n\s*-\s*['"]v\[0-9\]\[0-9\]\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]\.\[0-9\]\*['"]/,
+  );
   assert.match(WORKFLOW, /^\s*workflow_dispatch:\s*$/m);
+  assert.doesNotMatch(WORKFLOW, /^\s*branches:\s*$/m);
 });
