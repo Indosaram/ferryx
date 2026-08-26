@@ -330,16 +330,35 @@ fn load_face_data(db: &Database, id: ID) -> Option<LoadedFace> {
     .flatten()
 }
 
+/// Converts a point size into the `PxScale` ab_glyph expects.
+///
+/// `PxScale` is the pixel height of `ascent - descent`, NOT an em size, so passing a point size
+/// straight in shrinks text by `height_unscaled / units_per_em` (about 26% for MesloLGS NF).
+/// macOS renders type at 72 DPI, where 1pt = 1px, so scaling by that ratio makes one em exactly
+/// `font_size` pixels and matches Ghostty's `DesiredSize.pixels()`.
+fn px_scale_for_size(font: &FontVec, font_size: f32) -> PxScale {
+    let units_per_em = font.units_per_em().unwrap_or(0.0);
+    let height_unscaled = font.height_unscaled();
+    if units_per_em > 0.0 && height_unscaled > 0.0 {
+        PxScale::from(font_size * height_unscaled / units_per_em)
+    } else {
+        PxScale::from(font_size)
+    }
+}
+
 /// Derives `CellMetrics` (width_px, height_px) from the primary font at configured `font_size`.
 fn derive_metrics_from_font(font: &FontVec, font_size: f32) -> CellMetrics {
-    let scale = PxScale::from(font_size);
+    let scale = px_scale_for_size(font, font_size);
     let scaled = font.as_scaled(scale);
 
     let ascent = scaled.ascent();
     let descent = scaled.descent(); // negative in ab_glyph
+    let line_gap = scaled.line_gap();
 
-    let raw_height = ascent - descent;
-    let height_px = raw_height.ceil().max(1.0) as u32;
+    // Ghostty's `FaceMetrics.lineHeight()`: ascent - descent + line_gap, rounded rather than
+    // ceiled so cell spacing stays within 0.5px of the font's authored line height.
+    let raw_height = ascent - descent + line_gap;
+    let height_px = raw_height.round().max(1.0) as u32;
 
     let m_glyph_id = font.glyph_id('M');
     let width_px = if m_glyph_id.0 != 0 {
@@ -476,7 +495,7 @@ fn render_char_to_buffer(
         return false;
     }
 
-    let initial_scale = PxScale::from(font_size);
+    let initial_scale = px_scale_for_size(font, font_size);
     let initial_scaled = font.as_scaled(initial_scale);
 
     let init_ascent = initial_scaled.ascent();
@@ -498,7 +517,7 @@ fn render_char_to_buffer(
     let scale_ratio = scale_ratio_x.min(scale_ratio_y);
 
     let (scale, _scaled, ascent, font_height, advance) = if scale_ratio < 0.99 {
-        let adj_scale = PxScale::from(font_size * scale_ratio);
+        let adj_scale = px_scale_for_size(font, font_size * scale_ratio);
         let adj_scaled = font.as_scaled(adj_scale);
         let adj_ascent = adj_scaled.ascent();
         let adj_descent = adj_scaled.descent();
@@ -657,22 +676,69 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_height_excludes_font_line_gap() {
+    fn test_cell_metrics_match_ghostty_point_to_pixel_conversion() {
         let mut db = Database::new();
         db.load_system_fonts();
         let Some(id) = db.faces().next().map(|face| face.id) else {
             return;
         };
         let face = load_face_data(&db, id).expect("system font face data");
+        let font = &face.font;
         let font_size = 17.0;
-        let scaled = face.font.as_scaled(PxScale::from(font_size));
 
-        let metrics = derive_metrics_from_font(&face.font, font_size);
-        let expected_height = (scaled.ascent() - scaled.descent()).ceil().max(1.0) as u32;
+        let units_per_em = font.units_per_em().expect("system font reports units_per_em");
+        let px_per_unit = font_size / units_per_em;
 
+        let scaled = font.as_scaled(px_scale_for_size(font, font_size));
+        assert!(
+            (scaled.height() / (font.height_unscaled() * px_per_unit) - 1.0).abs() < 1e-4,
+            "one em must rasterize at exactly font_size pixels, as macOS renders type at 72 DPI"
+        );
+
+        let metrics = derive_metrics_from_font(font, font_size);
+        let expected_height = ((font.ascent_unscaled() - font.descent_unscaled()
+            + font.line_gap_unscaled())
+            * px_per_unit)
+            .round()
+            .max(1.0) as u32;
         assert_eq!(
             metrics.height_px, expected_height,
-            "terminal cells must follow xterm's 1.0 line-height policy, without OpenType line-gap"
+            "cell height must equal Ghostty's lineHeight (ascent - descent + line_gap)"
+        );
+
+        let m_glyph = font.glyph_id('M');
+        if m_glyph.0 != 0 && font.h_advance_unscaled(m_glyph) > 0.0 {
+            let expected_width = (font.h_advance_unscaled(m_glyph) * px_per_unit)
+                .round()
+                .max(1.0) as u32;
+            assert_eq!(
+                metrics.width_px, expected_width,
+                "cell width must equal the em-scaled advance, matching Ghostty's face_width"
+            );
+        }
+    }
+
+    #[test]
+    fn test_meslo_lgs_nf_13pt_matches_ghostty_cell_geometry() {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        let mgr = FontManager::new_with_db(db, "MesloLGS NF", 13.0);
+        let has_meslo = {
+            let state = mgr.state.lock();
+            state.primary_regular_id.is_some()
+        };
+        if !has_meslo {
+            return;
+        }
+
+        // MesloLGS NF: unitsPerEm 2048, hhea ascent 2001 / descent -583 / lineGap 0, 'M' advance 1233.
+        // Ghostty at 13pt (72 DPI): width round(1233 * 13/2048) = 8, height round(2584 * 13/2048) = 16.
+        assert_eq!(
+            mgr.cell_metrics(),
+            CellMetrics {
+                width_px: 8,
+                height_px: 16
+            }
         );
     }
 
