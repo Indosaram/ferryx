@@ -4,7 +4,12 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { cn } from "../lib/cn";
-import { attachNativeTerminalLifecycle, detachNativeTerminalLifecycle } from "../lib/nativeTerminalLifecycle";
+import {
+  attachNativeTerminalLifecycle,
+  detachNativeTerminalLifecycle,
+  presentNativeTerminalLifecycle,
+} from "../lib/nativeTerminalLifecycle";
+import { switchDebug } from "../lib/switchDebug";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import type { TerminalSession } from "../lib/types";
 
@@ -262,6 +267,13 @@ export function NativeTerminalPane({
   useEffect(() => {
     const element = viewportRef.current;
     if (!visible || !element || !isTauri() || !targetSessionId) {
+      switchDebug("terminal.surface.skipped", {
+        localSessionId: sessionId,
+        backendSessionId: targetSessionId,
+        visible,
+        hasElement: Boolean(element),
+        tauri: isTauri(),
+      });
       return;
     }
 
@@ -300,6 +312,12 @@ export function NativeTerminalPane({
 
       lastGeometry = currentGeometry;
       scaleFactorRef.current = currentGeometry.scaleFactor;
+      switchDebug("terminal.surface.bounds.start", {
+        localSessionId: sessionId,
+        backendSessionId: targetSessionId,
+        bounds: currentGeometry.bounds,
+        scaleFactor: currentGeometry.scaleFactor,
+      });
 
       void invoke<NativeTerminalReceipt>("cmd_native_terminal_set_bounds", {
         sessionId: targetSessionId,
@@ -310,9 +328,23 @@ export function NativeTerminalPane({
           if (isSubscribed) {
             setError(null);
             updateImeAnchor(receipt);
+            presentNativeTerminalLifecycle(targetSessionId);
+            switchDebug("terminal.surface.presented", {
+              localSessionId: sessionId,
+              backendSessionId: targetSessionId,
+              cursorCol: receipt.cursorCol,
+              cursorRow: receipt.cursorRow,
+              cellWidthPx: receipt.cellWidthPx,
+              cellHeightPx: receipt.cellHeightPx,
+            });
           }
         })
         .catch((error: unknown) => {
+          switchDebug("terminal.surface.bounds.error", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+            error: String(error),
+          });
           reportNativeTerminalIpcFailure("cmd_native_terminal_set_bounds", error);
           if (isSubscribed) {
             setError("Failed to update native terminal bounds");
@@ -320,12 +352,21 @@ export function NativeTerminalPane({
         });
     };
 
+    switchDebug("terminal.surface.attach.start", {
+      localSessionId: sessionId,
+      backendSessionId: targetSessionId,
+    });
     void attachNativeTerminalLifecycle(targetSessionId, () =>
       invoke("cmd_native_terminal_attach", {
         sessionId: targetSessionId,
       }),
     )
       .then(() => {
+        switchDebug("terminal.surface.attach.complete", {
+          localSessionId: sessionId,
+          backendSessionId: targetSessionId,
+          subscribed: isSubscribed,
+        });
         if (!isSubscribed) return;
         setError(null);
         reportBounds();
@@ -339,6 +380,11 @@ export function NativeTerminalPane({
         }
       })
       .catch((error: unknown) => {
+        switchDebug("terminal.surface.attach.error", {
+          localSessionId: sessionId,
+          backendSessionId: targetSessionId,
+          error: String(error),
+        });
         reportNativeTerminalIpcFailure("cmd_native_terminal_attach", error);
         if (isSubscribed) {
           setError("Failed to attach native terminal");
@@ -346,6 +392,10 @@ export function NativeTerminalPane({
       });
 
     return () => {
+      switchDebug("terminal.surface.detach.scheduled", {
+        localSessionId: sessionId,
+        backendSessionId: targetSessionId,
+      });
       isSubscribed = false;
       observer?.disconnect();
       isComposingRef.current = false;
@@ -356,11 +406,23 @@ export function NativeTerminalPane({
         invoke("cmd_native_terminal_detach", {
           sessionId: targetSessionId,
         }),
-      ).catch((error: unknown) => {
-        reportNativeTerminalIpcFailure("cmd_native_terminal_detach", error);
-      });
+      )
+        .then(() => {
+          switchDebug("terminal.surface.detach.complete", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+          });
+        })
+        .catch((error: unknown) => {
+          switchDebug("terminal.surface.detach.error", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+            error: String(error),
+          });
+          reportNativeTerminalIpcFailure("cmd_native_terminal_detach", error);
+        });
     };
-  }, [targetSessionId, visible]);
+  }, [sessionId, targetSessionId, visible]);
 
   return (
     <div
