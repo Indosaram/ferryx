@@ -88,12 +88,22 @@ describe("Settings > General software update control", () => {
 
     act(() => emit({ state: "downloading", version: "2026.08.26.1", downloadProgress: 0.5 }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /install and relaunch/i })).toBeDisabled();
+      const pendingInstall = screen.getByRole("button", { name: /install and relaunch/i });
+      expect(pendingInstall).toBeDisabled();
+      expect(pendingInstall).toHaveAttribute("data-variant", "secondary");
+      expect(pendingInstall).not.toHaveClass("bg-primary");
     });
 
     act(() => emit({ state: "downloaded", version: "2026.08.26.1", downloadProgress: 1 }));
     const install = await screen.findByRole("button", { name: /install and relaunch/i });
     expect(install).toBeEnabled();
+    expect(install).toHaveAttribute("data-variant", "primary");
+    expect(install).toHaveClass("bg-primary");
+    expect(install).toHaveClass("text-primary-foreground");
+
+    const status = await screen.findByTestId("settings-update-status");
+    expect(status).toHaveClass("text-status-success");
+    expect(status).toHaveTextContent(/Version 2026\.08\.26\.1 is ready to install\./);
 
     fireEvent.click(install);
 

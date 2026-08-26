@@ -342,6 +342,7 @@ function SoftwareUpdateCard() {
   }, []);
 
   const busy = status.state === "checking" || status.state === "downloading";
+  const isDownloaded = status.state === "downloaded";
   const percent = Math.round((status.downloadProgress ?? 0) * 100);
 
   return (
@@ -353,9 +354,16 @@ function SoftwareUpdateCard() {
       <p
         data-testid="settings-update-status"
         aria-live="polite"
-        className="mt-2 text-[12px] leading-5 text-foreground"
+        className={`mt-2 text-[12px] leading-5 ${
+          isDownloaded
+            ? "flex items-center gap-1.5 font-medium text-status-success"
+            : status.state === "error"
+              ? "text-destructive"
+              : "text-foreground"
+        }`}
       >
-        {updateStatusMessage(status)}
+        {isDownloaded ? <CheckCircle2 className="size-3.5 shrink-0" /> : null}
+        <span>{updateStatusMessage(status)}</span>
       </p>
       {status.state === "downloading" || status.state === "downloaded" ? (
         <div
@@ -366,7 +374,12 @@ function SoftwareUpdateCard() {
           aria-valuenow={percent}
           className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-accent"
         >
-          <div className="h-full rounded-full bg-foreground transition-all" style={{ width: `${percent}%` }} />
+          <div
+            className={`h-full rounded-full transition-all ${
+              isDownloaded ? "bg-status-success" : "bg-foreground"
+            }`}
+            style={{ width: `${percent}%` }}
+          />
         </div>
       ) : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -391,8 +404,13 @@ function SoftwareUpdateCard() {
         <button
           type="button"
           onClick={() => void relaunchApp()}
-          disabled={status.state !== "downloaded"}
-          className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+          disabled={!isDownloaded}
+          data-variant={isDownloaded ? "primary" : "secondary"}
+          className={`no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-colors ${
+            isDownloaded
+              ? "bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm"
+              : "border border-border text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+          }`}
         >
           <RotateCcw className="size-3" />
           Install and Relaunch
