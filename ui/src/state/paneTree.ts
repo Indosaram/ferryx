@@ -167,6 +167,42 @@ export function equalizeRatios(root: PaneNode): PaneNode {
   return { ...root, first, second, ratio: 0.5 };
 }
 
+/**
+ * True when re-splitting `targetLeafId` toward `direction`/`position` would move
+ * `sourceLeafId` back to the position it already occupies, reproducing the current tree.
+ * Such a drop looks actionable but only reissues leaf ids, remounting the pane and
+ * forcing a native terminal detach/attach for no layout change.
+ */
+export function isRedundantSplit(
+  root: PaneNode,
+  sourceLeafId: string,
+  targetLeafId: string,
+  direction: PaneDirection,
+  position: "first" | "second",
+): boolean {
+  if (sourceLeafId === targetLeafId) return true;
+
+  const parent = findParentSplit(root, sourceLeafId);
+  if (!parent || parent.direction !== direction) return false;
+
+  const sourceSide = parent.first.type === "leaf" && parent.first.leafId === sourceLeafId ? "first" : "second";
+  if (sourceSide !== position) return false;
+
+  const sibling = sourceSide === "first" ? parent.second : parent.first;
+  return sibling.type === "leaf" && sibling.leafId === targetLeafId;
+}
+
+function findParentSplit(node: PaneNode, leafId: string): PaneSplitNode | null {
+  if (node.type === "leaf") return null;
+  if (
+    (node.first.type === "leaf" && node.first.leafId === leafId) ||
+    (node.second.type === "leaf" && node.second.leafId === leafId)
+  ) {
+    return node;
+  }
+  return findParentSplit(node.first, leafId) ?? findParentSplit(node.second, leafId);
+}
+
 function applyRatio(node: PaneNode, segments: string[], ratio: number): PaneNode {
   if (node.type === "leaf") return node;
 

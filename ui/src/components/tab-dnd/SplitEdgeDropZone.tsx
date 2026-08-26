@@ -71,17 +71,33 @@ export function SplitEdgeDropZone({
   );
 }
 
-export function edgeHitTargetClass(edge: TabDropEdge): string {
-  switch (edge) {
-    case "left":
-      return "inset-y-0 left-0 w-[20%]";
-    case "right":
-      return "inset-y-0 right-0 w-[20%]";
-    case "top":
-      return "left-[20%] right-[20%] top-0 h-[20%]";
-    case "bottom":
-      return "bottom-0 left-[20%] right-[20%] h-[20%]";
+/**
+ * Every edge zone measures the whole surface, so a pointer anywhere inside it collides with
+ * all four. `resolveSplitEdgeForPoint` then picks the single winning edge, which is what puts
+ * the boundaries exactly on the two center lines instead of leaving a dead middle.
+ */
+export function edgeHitTargetClass(_edge: TabDropEdge): string {
+  return "inset-0";
+}
+
+/**
+ * Maps a pointer position inside `rect` to the edge whose half it falls in, splitting along
+ * the two diagonals so the vertical center line separates left/right and the horizontal one
+ * separates top/bottom. Ties resolve to the horizontal split, matching the toolbar default.
+ */
+export function resolveSplitEdgeForPoint(
+  point: { x: number; y: number },
+  rect: { left: number; top: number; width: number; height: number },
+): TabDropEdge {
+  if (rect.width <= 0 || rect.height <= 0) return "right";
+
+  const normalizedX = (point.x - rect.left) / rect.width - 0.5;
+  const normalizedY = (point.y - rect.top) / rect.height - 0.5;
+
+  if (Math.abs(normalizedY) > Math.abs(normalizedX)) {
+    return normalizedY < 0 ? "top" : "bottom";
   }
+  return normalizedX < 0 ? "left" : "right";
 }
 
 function edgePreviewClass(edge: TabDropEdge): string {

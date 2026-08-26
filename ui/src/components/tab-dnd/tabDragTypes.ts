@@ -148,9 +148,22 @@ export function isWorkspaceDropData(value: unknown): value is WorkspaceDropData 
   }
 }
 
+/**
+ * Reports whether a pane-edge drop would rebuild the tree it started from. Supplied by
+ * the layout owner because drop metadata alone cannot tell where a leaf sits in the tree.
+ */
+export type RedundantSplitCheck = (input: {
+  tabId: string;
+  sourceLeafId: string;
+  targetLeafId: string;
+  direction: PaneDirection;
+  position: "first" | "second";
+}) => boolean;
+
 export function resolveWorkspaceDropCommand(
   active: WorkspaceDragData,
   over: WorkspaceDropData | null,
+  isRedundantSplit?: RedundantSplitCheck,
 ): WorkspaceDropCommand | null {
   if (!over) return null;
 
@@ -202,6 +215,18 @@ export function resolveWorkspaceDropCommand(
       case "pane-edge": {
         if (over.tabId === active.tabId && over.leafId === sourceLeafId) return null;
         const { direction, position } = edgeToSplit(over.edge);
+        if (
+          over.tabId === active.tabId &&
+          isRedundantSplit?.({
+            tabId: active.tabId,
+            sourceLeafId,
+            targetLeafId: over.leafId,
+            direction,
+            position,
+          })
+        ) {
+          return null;
+        }
         return {
           type: "move-pane-to-pane-split",
           sourceTabId: active.tabId,
