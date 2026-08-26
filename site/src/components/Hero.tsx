@@ -17,7 +17,7 @@ export function Hero({ children }: { children?: ReactNode }) {
         </h1>
 
         <p className="mt-6 text-lg sm:text-xl text-zinc-400 max-w-2xl mx-auto leading-relaxed">
-          Ultra-lightweight Rust native terminal host daemon with seamless split-pane tiling, embedded web companion, and authenticated mobile web remote control.
+          Ultra-lightweight Rust workspace powered by a native Ghostty terminal engine with wgpu GPU rendering, seamless split-pane tiling, embedded web companion, and mobile web remote control.
         </p>
 
         {/* Primary Action Section */}

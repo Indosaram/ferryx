@@ -248,8 +248,9 @@ export function CTA() {
 
           <div className="mt-8 flex flex-wrap items-center justify-center gap-6 text-xs text-zinc-500 font-mono">
             <span className="flex items-center gap-1.5">
-              <Terminal className="h-3.5 w-3.5 text-zinc-400" /> Rust + Tauri v2
+              <Terminal className="h-3.5 w-3.5 text-zinc-400" /> Ghostty + Rust + Tauri v2
             </span>
+            <span>wgpu GPU Accelerated</span>
             <span>100% Open Source</span>
             <span>Zero Electron Bloat</span>
           </div>

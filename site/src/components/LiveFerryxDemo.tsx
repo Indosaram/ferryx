@@ -7,7 +7,7 @@ import { registerProject } from "@ui/lib/tauri";
 import type { RegisteredProject } from "@ui/lib/tauri";
 import type { BrowserTab } from "@ui/lib/types";
 
-const project: RegisteredProject = { workspaceId: "ferryx-demo", repoRoot: "." };
+const project: RegisteredProject = { workspaceId: "ferryx-demo", repoRoot: ".", gitRoot: null };
 
 export default function LiveFerryxDemo() {
   return <Boundary><DemoWindow /></Boundary>;

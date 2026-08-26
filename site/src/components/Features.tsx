@@ -7,8 +7,8 @@ export function Features() {
     {
       icon: <Cpu className="h-6 w-6 text-zinc-200" />,
       badge: "Performance",
-      title: "Native Rust PTY Daemon",
-      description: "Direct OS-level pseudoterminal allocation with minimal I/O latency. Keeps processes and persistent sessions alive across window reloads.",
+      title: "Native Ghostty & wgpu Engine",
+      description: "Desktop terminal panes render directly via native libghostty and a GPU-accelerated wgpu pipeline for crisp font rasterization and low-latency throughput.",
     },
     {
       icon: <Bot className="h-6 w-6 text-zinc-200" />,
@@ -26,13 +26,13 @@ export function Features() {
       icon: <Smartphone className="h-6 w-6 text-zinc-200" />,
       badge: "Remote Control",
       title: "Mobile Web Pairing",
-      description: "Secure, authenticated remote web access via QR/PIN code. Stream terminal output and steer agent workflows from your phone browser.",
+      description: "Secure, authenticated remote web access via QR/PIN code. Stream terminal output via lightweight browser xterm.js and steer agent workflows on the go.",
     },
     {
       icon: <Zap className="h-6 w-6 text-zinc-200" />,
       badge: "Architecture",
       title: "Zero Electron Overhead",
-      description: "Built on Tauri v2 and native Webview2/WebKit engines. Instant startup and lightweight base memory usage.",
+      description: "Built on Tauri v2 and native Webview2/WebKit engines paired with a headless Rust PTY daemon. Instant startup with minimal footprint.",
     },
     {
       icon: <ShieldCheck className="h-6 w-6 text-zinc-200" />,

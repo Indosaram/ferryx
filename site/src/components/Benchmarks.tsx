@@ -2,9 +2,11 @@ import { Check, X } from "lucide-react";
 
 export function Benchmarks() {
   const comparisonRows = [
+    { feature: "Native Ghostty Terminal Engine (Desktop)", ferryx: true, electron: false },
+    { feature: "GPU-Accelerated wgpu Rendering Pipeline", ferryx: true, electron: false },
     { feature: "Native Rust PTY Host Daemon", ferryx: true, electron: false },
     { feature: "Integrated Webview Split-Tabs", ferryx: true, electron: false },
-    { feature: "Mobile Web Remote Pairing", ferryx: true, electron: false },
+    { feature: "Mobile Web Remote Pairing (xterm.js Web Client)", ferryx: true, electron: false },
     { feature: "Multi-Agent Status Indicators", ferryx: true, electron: false },
     { feature: "Persistent Background Daemon", ferryx: true, electron: false },
   ];
@@ -17,7 +19,7 @@ export function Benchmarks() {
             Built Different
           </h2>
           <p className="mt-4 text-zinc-400 text-base">
-            How Ferryx's architecture compares to traditional Electron-based AI IDEs and terminal emulators.
+            How Ferryx's native Ghostty and Rust architecture compares to traditional Electron-based AI IDEs and terminal emulators.
           </p>
         </div>
 
