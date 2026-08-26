@@ -1,293 +1,424 @@
-import type { FitAddon } from "@xterm/addon-fit";
-import type { Terminal } from "@xterm/xterm";
-import React, { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
 import { MobileKeyDock } from "../components/MobileKeyDock";
-import { attachWebglRenderer, loadTerminalAssets } from "../lib/terminalRenderer";
-import { applyTerminalSettings, useTerminalSettings } from "../lib/terminalSettings";
+import { useTerminalSettings } from "../lib/terminalSettings";
+import {
+  applyGridFrame,
+  decodeGridAttrs,
+  parseGridFrame,
+  type GridColor,
+  type GridCursor,
+  type GridRun,
+  type TerminalGridState,
+} from "./terminalGridProtocol";
 
 type RemoteTerminalProps = {
-  sessionId: string;
-  token: string;
-  title?: string;
-  onBack?: () => void;
-  embedded?: boolean;
+  readonly sessionId: string;
+  readonly token: string;
+  readonly title?: string;
+  readonly onBack?: () => void;
+  readonly embedded?: boolean;
 };
 
-export const RemoteTerminal: React.FC<RemoteTerminalProps> = ({
-  sessionId,
-  token,
-  title,
-  onBack,
-  embedded = false,
-}) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const [connected, setConnected] = useState(false);
-  const { settings, refreshNativePreferences } = useTerminalSettings();
-  const settingsRef = useRef(settings);
+type CellMetrics = {
+  readonly width: number;
+  readonly height: number;
+};
 
-  settingsRef.current = settings;
+type GridGeometry = {
+  readonly cols: number;
+  readonly rows: number;
+};
+
+type SocketRequest = {
+  readonly sessionId: string;
+  readonly token: string;
+  readonly geometry: GridGeometry;
+};
+
+const MAX_GRID_COLS = 512;
+const MAX_GRID_ROWS = 256;
+
+const KEY_SEQUENCES = {
+  tab: "\t",
+  esc: "\u001b",
+  up: "\u001b[A",
+  down: "\u001b[B",
+  left: "\u001b[D",
+  right: "\u001b[C",
+  pageup: "\u001b[5~",
+  pagedown: "\u001b[6~",
+  home: "\u001b[H",
+  end: "\u001b[F",
+  "ctrl-d": "\u0004",
+  "ctrl-z": "\u001a",
+  backspace: "\u007f",
+  delete: "\u001b[3~",
+} as const;
+
+const BROWSER_KEY_NAMES: Record<string, keyof typeof KEY_SEQUENCES> = {
+  ArrowUp: "up",
+  ArrowDown: "down",
+  ArrowLeft: "left",
+  ArrowRight: "right",
+  PageUp: "pageup",
+  PageDown: "pagedown",
+  Home: "home",
+  End: "end",
+  Escape: "esc",
+  Tab: "tab",
+  Backspace: "backspace",
+  Delete: "delete",
+};
+
+const MODIFIED_NAVIGATION_FINALS: Record<string, string> = {
+  ArrowUp: "A",
+  ArrowDown: "B",
+  ArrowRight: "C",
+  ArrowLeft: "D",
+  Home: "H",
+  End: "F",
+};
+
+const DOCK_NAVIGATION_FINALS: Record<string, string> = {
+  up: "A",
+  down: "B",
+  right: "C",
+  left: "D",
+  home: "H",
+  end: "F",
+};
+
+function modifiedNavigationSequence(key: string, ctrlKey: boolean, altKey: boolean): string | undefined {
+  const final = MODIFIED_NAVIGATION_FINALS[key];
+  if (!final || (!ctrlKey && !altKey)) return undefined;
+  const modifier = 1 + (altKey ? 2 : 0) + (ctrlKey ? 4 : 0);
+  return `\u001b[1;${modifier}${final}`;
+}
+
+function modifiedDockNavigationSequence(key: string): string | undefined {
+  const [modifier, direction] = key.split("-", 2);
+  const final = direction ? DOCK_NAVIGATION_FINALS[direction] : undefined;
+  if (!final) return undefined;
+  const modifierCode = modifier === "ctrl" ? 5 : modifier === "alt" ? 3 : undefined;
+  return modifierCode ? `\u001b[1;${modifierCode}${final}` : undefined;
+}
+
+function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/v1/terminal/${sessionId}?token=${encodeURIComponent(token)}&render=grid&cols=${geometry.cols}&rows=${geometry.rows}`;
+}
+
+function geometriesEqual(left: GridGeometry | null, right: GridGeometry): boolean {
+  return left?.cols === right.cols && left.rows === right.rows;
+}
+
+function socketRequestMatches(request: SocketRequest | null, sessionId: string, token: string): boolean {
+  return request?.sessionId === sessionId && request.token === token;
+}
+
+function colorCss(color: GridColor): string {
+  return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+function runStyle(run: GridRun, foreground: string, background: string): CSSProperties {
+  const attrs = decodeGridAttrs(run.attrs);
+  const explicitForeground = run.fg ? colorCss(run.fg) : null;
+  const explicitBackground = run.bg ? colorCss(run.bg) : null;
+  return {
+    color: attrs.inverse ? (explicitBackground ?? background) : (explicitForeground ?? undefined),
+    backgroundColor: attrs.inverse ? (explicitForeground ?? foreground) : (explicitBackground ?? undefined),
+    fontWeight: attrs.bold ? 700 : undefined,
+    fontStyle: attrs.italic ? "italic" : undefined,
+    textDecorationLine: attrs.underline ? "underline" : undefined,
+  };
+}
+
+function cursorOverlayStyle(cursor: GridCursor, cell: CellMetrics, color: string): CSSProperties {
+  const left = cursor.x * cell.width;
+  const top = cursor.y * cell.height;
+  const base: CSSProperties = {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    pointerEvents: "none",
+    boxSizing: "border-box",
+    zIndex: 2,
+  };
+
+  if (cursor.visualStyle === "bar") {
+    return {
+      ...base,
+      width: Math.max(1, Math.round(cell.width * 0.12)),
+      height: cell.height,
+      backgroundColor: color,
+      transform: `translate(${left}px, ${top}px)`,
+    };
+  }
+  if (cursor.visualStyle === "underline") {
+    const height = Math.max(1, Math.round(cell.height * 0.12));
+    return {
+      ...base,
+      width: cell.width,
+      height,
+      backgroundColor: color,
+      transform: `translate(${left}px, ${top + cell.height - height}px)`,
+    };
+  }
+  if (cursor.visualStyle === "blockHollow") {
+    return {
+      ...base,
+      width: cell.width,
+      height: cell.height,
+      border: `1px solid ${color}`,
+      transform: `translate(${left}px, ${top}px)`,
+    };
+  }
+  return {
+    ...base,
+    width: cell.width,
+    height: cell.height,
+    backgroundColor: color,
+    opacity: 0.5,
+    transform: `translate(${left}px, ${top}px)`,
+  };
+}
+
+export function RemoteTerminal({ sessionId, token, title, onBack, embedded = false }: RemoteTerminalProps) {
+  const socketRef = useRef<WebSocket | null>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const cellMeasureRef = useRef<HTMLSpanElement>(null);
+  const requestResizeRef = useRef<() => void>(() => {});
+  const lastSentGeometryRef = useRef<GridGeometry | null>(null);
+  const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
+  const activeSocketRequestRef = useRef<SocketRequest | null>(null);
+  const [socketRequest, setSocketRequest] = useState<SocketRequest | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [grid, setGrid] = useState<TerminalGridState | null>(null);
+  const [cellMetrics, setCellMetrics] = useState<CellMetrics>({ width: 0, height: 0 });
+  const { settings, refreshNativePreferences } = useTerminalSettings();
 
   useEffect(() => {
     void refreshNativePreferences();
   }, [refreshNativePreferences]);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
+  useLayoutEffect(() => {
+    const surface = surfaceRef.current;
+    const cellMeasure = cellMeasureRef.current;
+    if (!surface || !cellMeasure) return;
 
-    let terminalInstance: Terminal | null = null;
-    let cleanupWebgl: (() => void) | null = null;
-    let onDataDisposable: { dispose: () => void } | null = null;
-    let isDisposed = false;
-    const abortController = new AbortController();
+    const measureAndResize = () => {
+      const surfaceRect = surface.getBoundingClientRect();
+      const cellRect = cellMeasure.getBoundingClientRect();
+      if (surfaceRect.width <= 0 || surfaceRect.height <= 0 || cellRect.width <= 0 || cellRect.height <= 0) return;
 
-    loadTerminalAssets()
-      .then(async ({ Terminal: TerminalCtor, FitAddon: FitAddonCtor }) => {
-        if (isDisposed || !containerRef.current) return;
+      const nextCellMetrics = { width: cellRect.width, height: cellRect.height };
+      setCellMetrics((current) => (
+        current.width === nextCellMetrics.width && current.height === nextCellMetrics.height
+          ? current
+          : nextCellMetrics
+      ));
 
-        const term = new TerminalCtor({
-          cursorBlink: true,
-          fontFamily: settingsRef.current.fontFamily,
-          fontSize: settingsRef.current.fontSize,
-          macOptionIsMeta: settingsRef.current.macosOptionAsAlt,
-          scrollback: settingsRef.current.scrollback,
-          cursorStyle: settingsRef.current.cursorStyle,
-          allowProposedApi: false,
-          customGlyphs: true,
-          convertEol: true,
-          lineHeight: 1.0,
-          letterSpacing: 0,
-          theme: {
-            background: settingsRef.current.theme.background,
-            foreground: settingsRef.current.theme.foreground,
-            cursor: settingsRef.current.theme.cursor,
-            cursorAccent: settingsRef.current.theme.cursorAccent,
-            selectionBackground: settingsRef.current.theme.selectionBackground,
-            selectionForeground: settingsRef.current.theme.selectionForeground,
-            black: settingsRef.current.theme.black,
-            red: settingsRef.current.theme.red,
-            green: settingsRef.current.theme.green,
-            yellow: settingsRef.current.theme.yellow,
-            blue: settingsRef.current.theme.blue,
-            magenta: settingsRef.current.theme.magenta,
-            cyan: settingsRef.current.theme.cyan,
-            white: settingsRef.current.theme.white,
-            brightBlack: settingsRef.current.theme.brightBlack,
-            brightRed: settingsRef.current.theme.brightRed,
-            brightGreen: settingsRef.current.theme.brightGreen,
-            brightYellow: settingsRef.current.theme.brightYellow,
-            brightBlue: settingsRef.current.theme.brightBlue,
-            brightMagenta: settingsRef.current.theme.brightMagenta,
-            brightCyan: settingsRef.current.theme.brightCyan,
-            brightWhite: settingsRef.current.theme.brightWhite,
-            extendedAnsi: settingsRef.current.theme.extendedAnsi,
-          },
-          allowTransparency: true,
-        });
+      const geometry = {
+        cols: Math.min(MAX_GRID_COLS, Math.max(1, Math.floor(surfaceRect.width / cellRect.width))),
+        rows: Math.min(MAX_GRID_ROWS, Math.max(1, Math.floor(surfaceRect.height / cellRect.height))),
+      };
+      if (!socketRequestMatches(scheduledSocketRequestRef.current, sessionId, token)) {
+        const nextRequest = { sessionId, token, geometry };
+        scheduledSocketRequestRef.current = nextRequest;
+        setGrid(null);
+        setConnected(false);
+        lastSentGeometryRef.current = null;
+        setSocketRequest(nextRequest);
+        return;
+      }
 
-        const fitAddon = new FitAddonCtor();
-        term.loadAddon(fitAddon);
-        term.open(containerRef.current);
-        cleanupWebgl = await attachWebglRenderer(term, abortController.signal);
-
-        if (isDisposed) {
-          term.dispose();
-          cleanupWebgl?.();
-          return;
-        }
-
-        // Defer initial fit to requestAnimationFrame with dimension guard
-        requestAnimationFrame(() => {
-          if (containerRef.current && containerRef.current.clientWidth > 0) {
-            fitAddon.fit();
-          }
-        });
-
-        termRef.current = term;
-        fitRef.current = fitAddon;
-        terminalInstance = term;
-
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const wsUrl = `${protocol}//${window.location.host}/api/v1/terminal/${sessionId}?token=${encodeURIComponent(token)}`;
-
-        const ws = new WebSocket(wsUrl);
-        ws.binaryType = "arraybuffer";
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          setConnected(true);
-          if (containerRef.current && containerRef.current.clientWidth > 0) {
-            fitAddon.fit();
-            ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-          }
-        };
-
-        ws.onclose = () => {
-          setConnected(false);
-        };
-
-        ws.onmessage = (event) => {
-          if (typeof event.data === "string") {
-            term.write(event.data);
-          } else {
-            term.write(new Uint8Array(event.data));
-          }
-        };
-
-        onDataDisposable = term.onData((data) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(new TextEncoder().encode(data));
-          }
-        });
-      })
-      .catch(() => {});
-
-    // Coalesced viewport adaptation using requestAnimationFrame
-    let rAfId: number | null = null;
-    const scheduleResize = () => {
-      if (rAfId !== null) cancelAnimationFrame(rAfId);
-      rAfId = requestAnimationFrame(() => {
-        rAfId = null;
-        if (!embedded && window.visualViewport && rootRef.current) {
-          rootRef.current.style.height = `${window.visualViewport.height}px`;
-        }
-        if (fitRef.current && containerRef.current && containerRef.current.clientWidth > 0 && termRef.current) {
-          fitRef.current.fit();
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(
-              JSON.stringify({
-                type: "resize",
-                cols: termRef.current.cols,
-                rows: termRef.current.rows,
-              })
-            );
-          }
-        }
-      });
+      const socket = socketRef.current;
+      if (
+        !socket ||
+        socket.readyState !== WebSocket.OPEN ||
+        !socketRequestMatches(activeSocketRequestRef.current, sessionId, token) ||
+        geometriesEqual(lastSentGeometryRef.current, geometry)
+      ) return;
+      socket.send(JSON.stringify({ type: "resize", cols: geometry.cols, rows: geometry.rows }));
+      lastSentGeometryRef.current = geometry;
     };
 
-    window.addEventListener("resize", scheduleResize);
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener("resize", scheduleResize);
+    requestResizeRef.current = measureAndResize;
+    measureAndResize();
+
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        if (requestResizeRef.current === measureAndResize) requestResizeRef.current = () => {};
+      };
     }
+
+    const observer = new ResizeObserver(() => measureAndResize());
+    observer.observe(surface);
+    return () => {
+      observer.disconnect();
+      if (requestResizeRef.current === measureAndResize) requestResizeRef.current = () => {};
+    };
+  }, [sessionId, settings.fontFamily, settings.fontSize, token]);
+
+  useEffect(() => {
+    if (!socketRequest) return;
+    setGrid(null);
+    setConnected(false);
+    lastSentGeometryRef.current = socketRequest.geometry;
+    const socket = new WebSocket(
+      terminalSocketUrl(socketRequest.sessionId, socketRequest.token, socketRequest.geometry),
+    );
+    socket.binaryType = "arraybuffer";
+    socketRef.current = socket;
+    activeSocketRequestRef.current = socketRequest;
+    socket.onopen = () => {
+      if (socketRef.current !== socket) return;
+      setConnected(true);
+      requestResizeRef.current();
+    };
+    socket.onclose = () => {
+      if (socketRef.current !== socket) return;
+      setConnected(false);
+    };
+    socket.onmessage = (event) => {
+      if (socketRef.current !== socket) return;
+      if (typeof event.data !== "string") return;
+      const frame = parseGridFrame(event.data);
+      if (!frame) return;
+      setGrid((current) => applyGridFrame(current, frame));
+    };
 
     return () => {
-      isDisposed = true;
-      abortController.abort();
-      if (rAfId !== null) cancelAnimationFrame(rAfId);
-      window.removeEventListener("resize", scheduleResize);
-      if (window.visualViewport) {
-        window.visualViewport.removeEventListener("resize", scheduleResize);
-      }
-      if (onDataDisposable) {
-        onDataDisposable.dispose();
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-      if (cleanupWebgl) {
-        cleanupWebgl();
-      }
-      if (terminalInstance) {
-        terminalInstance.dispose();
+      socket.close();
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+        activeSocketRequestRef.current = null;
       }
     };
-  }, [embedded, sessionId, token]);
-
-  // Synchronize settings changes dynamically
-  useEffect(() => {
-    if (termRef.current) {
-      applyTerminalSettings(termRef.current, settings);
-      fitRef.current?.fit();
-    }
-  }, [settings]);
+  }, [socketRequest]);
 
   const sendKey = (key: string) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-    const enc = new TextEncoder();
     if (key === "ctrl-c") {
-      ws.send(JSON.stringify({ type: "signal", signal: "interrupt" }));
-    } else if (key === "tab") {
-      ws.send(enc.encode("\t"));
-    } else if (key === "esc") {
-      ws.send(enc.encode("\x1b"));
-    } else if (key === "up") {
-      ws.send(enc.encode("\x1b[A"));
-    } else if (key === "down") {
-      ws.send(enc.encode("\x1b[B"));
-    } else if (key === "left") {
-      ws.send(enc.encode("\x1b[D"));
-    } else if (key === "right") {
-      ws.send(enc.encode("\x1b[C"));
-    } else if (key === "ctrl-d") {
-      ws.send(enc.encode("\x04"));
-    } else if (key === "ctrl-z") {
-      ws.send(enc.encode("\x1a"));
-    } else if (key === "pageup") {
-      ws.send(enc.encode("\x1b[5~"));
-    } else if (key === "pagedown") {
-      ws.send(enc.encode("\x1b[6~"));
-    } else if (key === "home") {
-      ws.send(enc.encode("\x1b[H"));
-    } else if (key === "end") {
-      ws.send(enc.encode("\x1b[F"));
-    } else if (key.startsWith("alt-")) {
-      const char = key.replace("alt-", "");
-      ws.send(enc.encode("\x1b" + char));
-    } else if (key.startsWith("ctrl-")) {
-      const char = key.replace("ctrl-", "");
-      if (char.length === 1) {
-        const code = char.toUpperCase().charCodeAt(0) - 64;
-        if (code >= 1 && code <= 26) {
-          ws.send(new Uint8Array([code]));
-        }
-      }
-    } else {
-      ws.send(enc.encode(key));
+      socket.send(JSON.stringify({ type: "signal", signal: "interrupt" }));
+      return;
     }
+    const modifiedDockSequence = modifiedDockNavigationSequence(key);
+    if (modifiedDockSequence) {
+      socket.send(new TextEncoder().encode(modifiedDockSequence));
+      return;
+    }
+    if (key.startsWith("alt-")) {
+      socket.send(new TextEncoder().encode(`\u001b${key.slice(4)}`));
+      return;
+    }
+    if (key.startsWith("ctrl-") && key.length === 6) {
+      socket.send(new Uint8Array([key.slice(5).toUpperCase().charCodeAt(0) - 64]));
+      return;
+    }
+    const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
+    const sequence = KEY_SEQUENCES[sequenceKey as keyof typeof KEY_SEQUENCES] ?? sequenceKey;
+    socket.send(new TextEncoder().encode(sequence));
   };
 
   return (
-    <div
-      ref={rootRef}
-      className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-foreground ${
-        embedded ? "h-full flex-1" : "h-[100dvh]"
-      }`}
-    >
+    <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-foreground ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-card px-2">
         <div className="flex min-w-0 items-center gap-2">
           {!embedded && onBack ? (
-            <button
-              type="button"
-              onClick={onBack}
-              className="rounded-md border border-border bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
+            <button type="button" onClick={onBack} className="rounded-md border border-border bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground">
               Back
             </button>
           ) : null}
-          <span className="truncate font-mono text-xs text-muted-foreground">
-            {title ?? "Desktop terminal"}
-          </span>
+          <span className="truncate font-mono text-xs text-muted-foreground">{title ?? "Desktop terminal"}</span>
         </div>
-        <div className="flex items-center gap-1.5" role="status" aria-live="polite">
-          <span
-            className={`size-2 rounded-full ${
-              connected ? "bg-status-success ring-2 ring-status-success/25" : "animate-pulse bg-status-warning"
-            }`}
-          />
-          <span className="font-mono text-[10px] text-muted-foreground">
-            {connected ? "Live" : "Connecting"}
-          </span>
-        </div>
+        <span role="status" className="font-mono text-[10px] text-muted-foreground">
+          {connected ? "Live" : "Connecting"}
+        </span>
       </div>
-
-      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden bg-terminal p-1" />
+      <div
+        ref={surfaceRef}
+        data-testid="remote-terminal-grid"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
+            event.preventDefault();
+            sendKey(`ctrl-${event.key.toLowerCase()}`);
+          } else if (!event.metaKey) {
+            const modifiedSequence = modifiedNavigationSequence(event.key, event.ctrlKey, event.altKey);
+            if (modifiedSequence) {
+              event.preventDefault();
+              sendKey(modifiedSequence);
+            } else if (!event.altKey && event.key.length === 1) {
+              event.preventDefault();
+              sendKey(event.key);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              sendKey("\r");
+            } else if (BROWSER_KEY_NAMES[event.key]) {
+              event.preventDefault();
+              sendKey(event.key);
+            }
+          }
+        }}
+        onPaste={(event) => {
+          event.preventDefault();
+          sendKey(event.clipboardData.getData("text"));
+        }}
+        className="relative min-h-0 flex-1 overflow-auto bg-terminal outline-none"
+        style={{
+          backgroundColor: settings.theme.background,
+          color: settings.theme.foreground,
+          fontFamily: settings.fontFamily,
+          fontSize: `${settings.fontSize}px`,
+          lineHeight: 1,
+          whiteSpace: "pre",
+        }}
+      >
+        <span
+          ref={cellMeasureRef}
+          data-terminal-cell-measure="true"
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            visibility: "hidden",
+            display: "inline-block",
+            width: "1ch",
+            height: "1em",
+            pointerEvents: "none",
+          }}
+        />
+        {grid?.lines.map((line) => (
+          <span
+            key={line.index}
+            data-grid-line={line.index}
+            style={{
+              display: "block",
+              minWidth: cellMetrics.width > 0 ? `${grid.cols * cellMetrics.width}px` : `${grid.cols}ch`,
+              height: cellMetrics.height > 0 ? `${cellMetrics.height}px` : "1em",
+            }}
+          >
+            {line.runs.map((run, runIndex) => (
+              <span key={runIndex} style={runStyle(run, settings.theme.foreground, settings.theme.background)}>
+                {run.text}
+              </span>
+            ))}
+          </span>
+        ))}
+        {grid?.cursor.visible && cellMetrics.width > 0 && cellMetrics.height > 0 ? (
+          <span
+            aria-hidden="true"
+            data-terminal-cursor="true"
+            className={grid.cursor.blinking ? "animate-pulse" : undefined}
+            style={cursorOverlayStyle(grid.cursor, cellMetrics, settings.theme.cursor)}
+          />
+        ) : null}
+      </div>
       <MobileKeyDock onSendKey={sendKey} />
     </div>
   );
-};
+}

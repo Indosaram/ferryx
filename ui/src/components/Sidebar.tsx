@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
+import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
   getMigratedItem,
@@ -17,7 +18,7 @@ import {
   SIDEBAR_WIDTH_STORAGE_KEY,
 } from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
-import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
+import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
 import { WorktreeList } from "./WorktreeList";
@@ -33,6 +34,7 @@ type SidebarProps = {
   projects?: RegisteredProject[];
   activeProjectId?: string;
   worktrees: Worktree[];
+  inactiveProjectWorktrees?: Record<string, Worktree[]>;
   agents: ActiveAgent[];
   activePath: string;
   statuses?: Record<string, DirtyState | undefined>;
@@ -55,6 +57,7 @@ export function Sidebar({
   projects = [],
   activeProjectId,
   worktrees,
+  inactiveProjectWorktrees,
   agents,
   activePath,
   statuses = {},
@@ -112,9 +115,19 @@ export function Sidebar({
   }, []);
 
   const worktreesByProject = useMemo(
-    () => groupWorktreesByProject(worktrees, projects, activeProjectId),
-    [activeProjectId, projects, worktrees],
+    () => groupWorktreesByProject(worktrees, projects, activeProjectId, inactiveProjectWorktrees),
+    [activeProjectId, inactiveProjectWorktrees, projects, worktrees],
   );
+
+  // The active row is highlighted in whichever project's group actually renders
+  // it, so a nested project sharing the path prefix does not light up too.
+  // Only the active project can own the active row. Matching by path alone lit
+  // up an inactive project whose list still contained that path.
+  const activeWorktreeOwnerId = useMemo(() => {
+    if (!activePath || !activeProjectId) return undefined;
+    const activeRows = worktreesByProject.get(activeProjectId);
+    return activeRows?.some((row) => row.path === activePath) ? activeProjectId : undefined;
+  }, [activePath, activeProjectId, worktreesByProject]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -203,12 +216,7 @@ export function Sidebar({
             return (
               <div key={project.workspaceId} className="pb-0.5">
                 <div
-                  className={cn(
-                    "group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 transition-colors",
-                    active
-                      ? "bg-worktree-sidebar-accent font-medium text-worktree-sidebar-accent-foreground"
-                      : "text-worktree-sidebar-foreground/65 hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground",
-                  )}
+                  className="group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground"
                 >
                   <button
                     type="button"
@@ -224,7 +232,10 @@ export function Sidebar({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onSelectProject(project)}
+                    onClick={() => {
+                      onSelectProject(project);
+                      toggleProject(project.workspaceId);
+                    }}
                     aria-current={active ? "true" : undefined}
                     aria-label={project.workspaceId}
                     className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -250,14 +261,16 @@ export function Sidebar({
                       </span>
                     ) : null}
                   </button>
-                  <IconButton
-                    label={`Add worktree to ${project.workspaceId}`}
-                    size="sm"
-                    className="size-5 opacity-55 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
-                    onClick={() => onCreateWorktree(project)}
-                  >
-                    <FolderPlus className="size-3" />
-                  </IconButton>
+                  {project.gitRoot !== null ? (
+                    <IconButton
+                      label={`Add worktree to ${project.workspaceId}`}
+                      size="sm"
+                      className="size-5 opacity-55 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+                      onClick={() => onCreateWorktree(project)}
+                    >
+                      <FolderPlus className="size-3" />
+                    </IconButton>
+                  ) : null}
                 </div>
 
                 {expanded ? (
@@ -265,12 +278,11 @@ export function Sidebar({
                     <WorktreeList
                       worktrees={projectWorktrees}
                       agents={agents}
-                      activePath={active ? activePath : ""}
+                      activePath={activeWorktreeOwnerId === project.workspaceId ? activePath : ""}
                       statuses={statuses}
                       unreadWorktreePaths={unreadWorktreePaths}
                       activityByWorktreePath={activityByWorktreePath}
                       onSelect={onSelectWorktree}
-                      onCreate={() => onCreateWorktree(project)}
                       onDelete={onDeleteWorktree}
                       label={`${project.workspaceId} worktrees`}
                     />
@@ -318,23 +330,59 @@ function summarizeProjectActivity(
 
 /**
  * Worktrees carry their owning project inside their `orca/<wsId>/<slug>` branch name. Anything
- * without a matching registered project belongs to the active project, which is the only project
- * whose worktrees the workspace store actually holds.
+ * without that identity is attributed by path — a project root, or a path nested under one — so a
+ * plain-folder project's root row never lands under whichever project happens to be active.
  */
 function groupWorktreesByProject(
   worktrees: Worktree[],
   projects: RegisteredProject[],
   activeProjectId: string | undefined,
+  inactiveProjectWorktrees?: Record<string, Worktree[]>,
 ) {
   const grouped = new Map<string, Worktree[]>();
-  for (const project of projects) grouped.set(project.workspaceId, []);
+  for (const project of projects) {
+    const listed = project.workspaceId === activeProjectId ? [] : inactiveProjectWorktrees?.[project.workspaceId];
+    grouped.set(project.workspaceId, listed ? [...listed] : []);
+  }
 
   for (const worktree of worktrees) {
-    const ownerId = worktreeIdentity(worktree)?.wsId;
-    const owner = ownerId && grouped.has(ownerId) ? ownerId : activeProjectId;
+    const owner = resolveWorktreeOwnerId(worktree, projects, activeProjectId);
     if (!owner) continue;
     const bucket = grouped.get(owner);
-    if (bucket) bucket.push(worktree);
+    if (!bucket || bucket.some((candidate) => candidate.path === worktree.path)) continue;
+    bucket.push(worktree);
+  }
+
+  if (activeProjectId) {
+    const activeBucket = grouped.get(activeProjectId);
+    if (activeBucket && activeBucket.length === 0) {
+      const cached = inactiveProjectWorktrees?.[activeProjectId];
+      if (cached && cached.length > 0) {
+        for (const row of cached) {
+          if (!activeBucket.some((candidate) => candidate.path === row.path)) {
+            activeBucket.push(row);
+          }
+        }
+      }
+    }
+  }
+
+  // A non-Git project has no git worktrees at all, so without a synthesized
+  // folder row its group would render empty and the folder would be
+  // unselectable - including while it is the active project.
+  for (const project of projects) {
+    if (project.gitRoot !== null) continue;
+    const bucket = grouped.get(project.workspaceId);
+    if (!bucket || bucket.length > 0) continue;
+    bucket.push({
+      path: project.repoRoot,
+      head: "",
+      branch: null,
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    });
   }
 
   return grouped;

@@ -37,6 +37,11 @@ function services(): WorkspaceServices {
   };
 }
 
+function openedTab(tabId: string | null): string {
+  if (tabId === null) throw new Error("expected openTab to return a tab id");
+  return tabId;
+}
+
 describe("workspace activity tracking", () => {
   it("aggregates every child pane session into its tab and worktree summary without double-counting", () => {
     const state: WorkspaceState = {
@@ -118,7 +123,7 @@ describe("workspace activity tracking", () => {
 
     let backgroundTabId = "";
     await act(async () => {
-      backgroundTabId = await result.current.openTab(worktree);
+      backgroundTabId = openedTab(await result.current.openTab(worktree));
       await result.current.openTab(featureWorktree);
     });
 
@@ -151,7 +156,7 @@ describe("workspace activity tracking", () => {
 
     let tabId = "";
     await act(async () => {
-      tabId = await result.current.openTab(worktree);
+      tabId = openedTab(await result.current.openTab(worktree));
     });
     act(() => {
       result.current.updateSessionTitleActivity(tabId, "zsh /repo/main");
