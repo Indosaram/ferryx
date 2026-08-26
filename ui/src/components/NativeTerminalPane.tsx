@@ -149,6 +149,12 @@ function reportNativeTerminalIpcFailure(command: NativeTerminalIpcCommand, error
  * This is a fixed reservation rather than a hover-time inset on purpose: the
  * compositor derives rows from the surface height, so resizing on hover would
  * reflow the terminal on every pointer pass over the top edge.
+ *
+ * The reservation is applied to this component's OUTER box, not just the inner
+ * viewport, so the strip is not terminal area in the DOM either. Keeping the
+ * terminal box over the strip let its `onPointerDown` (which calls
+ * `preventDefault()` to focus the PTY) swallow the press that starts a
+ * pane-handle drag, so the handle could be seen and hovered but not dragged.
  */
 export const NATIVE_TERMINAL_HANDLE_INSET_PX = 12;
 
@@ -513,7 +519,11 @@ export function NativeTerminalPane({
       data-testid="native-terminal-pane"
       data-native-terminal-visible={visible ? "true" : "false"}
       className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", className)}
-      style={style}
+      style={{
+        marginTop: `${NATIVE_TERMINAL_HANDLE_INSET_PX}px`,
+        height: `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX}px)`,
+        ...style,
+      }}
       onPointerDown={(event) => {
         if (!visible) return;
         event.preventDefault();
@@ -533,8 +543,7 @@ export function NativeTerminalPane({
       <div
         ref={viewportRef}
         data-testid="native-terminal-viewport"
-        className="absolute inset-x-0 bottom-0"
-        style={{ top: `${NATIVE_TERMINAL_HANDLE_INSET_PX}px` }}
+        className="absolute inset-0"
       >
         <textarea
           ref={inputRef}

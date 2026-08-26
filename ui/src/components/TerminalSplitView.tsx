@@ -31,10 +31,12 @@ import type {
   WorkspaceTab,
 } from "../lib/types";
 import { defaultContentForTab, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
-import type { PaneDirection, PaneNode } from "../state/paneTree";
+import { isRedundantSplit as isRedundantPaneSplit, type PaneDirection, type PaneNode } from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
 import { TabBar } from "./TabBar";
+import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
 import { PaneEdgeDropZones } from "./tab-dnd/PaneEdgeDropZones";
+import { resolveSplitEdgeForPoint } from "./tab-dnd/SplitEdgeDropZone";
 import { TabGroupDropSurface } from "./tab-dnd/TabGroupDropSurface";
 import {
   dropPriority,
@@ -42,6 +44,7 @@ import {
   isWorkspaceDragData,
   isWorkspaceDropData,
   resolveWorkspaceDropCommand,
+  type RedundantSplitCheck,
   type TabDropEdge,
   type WorkspaceDragData,
   type WorkspaceDropData,
@@ -61,25 +64,44 @@ export const FALLBACK_SESSION: TerminalSession = {
   lifecycle: "working",
 };
 
-export const workspaceCollisionDetection: CollisionDetection = (args) => {
-  const activeData = args.active.data.current;
-  if (!isWorkspaceDragData(activeData)) return pointerWithin(args);
-  const containerDataById = new Map<UniqueIdentifier, unknown>();
-  for (const container of args.droppableContainers) {
-    containerDataById.set(container.id, container.data.current);
-  }
-  return pointerWithin(args)
-    .filter((collision) => {
-      const data = containerDataById.get(collision.id);
-      return isWorkspaceDropData(data) && dropPriority(activeData, data) < 100;
-    })
-    .sort((left, right) => {
-      const leftData = containerDataById.get(left.id);
-      const rightData = containerDataById.get(right.id);
-      if (!isWorkspaceDropData(leftData) || !isWorkspaceDropData(rightData)) return 0;
-      return dropPriority(activeData, leftData) - dropPriority(activeData, rightData);
-    });
-};
+export const workspaceCollisionDetection: CollisionDetection = (args) => createWorkspaceCollisionDetection()(args);
+
+/**
+ * `isRedundantSplit` drops targets whose drop would rebuild the current tree, so the
+ * edge preview never advertises a split that cannot happen.
+ */
+export function createWorkspaceCollisionDetection(
+  isRedundantSplit?: RedundantSplitCheck,
+): CollisionDetection {
+  return (args) => {
+    const activeData = args.active.data.current;
+    if (!isWorkspaceDragData(activeData)) return pointerWithin(args);
+    const containerDataById = new Map<UniqueIdentifier, unknown>();
+    for (const container of args.droppableContainers) {
+      containerDataById.set(container.id, container.data.current);
+    }
+    const pointer = args.pointerCoordinates;
+    return pointerWithin(args)
+      .filter((collision) => {
+        const data = containerDataById.get(collision.id);
+        if (!isWorkspaceDropData(data) || dropPriority(activeData, data) >= 100) return false;
+        // Edge zones span their whole surface, so keep only the edge owning the pointer's
+        // side of the center lines; without this every edge would collide at once.
+        if (data.type === "pane-edge" || data.type === "group-edge") {
+          const rect = args.droppableRects.get(collision.id);
+          if (!pointer || !rect) return false;
+          if (resolveSplitEdgeForPoint(pointer, rect) !== data.edge) return false;
+        }
+        return resolveWorkspaceDropCommand(activeData, data, isRedundantSplit) !== null;
+      })
+      .sort((left, right) => {
+        const leftData = containerDataById.get(left.id);
+        const rightData = containerDataById.get(right.id);
+        if (!isWorkspaceDropData(leftData) || !isWorkspaceDropData(rightData)) return 0;
+        return dropPriority(activeData, leftData) - dropPriority(activeData, rightData);
+      });
+  };
+}
 
 type SplitPaneOptions = { position?: "first" | "second" };
 
@@ -184,6 +206,7 @@ export function TerminalSplitView({
   const dragSnapshotRef = useRef<DragFocusSnapshot | null>(null);
   const activeDragRef = useRef<WorkspaceDragData | null>(null);
   const [activeDrag, setActiveDrag] = useState<WorkspaceDragData | null>(null);
+  const [dropFeedbackLeafId, setDropFeedbackLeafId] = useState<string | null>(null);
   const previewedTabIdRef = useRef<string | null>(null);
 
   const sensors = useSensors(
@@ -191,7 +214,16 @@ export function TerminalSplitView({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const collisionDetection = workspaceCollisionDetection;
+  const isRedundantSplit: RedundantSplitCheck = ({ tabId, sourceLeafId, targetLeafId, direction, position }) => {
+    const tab = normalizedLayout.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return false;
+    const root = getTabPaneLayout(normalizedLayout, tab).root;
+    return isRedundantPaneSplit(root, sourceLeafId, targetLeafId, direction, position);
+  };
+  const collisionDetection = React.useMemo(
+    () => createWorkspaceCollisionDetection(isRedundantSplit),
+    [normalizedLayout],
+  );
 
   const splitTerminalTab = (tabId: string, direction: PaneDirection) => {
     const tab = normalizedLayout.tabs.find((candidate) => candidate.id === tabId);
@@ -209,6 +241,7 @@ export function TerminalSplitView({
   const clearDragState = () => {
     activeDragRef.current = null;
     setActiveDrag(null);
+    setDropFeedbackLeafId(null);
     dragSnapshotRef.current = null;
     previewedTabIdRef.current = null;
   };
@@ -228,6 +261,15 @@ export function TerminalSplitView({
   const handleDragOver = (event: DragOverEvent) => {
     const active = activeDragRef.current;
     const overData = event.over?.data.current;
+
+    // Drop feedback is painted by the hovered pane only, and a native terminal surface
+    // would cover it, so exactly that one pane yields its surface while it is targeted.
+    setDropFeedbackLeafId(
+      isWorkspaceDropData(overData) && (overData.type === "pane-edge" || overData.type === "pane-leaf")
+        ? overData.leafId
+        : null,
+    );
+
     if (!active || active.type !== "tab" || !isWorkspaceDropData(overData)) return;
 
     let previewTabId: string | null = null;
@@ -249,7 +291,7 @@ export function TerminalSplitView({
   };
 
   const executeDrop = (active: WorkspaceDragData, over: WorkspaceDropData | null) => {
-    const command = resolveWorkspaceDropCommand(active, over);
+    const command = resolveWorkspaceDropCommand(active, over, isRedundantSplit);
     if (!command) return false;
 
     switch (command.type) {
@@ -376,6 +418,7 @@ export function TerminalSplitView({
     onCloseSearch,
     splitTerminalTab,
     browserPanesVisible: activeDrag === null,
+    dropFeedbackLeafId,
   };
 
   const overlayLabel =
@@ -534,6 +577,7 @@ type TabGroupViewProps = {
   onCloseSearch?: () => void;
   splitTerminalTab: (tabId: string, direction: PaneDirection) => void;
   browserPanesVisible: boolean;
+  dropFeedbackLeafId: string | null;
 };
 
 function TabGroupView({
@@ -573,6 +617,7 @@ function TabGroupView({
   onCloseSearch,
   splitTerminalTab,
   browserPanesVisible,
+  dropFeedbackLeafId,
 }: TabGroupViewProps) {
   const group = groups[groupId];
   if (!group) return null;
@@ -662,6 +707,7 @@ function TabGroupView({
             sessions={sessions}
             groupFocused={isFocused}
             browserPanesVisible={browserPanesVisible}
+            dropFeedbackLeafId={dropFeedbackLeafId}
             onNavigateBrowserTab={onNavigateBrowserTab}
             onReloadBrowserTab={onReloadBrowserTab}
             path=""
@@ -701,6 +747,7 @@ type PaneRendererProps = {
   sessions: Record<string, TerminalSession>;
   groupFocused: boolean;
   browserPanesVisible: boolean;
+  dropFeedbackLeafId: string | null;
   path: string;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
@@ -716,7 +763,7 @@ type PaneRendererProps = {
 };
 
 const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) {
-  const { node, tab, tabLayout, sessions, path, browserPanesVisible, onNavigateBrowserTab, onReloadBrowserTab } = props;
+  const { node, tab, tabLayout, sessions, path, browserPanesVisible, dropFeedbackLeafId, onNavigateBrowserTab, onReloadBrowserTab } = props;
   if (node.type === "leaf") {
     const rawContent = tabLayout.contentsByLeafId?.[node.leafId];
     const defaultSessionId = tab.kind === "browser" ? "" : tab.sessionId;
@@ -734,6 +781,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         isOnlyLeaf={tabLayout.root.type === "leaf"}
         isActive={props.groupFocused && tabLayout.activeLeafId === node.leafId}
         browserPanesVisible={browserPanesVisible}
+        dropFeedbackLeafId={dropFeedbackLeafId}
         searchOpen={props.searchLeafId === node.leafId}
         onCloseSearch={props.onCloseSearch}
         onNavigateBrowserTab={onNavigateBrowserTab}
@@ -779,6 +827,7 @@ type PaneLeafViewProps = {
   isOnlyLeaf: boolean;
   isActive: boolean;
   browserPanesVisible: boolean;
+  dropFeedbackLeafId: string | null;
   searchOpen?: boolean;
   onCloseSearch?: () => void;
   onNavigateBrowserTab: (tabId: string, url: string) => void;
@@ -798,6 +847,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   isOnlyLeaf,
   isActive,
   browserPanesVisible,
+  dropFeedbackLeafId,
   searchOpen,
   onCloseSearch,
   onNavigateBrowserTab,
@@ -824,7 +874,13 @@ const PaneLeafView = React.memo(function PaneLeafView({
     },
   });
 
+  // Native compositor child views paint above WKWebView on macOS, so DOM drop feedback
+  // cannot cover a live terminal surface. Only the targeted pane paints feedback, so only
+  // it yields its surface -- every other terminal keeps rendering during the drag.
+  const showsDropFeedback = dropFeedbackLeafId === leafId;
+
   return (
+    <NativeTerminalVisibilityProvider visible={!showsDropFeedback}>
     <div
       ref={droppable.setNodeRef}
       className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal ${
@@ -967,6 +1023,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         })()}
       </div>
     </div>
+    </NativeTerminalVisibilityProvider>
   );
 });
 
