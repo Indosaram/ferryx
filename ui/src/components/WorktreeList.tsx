@@ -1,8 +1,8 @@
-import { GitBranch, LockKeyhole, Trash2 } from "lucide-react";
+import { LockKeyhole, Trash2 } from "lucide-react";
 import { memo, useMemo } from "react";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
-import { branchName, workspaceName } from "../lib/branchFilter";
+import { workspaceName } from "../lib/branchFilter";
 import { cn } from "../lib/cn";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { IconButton } from "./ui/IconButton";
@@ -16,7 +16,6 @@ type WorktreeListProps = {
   readonly unreadWorktreePaths?: Record<string, boolean>;
   readonly activityByWorktreePath?: Record<string, ActivitySummary | undefined>;
   readonly onSelect: (worktree: Worktree) => void;
-  readonly onCreate: () => void;
   readonly onDelete: (worktree: Worktree) => void;
   readonly label?: string;
 };
@@ -49,6 +48,7 @@ export const WorktreeRow = memo(function WorktreeRow({
 }: WorktreeRowProps) {
   const primary = isPrimaryWorktree(worktree);
   const canDelete = !primary;
+  const displayName = workspaceName(worktree);
   const displaySummary = activitySummary
     ? activitySummary.hasUnread === unread
       ? activitySummary
@@ -61,58 +61,45 @@ export const WorktreeRow = memo(function WorktreeRow({
   return (
     <li
       className={cn(
-        "group/worktree-row relative border-l transition-colors",
+        "group/worktree-row relative my-0.5 rounded-md border transition-colors",
         active
-          ? "border-worktree-sidebar-ring/60 bg-worktree-sidebar-accent"
-          : "border-worktree-sidebar-border hover:bg-worktree-sidebar-accent/45",
+          ? "border-[#6c6c6c] bg-[#3f3f3f]"
+          : "border-transparent bg-transparent hover:bg-white/[0.04]",
       )}
     >
       <button
         type="button"
         onClick={() => onSelect(worktree)}
         aria-current={active ? "true" : undefined}
-        className="w-full rounded-sm py-1.5 pl-2 pr-9 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
-        <span className="flex min-w-0 items-start gap-1.5">
-          <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center text-muted-foreground">
-            <GitBranch className="size-3" />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="flex items-center gap-1.5">
-              <span
-                data-testid="worktree-status-dot"
-                data-activity-state={indicator ?? "idle"}
-                className="inline-flex size-3 shrink-0 items-center justify-center"
-              >
-                {indicator ? <StatusDot state={indicator} /> : <span className="size-1.5 shrink-0 rounded-full bg-status-idle" />}
+        <span className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span
+              data-testid="worktree-status-dot"
+              data-activity-state={indicator ?? "idle"}
+              className="inline-flex size-2 shrink-0 items-center justify-center"
+            >
+              {indicator ? <StatusDot state={indicator} /> : <span className="size-2 shrink-0 rounded-full bg-[#00bc7d]" />}
+            </span>
+            <span className="truncate text-[12px] font-semibold leading-tight text-[#fafafa]">
+              {displayName}
+            </span>
+            {primary ? (
+              <span className="shrink-0 rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]">
+                primary
               </span>
-              <span className="min-w-0 flex-1 truncate text-[12px] font-medium leading-tight text-foreground">
-                {workspaceName(worktree)}
-              </span>
-              {primary ? (
-                <span className="shrink-0 rounded-full bg-worktree-sidebar-foreground/10 px-1.5 py-px text-[10px] font-medium leading-none text-muted-foreground">
-                  primary
-                </span>
-              ) : null}
-            </span>
-            <span className="mt-0.5 block truncate font-mono text-[9px] leading-snug text-muted-foreground/75">
-              {branchName(worktree)}
-            </span>
-            <span className={cn("mt-0.5 block text-[9px]", status?.isDirty ? "text-status-warning" : "text-muted-foreground/75")}>
-              {status ? (status.isDirty ? `Dirty · ${status.files.length} ${status.files.length === 1 ? "file" : "files"}` : "Clean") : "Status not checked"}
-            </span>
-            {agent ? (
-              <span className="mt-0.5 flex items-center gap-1.5 truncate text-[9px] text-muted-foreground/75">
-                <span className="truncate">{agent.name}</span>
-                <span aria-hidden="true">·</span>
-                <span className="truncate">{agent.task}</span>
+            ) : null}
+            {status?.isDirty ? (
+              <span className="shrink-0 text-[10px] text-status-warning">
+                Dirty · {status.files.length} {status.files.length === 1 ? "file" : "files"}
               </span>
             ) : null}
           </span>
         </span>
       </button>
 
-      <div className="absolute right-1 top-1 flex items-center gap-0.5 opacity-55 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
+      <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-55 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
         {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
         <IconButton label="Delete worktree" size="sm" disabled={!canDelete} onClick={() => onDelete(worktree)}>
           <Trash2 className="size-3" />
@@ -130,7 +117,6 @@ export function WorktreeList({
   unreadWorktreePaths,
   activityByWorktreePath,
   onSelect,
-  onCreate,
   onDelete,
   label = "Worktrees",
 }: WorktreeListProps) {
@@ -142,20 +128,7 @@ export function WorktreeList({
     return map;
   }, [agents]);
 
-  if (worktrees.length === 0) {
-    return (
-      <div className="border-l border-worktree-sidebar-border py-2 pl-3 pr-2 text-[11px] leading-relaxed text-muted-foreground">
-        <p>No Git worktrees found for this repository.</p>
-        <button
-          type="button"
-          onClick={onCreate}
-          className="mt-1 rounded-sm text-[11px] font-medium text-worktree-sidebar-foreground/70 underline-offset-2 transition-colors hover:text-worktree-sidebar-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          Create the first worktree
-        </button>
-      </div>
-    );
-  }
+  if (worktrees.length === 0) return null;
 
   return (
     <ul aria-label={label} className="m-0 list-none p-0">

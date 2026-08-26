@@ -37,8 +37,8 @@ const qaWorktree: Worktree = {
 };
 
 const accordionProjects = [
-  { workspaceId: "default", repoRoot: "/repos/default" },
-  { workspaceId: "rorca-qa", repoRoot: "/repos/rorca-qa" },
+  { workspaceId: "default", repoRoot: "/repos/default", gitRoot: "/repos/default" },
+  { workspaceId: "rorca-qa", repoRoot: "/repos/rorca-qa", gitRoot: "/repos/rorca-qa" },
 ];
 
 function projectRow(workspaceId: string) {
@@ -53,8 +53,8 @@ beforeEach(() => localStorage.clear());
 afterEach(cleanup);
 
 const projects = [
-  { workspaceId: "maho-workspace", repoRoot: "/repos/maho-workspace" },
-  { workspaceId: "content-intel-dashboard", repoRoot: "/repos/content-intel-dashboard" },
+  { workspaceId: "maho-workspace", repoRoot: "/repos/maho-workspace", gitRoot: "/repos/maho-workspace" },
+  { workspaceId: "content-intel-dashboard", repoRoot: "/repos/content-intel-dashboard", gitRoot: "/repos/content-intel-dashboard" },
 ];
 
 function baseProps(overrides: Record<string, unknown> = {}) {
@@ -75,6 +75,197 @@ function renderSidebar(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Sidebar navigation", () => {
+  it("renders cached worktrees for a newly active project while active store rows are temporarily empty", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const cachedWorktree: Worktree = {
+      path: "/repos/alpha/feature",
+      head: "123456",
+      branch: "refs/heads/orca/alpha/feature",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+    ];
+
+    renderSidebar({
+      projects,
+      activeProjectId: "alpha",
+      worktrees: [],
+      inactiveProjectWorktrees: { alpha: [cachedWorktree] },
+    });
+
+    const alphaList = screen.getByRole("list", { name: "alpha worktrees" });
+    expect(within(alphaList).getByRole("button", { name: /feature/ })).toBeInTheDocument();
+  });
+
+  it("lists an inactive project's own rows so index-based selection can reach them", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "plain", repoRoot: "/repos/plain", gitRoot: null },
+    ];
+    const alphaRoot: Worktree = {
+      path: "/repos/alpha",
+      head: "",
+      branch: null,
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    renderSidebar({
+      projects,
+      activeProjectId: "alpha",
+      worktrees: [alphaRoot],
+      activePath: alphaRoot.path,
+    });
+
+    // Both groups render rows, so Cmd+N ordering spans alpha then plain.
+    expect(within(screen.getByRole("list", { name: "alpha worktrees" })).getAllByRole("button")).not.toHaveLength(0);
+    expect(within(screen.getByRole("list", { name: "plain worktrees" })).getByText("plain")).toBeInTheDocument();
+  });
+
+  it("renders the folder row for an active non-Git project even before the store lists it", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const plainProject = { workspaceId: "plain", repoRoot: "/repos/plain", gitRoot: null };
+
+    // A plain project has no git worktrees, so the store list is empty. The
+    // sidebar must still offer its folder root as a selectable row.
+    renderSidebar({
+      projects: [plainProject],
+      activeProjectId: "plain",
+      worktrees: [],
+      activePath: "",
+    });
+
+    const plainList = screen.getByRole("list", { name: "plain worktrees" });
+    expect(within(plainList).getByText("plain")).toBeInTheDocument();
+  });
+
+  it("attributes a branch-less root worktree to the project that owns its path, not the active project", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const mixedProjects = [
+      { workspaceId: "orca-lite", repoRoot: "/repos/orca-lite", gitRoot: "/repos/orca-lite" },
+      { workspaceId: "superwiki", repoRoot: "/repos/superwiki", gitRoot: null },
+    ];
+    const superwikiRoot: Worktree = {
+      path: "/repos/superwiki",
+      head: "",
+      branch: null,
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    renderSidebar({
+      projects: mixedProjects,
+      activeProjectId: "orca-lite",
+      worktrees: [superwikiRoot],
+      activePath: superwikiRoot.path,
+    });
+
+    const superwikiList = screen.getByRole("list", { name: "superwiki worktrees" });
+    expect(within(superwikiList).getByText("superwiki")).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "orca-lite worktrees" })).not.toBeInTheDocument();
+  });
+
+  it("collapses and expands a project from its name button, not just the chevron", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const onSelectProject = vi.fn();
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree],
+      onSelectProject,
+    });
+
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+
+    fireEvent.click(projectRow("default"));
+
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
+    expect(onSelectProject).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(projectRow("default"));
+
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+  });
+
+  it("does not highlight an inactive project's row when the active path is stale", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const qaRow = {
+      path: "/repos/rorca-qa/regression",
+      head: "789abc",
+      branch: "refs/heads/orca/rorca-qa/regression",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    } as any;
+
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [],
+      inactiveProjectWorktrees: { "rorca-qa": [qaRow] },
+      activePath: qaRow.path,
+    });
+
+    const qaList = screen.getByRole("list", { name: "rorca-qa worktrees" });
+    expect(within(qaList).queryByRole("button", { current: true })).toBeNull();
+  });
+
+  it("highlights the active worktree only inside the project that owns it", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const sharedPath = "/repos/shared-folder";
+    const activeRoot = {
+      path: sharedPath,
+      head: "",
+      branch: null,
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    } as any;
+
+    renderSidebar({
+      projects: [
+        { workspaceId: "alpha", repoRoot: sharedPath, gitRoot: null },
+        { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+      ],
+      activeProjectId: "alpha",
+      worktrees: [activeRoot],
+      inactiveProjectWorktrees: { beta: [activeRoot] },
+      activePath: sharedPath,
+    });
+
+    const alphaList = screen.getByRole("list", { name: "alpha worktrees" });
+    const betaList = screen.getByRole("list", { name: "beta worktrees" });
+
+    expect(within(alphaList).getByRole("button", { current: true })).toBeInTheDocument();
+    expect(within(betaList).queryByRole("button", { current: true })).toBeNull();
+  });
+
+  it("lists inactive project worktrees instead of the empty-state message", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree],
+      inactiveProjectWorktrees: { "rorca-qa": [qaWorktree] },
+    });
+
+    const qaList = screen.getByRole("list", { name: "rorca-qa worktrees" });
+    expect(within(qaList).getByText("regression")).toBeInTheDocument();
+    expect(screen.queryByText(/No Git worktrees/i)).not.toBeInTheDocument();
+  });
+
   it("uses the 236px parity width by default", () => {
     renderSidebar();
     expect(screen.getByRole("complementary")).toHaveStyle({ width: "236px" });
@@ -282,7 +473,7 @@ describe("Sidebar navigation", () => {
     expect(screen.getByRole("button", { name: "Delete worktree" })).toBeInTheDocument();
   });
 
-  it("offers first-worktree creation inside a project with no worktrees", () => {
+  it("renders no empty-state row or message for a project with no worktrees", () => {
     const onCreateWorktree = vi.fn();
     renderSidebar({
       projects: accordionProjects,
@@ -292,9 +483,12 @@ describe("Sidebar navigation", () => {
     });
 
     fireEvent.click(projectToggle("rorca-qa"));
-    expect(screen.queryByRole("list", { name: "rorca-qa worktrees" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /create the first worktree/i }));
+    expect(screen.queryByRole("list", { name: "rorca-qa worktrees" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/No Git worktrees/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /create the first worktree/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to rorca-qa" }));
     expect(onCreateWorktree).toHaveBeenCalledExactlyOnceWith(accordionProjects[1]);
   });
 
@@ -368,5 +562,16 @@ describe("Sidebar navigation", () => {
     // Then: it must not allocate new Set(projects.map(...)) as an eager useRef parameter
     expect(source).not.toContain("useRef<Set<string>>(new Set");
     expect(source).not.toMatch(/useRef<Set<string>>\(\s*new Set/);
+  });
+
+  it("hides add-worktree button when project gitRoot is null and shows it when gitRoot is set", () => {
+    const mixedProjects = [
+      { workspaceId: "git-proj", repoRoot: "/repos/git-proj", gitRoot: "/repos/git-proj" },
+      { workspaceId: "plain-proj", repoRoot: "/repos/plain-proj", gitRoot: null },
+    ];
+    renderSidebar({ projects: mixedProjects, activeProjectId: "git-proj" });
+
+    expect(screen.getByRole("button", { name: "Add worktree to git-proj" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add worktree to plain-proj" })).not.toBeInTheDocument();
   });
 });

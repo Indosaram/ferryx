@@ -38,7 +38,6 @@ describe("WorktreeList actions", () => {
         agents={[]}
         statuses={{ [worktree.path]: { isDirty: true, files: [{ statusCode: "M", path: "src/main.ts" }] } }}
         onSelect={onSelect}
-        onCreate={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -69,7 +68,6 @@ describe("WorktreeList actions", () => {
           },
         }}
         onSelect={vi.fn()}
-        onCreate={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -99,7 +97,6 @@ describe("WorktreeList actions", () => {
         statuses={{}}
         activityByWorktreePath={{ [worktree.path]: activity }}
         onSelect={vi.fn()}
-        onCreate={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -113,7 +110,6 @@ describe("WorktreeList actions", () => {
         statuses={{}}
         activityByWorktreePath={{ [worktree.path]: activity }}
         onSelect={vi.fn()}
-        onCreate={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -129,7 +125,6 @@ describe("WorktreeList actions", () => {
         agents={[]}
         statuses={{}}
         onSelect={vi.fn()}
-        onCreate={vi.fn()}
         onDelete={onDelete}
       />,
     );
@@ -146,7 +141,6 @@ describe("WorktreeList actions", () => {
         agents={[]}
         statuses={{}}
         onSelect={vi.fn()}
-        onCreate={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -159,22 +153,20 @@ describe("WorktreeList actions", () => {
     expect(featureDelete).toBeEnabled();
   });
 
-  it("offers worktree creation from the empty state", () => {
-    const onCreate = vi.fn();
-    render(
+  it("renders nothing when a project has no worktrees", () => {
+    const { container } = render(
       <WorktreeList
         worktrees={[]}
         activePath=""
         agents={[]}
         statuses={{}}
         onSelect={vi.fn()}
-        onCreate={onCreate}
         onDelete={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /create the first worktree/i }));
-    expect(onCreate).toHaveBeenCalledOnce();
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText(/No Git worktrees/i)).toBeNull();
   });
 
   it("normalizes ferryx and rorca branch names to main (F11)", () => {
@@ -204,7 +196,6 @@ describe("WorktreeList actions", () => {
         agents={[]}
         statuses={{}}
         onSelect={vi.fn()}
-        onCreate={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -223,7 +214,7 @@ describe("WorktreeList actions", () => {
     expect(source).toContain("agentsByPath");
   });
 
-  it("renders active agent info mapped to corresponding worktree correctly", () => {
+  it("keeps the agent-driven status dot but renders no agent text line", () => {
     const activeAgent: ActiveAgent = {
       id: "agent-1",
       name: "Coder",
@@ -241,12 +232,39 @@ describe("WorktreeList actions", () => {
         agents={[activeAgent]}
         statuses={{}}
         onSelect={vi.fn()}
-        onCreate={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("Coder")).toBeInTheDocument();
-    expect(screen.getByText("Fix perf regressions")).toBeInTheDocument();
+    expect(screen.queryByText("Coder")).not.toBeInTheDocument();
+    expect(screen.queryByText("Fix perf regressions")).not.toBeInTheDocument();
+    expect(screen.getByTestId("worktree-status-dot")).toHaveAttribute("data-activity-state", "working");
+  });
+
+  it("renders plain-folder root rows like normal worktrees without an unavailable message", () => {
+    const plainRoot: Worktree = {
+      path: "/Users/dev/superwiki-mail-otp",
+      head: "",
+      branch: null,
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[plainRoot]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("superwiki-mail-otp")).toBeInTheDocument();
+    expect(screen.queryByText(/unavailable for non-Git/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/detached HEAD/i)).not.toBeInTheDocument();
   });
 });
