@@ -361,6 +361,9 @@ function SoftwareUpdateCard() {
       <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
         Current version {currentVersion ?? "unknown"}. Updates are signed and verified before they install.
       </p>
+      <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+        Ferryx restarts, but active agents and terminal sessions continue in the background.
+      </p>
       <p
         data-testid="settings-update-status"
         aria-live="polite"

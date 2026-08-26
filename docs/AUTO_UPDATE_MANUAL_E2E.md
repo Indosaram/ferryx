@@ -27,6 +27,9 @@ GitHub Release를 상대로 동일한 경로를 한 번 더 검증하는 절차�
 - Install and Relaunch 뒤 진행 막대가 나타나지 않거나 재시작되지 않으면 `.sig` 파일 이름,
   `latest.json.platforms`의 URL과 signature, 그리고 공개키/개인키 쌍을 확인한다. 서명 오류가
   원인일 때는 앱을 강제로 재시작하거나 서명 검증을 우회하지 않는다.
+- `failed to unpack '._Ferryx.app'` 오류가 나오면 updater 아카이브에 AppleDouble 메타데이터가
+  포함된 것이다. 해당 릴리스를 재시도하지 말고, `scripts/assert-updater-archive-layout.mjs`를
+  통과한 새로 서명된 `.app.tar.gz`와 `.sig`가 있는 후속 릴리스로 교체한다.
 - 자동 재시작이 동작하지 않으면 `process:default` capability가 포함된 최신 앱 번들을 설치했는지
   확인한다.
 

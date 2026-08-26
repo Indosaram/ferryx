@@ -96,6 +96,12 @@ jobs:
       - name: Build Frontend UI
         run: bun run --cwd ui build
 
+      - name: Remove AppleDouble metadata before macOS bundling
+        if: matrix.os_name == 'macos'
+        shell: bash
+        run: |
+          find ui src-tauri -type f -name '._*' -delete
+
       - name: Import macOS signing and notarization credentials
         if: matrix.os_name == 'macos'
         env:
@@ -136,6 +142,17 @@ jobs:
         shell: bash
         run: |
           bunx @tauri-apps/cli build ${{ matrix.tauri_args }}
+
+      - name: Verify macOS updater archive layout
+        if: matrix.os_name == 'macos'
+        shell: bash
+        run: |
+          archive_count=0
+          while IFS= read -r -d '' archive; do
+            archive_count=$((archive_count + 1))
+            node scripts/assert-updater-archive-layout.mjs "$archive"
+          done < <(find src-tauri/target -type f -name '*.app.tar.gz' -print0)
+          test "$archive_count" -gt 0
 
       - name: Collect platform release artifacts
         id: collect

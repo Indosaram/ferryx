@@ -84,17 +84,35 @@ path. A subsequent updater-only source repair adds date-version tag-push
 triggers for future releases and retains manual dispatch when the same tag ref
 is selected. This does not alter or invalidate the verified live assets above.
 
-## Pending physical E2E
+## Physical E2E result: failed archive extraction
 
 The disposable old app at
-`/Users/indo/code/project/orca-lite-manual-update-retest/Ferryx.app` remains
-version `0.1.0`. Complete the documented user-operated sequence in
-`docs/AUTO_UPDATE_MANUAL_E2E.md`:
+`/Users/indo/code/project/orca-lite-manual-update-retest/Ferryx.app` was run
+against the public release on 2026-08-26. The updater reached the installation
+step but displayed:
 
-1. Open **Settings > General > Software Update** in that old app.
-2. Select **Check for Updates** and confirm `2026.826.1` is offered.
-3. Select the highlighted **Install and Relaunch** control and wait for its signed
-   download, install, and automatic relaunch.
-4. Confirm the same app bundle reopens at `2026.826.1`.
+```text
+Update failed: failed to unpack `._Ferryx.app` into
+`.../tauri_updated_app...`
+```
 
-Only that observed install/relaunch result can close the in-app E2E gate.
+The screenshot is captured at:
+
+```text
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/clipboard-2026-08-26-232113-83C27009.png
+```
+
+The live artifact is cryptographically valid but structurally invalid for the
+Tauri macOS installer: its raw tar headers contain the single-component
+AppleDouble payload `._Ferryx.app`. `tauri-plugin-updater` removes the first
+archive path component before extraction, causing that file to collide with its
+already-created extraction root. macOS `tar -tzf` hides this metadata entry,
+so `scripts/assert-updater-archive-layout.mjs` now parses raw tar headers and
+rejects it reliably.
+
+The source release workflow now removes physical `._*` files before Tauri
+bundles the app and checks every generated `.app.tar.gz` before it is uploaded.
+The existing public `v2026.08.26.1` archive must not be used for further E2E;
+a new signed and notarized release is required. Only a fresh old-app update
+that installs and relaunches into that replacement release can close the E2E
+gate.

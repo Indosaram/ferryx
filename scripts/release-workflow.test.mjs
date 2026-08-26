@@ -49,6 +49,14 @@ test("signatures and updater bundles are collected as release artifacts", () => 
   assert.match(WORKFLOW, /-name "\*\.AppImage\.tar\.gz"/);
 });
 
+test("macOS updater archives are scrubbed and validated before publishing", () => {
+  assert.match(WORKFLOW, /Remove AppleDouble metadata before macOS bundling/);
+  assert.match(WORKFLOW, /find ui src-tauri -type f -name '._\*' -delete/);
+  assert.match(WORKFLOW, /Verify macOS updater archive layout/);
+  assert.match(WORKFLOW, /find src-tauri\/target -type f -name '\*\.app\.tar\.gz' -print0/);
+  assert.match(WORKFLOW, /node scripts\/assert-updater-archive-layout\.mjs/);
+});
+
 test("the publish job generates latest.json into the uploaded directory", () => {
   assert.match(WORKFLOW, /node scripts\/build-latest-json\.mjs/);
   assert.match(WORKFLOW, /MANIFEST_VERSION="\$\(node scripts\/sync-version\.mjs --tag/);
