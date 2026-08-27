@@ -58,6 +58,12 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: tauriCoreMocks.isTauri,
 }));
 
+// isTauri() is mocked true, so event subscriptions pass their runtime guard and
+// would reach the real bridge, which has no __TAURI_INTERNALS__ under jsdom.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => undefined),
+}));
+
 class TestResizeObserver implements ResizeObserver {
   readonly observe = vi.fn();
   readonly unobserve = vi.fn();

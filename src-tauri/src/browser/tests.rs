@@ -4,6 +4,30 @@ use crate::ipc::error::{IpcError, IpcErrorCode};
 use tauri::Manager;
 
 #[test]
+fn test_default_desktop_user_agent() {
+    let ua = default_desktop_user_agent();
+    assert!(ua.contains("Mozilla/5.0"));
+    #[cfg(target_os = "macos")]
+    {
+        assert!(ua.contains("Macintosh; Intel Mac OS X 10_15_7"));
+        assert!(ua.contains("AppleWebKit/537.36") || ua.contains("AppleWebKit/605.1.15"));
+        assert!(ua.contains("Chrome/") || ua.contains("Safari/"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        assert!(ua.contains("Windows NT 10.0; Win64; x64"));
+        assert!(ua.contains("AppleWebKit/537.36"));
+        assert!(ua.contains("Chrome/"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        assert!(ua.contains("X11; Linux x86_64") || ua.contains("Linux"));
+        assert!(ua.contains("AppleWebKit/537.36"));
+        assert!(ua.contains("Chrome/"));
+    }
+}
+
+#[test]
 fn test_validate_url() {
     assert_eq!(
         validate_url("https://github.com").unwrap(),
@@ -27,10 +51,12 @@ fn test_browser_manager_lifecycle() {
     let mgr = BrowserManager::new();
     assert!(!mgr.has_sessions());
     let req = CreateBrowserRequest {
+        browser_id: None,
         workspace_id: Some("default".into()),
         worktree_path: None,
         url: "https://example.com".into(),
         profile: Some(BrowserProfileId::Default),
+        zoom_factor: None,
         bounds: Some(LogicalRect {
             x: 0.0,
             y: 0.0,
@@ -126,21 +152,31 @@ fn test_history_navigation_marks_loading_without_overwriting_url() {
     let mgr = BrowserManager::new();
     let state = mgr
         .register_session(CreateBrowserRequest {
+            browser_id: None,
             workspace_id: Some("default".into()),
             worktree_path: None,
-            url: "https://example.com/second".into(),
+            url: "https://example.com/first".into(),
             profile: Some(BrowserProfileId::Default),
+            zoom_factor: None,
             bounds: None,
             visible: Some(true),
         })
         .expect("register browser");
 
+    mgr.update_url(&state.browser_id, "https://example.com/second")
+        .expect("update url");
+
+    let current = mgr.get_state(&state.browser_id).expect("get state");
+    assert_eq!(current.url, "https://example.com/second");
+    assert!(current.can_go_back);
+    assert!(!current.can_go_forward);
+
     let started = mgr
-        .begin_history_navigation(&state.browser_id)
+        .begin_history_navigation(&state.browser_id, false)
         .expect("begin history navigation");
-    assert_eq!(started.url, "https://example.com/second");
+    assert_eq!(started.url, "https://example.com/first");
     assert!(started.loading);
-    assert_eq!(started.generation, state.generation + 1);
+    assert_eq!(started.generation, current.generation + 1);
 
     let finished = mgr
         .update_navigation_state(
@@ -164,10 +200,12 @@ fn test_browser_automation_target_rejects_stale_generation() {
     let manager = BrowserManager::new();
     let state = manager
         .register_session(CreateBrowserRequest {
+            browser_id: None,
             workspace_id: None,
             worktree_path: None,
             url: "https://example.com".into(),
             profile: None,
+            zoom_factor: None,
             bounds: None,
             visible: Some(true),
         })
@@ -204,10 +242,12 @@ fn test_browser_automation_target_requires_current_snapshot_reference() {
     let manager = BrowserManager::new();
     let state = manager
         .register_session(CreateBrowserRequest {
+            browser_id: None,
             workspace_id: None,
             worktree_path: None,
             url: "https://example.com".into(),
             profile: None,
+            zoom_factor: None,
             bounds: None,
             visible: Some(true),
         })
@@ -224,10 +264,12 @@ fn test_page_load_url_change_invalidates_automation_targets() {
     let manager = BrowserManager::new();
     let state = manager
         .register_session(CreateBrowserRequest {
+            browser_id: None,
             workspace_id: None,
             worktree_path: None,
             url: "https://example.com".into(),
             profile: None,
+            zoom_factor: None,
             bounds: None,
             visible: Some(true),
         })
@@ -269,10 +311,12 @@ fn test_browser_manager_get_bounds_and_visibility() {
     let mgr = BrowserManager::new();
     let state = mgr
         .register_session(CreateBrowserRequest {
+            browser_id: None,
             workspace_id: None,
             worktree_path: None,
             url: "https://example.com".into(),
             profile: Some(BrowserProfileId::Default),
+            zoom_factor: None,
             bounds: Some(LogicalRect {
                 x: 0.0,
                 y: 0.0,
@@ -336,10 +380,12 @@ async fn test_cmd_browser_set_bounds_returns_webview_not_found_when_webview_miss
     let manager = std::sync::Arc::new(BrowserManager::new());
     let state = manager
         .register_session(CreateBrowserRequest {
+            browser_id: None,
             workspace_id: None,
             worktree_path: None,
             url: "https://example.com".into(),
             profile: None,
+            zoom_factor: None,
             bounds: None,
             visible: Some(true),
         })
@@ -364,4 +410,80 @@ async fn test_cmd_browser_set_bounds_returns_webview_not_found_when_webview_miss
     let err = result.unwrap_err();
     assert_eq!(err.code, IpcErrorCode::WebviewNotFound);
     assert!(err.message.contains(&state.webview_label));
+}
+
+#[test]
+fn named_profile_ids_round_trip_as_strings() {
+    let profile = BrowserProfileId::from_id("work-account").expect("named profile");
+    assert_eq!(profile, BrowserProfileId::Named("work-account".into()));
+    assert_eq!(profile.as_str(), "work-account");
+    assert_eq!(serde_json::to_string(&profile).unwrap(), "\"work-account\"");
+    assert_eq!(serde_json::from_str::<BrowserProfileId>("\"work-account\"").unwrap(), profile);
+    assert!(BrowserProfileId::from_id("../unsafe").is_none());
+}
+
+#[test]
+fn restored_browser_id_and_zoom_are_preserved_by_manager() {
+    let manager = BrowserManager::new();
+    let state = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: Some("persisted-browser-id".into()),
+            workspace_id: Some("workspace-1".into()),
+            worktree_path: None,
+            url: "https://example.com/restored".into(),
+            profile: Some(BrowserProfileId::Private),
+            zoom_factor: Some(1.25),
+            bounds: None,
+            visible: Some(false),
+        })
+        .expect("register restored browser");
+
+    assert_eq!(state.browser_id, "persisted-browser-id");
+    assert_eq!(state.profile_id, BrowserProfileId::Private);
+    assert_eq!(state.zoom_factor, 1.25);
+    assert!(!state.visible);
+}
+
+#[test]
+fn history_stack_truncates_forward_entries_after_new_navigation() {
+    let manager = BrowserManager::new();
+    let state = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: None,
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.com/one".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .expect("register browser");
+
+    manager.update_url(&state.browser_id, "https://example.com/two").unwrap();
+    manager.update_url(&state.browser_id, "https://example.com/three").unwrap();
+
+    let back = manager
+        .begin_history_navigation(&state.browser_id, false)
+        .expect("go back");
+    assert_eq!(back.url, "https://example.com/two");
+    assert!(back.can_go_back);
+    assert!(back.can_go_forward);
+
+    manager
+        .update_url(&state.browser_id, "https://example.com/replacement")
+        .expect("new navigation from history");
+    let replaced = manager.get_state(&state.browser_id).unwrap();
+    assert_eq!(replaced.url, "https://example.com/replacement");
+    assert!(replaced.can_go_back);
+    assert!(!replaced.can_go_forward);
+
+    let back_again = manager
+        .begin_history_navigation(&state.browser_id, false)
+        .expect("go back to two");
+    assert_eq!(back_again.url, "https://example.com/two");
+    let forward = manager
+        .begin_history_navigation(&state.browser_id, true)
+        .expect("go forward to replacement");
+    assert_eq!(forward.url, "https://example.com/replacement");
 }

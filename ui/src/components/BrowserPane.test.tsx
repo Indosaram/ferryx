@@ -9,6 +9,7 @@ const eventMocks = vi.hoisted(() => ({
 }));
 
 const browserMocks = vi.hoisted(() => ({
+  BROWSER_SHORTCUT_EVENT: "ferryx:browser-shortcut",
   getBrowserState: vi.fn(async () => ({
     browserId: "browser-1",
     webviewLabel: "browser-browser-1",
@@ -27,6 +28,12 @@ const browserMocks = vi.hoisted(() => ({
   })),
   setBrowserBounds: vi.fn(async () => undefined),
   setBrowserVisible: vi.fn(async () => undefined),
+  onBrowserShortcutRequested: vi.fn(async () => () => undefined),
+  onBrowserDownloadRequested: vi.fn(async () => () => undefined),
+  findBrowser: vi.fn(),
+  clearBrowserFind: vi.fn(),
+  downloadBrowserUrl: vi.fn(),
+  openExternalUrl: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));

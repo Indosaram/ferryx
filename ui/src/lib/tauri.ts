@@ -7,6 +7,8 @@ export type {
   AttachTerminalRequest,
   AttachTerminalResponse,
   CliLauncherStatus,
+  NativeTerminalAgentStatePayload,
+  NativeTerminalScrollbarPayload,
   NotificationBadgeResult,
   SetBadgeCountResult,
   TerminalLifecyclePayload,
@@ -23,7 +25,9 @@ import type {
   BranchDeletionPreview,
   CliLauncherStatus,
   DirtyState,
+  NativeTerminalAgentStatePayload,
   NativeTerminalBellPayload,
+  NativeTerminalScrollbarPayload,
   NativeTerminalTitlePayload,
   NotificationBadgeResult,
   SetBadgeCountResult,
@@ -287,6 +291,7 @@ export async function signalTerminal(request: { sessionId: string; signal: Termi
 
 export async function closeTerminal(sessionId: string) {
   if (!isTauri()) return;
+  await invokeCommand<void>("cmd_native_terminal_close", { sessionId }).catch(() => undefined);
   await invokeCommand<void>("cmd_terminal_close", { sessionId });
 }
 
@@ -327,6 +332,20 @@ export async function onNativeTerminalBell(
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<NativeTerminalBellPayload>("native_terminal_bell", (event) => handler(event.payload));
+}
+
+export async function onNativeTerminalAgentState(
+  handler: (payload: NativeTerminalAgentStatePayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<NativeTerminalAgentStatePayload>("native_terminal_agent_state", (event) => handler(event.payload));
+}
+
+export async function onNativeTerminalScrollbar(
+  handler: (payload: NativeTerminalScrollbarPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<NativeTerminalScrollbarPayload>("native_terminal_scrollbar", (event) => handler(event.payload));
 }
 
 export async function onNewTerminalTabMenu(handler: () => void): Promise<UnlistenFn> {
@@ -499,8 +518,8 @@ export async function requestNotificationPermission(): Promise<import('./types')
   return invokeCommand<import('./types').NotificationPermissionRequest>('cmd_notification_request_permission');
 }
 
-export async function probeNotificationDelivery(force?: boolean): Promise<import('./types').NotificationProbeResult> {
-  return invokeCommand<import('./types').NotificationProbeResult>('cmd_notification_probe_delivery', { force });
+export async function probeNotificationDelivery(sendTest?: boolean): Promise<import('./types').NotificationProbeResult> {
+  return invokeCommand<import('./types').NotificationProbeResult>('cmd_notification_probe_delivery', { sendTest });
 }
 
 export async function openNotificationSystemSettings(): Promise<import('./types').OpenSystemSettingsResult> {
@@ -558,6 +577,8 @@ export async function clearSession(): Promise<void> {
 export type RemoteTerminalTabInfo = {
   id: string;
   label: string;
+  activityState?: "working" | "waiting" | "done";
+  agentType?: string;
 };
 
 export type FocusedTerminalPayload = {
@@ -585,7 +606,7 @@ export async function publishFocusedTerminal(payload: FocusedTerminalPayload | n
       tabs: terminalTabs,
       terminalTabs,
     },
-  }).catch(() => undefined);
+  });
 }
 
 export type RemoteSelectionRequestedPayload = {

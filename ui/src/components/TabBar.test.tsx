@@ -263,7 +263,7 @@ describe("TabBar", () => {
     expect(nativeWindow.startDragging).not.toHaveBeenCalled();
 
     fireEvent.click(browserAction);
-    expect(onAddBrowser).toHaveBeenCalledWith("about:blank");
+    expect(onAddBrowser).toHaveBeenCalledWith("about:blank", undefined);
 
     fireEvent.pointerDown(screen.getByRole("button", { name: "Action" }), { button: 0 });
     expect(nativeWindow.startDragging).not.toHaveBeenCalled();
@@ -285,7 +285,7 @@ describe("TabBar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
     fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
-    expect(onAddBrowser).toHaveBeenCalledWith("https://example.com/start");
+    expect(onAddBrowser).toHaveBeenCalledWith("https://example.com/start", undefined);
   });
 
   it("disables terminal split for browser tabs while preserving whole-tab split", () => {

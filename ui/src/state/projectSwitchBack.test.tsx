@@ -9,6 +9,7 @@ import { useWorkspaceStore, type WorkspaceServices } from "./workspaceStore";
 const createBrowserMock = vi.fn();
 const closeBrowserMock = vi.fn(async (_browserId: string) => undefined);
 vi.mock("../lib/browserTauri", () => ({
+  BROWSER_SHORTCUT_EVENT: "ferryx:browser-shortcut",
   createBrowser: (options: unknown) => createBrowserMock(options),
   closeBrowser: (browserId: string) => closeBrowserMock(browserId),
   navigateBrowser: vi.fn(async () => undefined),

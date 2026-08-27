@@ -7,6 +7,7 @@ import {
   shortcutLabel,
   useShortcuts,
   type ShortcutActionId,
+  type ShortcutBinding,
 } from "./shortcuts";
 
 const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventInit][] = [
@@ -65,6 +66,11 @@ describe("shortcut registry", () => {
       "tab.newTerminal",
       "tab.newBrowser",
       "tab.close",
+      "browser.focusAddress",
+      "browser.reload",
+      "browser.back",
+      "browser.forward",
+      "browser.find",
       "tab.next",
       "tab.previous",
       "tab.select1",
@@ -236,5 +242,134 @@ describe("shortcut registry", () => {
     fireEvent.keyDown(input, { key: "k", ctrlKey: true });
     expect(handlers["commandPalette.open"]).toHaveBeenCalledOnce();
     input.remove();
+  });
+});
+
+function canonicalChordKey(binding: ShortcutBinding): string {
+  const parts: string[] = [];
+  if (binding.mod) parts.push("Mod");
+  if (binding.control) parts.push("Control");
+  if (binding.alt) parts.push("Alt");
+  if (binding.shift) parts.push("Shift");
+  parts.push(binding.key);
+  return parts.join("+");
+}
+
+function collectShortcutCollisions(): Record<string, string[]> {
+  const map: Record<string, string[]> = {};
+  for (const shortcut of SHORTCUTS) {
+    const chord = canonicalChordKey(shortcut.binding);
+    if (!map[chord]) {
+      map[chord] = [];
+    }
+    map[chord].push(shortcut.id);
+  }
+  const collisions: Record<string, string[]> = {};
+  for (const [chord, ids] of Object.entries(map)) {
+    if (ids.length > 1) {
+      collisions[chord] = [...ids].sort();
+    }
+  }
+  return collisions;
+}
+
+describe("shortcut chord collision invariants", () => {
+  it("collision inventory is exactly the known colliding pairs", () => {
+    const collisions = collectShortcutCollisions();
+    expect(collisions).toEqual({
+      "Mod+[": ["browser.back", "terminal.focusPrevious"],
+      "Mod+]": ["browser.forward", "terminal.focusNext"],
+      "Mod+f": ["browser.find", "terminal.search"],
+    });
+  });
+
+  it("every colliding pair spans the browser/terminal surface split", () => {
+    const collisions = collectShortcutCollisions();
+    for (const [chord, ids] of Object.entries(collisions)) {
+      // App.tsx guarantees only one surface's handlers are registered at a time,
+      // so a collision is safe only if the two ids belong to different surfaces.
+      // A collision between two same-surface ids would be a real, unresolvable conflict.
+      expect(ids).toHaveLength(2);
+      const hasBrowser = ids.some((id) => id.startsWith("browser."));
+      const hasTerminal = ids.some((id) => id.startsWith("terminal."));
+      expect(hasBrowser, `Expected chord ${chord} to have a browser action`).toBe(true);
+      expect(hasTerminal, `Expected chord ${chord} to have a terminal action`).toBe(true);
+    }
+  });
+
+  it("dispatcher resolves each chord by which surface's handler is registered", () => {
+    // 1. With ONLY browser.back registered (terminal handler absent), dispatching Mod+[ calls browser handler
+    const browserBack1 = vi.fn();
+    const terminalPrev1 = vi.fn();
+    const { unmount: unmount1 } = renderHook(() =>
+      useShortcuts({ "browser.back": browserBack1, "terminal.focusPrevious": undefined }, { isMac: true }),
+    );
+    const ev1 = new KeyboardEvent("keydown", { key: "[", code: "BracketLeft", metaKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(ev1);
+    expect(ev1.defaultPrevented).toBe(true);
+    expect(browserBack1).toHaveBeenCalledOnce();
+    expect(terminalPrev1).not.toHaveBeenCalled();
+    unmount1();
+
+    // 2. With ONLY terminal.focusPrevious registered (browser handler absent), dispatching Mod+[ calls terminal handler
+    const browserBack2 = vi.fn();
+    const terminalPrev2 = vi.fn();
+    const { unmount: unmount2 } = renderHook(() =>
+      useShortcuts({ "browser.back": undefined, "terminal.focusPrevious": terminalPrev2 }, { isMac: true }),
+    );
+    const ev2 = new KeyboardEvent("keydown", { key: "[", code: "BracketLeft", metaKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(ev2);
+    expect(ev2.defaultPrevented).toBe(true);
+    expect(terminalPrev2).toHaveBeenCalledOnce();
+    expect(browserBack2).not.toHaveBeenCalled();
+    unmount2();
+
+    // 3. With ONLY browser.forward registered (terminal handler absent), dispatching Mod+] calls browser handler
+    const browserForward1 = vi.fn();
+    const terminalNext1 = vi.fn();
+    const { unmount: unmount3 } = renderHook(() =>
+      useShortcuts({ "browser.forward": browserForward1, "terminal.focusNext": undefined }, { isMac: true }),
+    );
+    const ev3 = new KeyboardEvent("keydown", { key: "]", code: "BracketRight", metaKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(ev3);
+    expect(ev3.defaultPrevented).toBe(true);
+    expect(browserForward1).toHaveBeenCalledOnce();
+    expect(terminalNext1).not.toHaveBeenCalled();
+    unmount3();
+
+    // 4. With ONLY terminal.focusNext registered (browser handler absent), dispatching Mod+] calls terminal handler
+    const browserForward2 = vi.fn();
+    const terminalNext2 = vi.fn();
+    const { unmount: unmount4 } = renderHook(() =>
+      useShortcuts({ "browser.forward": undefined, "terminal.focusNext": terminalNext2 }, { isMac: true }),
+    );
+    const ev4 = new KeyboardEvent("keydown", { key: "]", code: "BracketRight", metaKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(ev4);
+    expect(ev4.defaultPrevented).toBe(true);
+    expect(terminalNext2).toHaveBeenCalledOnce();
+    expect(browserForward2).not.toHaveBeenCalled();
+    unmount4();
+  });
+
+  it("documents precedence order when both colliding handlers are registered (array order wins)", () => {
+    // App.tsx must keep these mutually exclusive so this path is never taken in production.
+    const browserBack = vi.fn();
+    const terminalPrev = vi.fn();
+    const { unmount } = renderHook(() =>
+      useShortcuts(
+        {
+          "browser.back": browserBack,
+          "terminal.focusPrevious": terminalPrev,
+        },
+        { isMac: true },
+      ),
+    );
+
+    const ev = new KeyboardEvent("keydown", { key: "[", code: "BracketLeft", metaKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(browserBack).toHaveBeenCalledOnce();
+    expect(terminalPrev).not.toHaveBeenCalled();
+    unmount();
   });
 });

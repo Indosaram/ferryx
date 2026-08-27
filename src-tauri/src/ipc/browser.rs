@@ -1,9 +1,14 @@
 use crate::browser::{
-    cookie_from_imported, parse_cookie_file, BrowserAutomationAction, BrowserAutomationElement,
-    BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserError,
-    BrowserManager, BrowserProfileId, BrowserSessionSummary, BrowserState,
-    BrowserStateChangedPayload, CreateBrowserRequest, ImportBrowserCookiesRequest,
-    ImportBrowserCookiesResult, LogicalRect,
+    browser_find_script, cookie_from_imported, download_url_to_path, parse_browser_find_callback,
+    parse_browser_guest_action, parse_cookie_file, BrowserAutomationAction, BrowserAutomationElement,
+    BrowserAutomationRequest, BrowserAutomationSnapshot,
+    BrowserAutomationTarget, BrowserDownloadRequestedPayload, BrowserError, BrowserFindResult,
+    BrowserGuestAction, BrowserManager, BrowserOpenRequestedPayload, BrowserProfileId,
+    BrowserSessionSummary, BrowserShortcutRequestedPayload, BrowserState, BrowserStateChangedPayload,
+    CreateBrowserRequest, ImportBrowserCookiesRequest, ImportBrowserCookiesResult, LogicalRect,
+    BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_GUEST_BRIDGE_SCRIPT, BROWSER_OPEN_REQUESTED_EVENT,
+    BROWSER_SHORTCUT_REQUESTED_EVENT,
+    BROWSER_CLEAR_FIND_SCRIPT,
 };
 use crate::ipc::error::IpcError;
 #[cfg(target_os = "macos")]
@@ -801,9 +806,10 @@ fn update_webview_state<R: tauri::Runtime>(
     url: Option<String>,
     title: Option<String>,
     loading: Option<bool>,
+    error: Option<String>,
 ) {
     if let Ok(state) =
-        manager.update_navigation_state(&browser_id, url, title, loading, None, None, None)
+        manager.update_navigation_state(&browser_id, url, title, loading, None, None, error)
     {
         emit_browser_state(webview, &state);
     }
@@ -836,7 +842,34 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     request: CreateBrowserRequest,
 ) -> Result<BrowserState, IpcError> {
+    if let Some(restored_browser_id) = request.browser_id.as_deref() {
+        if let Ok(existing) = manager.get_state(restored_browser_id) {
+            return Ok(existing);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if request.profile.as_ref().is_some_and(BrowserProfileId::is_named) {
+        return Err(BrowserError::UnsupportedProfile(
+            "named persistent browser profiles are unavailable on macOS WebKit".into(),
+        )
+        .into());
+    }
     let state = manager.register_session(request.clone())?;
+
+
+    #[cfg(not(target_os = "macos"))]
+    let profile_data_dir = match request.profile.as_ref() {
+        Some(BrowserProfileId::Named(profile_id)) => {
+            let root = app.path().app_data_dir().map_err(|error| BrowserError::CreateFailed(error.to_string()))?;
+            let data_dir = root.join("browser-profiles").join(profile_id);
+            tokio::fs::create_dir_all(&data_dir)
+                .await
+                .map_err(|error| BrowserError::CreateFailed(error.to_string()))?;
+            Some(data_dir)
+        }
+        _ => None,
+    };
 
     if let Some(main_window) = app.get_window("main") {
         let label = state.webview_label.clone();
@@ -844,7 +877,14 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
         let bounds = request.bounds.clone();
         let visible = state.visible;
         let browser_id = state.browser_id.clone();
-        let incognito = matches!(&state.profile_id, BrowserProfileId::Private);
+        let incognito = state.profile_id.is_private();
+        let profile_id = state.profile_id.clone();
+        let worktree_path = state.worktree_path.clone();
+        let zoom_factor = state.zoom_factor;
+        let bridge_app = app.clone();
+        let bridge_browser_id = browser_id.clone();
+        let bridge_profile_id = profile_id.clone();
+        let bridge_worktree_path = worktree_path.clone();
         let page_manager = Arc::clone(manager.inner());
         let title_manager = Arc::clone(manager.inner());
         let creation_manager = Arc::clone(manager.inner());
@@ -860,16 +900,66 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
             };
 
             let builder = tauri::WebviewBuilder::new(label, parsed_url)
+                .user_agent(crate::browser::default_desktop_user_agent())
                 .incognito(incognito)
+                .initialization_script(BROWSER_GUEST_BRIDGE_SCRIPT)
+                .on_navigation(move |target| {
+                    match parse_browser_guest_action(target) {
+                        Some(BrowserGuestAction::Open(target_url)) => {
+                            let _ = bridge_app.emit(
+                                BROWSER_OPEN_REQUESTED_EVENT,
+                                BrowserOpenRequestedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                    target_url,
+                                    profile_id: bridge_profile_id.clone(),
+                                    worktree_path: bridge_worktree_path.clone(),
+                                },
+                            );
+                            false
+                        }
+                        Some(BrowserGuestAction::Download(target_url)) => {
+                            let _ = bridge_app.emit(
+                                BROWSER_DOWNLOAD_REQUESTED_EVENT,
+                                BrowserDownloadRequestedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                    target_url,
+                                },
+                            );
+                            false
+                        }
+                        Some(BrowserGuestAction::Shortcut(action)) => {
+                            let _ = bridge_app.emit(
+                                BROWSER_SHORTCUT_REQUESTED_EVENT,
+                                BrowserShortcutRequestedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                    action,
+                                },
+                            );
+                            false
+                        }
+                        None => true,
+                    }
+                })
                 .on_page_load(move |webview, payload| {
                     let loading = matches!(payload.event(), PageLoadEvent::Started);
+                    let page_url = payload.url().to_string();
+                    let current_state = page_manager.get_state(&page_browser_id).ok();
+                    let fallback_to_blank = page_url == "about:blank"
+                        && current_state
+                            .as_ref()
+                            .is_some_and(|state| state.url != "about:blank");
+                    let error = (!loading && fallback_to_blank).then(|| {
+                        format!("Failed to load {}", current_state.as_ref().map_or("page", |state| state.url.as_str()))
+                    });
+                    let navigation_url = (!fallback_to_blank).then_some(page_url);
                     update_webview_state(
                         &webview,
                         Arc::clone(&page_manager),
                         page_browser_id.clone(),
-                        Some(payload.url().to_string()),
+                        navigation_url,
                         None,
                         Some(loading),
+                        error,
                     );
                 })
                 .on_document_title_changed(move |webview, title| {
@@ -880,8 +970,17 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                         None,
                         Some(title),
                         None,
+                        None,
                     );
                 });
+
+
+            #[cfg(not(target_os = "macos"))]
+            let builder = if let Some(data_dir) = profile_data_dir {
+                builder.data_directory(data_dir)
+            } else {
+                builder
+            };
 
             let pos = if let Some(ref b) = bounds {
                 tauri::LogicalPosition { x: b.x, y: b.y }
@@ -909,6 +1008,7 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                     height: size.height,
                 },
             ) {
+                let _ = child.set_zoom(zoom_factor);
                 if let Ok(Some(current_bounds)) = creation_manager.get_bounds(&browser_id) {
                     let _ = child.set_bounds(tauri::Rect {
                         position: tauri::Position::Logical(tauri::LogicalPosition {
@@ -949,9 +1049,21 @@ pub async fn cmd_browser_navigate<R: tauri::Runtime>(
         let parsed = valid_url.parse().map_err(|error| {
             BrowserError::NavigationFailed(format!("invalid target URL: {error}"))
         })?;
-        webview
-            .navigate(parsed)
-            .map_err(|error| BrowserError::NavigationFailed(error.to_string()))?;
+        if let Err(error) = webview.navigate(parsed) {
+            let message = error.to_string();
+            if let Ok(error_state) = manager.update_navigation_state(
+                &browser_id,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                Some(message.clone()),
+            ) {
+                emit_browser_state(&webview, &error_state);
+            }
+            return Err(BrowserError::NavigationFailed(message).into());
+        }
     }
     Ok(())
 }
@@ -962,12 +1074,15 @@ fn history_navigation<R: tauri::Runtime>(
     browser_id: &str,
     forward: bool,
 ) -> Result<(), IpcError> {
-    let state = manager.begin_history_navigation(browser_id)?;
+    let state = manager.begin_history_navigation(browser_id, forward)?;
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
     emit_browser_state(&webview, &state);
 
+    if !state.loading {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     {
         let manager = Arc::clone(manager);
@@ -990,15 +1105,20 @@ fn history_navigation<R: tauri::Runtime>(
                     }
                 }
 
-                if let Ok(next_state) = manager.update_navigation_state(
-                    &browser_id,
-                    None,
-                    None,
-                    Some(can_navigate),
-                    Some(native.canGoBack()),
-                    Some(native.canGoForward()),
-                    None,
-                ) {
+                let next_state = if can_navigate {
+                    manager.update_navigation_state(
+                        &browser_id,
+                        None,
+                        None,
+                        Some(true),
+                        Some(native.canGoBack()),
+                        Some(native.canGoForward()),
+                        None,
+                    )
+                } else {
+                    manager.cancel_history_navigation(&browser_id, forward)
+                };
+                if let Ok(next_state) = next_state {
                     emit_browser_state(&webview_for_emit, &next_state);
                 }
             })
@@ -1013,9 +1133,12 @@ fn history_navigation<R: tauri::Runtime>(
         } else {
             "history.back()"
         };
-        webview
-            .eval(script)
-            .map_err(|error| BrowserError::HistoryFailed(error.to_string()))?;
+        if let Err(error) = webview.eval(script) {
+            if let Ok(restored) = manager.cancel_history_navigation(browser_id, forward) {
+                emit_browser_state(&webview, &restored);
+            }
+            return Err(BrowserError::HistoryFailed(error.to_string()).into());
+        }
         Ok(())
     }
 }
@@ -1095,12 +1218,24 @@ pub async fn cmd_browser_reload<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
-    let state = manager.begin_history_navigation(&browser_id)?;
+    let state = manager.begin_reload(&browser_id)?;
     if let Some(webview) = app.get_webview(&state.webview_label) {
         emit_browser_state(&webview, &state);
-        webview
-            .reload()
-            .map_err(|error| BrowserError::NavigationFailed(error.to_string()))?;
+        if let Err(error) = webview.reload() {
+            let message = error.to_string();
+            if let Ok(error_state) = manager.update_navigation_state(
+                &browser_id,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                Some(message.clone()),
+            ) {
+                emit_browser_state(&webview, &error_state);
+            }
+            return Err(BrowserError::NavigationFailed(message).into());
+        }
     }
     Ok(())
 }
@@ -1186,6 +1321,53 @@ pub async fn cmd_browser_get_state(
     Ok(state)
 }
 
+
+#[tauri::command]
+pub async fn cmd_browser_find<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+    query: String,
+    backwards: bool,
+) -> Result<BrowserFindResult, IpcError> {
+    let state = manager.get_state(&browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    if query.trim().is_empty() {
+        return Ok(BrowserFindResult {
+            match_count: 0,
+            found: false,
+        });
+    }
+    let script = browser_find_script(&query, backwards)?;
+    let result = eval_webview(webview, script)
+        .await
+        .map_err(|error| BrowserError::FindFailed(error.to_string()))?;
+    Ok(parse_browser_find_callback(&result)?)
+}
+
+#[tauri::command]
+pub async fn cmd_browser_clear_find<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+) -> Result<(), IpcError> {
+    let state = manager.get_state(&browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let _ = eval_webview(webview, BROWSER_CLEAR_FIND_SCRIPT.to_string())
+        .await
+        .map_err(|error| BrowserError::FindFailed(error.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_browser_download(url: String, file_path: String) -> Result<(), IpcError> {
+    download_url_to_path(&url, std::path::Path::new(&file_path)).await?;
+    Ok(())
+}
 #[tauri::command]
 pub async fn cmd_browser_automation_snapshot<R: tauri::Runtime>(
     app: AppHandle<R>,

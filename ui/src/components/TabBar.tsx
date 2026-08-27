@@ -18,6 +18,7 @@ import {
 import React, { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { BrowserDuplicateControl } from "./BrowserDuplicateControl";
 import type { ActivitySummary } from "../lib/activity";
 import type { WorkspaceTab } from "../lib/types";
 import { NewTabPopover } from "./NewTabPopover";
@@ -42,7 +43,8 @@ type TabBarProps = {
   /** Whole-tab split, valid for terminal and browser tabs. */
   onMoveTabToSplit?: (tabId: string, edge: TabDropEdge) => void;
   onAdd: () => void;
-  onAddBrowser?: (url?: string) => void;
+  onAddBrowser?: (url?: string, profileId?: string) => void;
+  onDuplicateBrowser?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
   onOpenSettings?: () => void;
@@ -78,6 +80,7 @@ export function TabBar({
   onMoveTabToSplit,
   onAdd,
   onAddBrowser,
+  onDuplicateBrowser,
   onAddMarkdown,
   onAddMobileEmulator,
   onOpenSettings,
@@ -204,9 +207,9 @@ export function TabBar({
                 setIsNewTabOpen(false);
                 onAdd();
               }}
-              onNewBrowser={(url) => {
+              onNewBrowser={(url, profileId) => {
                 setIsNewTabOpen(false);
-                onAddBrowser?.(url);
+                onAddBrowser?.(url, profileId);
               }}
               onNewMarkdown={
                 onAddMarkdown
@@ -280,6 +283,14 @@ export function TabBar({
             onTogglePin?.(contextTab.id, !contextTab.pinned);
             setContextMenu(null);
           }}
+          onDuplicateBrowser={
+            contextTab.kind === "browser" && onDuplicateBrowser
+              ? (profileId) => {
+                  onDuplicateBrowser(contextTab.id, profileId);
+                  setContextMenu(null);
+                }
+              : undefined
+          }
           onRename={() => handleStartRename(contextTab)}
           onCloseTab={() => {
             if (!contextTab.pinned) onClose(contextTab.id);
@@ -321,6 +332,7 @@ function TabContextMenuPopup({
   onMoveTabToSplit,
   onTogglePin,
   onRename,
+  onDuplicateBrowser,
   onCloseTab,
   onCloseOthers,
   onCloseToRight,
@@ -343,6 +355,7 @@ function TabContextMenuPopup({
   onMoveTabToSplit: (edge: TabDropEdge) => void;
   onTogglePin: () => void;
   onRename: () => void;
+  onDuplicateBrowser?: (profileId: string) => void;
   onCloseTab: () => void;
   onCloseOthers: () => void;
   onCloseToRight: () => void;
@@ -379,6 +392,9 @@ function TabContextMenuPopup({
       className="fixed z-50 min-w-44 rounded-md border border-border bg-popover p-1 text-xs text-popover-foreground shadow-md"
       style={{ left: `${left}px`, top: `${top}px` }}
     >
+      {state.tab.kind === "browser" && onDuplicateBrowser ? (
+        <BrowserDuplicateControl tab={state.tab} onDuplicate={onDuplicateBrowser} />
+      ) : null}
       {hasSplitRightHandler ? (
         <button
           type="button"

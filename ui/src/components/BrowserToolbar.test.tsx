@@ -143,10 +143,11 @@ describe("BrowserToolbar", () => {
       },
     ]));
 
+    const onNavigate = vi.fn();
     render(
       <BrowserToolbar
         tab={mockTab}
-        onNavigate={vi.fn()}
+        onNavigate={onNavigate}
         onReload={vi.fn()}
       />
     );
@@ -155,7 +156,7 @@ describe("BrowserToolbar", () => {
     expect(screen.getByText("Previous page")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Previous page"));
     await waitFor(() => {
-      expect(browserNative.navigateBrowser).toHaveBeenCalledWith("b-1", "https://example.com/previous");
+      expect(onNavigate).toHaveBeenCalledWith("https://example.com/previous");
     });
   });
 

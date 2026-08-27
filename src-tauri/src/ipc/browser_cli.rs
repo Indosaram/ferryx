@@ -259,10 +259,12 @@ mod tests {
         let manager = Arc::new(BrowserManager::new());
         let registered_session = manager
             .register_session(CreateBrowserRequest {
+                browser_id: None,
                 workspace_id: Some("workspace-regression".to_string()),
                 worktree_path: Some("/worktree/alpha".to_string()),
                 url: "https://ferryx.dev".to_string(),
                 profile: Some(BrowserProfileId::Default),
+                zoom_factor: None,
                 bounds: None,
                 visible: Some(true),
             })

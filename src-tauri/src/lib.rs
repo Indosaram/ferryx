@@ -1,3 +1,4 @@
+pub mod agent_detect;
 pub mod browser;
 pub mod daemon;
 pub mod ipc;
@@ -293,10 +294,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_apply_overrides,
         cmd_native_terminal_attach,
         cmd_native_terminal_detach,
+        cmd_native_terminal_close,
         cmd_native_terminal_set_bounds,
         cmd_native_terminal_set_focus,
         cmd_native_terminal_send_input,
         cmd_native_terminal_scroll,
+        cmd_native_terminal_scrollbar,
         cmd_native_terminal_select,
         cmd_native_terminal_copy_selection,
         cmd_native_terminal_paste,
@@ -344,6 +347,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_set_zoom,
         cmd_browser_focus,
         cmd_browser_get_state,
+        cmd_browser_find,
+        cmd_browser_clear_find,
+        cmd_browser_download,
         cmd_browser_automation_snapshot,
         cmd_browser_automation_act,
         cmd_browser_close,

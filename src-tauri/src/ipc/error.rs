@@ -26,6 +26,8 @@ pub enum IpcErrorCode {
     WebviewNotFound,
     BrowserUrlInvalid,
     BrowserUrlSchemeDenied,
+    BrowserFindFailed,
+    BrowserDownloadFailed,
     BrowserBoundsInvalid,
     BrowserCreateFailed,
     BrowserNavigationFailed,
@@ -204,6 +206,22 @@ impl From<PtyError> for IpcError {
     }
 }
 
+#[cfg(feature = "native-terminal")]
+impl From<crate::native_terminal::NativeTerminalError> for IpcError {
+    fn from(error: crate::native_terminal::NativeTerminalError) -> Self {
+        let message = error.to_string();
+        let code = match error {
+            // A pane whose surface was released races its own in-flight geometry updates during a
+            // tab switch. The frontend recognises this code and drops the update silently.
+            crate::native_terminal::NativeTerminalError::SessionDetached(_) => {
+                IpcErrorCode::SessionNotFound
+            }
+            _ => IpcErrorCode::InternalError,
+        };
+        Self::new(code, message)
+    }
+}
+
 impl From<crate::browser::BrowserError> for IpcError {
     fn from(error: crate::browser::BrowserError) -> Self {
         let message = error.to_string();
@@ -219,6 +237,8 @@ impl From<crate::browser::BrowserError> for IpcError {
                 IpcErrorCode::BrowserNavigationFailed
             }
             crate::browser::BrowserError::HistoryFailed(_) => IpcErrorCode::BrowserHistoryFailed,
+            crate::browser::BrowserError::FindFailed(_) => IpcErrorCode::BrowserFindFailed,
+            crate::browser::BrowserError::DownloadFailed(_) => IpcErrorCode::BrowserDownloadFailed,
             crate::browser::BrowserError::CookieImport(_) => {
                 IpcErrorCode::BrowserCookieImportFailed
             }

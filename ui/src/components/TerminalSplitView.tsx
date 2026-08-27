@@ -132,7 +132,8 @@ type TerminalSplitViewProps = {
   onRenameTab?: (tabId: string, label: string) => void;
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab?: () => void;
-  onAddBrowserTab?: (url?: string) => void;
+  onAddBrowserTab?: (url?: string, profileId?: string) => void;
+  onDuplicateBrowserTab?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
   onOpenSettings?: () => void;
@@ -175,6 +176,7 @@ export function TerminalSplitView({
   onToggleTabPin,
   onAddTab = () => undefined,
   onAddBrowserTab = () => undefined,
+  onDuplicateBrowserTab = () => undefined,
   onAddMarkdown,
   onAddMobileEmulator,
   onOpenSettings,
@@ -392,6 +394,7 @@ export function TerminalSplitView({
     onToggleTabPin,
     onAddTab,
     onAddBrowserTab,
+    onDuplicateBrowserTab,
     onAddMarkdown,
     onAddMobileEmulator,
     onOpenSettings,
@@ -449,6 +452,7 @@ export function TerminalSplitView({
             onClose={onCloseTab}
             onAdd={onAddTab}
             onAddBrowser={onAddBrowserTab}
+            onDuplicateBrowser={onDuplicateBrowserTab}
             onAddMarkdown={onAddMarkdown}
             onAddMobileEmulator={onAddMobileEmulator}
             onOpenSettings={onOpenSettings}
@@ -542,7 +546,8 @@ type TabGroupViewProps = {
   onRenameTab?: (tabId: string, label: string) => void;
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab: () => void;
-  onAddBrowserTab: (url?: string) => void;
+  onAddBrowserTab: (url?: string, profileId?: string) => void;
+  onDuplicateBrowserTab: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
   onOpenSettings?: () => void;
@@ -588,6 +593,7 @@ function TabGroupView({
   onAddTab,
   onAddBrowserTab,
   onAddMarkdown,
+  onDuplicateBrowserTab,
   onAddMobileEmulator,
   onOpenSettings,
   agents,
@@ -654,10 +660,11 @@ function TabGroupView({
           focusGroup();
           onAddTab();
         }}
-        onAddBrowser={(url) => {
+        onAddBrowser={(url, profileId) => {
           focusGroup();
-          onAddBrowserTab(url);
+          onAddBrowserTab(url, profileId);
         }}
+        onDuplicateBrowser={onDuplicateBrowserTab}
         onAddMarkdown={
           onAddMarkdown
             ? () => {
@@ -970,6 +977,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 canGoBack: content.canGoBack ?? false,
                 canGoForward: content.canGoForward ?? false,
                 profileId: content.profileId,
+                zoomFactor: content.zoomFactor,
+                loadError: content.loadError ?? null,
                 worktreePath: content.worktreePath,
                 worktreeLabel: content.worktreeLabel,
               };
@@ -984,6 +993,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 canGoBack: browserState.canGoBack ?? false,
                 canGoForward: browserState.canGoForward ?? false,
                 profileId: browserState.profileId,
+                zoomFactor: browserState.zoomFactor,
+                loadError: browserState.loadError ?? null,
                 worktreePath: browserState.worktreePath,
                 worktreeLabel: browserState.worktreeLabel,
                 pinned: tab.pinned,

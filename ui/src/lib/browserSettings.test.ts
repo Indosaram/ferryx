@@ -88,6 +88,7 @@ describe("browser settings", () => {
     });
     expect(normalized.profiles).toEqual([
       { id: "default", name: "Default" },
+      { id: "private", name: "Private" },
       { id: "work", name: "Work" },
     ]);
     expect(normalized.defaultProfileId).toBe("default");

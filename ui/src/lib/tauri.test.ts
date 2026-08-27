@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/api/event", () => events);
 
 import {
   attachTerminal,
+  probeNotificationDelivery,
   createWorktree,
   deleteWorktree,
   deleteWorktreeDestructive,
@@ -22,6 +23,7 @@ import {
   getWorktreeStatus,
   listProjectBranches,
   listTerminalSessions,
+  onNativeTerminalScrollbar,
   onNewTerminalTabMenu,
   onCloseTabMenu,
   listWorktrees,
@@ -317,6 +319,53 @@ describe("Tauri IPC wrapper contract", () => {
     });
   });
 
+  it("publishes focused terminal with optional activityState and agentType on terminal tabs", async () => {
+    core.invoke.mockResolvedValue(undefined);
+
+    await publishFocusedTerminal({
+      workspaceId: "orca-lite",
+      worktreeSlug: "main",
+      worktreeLabel: "main",
+      backendSessionId: "pty-1",
+      activeTabId: "tab-1",
+      terminalTabs: [
+        { id: "tab-1", label: "main", activityState: "working", agentType: "claude" },
+        { id: "tab-2", label: "feature", activityState: "waiting", agentType: "codex" },
+      ],
+    });
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_remote_set_active_selection", {
+      request: {
+        workspaceId: "orca-lite",
+        worktreeSlug: "main",
+        worktreeLabel: "main",
+        sessionId: "pty-1",
+        tabId: "tab-1",
+        activeTabId: "tab-1",
+        tabs: [
+          { id: "tab-1", label: "main", activityState: "working", agentType: "claude" },
+          { id: "tab-2", label: "feature", activityState: "waiting", agentType: "codex" },
+        ],
+        terminalTabs: [
+          { id: "tab-1", label: "main", activityState: "working", agentType: "claude" },
+          { id: "tab-2", label: "feature", activityState: "waiting", agentType: "codex" },
+        ],
+      },
+    });
+  });
+
+  it("propagates publishFocusedTerminal rejection instead of swallowing errors", async () => {
+    const error = new Error("IPC invocation failed");
+    core.invoke.mockRejectedValue(error);
+
+    await expect(
+      publishFocusedTerminal({
+        workspaceId: "orca-lite",
+        backendSessionId: "pty-1",
+      }),
+    ).rejects.toThrow("IPC invocation failed");
+  });
+
   it("listens for remote selection requests and triggers callback", async () => {
     const unlisten = vi.fn();
     let listener: ((event: { payload: any }) => void) | null = null;
@@ -335,6 +384,24 @@ describe("Tauri IPC wrapper contract", () => {
       });
     }
     expect(handler).toHaveBeenCalledWith({ workspaceId: "orca-lite", worktreeSlug: "feature-1", tabId: "tab-2" });
+  });
+
+  it("listens for native terminal scrollbar updates", async () => {
+    const unlisten = vi.fn();
+    let listener: ((event: { payload: unknown }) => void) | null = null;
+    events.listen.mockImplementation(async (eventName: string, callback: (event: { payload: unknown }) => void) => {
+      expect(eventName).toBe("native_terminal_scrollbar");
+      listener = callback;
+      return unlisten;
+    });
+    const handler = vi.fn();
+
+    await expect(onNativeTerminalScrollbar(handler)).resolves.toBe(unlisten);
+    expect(listener).toBeTypeOf("function");
+    (listener as unknown as (event: { payload: unknown }) => void)({
+      payload: { sessionId: "pty-scroll", total: 200, offset: 80, len: 20 },
+    });
+    expect(handler).toHaveBeenCalledWith({ sessionId: "pty-scroll", total: 200, offset: 80, len: 20 });
   });
 
   it("sets native app badge count with normalized integer payload", async () => {
@@ -369,5 +436,20 @@ describe("Tauri IPC wrapper contract", () => {
     const result = await setBadgeCount(2);
     expect(result).toEqual({ supported: false, count: 2 });
     expect(core.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("probeNotificationDelivery", () => {
+  it("names the argument the Rust command actually binds, so a test notification is really sent", async () => {
+    core.invoke.mockResolvedValue({ outcome: "ready", testSubmitted: true });
+
+    await probeNotificationDelivery(true);
+
+    // cmd_notification_probe_delivery takes `send_test: Option<bool>`; Tauri binds camelCase
+    // `sendTest`. Any other key is dropped, silently defaulting to false and sending nothing.
+    expect(core.invoke).toHaveBeenCalledWith(
+      "cmd_notification_probe_delivery",
+      { sendTest: true },
+    );
   });
 });

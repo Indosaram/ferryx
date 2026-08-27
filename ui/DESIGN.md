@@ -69,6 +69,12 @@ Reusable, already shipped — compose these; do not hand-roll equivalents.
 - `ui/StatusDot` — maps `AgentState` to a status glyph; `working` pulses, `motion-reduce` safe.
 - `lib/cn` — `twMerge(clsx(...))` for conditional classes. All conditional styling goes through it.
 
+### Agent tab identity
+- A terminal tab with an agent type in `SUPPORTED_AGENT_LOGOS` displays that local brand SVG at `size-3`.
+- Brand SVGs are decorative (`alt=""`) because the tab label supplies the accessible name.
+- Any unknown, unsupported, or terminal-only type uses `TerminalSquare`; never substitute a generic bot or a guessed logo.
+- The separate `StatusDot` remains adjacent to the identity icon, so working/waiting/done is not encoded by the logo.
+
 ### Tab chrome states
 - The tab strip and inactive tabs use `bg-card`.
 - The active tab uses `bg-accent text-foreground`, so it follows light/dark appearance settings.
@@ -78,6 +84,11 @@ Reusable, already shipped — compose these; do not hand-roll equivalents.
 - Horizontal and vertical terminal splits use the opaque `--terminal-divider` color directly on a line exactly 1px thick.
 - The visible line remains 1px; a separate transparent hit area extends 4px around it for resizing.
 - Do not reuse translucent application `border` tokens here: their built-in alpha makes a 1px line disappear against terminal backgrounds.
+
+### Native terminal scrollbar
+- Native terminal panes reserve a `w-3` (12px) right-side strip outside the compositor viewport so the DOM scrollbar remains visible above the native surface.
+- The track uses `bg-terminal`; its narrow thumb uses `bg-muted-foreground/45` and only changes color on hover. It has no decorative motion beyond the existing `transition-colors` contract.
+- The scrollbar is rendered only when Ghostty reports retained scrollback (`total > len`) and exposes the semantic vertical `scrollbar` role for assistive technology.
 
 ## 3. Sidebar information architecture (this feature)
 

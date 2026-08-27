@@ -23,6 +23,8 @@ pub struct ManagedBrowserSession {
     pub visible: bool,
     pub bounds: Option<LogicalRect>,
     pub automation_targets: HashMap<String, String>,
+    history: Vec<String>,
+    history_index: usize,
 }
 
 fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
@@ -42,6 +44,27 @@ fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
         load_error: s.load_error.clone(),
         visible: s.visible,
     }
+}
+
+fn sync_history_flags(session: &mut ManagedBrowserSession) {
+    session.can_go_back = session.history_index > 0;
+    session.can_go_forward = session.history_index + 1 < session.history.len();
+}
+
+fn push_history_url(session: &mut ManagedBrowserSession, url: &str) {
+    if session
+        .history
+        .get(session.history_index)
+        .is_some_and(|current| current == url)
+    {
+        sync_history_flags(session);
+        return;
+    }
+
+    session.history.truncate(session.history_index.saturating_add(1));
+    session.history.push(url.to_string());
+    session.history_index = session.history.len().saturating_sub(1);
+    sync_history_flags(session);
 }
 
 #[derive(Default, Clone)]
@@ -68,10 +91,22 @@ impl BrowserManager {
         }
 
         let uuid = Uuid::new_v4().to_string();
-        let browser_id = uuid.clone();
-        let webview_label = format!("browser-{}", uuid);
+        let requested_browser_id = req
+            .browser_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .map(str::to_string);
+        let browser_id = requested_browser_id.unwrap_or_else(|| uuid.clone());
+        if self.sessions.read().contains_key(&browser_id) {
+            return Err(BrowserError::Internal(format!(
+                "browser session id already exists: {browser_id}"
+            )));
+        }
+        let webview_label = format!("browser-{uuid}");
         let profile_id = req.profile.unwrap_or(BrowserProfileId::Default);
         let visible = req.visible.unwrap_or(true);
+        let zoom_factor = req.zoom_factor.unwrap_or(1.0).clamp(0.25, 5.0);
 
         let session = ManagedBrowserSession {
             browser_id: browser_id.clone(),
@@ -80,16 +115,18 @@ impl BrowserManager {
             worktree_path: req.worktree_path,
             profile_id,
             generation: 1,
-            url: valid_url,
+            url: valid_url.clone(),
             title: None,
             loading: false,
             can_go_back: false,
             can_go_forward: false,
-            zoom_factor: 1.0,
+            zoom_factor,
             load_error: None,
             visible,
             bounds: req.bounds,
             automation_targets: HashMap::new(),
+            history: vec![valid_url],
+            history_index: 0,
         };
 
         let state = browser_state(&session);
@@ -145,7 +182,10 @@ impl BrowserManager {
             .get_mut(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
 
-        s.url = valid_url.clone();
+        if s.url != valid_url {
+            push_history_url(s, &valid_url);
+            s.url = valid_url.clone();
+        }
         s.generation += 1;
         s.automation_targets.clear();
         s.loading = true;
@@ -153,7 +193,7 @@ impl BrowserManager {
         Ok(valid_url)
     }
 
-    pub fn begin_history_navigation(&self, browser_id: &str) -> Result<BrowserState, BrowserError> {
+    pub fn begin_reload(&self, browser_id: &str) -> Result<BrowserState, BrowserError> {
         let mut guard = self.sessions.write();
         let s = guard
             .get_mut(browser_id)
@@ -162,6 +202,63 @@ impl BrowserManager {
         s.automation_targets.clear();
         s.loading = true;
         s.load_error = None;
+        sync_history_flags(s);
+        Ok(browser_state(s))
+    }
+
+    pub fn begin_history_navigation(
+        &self,
+        browser_id: &str,
+        forward: bool,
+    ) -> Result<BrowserState, BrowserError> {
+        let mut guard = self.sessions.write();
+        let s = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+
+        let next_index = if forward {
+            (s.history_index + 1 < s.history.len()).then_some(s.history_index + 1)
+        } else {
+            s.history_index.checked_sub(1)
+        };
+
+        let Some(next_index) = next_index else {
+            s.loading = false;
+            sync_history_flags(s);
+            return Ok(browser_state(s));
+        };
+
+        s.history_index = next_index;
+        s.url = s.history[next_index].clone();
+        s.generation += 1;
+        s.automation_targets.clear();
+        s.loading = true;
+        s.load_error = None;
+        sync_history_flags(s);
+        Ok(browser_state(s))
+    }
+
+
+    pub fn cancel_history_navigation(
+        &self,
+        browser_id: &str,
+        forward: bool,
+    ) -> Result<BrowserState, BrowserError> {
+        let mut guard = self.sessions.write();
+        let s = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        let restored_index = if forward {
+            s.history_index.checked_sub(1)
+        } else {
+            (s.history_index + 1 < s.history.len()).then_some(s.history_index + 1)
+        };
+        if let Some(index) = restored_index {
+            s.history_index = index;
+            s.url = s.history[index].clone();
+        }
+        s.loading = false;
+        sync_history_flags(s);
         Ok(browser_state(s))
     }
 
@@ -255,8 +352,8 @@ impl BrowserManager {
         url: Option<String>,
         title: Option<String>,
         loading: Option<bool>,
-        can_go_back: Option<bool>,
-        can_go_forward: Option<bool>,
+        _can_go_back: Option<bool>,
+        _can_go_forward: Option<bool>,
         error: Option<String>,
     ) -> Result<BrowserState, BrowserError> {
         let mut guard = self.sessions.write();
@@ -266,9 +363,11 @@ impl BrowserManager {
 
         if let Some(u) = url {
             if s.url != u {
+                push_history_url(s, &u);
                 s.url = u;
                 s.generation += 1;
                 s.automation_targets.clear();
+                s.load_error = None;
             }
         }
         if let Some(t) = title {
@@ -277,13 +376,12 @@ impl BrowserManager {
         if let Some(l) = loading {
             s.loading = l;
         }
-        if let Some(b) = can_go_back {
-            s.can_go_back = b;
+        if let Some(error) = error {
+            s.load_error = Some(error);
+        } else if loading == Some(false) {
+            s.load_error = None;
         }
-        if let Some(f) = can_go_forward {
-            s.can_go_forward = f;
-        }
-        s.load_error = error;
+        sync_history_flags(s);
 
         Ok(browser_state(s))
     }

@@ -44,6 +44,7 @@ vi.mock("../lib/tauri", () => ({
 }));
 
 vi.mock("../lib/browserTauri", () => ({
+  BROWSER_SHORTCUT_EVENT: "ferryx:browser-shortcut",
   focusBrowser: vi.fn(async () => {}),
   listBrowsers: vi.fn(async () => []),
   setBrowserZoom: vi.fn(async () => 1),

@@ -5,8 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserTab, LayoutState, TerminalSession } from "../lib/types";
 
 const browserMocks = vi.hoisted(() => ({
+  BROWSER_SHORTCUT_EVENT: "ferryx:browser-shortcut",
   setBrowserBounds: vi.fn(async () => undefined),
   setBrowserVisible: vi.fn(async () => undefined),
+  onBrowserShortcutRequested: vi.fn(async () => () => undefined),
+  onBrowserDownloadRequested: vi.fn(async () => () => undefined),
 }));
 
 vi.mock("../lib/browserTauri", () => browserMocks);

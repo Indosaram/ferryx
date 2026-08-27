@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -284,8 +284,11 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Keyboard Shortcuts" }));
 
     for (const shortcut of SHORTCUTS) {
-      expect(screen.getByText(shortcut.title)).toBeInTheDocument();
-      expect(screen.getByText(shortcutLabel(shortcut.id))).toBeInTheDocument();
+      const titleEl = screen.getByText(shortcut.title);
+      expect(titleEl).toBeInTheDocument();
+      const row = titleEl.closest(".min-h-10") ?? (titleEl.parentElement?.parentElement as HTMLElement);
+      expect(row).not.toBeNull();
+      expect(within(row as HTMLElement).getByText(shortcutLabel(shortcut.id))).toBeInTheDocument();
     }
     expect(screen.getByRole("region", { name: "Keyboard Shortcuts" })).toBeInTheDocument();
   });

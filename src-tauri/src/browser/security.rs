@@ -21,6 +21,10 @@ pub enum BrowserError {
     NavigationFailed(String),
     #[error("History navigation failed: {0}")]
     HistoryFailed(String),
+    #[error("Find in page failed: {0}")]
+    FindFailed(String),
+    #[error("Browser download failed: {0}")]
+    DownloadFailed(String),
     #[error("Cookie import failed: {0}")]
     CookieImport(String),
     #[error("Failed to close browser: {0}")]
@@ -37,6 +41,25 @@ pub enum BrowserError {
     CliUnavailable(String),
     #[error("Internal browser error: {0}")]
     Internal(String),
+}
+
+pub fn default_desktop_user_agent() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    }
 }
 
 pub fn validate_url(url_str: &str) -> Result<String, BrowserError> {

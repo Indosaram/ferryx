@@ -11,6 +11,7 @@ import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { IconButton } from "./components/ui/IconButton";
 import { workspaceName } from "./lib/branchFilter";
 import { newBrowserTabUrl } from "./lib/browserSettings";
+import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, type BrowserShortcutAction } from "./lib/browserTauri";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator } from "./lib/notificationCoordinator";
 import type { TerminalActivityState } from "./lib/activity";
@@ -52,6 +53,7 @@ import {
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
+import type { PersistedWorkspaceSession } from "./lib/types";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
 import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
@@ -61,11 +63,13 @@ import {
   worktreeIdentity,
   type DirtyState,
   type StructuredIpcError,
+  type TerminalTab,
   type WorkspaceTab,
   type Worktree,
 } from "./lib/types";
-import { registerWindowCloseGuard } from "./lib/updater";
+import { checkForUpdate, registerWindowCloseGuard } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
@@ -83,6 +87,57 @@ type ProjectBootstrap = {
 
 function loadProjectBootstrap(): ProjectBootstrap {
   return { projects: loadProjects(), activeProjectId: loadActiveProjectId() };
+}
+
+function recoverProjectBootstrap(session: PersistedWorkspaceSession | null): ProjectBootstrap | null {
+  if (!session) return null;
+
+  const projects = Object.values(session.workspaces).reduce<RegisteredProject[]>((recovered, workspace) => {
+    if (!workspace.workspaceId || !workspace.repoRoot) return recovered;
+    if (!recovered.some((project) => project.workspaceId === workspace.workspaceId)) {
+      recovered.push({ workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot });
+    }
+    return recovered;
+  }, []);
+  if (projects.length === 0) return null;
+
+  const activeProjectId = projects.some((project) => project.workspaceId === session.activeWorkspaceId)
+    ? session.activeWorkspaceId
+    : projects[0].workspaceId;
+  return { projects, activeProjectId };
+}
+
+function mergeRecoveredProjectBootstrap(
+  stored: ProjectBootstrap,
+  recovered: ProjectBootstrap | null,
+  startup: RegisteredProject,
+): ProjectBootstrap {
+  if (!recovered) return stored;
+
+  const isReducedToStartup =
+    stored.projects.length === 1 &&
+    stored.projects[0].workspaceId === startup.workspaceId &&
+    stored.projects[0].repoRoot === startup.repoRoot &&
+    recovered.projects.some((project) => project.workspaceId !== startup.workspaceId);
+  const isUninitialized =
+    stored.projects.length === 1 &&
+    stored.projects[0].workspaceId === DEFAULT_WORKSPACE_ID &&
+    stored.projects[0].repoRoot === ".";
+  if (!isUninitialized && !isReducedToStartup) return stored;
+
+  const projects = stored.projects.filter(
+    (project) => project.workspaceId !== DEFAULT_WORKSPACE_ID || (project.repoRoot !== "." && project.repoRoot !== ""),
+  );
+  for (const recoveredProject of recovered.projects) {
+    if (!projects.some((project) => project.workspaceId === recoveredProject.workspaceId)) {
+      projects.push(recoveredProject);
+    }
+  }
+
+  const activeProjectId = projects.some((project) => project.workspaceId === recovered.activeProjectId)
+    ? recovered.activeProjectId
+    : (projects[0]?.workspaceId ?? stored.activeProjectId);
+  return { projects, activeProjectId };
 }
 
 function isInitialProjectPlaceholder(project: RegisteredProject, startup: RegisteredProject) {
@@ -115,12 +170,29 @@ export function App() {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (isNativeRuntime) void checkForUpdate();
+  }, [isNativeRuntime]);
+
+  useEffect(() => {
     if (!isNativeRuntime) return;
     let cancelled = false;
     void getInitialProject()
       .then(async (startup) => {
-        const prepared = canonicalizeProjectBootstrap(loadProjectBootstrap(), startup);
-        await preloadWorkspaceSnapshots(prepared.projects.map((project) => project.workspaceId)).catch(
+        const storedBootstrap = loadProjectBootstrap();
+        const savedSession = await loadSession().catch(() => null);
+        const recovered = recoverProjectBootstrap(savedSession);
+        const prepared = canonicalizeProjectBootstrap(
+          mergeRecoveredProjectBootstrap(storedBootstrap, recovered, startup),
+          startup,
+        );
+        if (recovered && prepared !== storedBootstrap) {
+          persistProjects(prepared.projects);
+          persistActiveProjectId(prepared.activeProjectId);
+        }
+        await preloadWorkspaceSnapshots(
+          prepared.projects.map((project) => project.workspaceId),
+          async () => savedSession,
+        ).catch(
           (error) => {
             console.warn("Workspace session preload skipped:", error);
           },
@@ -180,14 +252,22 @@ export function deriveFocusedTerminal(
     : activeTab.label;
 
   const terminalTabs = state.layout.tabs
-    .filter((tab) => {
-      if (tab.id === activeTab.id) return true;
+    .filter((tab): tab is TerminalTab => {
       if (tab.kind === "browser") return false;
+      if (tab.id === activeTab.id) return true;
       const tabSession = state.sessions[tab.sessionId];
       const tabWorktreePath = tabSession?.worktreePath ?? tabSession?.cwd;
       return tabWorktreePath === foundWorktree?.path;
     })
-    .map((tab) => ({ id: tab.id, label: remoteTabLabel(tab.label) }));
+    .map((tab) => {
+      const activity = state.activityBySessionId?.[tab.sessionId];
+      return {
+        id: tab.id,
+        label: remoteTabLabel(tab.label),
+        ...(activity?.state ? { activityState: activity.state } : {}),
+        ...(activity?.agentType ? { agentType: activity.agentType } : {}),
+      };
+    });
 
   return {
     workspaceId,
@@ -309,6 +389,7 @@ function WorkspaceApp({
     subscribeTerminalBell,
     openTab,
     createBrowserTab,
+    duplicateBrowserTab,
     navigateBrowserTab,
     reloadBrowserTab,
     ensureTabForWorktree,
@@ -333,6 +414,8 @@ function WorkspaceApp({
     restoreWorkspace,
     ensureSessionBackends,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
+  useBrowserSessionHydration(state, activeProject.workspaceId);
+
   const stateRef = useRef(state);
   stateRef.current = state;
 
@@ -680,8 +763,8 @@ function WorkspaceApp({
   );
 
   useEffect(() => {
-    void publishFocusedTerminal(focusedTerminalPayload);
-  }, [focusedTerminalPayload]);
+    void Promise.resolve(publishFocusedTerminal(focusedTerminalPayload)).catch(reportRuntimeError);
+  }, [focusedTerminalPayload, reportRuntimeError]);
 
   const unreadBadgeCount = useMemo(
     () => Object.values(state.unreadTabIds ?? {}).filter(Boolean).length,
@@ -958,6 +1041,24 @@ function WorkspaceApp({
     [closeTab, generalSettings.confirmCloseTab, reportRuntimeError],
   );
 
+  const handleCloseActiveSurface = useCallback(() => {
+    const currentState = stateRef.current;
+    const activeTabId = currentState.layout.activeTabId;
+    if (!activeTabId) return;
+
+    const activeTab = currentState.layout.tabs.find((tab) => tab.id === activeTabId);
+    const activeLayout = currentState.layout.layoutsByTabId?.[activeTabId];
+    if (activeTab?.kind === "terminal" && activeLayout?.root.type === "split") {
+      const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
+      if (activeLeafId) {
+        void closePane(activeTabId, activeLeafId).catch(reportRuntimeError);
+        return;
+      }
+    }
+
+    handleCloseTab(activeTabId);
+  }, [closePane, handleCloseTab, reportRuntimeError]);
+
   const handleConfirmTabClose = useCallback(() => {
     if (!pendingTabClose) return;
     const tabId = pendingTabClose.id;
@@ -1116,12 +1217,23 @@ function WorkspaceApp({
   const handleCancelTabClose = useCallback(() => setPendingTabClose(null), []);
 
   const handleAddBrowserTab = useCallback(
-    (url?: string) => {
-      void createBrowserTab(url ?? newBrowserTabUrl()).catch(reportRuntimeError);
+    (url?: string, profileId?: string) => {
+      const targetUrl = url ?? newBrowserTabUrl();
+      const task = profileId
+        ? createBrowserTab(targetUrl, undefined, { profileId })
+        : createBrowserTab(targetUrl);
+      void task.catch(reportRuntimeError);
     },
     [createBrowserTab, reportRuntimeError],
   );
 
+
+  const handleDuplicateBrowserTab = useCallback(
+    (tabId: string, profileId?: string) => {
+      void duplicateBrowserTab(tabId, profileId).catch(reportRuntimeError);
+    },
+    [duplicateBrowserTab, reportRuntimeError],
+  );
   const handleNavigateBrowserTab = useCallback(
     (tabId: string, url: string) => {
       void navigateBrowserTab(tabId, url).catch(reportRuntimeError);
@@ -1154,8 +1266,7 @@ function WorkspaceApp({
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     void onCloseTabMenu(() => {
-      const activeTabId = stateRef.current.layout.activeTabId;
-      if (activeTabId) handleCloseTab(activeTabId);
+      handleCloseActiveSurface();
     }).then((dispose) => {
       if (cancelled) dispose();
       else unlisten = dispose;
@@ -1164,7 +1275,25 @@ function WorkspaceApp({
       cancelled = true;
       unlisten?.();
     };
-  }, [handleCloseTab]);
+  }, [handleCloseActiveSurface]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserOpenRequested((payload) => {
+      void createBrowserTab(payload.targetUrl, undefined, {
+        profileId: payload.profileId,
+        worktreePath: payload.worktreePath ?? undefined,
+      }).catch(reportRuntimeError);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [createBrowserTab, reportRuntimeError]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -1183,14 +1312,22 @@ function WorkspaceApp({
     };
   }, [handleSelectWorktreeByIndex]);
 
+  const activeShortcutTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? null;
+  const browserShortcutsActive = activeShortcutTab?.kind === "browser";
+  const dispatchBrowserShortcut = (action: BrowserShortcutAction) => {
+    window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { action } }));
+  };
+
   const shortcutHandlers = useMemo(
     () => ({
       "tab.newTerminal": handleAddTerminalTab,
       "tab.newBrowser": () => void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError),
-      "tab.close": () => {
-        const activeTabId = stateRef.current.layout.activeTabId;
-        if (activeTabId) handleCloseTab(activeTabId);
-      },
+      "tab.close": handleCloseActiveSurface,
+      "browser.focusAddress": browserShortcutsActive ? () => dispatchBrowserShortcut("focus-address") : undefined,
+      "browser.reload": browserShortcutsActive ? () => dispatchBrowserShortcut("reload") : undefined,
+      "browser.back": browserShortcutsActive ? () => dispatchBrowserShortcut("back") : undefined,
+      "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
+      "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
       "tab.next": () => handleCycleTab(1),
       "tab.previous": () => handleCycleTab(-1),
       "tab.select1": () => handleSelectTerminalTabByIndex(0),
@@ -1214,21 +1351,22 @@ function WorkspaceApp({
       "terminal.splitRight": () => handleSplitActive("horizontal"),
       "terminal.splitDown": () => handleSplitActive("vertical"),
       "terminal.unsplit": handleUnsplitActive,
-      "terminal.focusNext": () => handleCyclePaneFocus(1),
-      "terminal.focusPrevious": () => handleCyclePaneFocus(-1),
-      "terminal.search": handleOpenTerminalSearch,
+      "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
+      "terminal.focusPrevious": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(-1),
+      "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
       "sidebar.left.toggle": toggleSidebar,
       "commandPalette.open": handleOpenCommandPalette,
       "settings.toggle": handleToggleSettings,
-      "zoom.in": handleZoomIn,
-      "zoom.out": handleZoomOut,
-      "zoom.reset": handleZoomReset,
+      "zoom.in": browserShortcutsActive ? undefined : handleZoomIn,
+      "zoom.out": browserShortcutsActive ? undefined : handleZoomOut,
+      "zoom.reset": browserShortcutsActive ? undefined : handleZoomReset,
     }),
     [
       createBrowserTab,
       handleAddTerminalTab,
-      handleCloseTab,
+      handleCloseActiveSurface,
       handleCyclePaneFocus,
+      browserShortcutsActive,
       handleCycleTab,
       handleOpenCommandPalette,
       handleOpenTerminalSearch,
@@ -1312,6 +1450,7 @@ function WorkspaceApp({
             defaultAgentId={agentSettings.defaultAgentId}
             onNavigateBrowserTab={handleNavigateBrowserTab}
             onReloadBrowserTab={handleReloadBrowserTab}
+            onDuplicateBrowserTab={handleDuplicateBrowserTab}
             onSplitPane={handleSplitPane}
             onClosePane={handleClosePane}
             onSetRatio={setPaneRatio}

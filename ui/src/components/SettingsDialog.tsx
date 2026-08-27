@@ -75,6 +75,7 @@ import {
 import { focusBrowser, listBrowsers, setBrowserZoom } from "../lib/browserTauri";
 import { useTerminalSettings } from "../lib/terminalSettings";
 import type { BrowserSessionSummary, NotificationPermissionStatus, Worktree } from "../lib/types";
+import { BrowserSettingsPanel } from "./BrowserSettingsPanel";
 
 export type SettingsDialogProps = {
   open: boolean;
@@ -822,6 +823,15 @@ const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
 };
 
 export function BrowserSettings() {
+  return (
+    <>
+      <BrowserSettingsPanel />
+      <CliLauncherCard />
+    </>
+  );
+}
+
+export function LegacyBrowserSettings() {
   const [settings, setSettings] = useState<BrowserSettingsState>(() => {
     try {
       const raw = localStorage.getItem(BROWSER_SETTINGS_STORAGE_KEY);

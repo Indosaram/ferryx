@@ -24,6 +24,11 @@ export type ShortcutActionId =
   | "workspace.select7"
   | "workspace.select8"
   | "workspace.select9"
+  | "browser.focusAddress"
+  | "browser.reload"
+  | "browser.back"
+  | "browser.forward"
+  | "browser.find"
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.unsplit"
@@ -75,6 +80,43 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Tabs",
     binding: { key: "w", mod: true },
     source: "original",
+  },
+  {
+    id: "browser.focusAddress",
+    title: "Focus browser address bar",
+    group: "Tabs",
+    binding: { key: "l", mod: true },
+    source: "ferryx",
+  },
+  {
+    id: "browser.reload",
+    title: "Reload browser tab",
+    group: "Tabs",
+    binding: { key: "r", mod: true },
+    source: "ferryx",
+  },
+  {
+    id: "browser.back",
+    title: "Browser back",
+    group: "Tabs",
+    binding: { key: "[", mod: true },
+    aliases: [{ key: "ArrowLeft", alt: true }],
+    source: "ferryx",
+  },
+  {
+    id: "browser.forward",
+    title: "Browser forward",
+    group: "Tabs",
+    binding: { key: "]", mod: true },
+    aliases: [{ key: "ArrowRight", alt: true }],
+    source: "ferryx",
+  },
+  {
+    id: "browser.find",
+    title: "Find in browser page",
+    group: "Tabs",
+    binding: { key: "f", mod: true },
+    source: "ferryx",
   },
   {
     id: "tab.next",
@@ -364,6 +406,7 @@ export function useShortcuts(
           isEditableTarget(event.target) &&
           !isTerminalTarget(event.target) &&
           shortcut.id !== "commandPalette.open" &&
+          !shortcut.id.startsWith("browser.") &&
           shortcut.id !== "settings.toggle"
         )
           continue;

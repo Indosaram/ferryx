@@ -65,12 +65,16 @@ const native = {
   remoteSelectionHandler: null as null | ((payload: any) => void),
 };
 
+const updater = {
+  checkForUpdate: vi.fn(),
+};
+
 const workspace = {
   activateTab: vi.fn(),
   activatePrimary: vi.fn(),
-  closeTab: vi.fn(),
-  splitPane: vi.fn(),
-  closePane: vi.fn(),
+  closeTab: vi.fn().mockResolvedValue(undefined),
+  splitPane: vi.fn().mockResolvedValue(undefined),
+  closePane: vi.fn().mockResolvedValue(undefined),
   focusPane: vi.fn(),
   setPaneRatio: vi.fn(),
   swapPanes: vi.fn(),
@@ -150,6 +154,14 @@ vi.mock("./lib/tauri", () => ({
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
 }));
+
+vi.mock("./lib/updater", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/updater")>();
+  return {
+    ...actual,
+    checkForUpdate: updater.checkForUpdate,
+  };
+});
 
 const workspaceStoreModule = await import("./state/workspaceStore");
 let storeSpy: any;
@@ -358,6 +370,8 @@ describe("App project workspace flow", () => {
       };
     });
     native.onRemoteSelectionRequested.mockReset();
+    updater.checkForUpdate.mockReset();
+    updater.checkForUpdate.mockResolvedValue(undefined);
     native.remoteSelectionHandler = null;
     native.onRemoteSelectionRequested.mockImplementation(async (handler: (payload: any) => void) => {
       native.remoteSelectionHandler = handler;
@@ -374,6 +388,8 @@ describe("App project workspace flow", () => {
     workspace.openTab.mockResolvedValue("tab-new");
     workspace.closeTab.mockReset();
     workspace.closeTab.mockResolvedValue(undefined);
+    workspace.closePane.mockReset();
+    workspace.closePane.mockResolvedValue(undefined);
     workspace.activatePrimary.mockReset();
     workspace.ensureTabForWorktree.mockReset();
     workspace.ensureTabForWorktree.mockResolvedValue(undefined);
@@ -412,6 +428,75 @@ describe("App project workspace flow", () => {
     native.closeMenuHandler?.();
 
     await waitFor(() => expect(workspace.closeTab).toHaveBeenCalledWith("tab-1"));
+  });
+
+  it("routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab", async () => {
+    const previousLayout = workspace.storeState.layout;
+    workspace.storeState.layout = {
+      ...previousLayout,
+      tabs: previousLayout.tabs.map((tab) => (tab.id === "tab-1" ? { ...tab, kind: "terminal" } : tab)),
+      layoutsByTabId: {
+        ...previousLayout.layoutsByTabId,
+        "tab-1": {
+          root: {
+            type: "split",
+            direction: "horizontal",
+            first: { type: "leaf", leafId: "leaf-1" },
+            second: { type: "leaf", leafId: "leaf-2" },
+            ratio: 0.5,
+          },
+          activeLeafId: "leaf-2",
+          expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-2": "sess-2" },
+        },
+      },
+    } as any;
+
+    try {
+      render(<App />);
+
+      await waitFor(() => expect(native.onCloseTabMenu).toHaveBeenCalledOnce());
+      native.closeMenuHandler?.();
+
+      await waitFor(() => expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-2"));
+      expect(workspace.closeTab).not.toHaveBeenCalled();
+    } finally {
+      workspace.storeState.layout = previousLayout;
+    }
+  });
+
+  it("routes the web Cmd+W shortcut to close the focused pane in a split terminal tab", async () => {
+    const previousLayout = workspace.storeState.layout;
+    workspace.storeState.layout = {
+      ...previousLayout,
+      tabs: previousLayout.tabs.map((tab) => (tab.id === "tab-1" ? { ...tab, kind: "terminal" } : tab)),
+      layoutsByTabId: {
+        ...previousLayout.layoutsByTabId,
+        "tab-1": {
+          root: {
+            type: "split",
+            direction: "horizontal",
+            first: { type: "leaf", leafId: "leaf-1" },
+            second: { type: "leaf", leafId: "leaf-2" },
+            ratio: 0.5,
+          },
+          activeLeafId: "leaf-2",
+          expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-2": "sess-2" },
+        },
+      },
+    } as any;
+
+    try {
+      render(<App />);
+
+      fireEvent.keyDown(window, { key: "w", metaKey: true });
+
+      await waitFor(() => expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-2"));
+      expect(workspace.closeTab).not.toHaveBeenCalled();
+    } finally {
+      workspace.storeState.layout = previousLayout;
+    }
   });
 
   it("routes the native Cmd+W menu accelerator to close an active browser tab", async () => {
@@ -482,6 +567,107 @@ describe("App project workspace flow", () => {
     expect(await screen.findByText("Active project orca-lite")).toBeInTheDocument();
     expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite");
+  });
+
+  it("checks for a signed update when the native app starts", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+
+    render(<App />);
+
+    await waitFor(() => expect(updater.checkForUpdate).toHaveBeenCalledOnce());
+  });
+
+  it("restores projects lost from WebView storage using the native session catalog", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+    native.loadSession.mockResolvedValue({
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "beta",
+      workspaces: {
+        alpha: {
+          workspaceId: "alpha",
+          repoRoot: "/repos/alpha",
+          worktrees: [],
+          activeWorktreePath: "/repos/alpha",
+          layout: {
+            splitMode: "none",
+            primaryTabId: null,
+            secondaryTabId: null,
+            activeTabId: null,
+            tabs: [],
+          },
+          terminalSessions: {},
+        },
+        beta: {
+          workspaceId: "beta",
+          repoRoot: "/repos/beta",
+          worktrees: [],
+          activeWorktreePath: "/repos/beta",
+          layout: {
+            splitMode: "none",
+            primaryTabId: null,
+            secondaryTabId: null,
+            activeTabId: null,
+            tabs: [],
+          },
+          terminalSessions: {},
+        },
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project beta")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Project alpha" })).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) ?? "[]")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }),
+        expect.objectContaining({ workspaceId: "alpha", repoRoot: "/repos/alpha" }),
+        expect.objectContaining({ workspaceId: "beta", repoRoot: "/repos/beta" }),
+      ]),
+    );
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("beta");
+  });
+
+  it("does not restore historical projects into an existing multi-project catalog", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    localStorage.setItem(
+      PROJECTS_STORAGE_KEY,
+      JSON.stringify([
+        { workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" },
+        { workspaceId: "current", repoRoot: "/repos/current" },
+      ]),
+    );
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "current");
+    native.loadSession.mockResolvedValue({
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "historical",
+      workspaces: {
+        historical: {
+          workspaceId: "historical",
+          repoRoot: "/repos/historical",
+          worktrees: [],
+          activeWorktreePath: "/repos/historical",
+          layout: {
+            splitMode: "none",
+            primaryTabId: null,
+            secondaryTabId: null,
+            activeTabId: null,
+            tabs: [],
+          },
+          terminalSessions: {},
+        },
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project current")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Project historical" })).not.toBeInTheDocument();
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("current");
   });
 
   it("keeps the native shell initializing until persisted workspace tabs are preloaded", async () => {
@@ -2330,6 +2516,54 @@ describe("App project workspace flow", () => {
       expect(result?.worktreeLabel).toBe("main");
     });
 
+    it("derives per-tab activityState and agentType when present in activityBySessionId", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const sampleState: any = {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "tab-1",
+          tabs: [
+            { id: "tab-1", label: "main", sessionId: "sess-1" },
+            { id: "tab-2", label: "feature", sessionId: "sess-2" },
+            { id: "tab-3", label: "plain", sessionId: "sess-3" },
+          ],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-1": { id: "sess-1", backendSessionId: "pty-1", cwd: "/repo/main" },
+          "sess-2": { id: "sess-2", backendSessionId: "pty-2", cwd: "/repo/main" },
+          "sess-3": { id: "sess-3", backendSessionId: "pty-3", cwd: "/repo/main" },
+        },
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+        activityBySessionId: {
+          "sess-1": {
+            state: "waiting",
+            title: "Claude Waiting",
+            isAgent: true,
+            agentType: "claude",
+          },
+          "sess-2": {
+            state: "working",
+            title: "Codex Working",
+            isAgent: true,
+            agentType: "codex",
+          },
+        },
+      };
+
+      const result = deriveFocusedTerminal("orca-lite", sampleState);
+      expect(result?.terminalTabs).toEqual([
+        { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude" },
+        { id: "tab-2", label: "feature", activityState: "working", agentType: "codex" },
+        { id: "tab-3", label: "plain" },
+      ]);
+      expect(result?.tabs).toEqual(result?.terminalTabs);
+      expect(result?.terminalTabs?.[2]?.activityState).toBeUndefined();
+      expect(result?.terminalTabs?.[2]?.agentType).toBeUndefined();
+      expect(result?.terminalTabs?.[2] ? "activityState" in result.terminalTabs[2] : true).toBe(false);
+      expect(result?.terminalTabs?.[2] ? "agentType" in result.terminalTabs[2] : true).toBe(false);
+    });
+
     it("clears active terminal (returns null) when active tab is a browser tab", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {
@@ -2407,6 +2641,187 @@ describe("App project workspace flow", () => {
       });
       // Absolute path must not leak
       expect(JSON.stringify(lastCall)).not.toContain("/repo/");
+    });
+
+    it("publishes per-tab agent activity state and agent type to native IPC", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      const storeWithActivity = {
+        ...workspace.storeState,
+        layout: {
+          ...workspace.storeState.layout,
+          tabs: [
+            { id: "tab-1", label: "main", sessionId: "sess-1" },
+            { id: "tab-2", label: "feature", sessionId: "sess-2" },
+            { id: "tab-3", label: "docs", sessionId: "sess-3" },
+          ],
+        },
+        sessions: {
+          "sess-1": {
+            id: "sess-1",
+            backendSessionId: "pty-1",
+            cwd: "/repo/main",
+            worktreePath: "/repo/main",
+          },
+          "sess-2": {
+            id: "sess-2",
+            backendSessionId: "pty-2",
+            cwd: "/repo/main",
+            worktreePath: "/repo/main",
+          },
+          "sess-3": {
+            id: "sess-3",
+            backendSessionId: "pty-3",
+            cwd: "/repo/main",
+            worktreePath: "/repo/main",
+          },
+        },
+        activityBySessionId: {
+          "sess-1": {
+            state: "waiting" as const,
+            title: "Claude Waiting",
+            isAgent: true,
+            agentType: "claude",
+          },
+          "sess-2": {
+            state: "working" as const,
+            title: "Codex Working",
+            isAgent: true,
+            agentType: "codex",
+          },
+        },
+      };
+
+      storeSpy.mockImplementation(() => ({
+        state: storeWithActivity,
+        recoveredFromHmr: false,
+        agents: [],
+        activateTab: workspace.activateTab,
+        closeTab: workspace.closeTab,
+        splitPane: workspace.splitPane,
+        closePane: workspace.closePane,
+        focusPane: workspace.focusPane,
+        setPaneRatio: workspace.setPaneRatio,
+        swapPanes: workspace.swapPanes,
+        ensureTabForWorktree: workspace.ensureTabForWorktree,
+        ensureSessionBackends: workspace.ensureSessionBackends,
+        openTab: workspace.openTab,
+        syncWorktrees: workspace.syncWorktrees,
+        restoreWorkspace: workspace.restoreWorkspace,
+        createBrowserTab: workspace.createBrowserTab,
+        subscribeTerminalBell: () => () => undefined,
+      }));
+
+      render(<App />);
+
+      await waitFor(() => expect(native.publishFocusedTerminal).toHaveBeenCalled());
+      const lastCall = native.publishFocusedTerminal.mock.calls.at(-1)?.[0];
+      expect(lastCall).toEqual({
+        workspaceId: "orca-lite",
+        worktreeSlug: null,
+        worktreeLabel: "main",
+        backendSessionId: "pty-1",
+        activeTabId: "tab-1",
+        tabId: "tab-1",
+        tabs: [
+          { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude" },
+          { id: "tab-2", label: "feature", activityState: "working", agentType: "codex" },
+          { id: "tab-3", label: "docs" },
+        ],
+        terminalTabs: [
+          { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude" },
+          { id: "tab-2", label: "feature", activityState: "working", agentType: "codex" },
+          { id: "tab-3", label: "docs" },
+        ],
+      });
+      expect(lastCall?.terminalTabs?.[0]?.activityState).toBe("waiting");
+      expect(lastCall?.terminalTabs?.[0]?.agentType).toBe("claude");
+      expect(lastCall?.terminalTabs?.[1]?.activityState).toBe("working");
+      expect(lastCall?.terminalTabs?.[1]?.agentType).toBe("codex");
+      expect(lastCall?.terminalTabs?.[2]?.activityState).toBeUndefined();
+      expect(lastCall?.terminalTabs?.[2]?.agentType).toBeUndefined();
+      expect(lastCall?.terminalTabs?.[2] ? "activityState" in lastCall.terminalTabs[2] : true).toBe(false);
+      expect(lastCall?.terminalTabs?.[2] ? "agentType" in lastCall.terminalTabs[2] : true).toBe(false);
+    });
+
+    it("publishes real backendSessionId after session backend is bound or rebound", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      let currentStoreState = {
+        ...workspace.storeState,
+        sessions: {
+          "sess-1": {
+            id: "sess-1",
+            backendSessionId: null as string | null,
+            cwd: "/repo/main",
+            worktreePath: "/repo/main",
+          },
+        },
+      };
+
+      const mockStore = () => ({
+        state: currentStoreState,
+        recoveredFromHmr: false,
+        agents: [],
+        activateTab: workspace.activateTab,
+        closeTab: workspace.closeTab,
+        splitPane: workspace.splitPane,
+        closePane: workspace.closePane,
+        focusPane: workspace.focusPane,
+        setPaneRatio: workspace.setPaneRatio,
+        swapPanes: workspace.swapPanes,
+        ensureTabForWorktree: workspace.ensureTabForWorktree,
+        ensureSessionBackends: workspace.ensureSessionBackends,
+        openTab: workspace.openTab,
+        syncWorktrees: workspace.syncWorktrees,
+        restoreWorkspace: workspace.restoreWorkspace,
+        createBrowserTab: workspace.createBrowserTab,
+        subscribeTerminalBell: () => () => undefined,
+      });
+
+      storeSpy.mockImplementation(mockStore);
+
+      const { rerender } = render(<App />);
+
+      await waitFor(() => expect(native.publishFocusedTerminal).toHaveBeenCalled());
+      expect(native.publishFocusedTerminal.mock.calls.at(-1)?.[0]?.backendSessionId).toBeNull();
+
+      // Simulate backend binding/rebinding (e.g. ensureSessionBackends or REBIND_SESSION_BACKEND)
+      currentStoreState = {
+        ...currentStoreState,
+        sessions: {
+          "sess-1": {
+            id: "sess-1",
+            backendSessionId: "pty-rebound-live-123",
+            cwd: "/repo/main",
+            worktreePath: "/repo/main",
+          },
+        },
+      };
+
+      rerender(<App />);
+
+      await waitFor(() => {
+        const lastCall = native.publishFocusedTerminal.mock.calls.at(-1)?.[0];
+        expect(lastCall?.backendSessionId).toBe("pty-rebound-live-123");
+      });
+      expect(native.publishFocusedTerminal.mock.calls.at(-1)?.[0]?.backendSessionId).not.toBeNull();
+    });
+
+    it("routes publishFocusedTerminal rejection to reportRuntimeError", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+      const publishError = new Error("Gateway publish rejected");
+      native.publishFocusedTerminal.mockRejectedValue(publishError);
+
+      render(<App />);
+
+      await waitFor(() => expect(workspace.reportRuntimeError).toHaveBeenCalledWith(publishError));
     });
 
     it("handles native remote_selection_requested and activates requested worktree context", async () => {

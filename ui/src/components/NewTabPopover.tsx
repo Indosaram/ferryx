@@ -1,6 +1,11 @@
-import { useRef, useEffect, useMemo } from "react";
+import { useRef, useEffect, useMemo, useState } from "react";
 import { TerminalSquare, Globe, FileText, Smartphone, Settings, Sparkles } from "lucide-react";
-import { newBrowserTabUrl } from "../lib/browserSettings";
+import {
+  newBrowserTabUrl,
+  resolveSupportedBrowserProfileId,
+  supportedBrowserProfiles,
+  useBrowserSettings,
+} from "../lib/browserSettings";
 import { formatBindingLabel, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
 
 export type PopoverAgent = {
@@ -15,7 +20,7 @@ interface NewTabPopoverProps {
   open: boolean;
   onClose: () => void;
   onNewTerminal: () => void;
-  onNewBrowser: (url?: string) => void;
+  onNewBrowser: (url?: string, profileId?: string) => void;
   onNewMarkdown?: () => void;
   onNewMobileEmulator?: () => void;
   onOpenSettings?: () => void;
@@ -54,10 +59,17 @@ export function NewTabPopover({
 }: NewTabPopoverProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isMac = isMacShortcutPlatform();
+  const { settings } = useBrowserSettings();
+  const browserProfiles = useMemo(() => supportedBrowserProfiles(settings), [settings]);
+  const [browserProfileId, setBrowserProfileId] = useState(() => resolveSupportedBrowserProfileId(undefined, settings));
   const launcherAgents = useMemo(
     () => (agents && agents.length > 0 ? orderAgentsForNewTab(agents, defaultAgentId) : agents),
     [agents, defaultAgentId],
   );
+
+  useEffect(() => {
+    setBrowserProfileId((current) => resolveSupportedBrowserProfileId(current, settings));
+  }, [settings]);
 
   useEffect(() => {
     if (!open) return;
@@ -112,22 +124,40 @@ export function NewTabPopover({
           </span>
         </button>
 
-        <button
-          type="button"
-          onClick={() => {
-            onNewBrowser(newBrowserTabUrl());
-            onClose();
-          }}
-          className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
-        >
-          <div className="flex items-center gap-2.5">
-            <Globe className="size-4 text-muted-foreground group-hover:text-foreground" />
-            <span className="font-medium">New Browser Tab</span>
+        <div className="rounded-lg hover:bg-accent/30">
+          <button
+            type="button"
+            onClick={() => {
+              const profileId = browserProfileId === settings.defaultProfileId
+                ? undefined
+                : browserProfileId;
+              onNewBrowser(newBrowserTabUrl(), profileId);
+              onClose();
+            }}
+            className="flex w-full items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground transition-colors group"
+          >
+            <div className="flex items-center gap-2.5">
+              <Globe className="size-4 text-muted-foreground group-hover:text-foreground" />
+              <span className="font-medium">New Browser Tab</span>
+            </div>
+            <span className="text-[11px] font-mono text-muted-foreground">
+              {shortcutLabel("tab.newBrowser", isMac)}
+            </span>
+          </button>
+          <div className="flex items-center gap-2 px-2.5 pb-2">
+            <span className="text-[10px] text-muted-foreground">Profile</span>
+            <select
+              aria-label="Browser profile"
+              value={browserProfileId}
+              onChange={(event) => setBrowserProfileId(event.target.value)}
+              className="min-w-0 flex-1 rounded border border-border bg-background px-1.5 py-1 text-[10px] text-foreground outline-none focus:border-ring"
+            >
+              {browserProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>{profile.name} profile</option>
+              ))}
+            </select>
           </div>
-          <span className="text-[11px] font-mono text-muted-foreground">
-            {shortcutLabel("tab.newBrowser", isMac)}
-          </span>
-        </button>
+        </div>
 
         {onNewMarkdown ? (
           <button

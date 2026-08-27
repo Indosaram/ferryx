@@ -67,6 +67,10 @@ export type TerminalSession = {
   ownerId?: string | null;
   daemonEpoch?: string | null;
   lastOutputSequence?: string | null;
+  /** Agent type detected for this pane, e.g. "claude". Never minted by Ferryx. */
+  agentType?: string | null;
+  /** Session id the AGENT ITSELF generated. Ferryx never mints this. */
+  agentSessionId?: string | null;
 };
 
 export type TerminalTab = {
@@ -78,7 +82,7 @@ export type TerminalTab = {
   pinned?: boolean;
 };
 
-export type BrowserProfileId = "default" | "private";
+export type BrowserProfileId = string;
 
 export type LogicalRect = {
   x: number;
@@ -114,6 +118,8 @@ export type BrowserTab = {
   loading?: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  zoomFactor?: number;
+  loadError?: string | null;
   profileId?: string;
   worktreePath?: string;
   worktreeLabel?: string;
@@ -123,10 +129,12 @@ export type BrowserTab = {
 export type WorkspaceTab = TerminalTab | BrowserTab;
 
 export type CreateBrowserRequest = {
+  browserId?: string | null;
   workspaceId?: string | null;
   worktreePath?: string | null;
   url: string;
   profile?: BrowserProfileId;
+  zoomFactor?: number;
   bounds?: LogicalRect;
   visible?: boolean;
 };
@@ -207,6 +215,8 @@ export type BrowserPaneState = {
   readonly loading?: boolean;
   readonly canGoBack?: boolean;
   readonly canGoForward?: boolean;
+  readonly zoomFactor?: number;
+  readonly loadError?: string | null;
   readonly profileId?: string;
   readonly worktreePath?: string;
   readonly worktreeLabel?: string;
@@ -221,6 +231,8 @@ export type BrowserPaneContent = {
   readonly loading?: boolean;
   readonly canGoBack?: boolean;
   readonly canGoForward?: boolean;
+  readonly zoomFactor?: number;
+  readonly loadError?: string | null;
   readonly profileId?: string;
   readonly worktreePath?: string;
   readonly worktreeLabel?: string;
@@ -240,6 +252,8 @@ export function createBrowserPaneContent(browser: BrowserPaneState): BrowserPane
     loading: { get() { return this.browser.loading; }, enumerable: false },
     canGoBack: { get() { return this.browser.canGoBack; }, enumerable: false },
     canGoForward: { get() { return this.browser.canGoForward; }, enumerable: false },
+    zoomFactor: { get() { return this.browser.zoomFactor; }, enumerable: false },
+    loadError: { get() { return this.browser.loadError; }, enumerable: false },
     profileId: { get() { return this.browser.profileId; }, enumerable: false },
     worktreePath: { get() { return this.browser.worktreePath; }, enumerable: false },
     worktreeLabel: { get() { return this.browser.worktreeLabel; }, enumerable: false },
@@ -355,9 +369,23 @@ export type NativeTerminalTitlePayload = {
   title: string;
 };
 
+export type NativeTerminalAgentStatePayload = {
+  sessionId: string;
+  state: "working" | "blocked" | "idle";
+  ruleId: string;
+  manifestId: string;
+};
+
 export type NativeTerminalBellPayload = {
   sessionId: string;
   count: number;
+};
+
+export type NativeTerminalScrollbarPayload = {
+  sessionId: string;
+  total: number;
+  offset: number;
+  len: number;
 };
 
 export type WorktreeChangedPayload = {
@@ -468,6 +496,7 @@ export interface PersistedBrowserTabState {
   loading?: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  zoomFactor?: number;
   profileId?: string;
   worktreePath?: string;
   worktreeLabel?: string;
@@ -528,6 +557,10 @@ export interface PersistedTerminalSession {
   createdAt: number;
   daemonEpoch?: string | null;
   lastOutputSequence?: string | null;
+  /** Agent type detected for this pane, e.g. "claude". Never minted by Ferryx. */
+  agentType?: string | null;
+  /** Session id the AGENT ITSELF generated. Ferryx never mints this. */
+  agentSessionId?: string | null;
 }
 
 export interface PersistedWorkspace {
@@ -538,6 +571,7 @@ export interface PersistedWorkspace {
   layout: PersistedLayout;
   worktreeLayouts?: Record<string, PersistedLayout>;
   terminalSessions: Record<string, PersistedTerminalSession>;
+  activityBySessionId?: Record<string, import("./activity").TerminalActivity>;
 }
 
 export interface PersistedWorkspaceSession {

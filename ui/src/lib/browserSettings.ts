@@ -24,6 +24,8 @@ export type BrowserSettingsState = {
 };
 
 export const DEFAULT_BROWSER_PROFILE: BrowserProfile = { id: "default", name: "Default" };
+export const PRIVATE_BROWSER_PROFILE: BrowserProfile = { id: "private", name: "Private" };
+const BUILT_IN_BROWSER_PROFILE_IDS = new Set([DEFAULT_BROWSER_PROFILE.id, PRIVATE_BROWSER_PROFILE.id]);
 
 export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   homePage: "",
@@ -35,7 +37,7 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   shiftOpensSystemBrowser: true,
   showTerminalLinkActions: true,
   localhostWorktreeLabels: true,
-  profiles: [DEFAULT_BROWSER_PROFILE],
+  profiles: [DEFAULT_BROWSER_PROFILE, PRIVATE_BROWSER_PROFILE],
   defaultProfileId: DEFAULT_BROWSER_PROFILE.id,
 };
 
@@ -65,8 +67,8 @@ function normalizeProfile(input: unknown): BrowserProfile | null {
 }
 
 function normalizeProfiles(value: unknown): BrowserProfile[] {
-  const normalized: BrowserProfile[] = [];
-  const seen = new Set<string>();
+  const normalized: BrowserProfile[] = [DEFAULT_BROWSER_PROFILE, PRIVATE_BROWSER_PROFILE];
+  const seen = new Set(normalized.map((profile) => profile.id));
   if (Array.isArray(value)) {
     for (const candidate of value) {
       const profile = normalizeProfile(candidate);
@@ -75,8 +77,35 @@ function normalizeProfiles(value: unknown): BrowserProfile[] {
       normalized.push(profile);
     }
   }
-  if (!seen.has(DEFAULT_BROWSER_PROFILE.id)) normalized.unshift(DEFAULT_BROWSER_PROFILE);
-  return normalized.length > 0 ? normalized : [DEFAULT_BROWSER_PROFILE];
+  return normalized;
+}
+
+export function isBuiltInBrowserProfileId(profileId: string): boolean {
+  return BUILT_IN_BROWSER_PROFILE_IDS.has(profileId);
+}
+
+export function browserNamedProfilesSupported(): boolean {
+  if (typeof navigator === "undefined") return true;
+  const platform = typeof navigator.platform === "string" ? navigator.platform : "";
+  const userAgent = typeof navigator.userAgent === "string" ? navigator.userAgent : "";
+  return !/Mac|iPhone|iPad|iPod/i.test(`${platform} ${userAgent}`);
+}
+
+export function supportedBrowserProfiles(
+  settings: BrowserSettingsState = loadBrowserSettings(),
+): BrowserProfile[] {
+  if (browserNamedProfilesSupported()) return settings.profiles;
+  return settings.profiles.filter((profile) => isBuiltInBrowserProfileId(profile.id));
+}
+
+export function resolveSupportedBrowserProfileId(
+  requestedProfileId: string | null | undefined,
+  settings: BrowserSettingsState = loadBrowserSettings(),
+): string {
+  const supported = supportedBrowserProfiles(settings);
+  const requested = requestedProfileId?.trim() || settings.defaultProfileId;
+  if (supported.some((profile) => profile.id === requested)) return requested;
+  return DEFAULT_BROWSER_PROFILE.id;
 }
 
 export function normalizeHomePageInput(input: string): string {
@@ -298,10 +327,10 @@ export function makeBrowserProfileId(name: string, profiles: BrowserProfile[]): 
     .replace(/^[^a-z0-9]+/, "")
     .slice(0, 40) || "profile";
   const ids = new Set(profiles.map((profile) => profile.id));
-  if (!ids.has(stem) && stem !== DEFAULT_BROWSER_PROFILE.id) return stem;
+  if (!ids.has(stem) && !isBuiltInBrowserProfileId(stem)) return stem;
   for (let index = 2; index < 10_000; index += 1) {
     const candidate = `${stem}-${index}`.slice(0, 64);
-    if (!ids.has(candidate)) return candidate;
+    if (!ids.has(candidate) && !isBuiltInBrowserProfileId(candidate)) return candidate;
   }
   return `profile-${Date.now()}`;
 }

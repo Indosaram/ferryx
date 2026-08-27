@@ -10,6 +10,7 @@ import {
 import { openExternalUrl } from "./browserTauri";
 
 vi.mock("./browserTauri", () => ({
+  BROWSER_SHORTCUT_EVENT: "ferryx:browser-shortcut",
   openExternalUrl: vi.fn(() => Promise.resolve()),
 }));
 

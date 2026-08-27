@@ -79,7 +79,7 @@ describe("NewTabPopover", () => {
 
     fireEvent.click(screen.getByText("New Browser Tab"));
 
-    expect(onNewBrowser).toHaveBeenCalledWith("https://example.com/start");
+    expect(onNewBrowser).toHaveBeenCalledWith("https://example.com/start", undefined);
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -97,7 +97,7 @@ describe("NewTabPopover", () => {
 
     fireEvent.click(screen.getByText("New Browser Tab"));
 
-    expect(onNewBrowser).toHaveBeenCalledWith("about:blank");
+    expect(onNewBrowser).toHaveBeenCalledWith("about:blank", undefined);
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -340,5 +340,6 @@ function agentLaunchButtons() {
 function expectNaturalAgentOrder() {
   const buttons = agentLaunchButtons();
   expect(buttons.map((button) => button.textContent)).toEqual(["Claude", "Aider"]);
-  expect(screen.queryByText("Default")).not.toBeInTheDocument();
+  const agentsSection = screen.getByText("AGENTS").parentElement as HTMLElement;
+  expect(within(agentsSection).queryByText("Default")).not.toBeInTheDocument();
 }

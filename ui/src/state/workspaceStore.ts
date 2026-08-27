@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import {
   activityStateToAgentState,
@@ -7,10 +7,10 @@ import {
   type TerminalActivity,
   type TerminalActivityState,
 } from "../lib/activity";
-import { classifyTerminalTitleActivity, formatTabLabelFromTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
+import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import { worktreeIdentity } from "../lib/types";
@@ -72,7 +72,7 @@ export {
 } from "./hmrWorkspaceState";
 
 import { getHmrWorkspaceState, setHmrWorkspaceState } from "./hmrWorkspaceState";
-import { getWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import { getWorkspaceSnapshot, listWorkspaceSnapshots, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 
 export type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
@@ -134,6 +134,14 @@ export type WorkspaceAction =
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
   | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
+  | {
+      type: "SESSION_SCREEN_ACTIVITY";
+      tabId: string;
+      sessionId: string;
+      state: "working" | "blocked" | "idle";
+      ruleId: string;
+      manifestId?: string;
+    }
   | { type: "MARK_TAB_UNREAD"; tabId: string }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
   | { type: "MARK_WORKTREE_UNREAD"; worktreePath: string }
@@ -171,6 +179,10 @@ export function useWorkspaceStore({
    */
   const bellListenersRef = useRef(new Set<(sessionId: string, tabId: string) => void>());
   const mountedWorkspaceIdRef = useRef(workspaceId);
+  // Snapshots of parked workspaces live outside React state, so a change there has to be announced
+  // for the sidebar's cross-workspace activity to recompute.
+  const [parkedActivityVersion, setParkedActivityVersion] = useState(0);
+  const bumpParkedActivity = useCallback(() => setParkedActivityVersion((value) => value + 1), []);
   // Provenance belongs to the workspace currently mounted; keeping the first
   // one would make restore pick the wrong HMR-vs-disk path after a switch.
   const recoveredFromHmrRef = useRef(initialRef.current.recoveredFromHmr);
@@ -233,24 +245,60 @@ export function useWorkspaceStore({
     // stream pump, so they arrive for every attached session -- including background tabs whose
     // panes `TerminalSplitView` has unmounted. That is the whole point: the notification exists
     // for the tab the user is NOT watching.
-    const resolveSession = (backendSessionId: string) => {
-      const snapshot = stateRef.current;
-      const session = Object.values(snapshot.sessions).find(
+    const locateSession = (state: WorkspaceState, backendSessionId: string) => {
+      const session = Object.values(state.sessions).find(
         (candidate) => candidate.backendSessionId === backendSessionId,
       );
       if (!session) return null;
-      const tabId = findTabIdForSession(snapshot, session.id);
+      const tabId = findTabIdForSession(state, session.id);
       if (!tabId) return null;
       return { sessionId: session.id, tabId };
     };
 
+    const resolveSession = (backendSessionId: string) =>
+      locateSession(stateRef.current, backendSessionId);
+
+    /**
+     * Applies an activity action to a session owned by a project that is not currently mounted.
+     *
+     * Only one workspace has a live reducer, so without this an agent working in another project
+     * would freeze at whatever state it held when the user switched away -- and the sidebar row
+     * that now reads snapshots would spin forever. Returns true when the event was consumed.
+     */
+    const dispatchToParkedWorkspace = (
+      backendSessionId: string,
+      build: (resolved: { sessionId: string; tabId: string }) => WorkspaceAction,
+    ): boolean => {
+      const mountedWorkspaceId = stateRef.current.workspaceId ?? mountedWorkspaceIdRef.current;
+      for (const [snapshotWorkspaceId, snapshot] of listWorkspaceSnapshots()) {
+        if (snapshotWorkspaceId === mountedWorkspaceId) continue;
+        const resolved = locateSession(snapshot, backendSessionId);
+        if (!resolved) continue;
+        const nextState = workspaceReducer(snapshot, build(resolved));
+        if (nextState === snapshot) return true;
+        setWorkspaceSnapshot(snapshotWorkspaceId, nextState);
+        bumpParkedActivity();
+        return true;
+      }
+      return false;
+    };
+
     let unlistenTitle: (() => void) | undefined;
     let unlistenBell: (() => void) | undefined;
+    let unlistenAgentState: (() => void) | undefined;
     let subscribed = true;
 
     void onNativeTerminalTitle((payload) => {
       const resolved = resolveSession(payload.sessionId);
-      if (!resolved) return;
+      if (!resolved) {
+        dispatchToParkedWorkspace(payload.sessionId, (parked) => ({
+          type: "SESSION_TITLE_ACTIVITY",
+          tabId: parked.tabId,
+          sessionId: parked.sessionId,
+          title: payload.title,
+        }));
+        return;
+      }
       dispatch({ type: "SESSION_TITLE_ACTIVITY", tabId: resolved.tabId, sessionId: resolved.sessionId, title: payload.title });
     })
       .then((unlisten) => {
@@ -270,11 +318,40 @@ export function useWorkspaceStore({
       })
       .catch(() => undefined);
 
+    void onNativeTerminalAgentState((payload) => {
+      const resolved = resolveSession(payload.sessionId);
+      if (!resolved) {
+        dispatchToParkedWorkspace(payload.sessionId, (parked) => ({
+          type: "SESSION_SCREEN_ACTIVITY",
+          tabId: parked.tabId,
+          sessionId: parked.sessionId,
+          state: payload.state,
+          ruleId: payload.ruleId,
+          manifestId: payload.manifestId,
+        }));
+        return;
+      }
+      dispatch({
+        type: "SESSION_SCREEN_ACTIVITY",
+        tabId: resolved.tabId,
+        sessionId: resolved.sessionId,
+        state: payload.state,
+        ruleId: payload.ruleId,
+        manifestId: payload.manifestId,
+      });
+    })
+      .then((unlisten) => {
+        if (subscribed) unlistenAgentState = unlisten;
+        else unlisten();
+      })
+      .catch(() => undefined);
+
     return () => {
       subscribed = false;
       unsubscribeLifecycle();
       unlistenTitle?.();
       unlistenBell?.();
+      unlistenAgentState?.();
     };
   }, [dispatch]);
 
@@ -763,15 +840,17 @@ export function useWorkspaceStore({
   }, []);
 
   const createBrowserTab = useCallback(
-    async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string }) => {
+    async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string; profileId?: string; browserId?: string }) => {
       const capturedWorktreePath = options?.worktreePath ?? stateRef.current.activeWorktreePath ?? undefined;
       const targetWorktree = capturedWorktreePath
         ? stateRef.current.worktrees.find((wt) => wt.path === capturedWorktreePath)
         : getActiveWorktree(stateRef.current);
       const browserState = await createBrowser({
+        browserId: options?.browserId,
         workspaceId,
         worktreePath: targetWorktree?.path,
         url,
+        profile: options?.profileId,
         visible: true,
       });
       // Landing this tab after a project switch would attach one project's
@@ -793,6 +872,9 @@ export function useWorkspaceStore({
         loading: browserState.loading,
         canGoBack: browserState.canGoBack,
         canGoForward: browserState.canGoForward,
+        zoomFactor: browserState.zoomFactor,
+        loadError: browserState.loadError ?? null,
+        profileId: browserState.profileId,
         worktreePath: targetWorktree?.path,
       };
 
@@ -800,6 +882,18 @@ export function useWorkspaceStore({
       return tabId;
     },
     [dispatch, workspaceId],
+  );
+
+  const duplicateBrowserTab = useCallback(
+    async (tabId: string, profileId?: string) => {
+      const source = stateRef.current.layout.tabs.find((tab) => tab.id === tabId);
+      if (!source || source.kind !== "browser") return null;
+      return createBrowserTab(source.url, source.label, {
+        worktreePath: source.worktreePath,
+        profileId: profileId ?? source.profileId,
+      });
+    },
+    [createBrowserTab],
   );
 
   const navigateBrowserTabAction = useCallback(
@@ -844,7 +938,17 @@ export function useWorkspaceStore({
 
   const agents = useMemo(() => selectAgents(renderedState), [renderedState]);
   const tabActivity = useMemo(() => selectTabActivitySummaries(renderedState), [renderedState]);
-  const worktreeActivity = useMemo(() => selectWorktreeActivitySummaries(renderedState), [renderedState]);
+  // Rows for other projects come from their snapshots and are overlaid by the live workspace, so a
+  // worktree the user switched away from keeps reporting its agent instead of going blank.
+  const worktreeActivity = useMemo(
+    () => ({
+      ...selectWorktreeActivitySummariesAcrossWorkspaces(renderedState.workspaceId ?? workspaceId),
+      ...selectWorktreeActivitySummaries(renderedState),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
+    // signal for the snapshot cache, which useMemo cannot observe directly.
+    [renderedState, workspaceId, parkedActivityVersion],
+  );
   const activityNotificationTargets = useMemo(
     () => selectActivityNotificationTargets(renderedState),
     [renderedState],
@@ -859,6 +963,7 @@ export function useWorkspaceStore({
     activityNotificationTargets,
     openTab,
     createBrowserTab,
+    duplicateBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
     reloadBrowserTab: reloadBrowserTabAction,
     ensureTabForWorktree,
@@ -978,6 +1083,32 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
   return result;
 }
 
+/**
+ * Worktree activity for every project EXCEPT the mounted one.
+ *
+ * The store is per project: `useWorkspaceStore({ workspaceId })` mounts one workspace at a time, so
+ * an agent running in another project has no live store to feed the sidebar. Its rows would sit
+ * blank while the agent works, then light up again the moment the user switched back. The snapshot
+ * cache already holds each workspace's last state, which is what the sidebar reads here.
+ *
+ * The mounted workspace is excluded on purpose: its snapshot lags the live reducer state by a
+ * render, and the caller merges this map UNDER the live one.
+ */
+export function selectWorktreeActivitySummariesAcrossWorkspaces(
+  mountedWorkspaceId: string,
+): Record<string, ActivitySummary> {
+  const merged: Record<string, ActivitySummary> = {};
+
+  for (const [workspaceId, snapshot] of listWorkspaceSnapshots()) {
+    if (workspaceId === mountedWorkspaceId) continue;
+    for (const [path, summary] of Object.entries(selectWorktreeActivitySummaries(snapshot))) {
+      merged[path] = summary;
+    }
+  }
+
+  return merged;
+}
+
 export type ActivityNotificationTarget = {
   sessionId: string;
   tabId: string;
@@ -1000,7 +1131,11 @@ export function selectActivityNotificationTargets(state: WorkspaceState): Activi
     const worktree = state.worktrees.find((candidate) => candidate.path === worktreePath);
     const worktreeLabel = worktree ? workspaceName(worktree) : "";
     const parsed = parseAgentTitle(activity.title);
-    const agentLabel = parsed?.isAgent ? parsed.name : undefined;
+    // An extension-reported state carries agentType but no agent name in the title, so fall back
+    // to the classified type rather than sending a nameless notification.
+    const agentLabel = parsed?.isAgent
+      ? parsed.name
+      : agentDisplayNameForType(activity.isAgent ? activity.agentType : undefined);
 
     targets.push({
       sessionId,
@@ -1385,11 +1520,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       if (state.layout.tabs.some((tab) => tab.id === action.tabId)) {
         const unreadTabIds = { ...state.unreadTabIds };
         delete unreadTabIds[action.tabId];
-        const nextState = {
-          ...state,
-          unreadTabIds,
-          layout: layoutReducer(state.layout, { type: "ACTIVATE_TAB", tabId: action.tabId }),
-        };
+        const nextState = acknowledgeTabCompletions(
+          {
+            ...state,
+            unreadTabIds,
+            layout: layoutReducer(state.layout, { type: "ACTIVATE_TAB", tabId: action.tabId }),
+          },
+          action.tabId,
+        );
         return clearWorktreeUnreadWhenRead(nextState, action.tabId, state);
       }
       for (const [wtPath, parkedLayout] of Object.entries(state.worktreeLayouts ?? {})) {
@@ -1404,14 +1542,17 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           delete unreadTabIds[action.tabId];
           const unreadWorktreePaths = { ...state.unreadWorktreePaths };
           delete unreadWorktreePaths[wtPath];
-          const nextState = {
-            ...state,
-            activeWorktreePath: wtPath,
-            layout: nextLayout,
-            worktreeLayouts: nextWorktreeLayouts,
-            unreadTabIds,
-            unreadWorktreePaths,
-          };
+          const nextState = acknowledgeTabCompletions(
+            {
+              ...state,
+              activeWorktreePath: wtPath,
+              layout: nextLayout,
+              worktreeLayouts: nextWorktreeLayouts,
+              unreadTabIds,
+              unreadWorktreePaths,
+            },
+            action.tabId,
+          );
           return clearWorktreeUnreadWhenRead(nextState, action.tabId, state);
         }
       }
@@ -1470,27 +1611,113 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         },
       };
     }
+    case "SESSION_SCREEN_ACTIVITY": {
+      const previous = state.activityBySessionId?.[action.sessionId];
+      let mappedState: TerminalActivityState;
+      if (action.state === "working") {
+        mappedState = "working";
+      } else if (action.state === "blocked") {
+        mappedState = "waiting";
+      } else if (action.state === "idle") {
+        if (!previous || (previous.state !== "working" && previous.state !== "waiting")) {
+          return state;
+        }
+        mappedState = "done";
+      } else {
+        return state;
+      }
+
+      const agentType = previous?.agentType;
+      const isAgent = previous?.isAgent ?? false;
+
+      const activity: TerminalActivity = {
+        state: mappedState,
+        title: previous?.title ?? "",
+        isAgent,
+        agentType,
+        source: "screen",
+      };
+      return applySessionActivity(state, action.tabId, action.sessionId, activity);
+    }
     case "SESSION_TITLE_ACTIVITY": {
+      const previous = state.activityBySessionId?.[action.sessionId];
+      const isScreenSource = previous?.source === "screen";
+
+      if (isBareAgentTitle(action.title)) {
+        if (isScreenSource) {
+          const parsed = parseAgentTitle(action.title);
+          const normalizedTitle = normalizeTerminalTitle(action.title);
+          const activity: TerminalActivity = {
+            state: previous.state,
+            title: formatTabLabelFromTitle(action.title, normalizedTitle),
+            isAgent: parsed?.isAgent ?? false,
+            agentType: parsed?.isAgent ? parsed.agentType : undefined,
+            source: "screen",
+          };
+          return applySessionActivity(state, action.tabId, action.sessionId, activity);
+        }
+        if (!previous) return state;
+        const activityBySessionId = { ...(state.activityBySessionId ?? {}) };
+        delete activityBySessionId[action.sessionId];
+        return { ...state, activityBySessionId };
+      }
+
       const parsed = parseAgentTitle(action.title);
       const classified = classifyTerminalTitleActivity(action.title);
 
-      if (!classified) {
-        if (!state.activityBySessionId?.[action.sessionId]) return state;
+      if (!classified && !previous) {
+        return state;
+      }
+
+      // A shell prompt repainting the title (cwd, `zsh`, …) is not evidence that the agent
+      // stopped: agents leave the title alone while a turn runs. Only drop the entry once the
+      // run has actually settled, so an in-flight state survives the repaint the same way a
+      // screen-derived one already does. The stale brand is still dropped below.
+      const inFlight = previous?.state === "working" || previous?.state === "waiting";
+
+      if (!classified && !parsed?.isAgent && !isScreenSource && !inFlight) {
+        if (!previous) return state;
         const activityBySessionId = { ...(state.activityBySessionId ?? {}) };
         delete activityBySessionId[action.sessionId];
         return { ...state, activityBySessionId };
       }
 
       const normalizedTitle = normalizeTerminalTitle(action.title);
+      const isAgent = parsed?.isAgent ?? false;
+      const agentType = parsed?.isAgent ? parsed.agentType : undefined;
+
       const activity: TerminalActivity = {
-        state: classified,
+        state: isScreenSource ? previous.state : (classified ?? previous!.state),
         title: formatTabLabelFromTitle(action.title, normalizedTitle),
-        isAgent: Boolean(parsed?.isAgent),
-        agentType: parsed?.isAgent ? parsed.agentType : undefined,
+        isAgent,
+        agentType,
+        source: isScreenSource ? "screen" : (previous?.source ?? "title"),
       };
       return applySessionActivity(state, action.tabId, action.sessionId, activity);
     }
   }
+}
+
+/**
+ * Marks every completion the given tab owns as seen.
+ *
+ * Opening a tab is how the user reads its completion, so the green dot must go out — the same way
+ * activating a tab already clears its unread flag. The entries are kept so the tab retains its agent
+ * brand icon; only the attention signal is consumed.
+ */
+function acknowledgeTabCompletions(state: WorkspaceState, tabId: string): WorkspaceState {
+  const activityBySessionId = state.activityBySessionId ?? {};
+  let changed = false;
+  const next = { ...activityBySessionId };
+
+  for (const sessionId of getTabSessionIds(state, tabId)) {
+    const activity = activityBySessionId[sessionId];
+    if (!activity || activity.state !== "done" || activity.seen) continue;
+    next[sessionId] = { ...activity, seen: true };
+    changed = true;
+  }
+
+  return changed ? { ...state, activityBySessionId: next } : state;
 }
 
 function isTabVisible(state: WorkspaceState, tabId: string): boolean {
@@ -1515,14 +1742,23 @@ function applySessionActivity(
     previous.state === activity.state &&
     previous.title === activity.title &&
     previous.isAgent === activity.isAgent &&
-    previous.agentType === activity.agentType
+    previous.agentType === activity.agentType &&
+    previous.source === activity.source &&
+    previous.seen === activity.seen
   ) {
     return state;
   }
 
+  // A completion the user is already looking at is not a request for attention, so it is born
+  // acknowledged. This is what keeps an agent that boots with a spinner and settles at its prompt
+  // from leaving a permanent dot on the tab in front of the user.
+  const acknowledged =
+    activity.state === "done" && (activity.seen === true || isTabVisible(state, tabId));
+  const stored: TerminalActivity = acknowledged ? { ...activity, seen: true } : activity;
+
   let nextState: WorkspaceState = {
     ...state,
-    activityBySessionId: { ...(state.activityBySessionId ?? {}), [sessionId]: activity },
+    activityBySessionId: { ...(state.activityBySessionId ?? {}), [sessionId]: stored },
   };
 
   if (activity.state === "done" && previous?.state !== "done" && !isTabVisible(state, tabId)) {

@@ -1,7 +1,8 @@
 import { createLayoutState, normalizeLayout } from "../state/layout";
-import { collectLeafIds, createLeafNode, removeLeaf } from "../state/paneTree";
+import { collectLeafIds, createLeafNode, removeLeaf, type PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
-import { loadBrowserSettings } from "./browserSettings";
+import type { TerminalActivity } from "./activity";
+import { loadBrowserSettings, resolveSupportedBrowserProfileId, supportedBrowserProfiles } from "./browserSettings";
 import {
   createBrowserPaneContent,
   createTerminalPaneContent,
@@ -61,6 +62,7 @@ export function serializeWorkspaceState(
             loading: tab.loading,
             canGoBack: tab.canGoBack,
             canGoForward: tab.canGoForward,
+            zoomFactor: tab.zoomFactor,
             profileId: tab.profileId,
             worktreePath: tab.worktreePath,
             worktreeLabel: tab.worktreeLabel,
@@ -70,7 +72,7 @@ export function serializeWorkspaceState(
       }
 
       const tabLayout = normalizedLayout.layoutsByTabId[tab.id];
-      let effectiveRoot = tabLayout?.root ?? createLeafNode(`leaf-persisted:${tab.id}`);
+      let effectiveRoot: PaneNode | null = tabLayout?.root ?? createLeafNode(`leaf-persisted:${tab.id}`);
       let effectiveContents = tabLayout?.contentsByLeafId;
 
       if (!restoreBrowserTabs && tabLayout && effectiveContents) {
@@ -78,7 +80,7 @@ export function serializeWorkspaceState(
           if (content.kind === "browser") {
             const nextRoot = removeLeaf(effectiveRoot, leafId);
             if (!nextRoot) {
-              effectiveRoot = null as any;
+              effectiveRoot = null;
               break;
             }
             effectiveRoot = nextRoot;
@@ -95,7 +97,7 @@ export function serializeWorkspaceState(
         const content = effectiveContents?.[leafId];
         if (content) {
           if (content.kind === "browser") {
-            const rawBrowser = content.browser ?? (content as any);
+            const rawBrowser = content.browser ?? content;
             contentsByLeafId[leafId] = createBrowserPaneContent({
               browserId: rawBrowser.browserId ?? "",
               url: rawBrowser.url ?? "",
@@ -103,6 +105,7 @@ export function serializeWorkspaceState(
               loading: rawBrowser.loading ?? false,
               canGoBack: rawBrowser.canGoBack ?? false,
               canGoForward: rawBrowser.canGoForward ?? false,
+              zoomFactor: rawBrowser.zoomFactor,
               profileId: rawBrowser.profileId,
               worktreePath: rawBrowser.worktreePath,
               worktreeLabel: rawBrowser.worktreeLabel,
@@ -210,8 +213,19 @@ export function serializeWorkspaceState(
       cwd: sess.cwd,
       daemonEpoch: sess.daemonEpoch != null ? String(sess.daemonEpoch) : null,
       lastOutputSequence: sess.lastOutputSequence != null ? String(sess.lastOutputSequence) : null,
+      agentType: sess.agentType ?? null,
+      agentSessionId: sess.agentSessionId ?? null,
       createdAt,
     };
+  }
+
+  const persistedActivity: Record<string, TerminalActivity> = {};
+  if (state.activityBySessionId) {
+    for (const [sessionId, activity] of Object.entries(state.activityBySessionId)) {
+      if (activity && referencedSessionIds.has(sessionId)) {
+        persistedActivity[sessionId] = { ...activity };
+      }
+    }
   }
 
   const workspace: PersistedWorkspace = {
@@ -222,6 +236,7 @@ export function serializeWorkspaceState(
     layout: persistedLayout,
     ...(Object.keys(persistedWorktreeLayouts).length > 0 ? { worktreeLayouts: persistedWorktreeLayouts } : {}),
     terminalSessions: persistedTerminalSessions,
+    ...(Object.keys(persistedActivity).length > 0 ? { activityBySessionId: persistedActivity } : {}),
   };
 
   const workspaces = {
@@ -256,8 +271,9 @@ export function deserializeWorkspaceState(
 
   const browserSettings = loadBrowserSettings();
   const restoreBrowser = browserSettings.restoreTabsOnLaunch;
-  const knownProfiles = new Set(browserSettings.profiles.map((p) => p.id));
-  const fallbackProfileId = browserSettings.defaultProfileId;
+  const supportedProfiles = supportedBrowserProfiles(browserSettings);
+  const knownProfiles = new Set(supportedProfiles.map((profile) => profile.id));
+  const fallbackProfileId = resolveSupportedBrowserProfileId(browserSettings.defaultProfileId, browserSettings);
 
   let globalLiveEpoch: string | null = null;
   const liveSessionMap = new Map<string, { daemonEpoch: string | null }>();
@@ -342,13 +358,17 @@ export function deserializeWorkspaceState(
         const liveInfo = liveSessionMap.get(persistedBackendSessionId);
         const effectiveLiveEpoch = liveInfo?.daemonEpoch ?? globalLiveEpoch;
 
+        // A hit in liveSessionMap came from listSessions on the daemon running right now, and
+        // backend ids do not survive a daemon restart. So a live hit already proves the PTY is
+        // ours; only a RECORDED epoch that disagrees can disprove it.
+        //
+        // Treating a missing persisted epoch as a mismatch orphaned every restored session,
+        // because no reducer writes daemonEpoch onto a session -- it is null in every save file.
         let epochMatches = true;
         if (effectiveLiveEpoch !== null && persistedEpoch !== null) {
           epochMatches = effectiveLiveEpoch === persistedEpoch;
-        } else if (effectiveLiveEpoch !== null && persistedEpoch === null) {
+        } else if (liveInfo === undefined && effectiveLiveEpoch !== null && persistedEpoch === null) {
           epochMatches = false;
-        } else if (effectiveLiveEpoch === null && persistedEpoch !== null) {
-          epochMatches = true;
         }
 
         if (epochMatches) {
@@ -367,6 +387,8 @@ export function deserializeWorkspaceState(
 
     const worktreePath = sess.worktreePath || sess.cwd;
     const matchingWorktree = worktrees.find((wt) => wt.path === worktreePath);
+    const agentType = sess.agentType ?? null;
+    const agentSessionId = sess.agentSessionId ?? null;
     sessions[localSessionId] = {
       id: localSessionId,
       cwd: sess.cwd || worktreePath,
@@ -377,6 +399,8 @@ export function deserializeWorkspaceState(
       lifecycle,
       daemonEpoch,
       lastOutputSequence,
+      agentType,
+      agentSessionId,
     };
   }
 
@@ -399,6 +423,7 @@ export function deserializeWorkspaceState(
           title: browser?.title ?? persistedTab.label,
           canGoBack: browser?.canGoBack ?? false,
           canGoForward: browser?.canGoForward ?? false,
+          zoomFactor: browser?.zoomFactor,
           loading: browser?.loading ?? false,
           pinned: Boolean(persistedTab.pinned),
           profileId,
@@ -434,6 +459,7 @@ export function deserializeWorkspaceState(
           title: browser?.title ?? persistedTab.label,
           canGoBack: browser?.canGoBack ?? false,
           canGoForward: browser?.canGoForward ?? false,
+          zoomFactor: browser?.zoomFactor,
           loading: browser?.loading ?? false,
           profileId,
           worktreePath: browser?.worktreePath ?? persistedTab.worktreePath,
@@ -453,7 +479,7 @@ export function deserializeWorkspaceState(
       const legacyTabLayout = persistedLayout.layoutsByTabId?.[persistedTab.id];
       const paneTree = terminal?.paneTree ?? persistedTab.paneTree ?? legacyTabLayout?.root;
       const primarySessionId = terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
-      let root = paneTree ?? createLeafNode(`leaf-restored:${persistedTab.id}`);
+      let root: PaneNode | null = paneTree ?? createLeafNode(`leaf-restored:${persistedTab.id}`);
       const persistedContents = terminal?.contentsByLeafId ?? persistedTab.contentsByLeafId;
       const persistedMapping =
         terminal?.sessionIdsByLeafId ?? persistedTab.sessionIdsByLeafId ?? legacyTabLayout?.sessionIdsByLeafId;
@@ -463,7 +489,7 @@ export function deserializeWorkspaceState(
           if (content && content.kind === "browser") {
             const nextRoot = removeLeaf(root, leafId);
             if (!nextRoot) {
-              root = null as any;
+              root = null;
               break;
             }
             root = nextRoot;
@@ -480,7 +506,7 @@ export function deserializeWorkspaceState(
         const rawContent = persistedContents?.[leafId];
         if (rawContent) {
           if (rawContent.kind === "browser") {
-            const rawBrowser = rawContent.browser ?? (rawContent as any);
+            const rawBrowser = rawContent.browser ?? rawContent;
             const rawProfileId = rawBrowser.profileId;
             const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
             contentsByLeafId[leafId] = createBrowserPaneContent({
@@ -490,6 +516,7 @@ export function deserializeWorkspaceState(
               loading: Boolean(rawBrowser.loading),
               canGoBack: Boolean(rawBrowser.canGoBack),
               canGoForward: Boolean(rawBrowser.canGoForward),
+              zoomFactor: typeof rawBrowser.zoomFactor === "number" ? rawBrowser.zoomFactor : undefined,
               profileId,
               worktreePath: rawBrowser.worktreePath,
               worktreeLabel: rawBrowser.worktreeLabel,
@@ -579,6 +606,25 @@ export function deserializeWorkspaceState(
     Object.entries(sessions).filter(([sessionId]) => referencedSessionIds.has(sessionId)),
   );
 
+  const restoredActivity: Record<string, TerminalActivity> = {};
+  if (ws.activityBySessionId) {
+    for (const [sessionId, activity] of Object.entries(ws.activityBySessionId)) {
+      if (activity && referencedSessionIds.has(sessionId)) {
+        // `working` and `waiting` are claims about a process that is alive right now. Nothing is
+        // running yet after a restart, so carrying them over would show a spinner for an agent that
+        // no longer exists. The agent identity is kept, so the tab still renders its icon.
+        const isInFlightClaim = activity.state === "working" || activity.state === "waiting";
+        restoredActivity[sessionId] = {
+          state: isInFlightClaim ? "done" : activity.state,
+          title: activity.title || "",
+          isAgent: Boolean(activity.isAgent),
+          ...(activity.agentType ? { agentType: activity.agentType } : {}),
+          ...(activity.source ? { source: activity.source } : {}),
+        };
+      }
+    }
+  }
+
   return {
     workspaceId,
     worktrees,
@@ -588,6 +634,6 @@ export function deserializeWorkspaceState(
     worktreeLayouts,
     unreadTabIds: {},
     unreadWorktreePaths: {},
-    activityBySessionId: {},
+    activityBySessionId: restoredActivity,
   };
 }

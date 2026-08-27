@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Cookie, FolderOpen, Globe, Plus, RotateCcw, Trash2 } from "lucide-react";
 
 import {
   BROWSER_ZOOM_LEVELS,
   DEFAULT_BROWSER_PROFILE,
+  browserNamedProfilesSupported,
+  isBuiltInBrowserProfileId,
   makeBrowserProfileId,
   normalizeHomePageInput,
+  supportedBrowserProfiles,
   useBrowserSettings,
   type BrowserProfile,
   type BrowserSettingsState,
@@ -40,9 +43,10 @@ function SettingRow({
   );
 }
 
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
+function Toggle({ checked, onChange, label, id }: { checked: boolean; onChange: (checked: boolean) => void; label: string; id?: string }) {
   return (
     <input
+      id={id}
       type="checkbox"
       aria-label={label}
       checked={checked}
@@ -59,6 +63,8 @@ export function BrowserSettingsPanel() {
   const [profileDraft, setProfileDraft] = useState("");
   const [importStatus, setImportStatus] = useState<Record<string, string>>({});
   const [activeBrowsers, setActiveBrowsers] = useState<BrowserSessionSummary[]>([]);
+  const namedProfilesSupported = browserNamedProfilesSupported();
+  const visibleProfiles = useMemo(() => supportedBrowserProfiles(settings), [settings]);
 
   useEffect(() => setHomeDraft(settings.homePage), [settings.homePage]);
 
@@ -100,6 +106,7 @@ export function BrowserSettingsPanel() {
   };
 
   const addProfile = () => {
+    if (!namedProfilesSupported) return;
     const name = profileDraft.trim();
     if (!name) return;
     const profile: BrowserProfile = { id: makeBrowserProfileId(name, settings.profiles), name: name.slice(0, 80) };
@@ -108,6 +115,7 @@ export function BrowserSettingsPanel() {
   };
 
   const renameProfile = (profileId: string, name: string) => {
+    if (isBuiltInBrowserProfileId(profileId)) return;
     const nextName = name.trim();
     if (!nextName) return;
     void update({
@@ -116,7 +124,7 @@ export function BrowserSettingsPanel() {
   };
 
   const deleteProfile = (profileId: string) => {
-    if (profileId === DEFAULT_BROWSER_PROFILE.id) return;
+    if (isBuiltInBrowserProfileId(profileId)) return;
     const profiles = settings.profiles.filter((profile) => profile.id !== profileId);
     void update({
       profiles,
@@ -152,7 +160,7 @@ export function BrowserSettingsPanel() {
         <Globe className="mt-0.5 size-5 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <h2 id="settings-browser-heading" className="text-sm font-semibold">Browser</h2>
-          <p className="mt-1 text-xs text-muted-foreground">Configure navigation, link routing, isolated sessions, and cookies.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Configure navigation, link routing, browser sessions, and cookies.</p>
         </div>
         <button
           type="button"
@@ -192,6 +200,7 @@ export function BrowserSettingsPanel() {
 
         <SettingRow label="Default Search Engine" description="Used by both the address bar and new-tab search input.">
           <select
+            id="browser-search-engine"
             aria-label="Default search engine"
             value={settings.searchEngine}
             onChange={(event) => void update({ searchEngine: event.target.value as BrowserSettingsState["searchEngine"] })}
@@ -206,6 +215,7 @@ export function BrowserSettingsPanel() {
 
         <SettingRow label="Default Zoom" description="Applied to new, restored, and currently open built-in browser tabs.">
           <select
+            id="browser-default-zoom"
             aria-label="Default zoom level"
             value={settings.defaultZoom}
             onChange={(event) => void update({ defaultZoom: Number(event.target.value) })}
@@ -216,7 +226,7 @@ export function BrowserSettingsPanel() {
         </SettingRow>
 
         <SettingRow label="Restore browser tabs on launch" description="Persist built-in browser tabs as part of the workspace session.">
-          <Toggle label="Restore tabs on launch" checked={settings.restoreTabsOnLaunch} onChange={(value) => void update({ restoreTabsOnLaunch: value })} />
+          <Toggle id="browser-restore-tabs" label="Restore tabs on launch" checked={settings.restoreTabsOnLaunch} onChange={(value) => void update({ restoreTabsOnLaunch: value })} />
         </SettingRow>
         <SettingRow label="Remember browsing history" description="Keep up to 100 recently visited built-in browser pages across Ferryx restarts.">
           <Toggle
@@ -249,28 +259,35 @@ export function BrowserSettingsPanel() {
       <div className="mt-7 flex items-end justify-between gap-4 border-b border-border pb-2">
         <div>
           <h3 className="text-[12px] font-semibold">Session & Cookies</h3>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">Each profile uses a separate WebView data store for cookies and site sessions.</p>
+          <p className="mt-0.5 max-w-xl text-[11px] text-muted-foreground">
+            Default uses the normal browser store. Private is ephemeral. {namedProfilesSupported
+              ? "Named profiles use separate persistent data directories."
+              : "macOS WebKit does not expose persistent named data stores, so only Default and Private are available."}
+          </p>
         </div>
-        <div className="flex items-center gap-1.5">
-          <input
-            value={profileDraft}
-            onChange={(event) => setProfileDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") addProfile();
-            }}
-            aria-label="New browser profile name"
-            placeholder="Profile name"
-            className="h-8 w-36 rounded-md border border-input bg-background px-2 text-xs outline-none focus:border-ring"
-          />
-          <button type="button" onClick={addProfile} className="flex h-8 items-center gap-1 rounded-md border border-border px-2 text-[11px] hover:bg-accent">
-            <Plus className="size-3" /> Add Profile
-          </button>
-        </div>
+        {namedProfilesSupported ? (
+          <div className="flex items-center gap-1.5">
+            <input
+              value={profileDraft}
+              onChange={(event) => setProfileDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") addProfile();
+              }}
+              aria-label="New browser profile name"
+              placeholder="Profile name"
+              className="h-8 w-36 rounded-md border border-input bg-background px-2 text-xs outline-none focus:border-ring"
+            />
+            <button type="button" onClick={addProfile} className="flex h-8 items-center gap-1 rounded-md border border-border px-2 text-[11px] hover:bg-accent">
+              <Plus className="size-3" /> Add Profile
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="divide-y divide-border">
-        {settings.profiles.map((profile) => {
+        {visibleProfiles.map((profile) => {
           const isDefault = profile.id === settings.defaultProfileId;
+          const isBuiltIn = isBuiltInBrowserProfileId(profile.id);
           return (
             <div key={profile.id} className="flex items-center gap-3 py-3">
               <Cookie className="size-4 shrink-0 text-muted-foreground" />
@@ -278,12 +295,13 @@ export function BrowserSettingsPanel() {
                 <input
                   key={`${profile.id}:${profile.name}`}
                   defaultValue={profile.name}
+                  disabled={isBuiltIn}
                   aria-label={`Profile name ${profile.id}`}
                   onBlur={(event) => renameProfile(profile.id, event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") event.currentTarget.blur();
                   }}
-                  className="h-7 w-full max-w-56 rounded border border-transparent bg-transparent px-1 text-xs font-medium outline-none hover:border-border focus:border-ring"
+                  className="h-7 w-full max-w-56 rounded border border-transparent bg-transparent px-1 text-xs font-medium outline-none hover:border-border focus:border-ring disabled:opacity-80"
                 />
                 <div className="px-1 font-mono text-[9px] text-muted-foreground">{profile.id}</div>
                 {importStatus[profile.id] ? <div className="mt-0.5 px-1 text-[10px] text-muted-foreground">{importStatus[profile.id]}</div> : null}
@@ -302,10 +320,10 @@ export function BrowserSettingsPanel() {
               </button>
               <button
                 type="button"
-                disabled={profile.id === DEFAULT_BROWSER_PROFILE.id}
+                disabled={isBuiltIn}
                 aria-label={`Delete profile ${profile.name}`}
                 onClick={() => deleteProfile(profile.id)}
-                title={profile.id === DEFAULT_BROWSER_PROFILE.id ? "The built-in default profile cannot be deleted" : "Delete profile"}
+                title={isBuiltIn ? "Built-in profiles cannot be deleted" : "Delete profile"}
                 className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <Trash2 className="size-3.5" />

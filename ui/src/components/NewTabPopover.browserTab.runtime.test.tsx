@@ -7,12 +7,15 @@ import { useWorkspaceStore } from "../state/workspaceStore";
 import { TerminalSplitView } from "./TerminalSplitView";
 
 const browserMocks = vi.hoisted(() => ({
+  BROWSER_SHORTCUT_EVENT: "ferryx:browser-shortcut",
   createBrowser: vi.fn(),
   setBrowserBounds: vi.fn(async () => undefined),
   setBrowserVisible: vi.fn(async () => undefined),
   closeBrowser: vi.fn(async () => undefined),
   navigateBrowser: vi.fn(async () => undefined),
   reloadBrowser: vi.fn(async () => undefined),
+  onBrowserShortcutRequested: vi.fn(async () => () => undefined),
+  onBrowserDownloadRequested: vi.fn(async () => () => undefined),
 }));
 
 vi.mock("../lib/browserTauri", () => browserMocks);
@@ -40,8 +43,8 @@ function Harness() {
         void store.closeTab(tabId);
       }}
       onAddTab={() => undefined}
-      onAddBrowserTab={(url) => {
-        void store.createBrowserTab(url ?? newBrowserTabUrl());
+      onAddBrowserTab={(url, profileId) => {
+        void store.createBrowserTab(url ?? newBrowserTabUrl(), undefined, { profileId });
       }}
     />
   );
