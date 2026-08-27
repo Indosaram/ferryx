@@ -3,7 +3,8 @@ use std::borrow::Cow;
 use ferryx_lib::daemon::{DaemonAttachment, DaemonStreamMessage};
 use ferryx_lib::ipc::native_terminal::{
     copy_attached_native_selection, encode_attached_native_input, encode_attached_native_mouse,
-    encode_attached_native_paste, scroll_attached_native_terminal, search_attached_native_terminal,
+    encode_attached_native_paste, scroll_attached_native_terminal,
+    scrollbar_for_attached_native_terminal, search_attached_native_terminal,
     select_attached_native_terminal, NativeTerminalScrollBehavior, NativeTerminalSelectMode,
 };
 use ferryx_lib::native_terminal::surface_host::NativeTerminalSurfaceHostState;
@@ -83,11 +84,8 @@ async fn production_input_boundary_rejects_detached_session_without_resurrecting
         Err(NativeTerminalError::NoValue)
     ));
     assert!(
-        state
-            .snapshot_for_session(session_id)
-            .expect("snapshot lookup after rejected text input")
-            .is_none(),
-        "rejected production text input must not lazily recreate detached native state"
+        state.ensure_surface_attached(session_id).is_err(),
+        "rejected production text input must not re-attach the detached surface"
     );
 
     // Key event to detached session must also fail and not recreate state
@@ -96,11 +94,8 @@ async fn production_input_boundary_rejects_detached_session_without_resurrecting
         Err(NativeTerminalError::NoValue)
     ));
     assert!(
-        state
-            .snapshot_for_session(session_id)
-            .expect("snapshot lookup after rejected key input")
-            .is_none(),
-        "rejected production key input must not lazily recreate detached native state"
+        state.ensure_surface_attached(session_id).is_err(),
+        "rejected production key input must not re-attach the detached surface"
     );
 }
 
@@ -195,11 +190,8 @@ async fn production_paste_boundary_rejects_detached_and_unattached_session() {
         Err(NativeTerminalError::NoValue)
     ));
     assert!(
-        state
-            .snapshot_for_session(session_id)
-            .expect("snapshot lookup after rejected paste")
-            .is_none(),
-        "rejected paste must not lazily recreate detached native state"
+        state.ensure_surface_attached(session_id).is_err(),
+        "rejected paste must not re-attach the detached surface"
     );
 
     // Paste to unattached session must fail
@@ -240,11 +232,8 @@ async fn production_mouse_boundary_rejects_detached_and_unattached_session() {
         Err(NativeTerminalError::NoValue)
     ));
     assert!(
-        state
-            .snapshot_for_session(session_id)
-            .expect("snapshot lookup after rejected mouse")
-            .is_none(),
-        "rejected mouse must not lazily recreate detached native state"
+        state.ensure_surface_attached(session_id).is_err(),
+        "rejected mouse must not re-attach the detached surface"
     );
 
     // Mouse to unattached session must fail
@@ -329,12 +318,110 @@ fn scroll_boundary_maps_each_behavior_variant_to_engine() {
     );
     term.scroll_viewport(delta_variant.to_scroll_viewport())
         .expect("scroll delta");
+    assert!(term
+        .render_snapshot()
+        .expect("snapshot after upward delta")
+        .row_text(0)
+        .starts_with("row-034"));
 
     // Row
     let row_variant = NativeTerminalScrollBehavior::Row { offset: 5 };
     assert_eq!(row_variant.to_scroll_viewport(), ScrollViewport::Row(5));
     term.scroll_viewport(row_variant.to_scroll_viewport())
         .expect("scroll row");
+    assert!(term
+        .render_snapshot()
+        .expect("snapshot after row scroll")
+        .row_text(0)
+        .starts_with("row-005"));
+}
+
+#[tokio::test]
+async fn attached_scrollbar_boundary_tracks_native_viewport_position() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "native-scrollbar-boundary";
+    let (tx, attachment) = create_attachment(session_id);
+    state
+        .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+        .expect("attach native session");
+    let mut updates = state
+        .subscribe_session_update(session_id)
+        .expect("subscribe to native output");
+
+    let history = (0..100)
+        .map(|row| format!("row-{row:03}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    tx.send(DaemonStreamMessage::Output {
+        session_id: Cow::Borrowed(session_id),
+        sequence: 1,
+        data: Cow::Owned(history.into_bytes()),
+        metrics_read_unix_micros: None,
+    })
+    .await
+    .expect("send scrollback output");
+    tokio::time::timeout(std::time::Duration::from_secs(2), updates.changed())
+        .await
+        .expect("output update arrives")
+        .expect("update sender stays open");
+
+    let bottom = scrollbar_for_attached_native_terminal(&state, session_id)
+        .expect("read scrollbar at live prompt");
+    assert!(bottom.total > bottom.len, "fixture must create scrollback");
+    assert_eq!(bottom.offset + bottom.len, bottom.total);
+
+    scroll_attached_native_terminal(&state, session_id, ScrollViewport::Top)
+        .expect("scroll to top");
+    let top =
+        scrollbar_for_attached_native_terminal(&state, session_id).expect("read scrollbar at top");
+    assert_eq!(top.total, bottom.total);
+    assert_eq!(top.len, bottom.len);
+    assert_eq!(top.offset, 0);
+}
+
+#[test]
+fn scroll_behavior_serde_wire_contract_matches_frontend_payloads() {
+    // Given: valid frontend JSON payloads for scroll behavior
+    let delta_json = r#"{"type":"delta","rows":3}"#;
+    let delta_neg_json = r#"{"type":"delta","rows":-3}"#;
+    let top_json = r#"{"type":"top"}"#;
+    let bottom_json = r#"{"type":"bottom"}"#;
+    let row_json = r#"{"type":"row","offset":5}"#;
+
+    // When: deserializing from JSON wire representation
+    let delta: NativeTerminalScrollBehavior =
+        serde_json::from_str(delta_json).expect("deserialize delta");
+    let delta_neg: NativeTerminalScrollBehavior =
+        serde_json::from_str(delta_neg_json).expect("deserialize negative delta");
+    let top: NativeTerminalScrollBehavior =
+        serde_json::from_str(top_json).expect("deserialize top");
+    let bottom: NativeTerminalScrollBehavior =
+        serde_json::from_str(bottom_json).expect("deserialize bottom");
+    let row: NativeTerminalScrollBehavior =
+        serde_json::from_str(row_json).expect("deserialize row");
+
+    // Then: correct variants and viewport mapping
+    assert_eq!(delta, NativeTerminalScrollBehavior::Delta { rows: 3 });
+    assert_eq!(delta.to_scroll_viewport(), ScrollViewport::Delta(3));
+
+    assert_eq!(delta_neg, NativeTerminalScrollBehavior::Delta { rows: -3 });
+    assert_eq!(delta_neg.to_scroll_viewport(), ScrollViewport::Delta(-3));
+
+    assert_eq!(top, NativeTerminalScrollBehavior::Top);
+    assert_eq!(top.to_scroll_viewport(), ScrollViewport::Top);
+
+    assert_eq!(bottom, NativeTerminalScrollBehavior::Bottom);
+    assert_eq!(bottom.to_scroll_viewport(), ScrollViewport::Bottom);
+
+    assert_eq!(row, NativeTerminalScrollBehavior::Row { offset: 5 });
+    assert_eq!(row.to_scroll_viewport(), ScrollViewport::Row(5));
+
+    // Regressive externally-tagged format {"Delta":{"rows":3}} without "type" field must fail deserialization
+    let regressive_delta_json = r#"{"Delta":{"rows":3}}"#;
+    assert!(
+        serde_json::from_str::<NativeTerminalScrollBehavior>(regressive_delta_json).is_err(),
+        "Externally tagged JSON object without 'type' discriminator must fail deserialization"
+    );
 }
 
 #[tokio::test]
@@ -473,6 +560,7 @@ fn native_terminal_commands_are_registered_in_tauri_generate_handler() {
         "cmd_native_terminal_set_focus",
         "cmd_native_terminal_send_input",
         "cmd_native_terminal_scroll",
+        "cmd_native_terminal_scrollbar",
         "cmd_native_terminal_select",
         "cmd_native_terminal_copy_selection",
         "cmd_native_terminal_paste",

@@ -9,8 +9,9 @@ import {
   presentNativeTerminalLifecycle,
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
+import { isStructuredIpcError, onNativeTerminalScrollbar } from "../lib/tauri";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
-import type { TerminalSession } from "../lib/types";
+import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
 
 export interface TerminalBounds {
   x: number;
@@ -45,6 +46,17 @@ interface ImeAnchor {
   readonly height: number;
 }
 
+interface ScrollbarMetrics {
+  readonly total: number;
+  readonly offset: number;
+  readonly len: number;
+}
+
+interface ScrollbarDrag {
+  readonly pointerId: number;
+  readonly grabOffsetPx: number;
+}
+
 interface NativeKeyInput {
   readonly keyEvent: {
     readonly key: string;
@@ -70,6 +82,7 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_set_focus"
   | "cmd_native_terminal_send_input"
   | "cmd_native_terminal_scroll"
+  | "cmd_native_terminal_scrollbar"
   | "cmd_native_terminal_copy_selection";
 
 const ignoredBrowserKeys = new Set([
@@ -123,6 +136,19 @@ function reportNativeTerminalIpcFailure(command: NativeTerminalIpcCommand, error
 }
 
 /**
+ * Recognises a geometry update that lost a race with its own pane going away.
+ *
+ * `ResizeObserver` callbacks and layout passes fire asynchronously, so switching tabs quickly can
+ * dispatch `cmd_native_terminal_set_bounds` for a session the compositor has already detached. The
+ * backend refuses to rebuild a surface for an unmounted pane and answers with `SESSION_NOT_FOUND`.
+ * Nothing is broken in that case: the surface is simply gone, so the update is dropped instead of
+ * being surfaced as a terminal error.
+ */
+function isDetachedSurfaceError(error: unknown): boolean {
+  return isStructuredIpcError(error) && error.code === "SESSION_NOT_FOUND";
+}
+
+/**
  * Height in CSS pixels reserved at the top of every terminal pane for the DOM
  * pane-drag handle.
  *
@@ -144,6 +170,26 @@ function reportNativeTerminalIpcFailure(command: NativeTerminalIpcCommand, error
  * pane-handle drag, so the handle could be seen and hovered but not dragged.
  */
 export const NATIVE_TERMINAL_HANDLE_INSET_PX = 12;
+export const NATIVE_TERMINAL_SCROLLBAR_WIDTH_PX = 12;
+const NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX = 20;
+
+export function nativeScrollbarThumb(metrics: ScrollbarMetrics | null): {
+  visible: boolean;
+  positionPercent: number;
+  heightPercent: number;
+} {
+  if (!metrics || metrics.total <= metrics.len || metrics.len <= 0) {
+    return { visible: false, positionPercent: 0, heightPercent: 100 };
+  }
+
+  const maxOffset = metrics.total - metrics.len;
+  const heightPercent = Math.min(100, Math.max(0, (metrics.len / metrics.total) * 100));
+  return {
+    visible: true,
+    positionPercent: maxOffset === 0 ? 0 : (metrics.offset / maxOffset) * 100,
+    heightPercent,
+  };
+}
 
 export function NativeTerminalPane({
   sessionId,
@@ -153,13 +199,17 @@ export function NativeTerminalPane({
 }: NativeTerminalPaneProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const scrollbarTrackRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
+  const scrollbarDragRef = useRef<ScrollbarDrag | null>(null);
   const scaleFactorRef = useRef(1);
   const contextVisible = useNativeTerminalVisibility();
   const visible = contextVisible;
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
+  const scrollbarRevisionRef = useRef(0);
   // Native Tauri commands identify the PTY/surface by `backendSessionId`. When callers only
   // supply `sessionId` without a `session` object, fall back safely to `sessionId``.
   // When a `session` object is provided, require `backendSessionId` so we never attach with local frontend ID.
@@ -178,6 +228,28 @@ export function NativeTerminalPane({
       height: receipt.cellHeightPx / scaleFactor,
     });
   };
+
+  const updateScrollbar = useCallback((metrics: NativeTerminalScrollbarPayload | undefined) => {
+    if (!metrics) return;
+    scrollbarRevisionRef.current += 1;
+    setScrollbar({ total: metrics.total, offset: metrics.offset, len: metrics.len });
+  }, []);
+
+  const refreshScrollbar = useCallback(() => {
+    if (!visible || !isTauri() || !targetSessionId) return;
+    const reqRevision = ++scrollbarRevisionRef.current;
+    void invoke<NativeTerminalScrollbarPayload>("cmd_native_terminal_scrollbar", {
+      sessionId: targetSessionId,
+    })
+      .then((metrics) => {
+        if (reqRevision === scrollbarRevisionRef.current && metrics) {
+          setScrollbar({ total: metrics.total, offset: metrics.offset, len: metrics.len });
+        }
+      })
+      .catch((error: unknown) => {
+        reportNativeTerminalIpcFailure("cmd_native_terminal_scrollbar", error);
+      });
+  }, [targetSessionId, visible]);
 
   const sendFocus = (focused: boolean) => {
     if (!visible || !isTauri() || !targetSessionId) {
@@ -238,6 +310,81 @@ export function NativeTerminalPane({
     }
   }, [sendInput, targetSessionId, visible]);
 
+  const scrollToTrackPosition = useCallback((clientY: number, grabOffsetPx: number) => {
+    const track = scrollbarTrackRef.current;
+    if (!track || !scrollbar || !targetSessionId || !isTauri()) return;
+
+    const thumb = nativeScrollbarThumb(scrollbar);
+    const rect = track.getBoundingClientRect();
+    const thumbHeightPx = Math.max(
+      NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX,
+      (thumb.heightPercent / 100) * rect.height,
+    );
+    const availablePx = Math.max(1, rect.height - thumbHeightPx);
+    const topPx = Math.min(
+      availablePx,
+      Math.max(0, clientY - rect.top - grabOffsetPx),
+    );
+    const maxOffset = Math.max(0, scrollbar.total - scrollbar.len);
+    const offset = Math.round((topPx / availablePx) * maxOffset);
+    setScrollbar({ ...scrollbar, offset });
+
+    void invoke("cmd_native_terminal_scroll", {
+      sessionId: targetSessionId,
+      behavior: { type: "row", offset },
+    })
+      .then(refreshScrollbar)
+      .catch((error: unknown) => {
+        reportNativeTerminalIpcFailure("cmd_native_terminal_scroll", error);
+        refreshScrollbar();
+      });
+  }, [refreshScrollbar, scrollbar, targetSessionId]);
+
+  useEffect(() => {
+    if (!visible || !targetSessionId || !isTauri()) {
+      scrollbarRevisionRef.current += 1;
+      setScrollbar(null);
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onNativeTerminalScrollbar((metrics) => {
+      if (metrics.sessionId === targetSessionId) updateScrollbar(metrics);
+    }).then((listener) => {
+      if (disposed) listener();
+      else unlisten = listener;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [targetSessionId, updateScrollbar, visible]);
+
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const drag = scrollbarDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      scrollToTrackPosition(event.clientY, drag.grabOffsetPx);
+    };
+    const finish = (event: PointerEvent) => {
+      if (scrollbarDragRef.current?.pointerId !== event.pointerId) return;
+      scrollbarDragRef.current = null;
+      document.body.style.cursor = "";
+      refreshScrollbar();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.style.cursor = "";
+    };
+  }, [refreshScrollbar, scrollToTrackPosition]);
+
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -255,6 +402,8 @@ export function NativeTerminalPane({
     let isSubscribed = true;
     let observer: ResizeObserver | null = null;
     let lastGeometry: GeometryState | null = null;
+    let inFlight = false;
+    let pendingGeometry: GeometryState | null = null;
 
     const measureGeometry = (): GeometryState | null => {
       const rect = element.getBoundingClientRect();
@@ -278,6 +427,89 @@ export function NativeTerminalPane({
         },
         scaleFactor,
       };
+    };
+
+    const isGeometryEqual = (a: GeometryState | null, b: GeometryState | null): boolean => {
+      if (!a || !b) return false;
+      return (
+        a.bounds.x === b.bounds.x &&
+        a.bounds.y === b.bounds.y &&
+        a.bounds.width === b.bounds.width &&
+        a.bounds.height === b.bounds.height &&
+        a.scaleFactor === b.scaleFactor
+      );
+    };
+
+    const dispatchBounds = (nextGeometry: GeometryState) => {
+      if (!isSubscribed) return;
+      inFlight = true;
+      scaleFactorRef.current = nextGeometry.scaleFactor;
+      switchDebug("terminal.surface.bounds.start", {
+        localSessionId: sessionId,
+        backendSessionId: targetSessionId,
+        bounds: nextGeometry.bounds,
+        scaleFactor: nextGeometry.scaleFactor,
+      });
+
+      void invoke<NativeTerminalReceipt>("cmd_native_terminal_set_bounds", {
+        sessionId: targetSessionId,
+        bounds: nextGeometry.bounds,
+        scaleFactor: nextGeometry.scaleFactor,
+      })
+        .then((receipt) => {
+          if (isSubscribed) {
+            lastGeometry = nextGeometry;
+            setError(null);
+            updateImeAnchor(receipt);
+            presentNativeTerminalLifecycle(targetSessionId);
+            refreshScrollbar();
+            if (receipt) {
+              switchDebug("terminal.surface.presented", {
+                localSessionId: sessionId,
+                backendSessionId: targetSessionId,
+                cursorCol: receipt.cursorCol,
+                cursorRow: receipt.cursorRow,
+                cellWidthPx: receipt.cellWidthPx,
+                cellHeightPx: receipt.cellHeightPx,
+              });
+            }
+          }
+        })
+        .catch((error: unknown) => {
+          // The cached geometry stands for "the compositor already has this".
+          // Keeping it after a failure would suppress every identical retry, so
+          // drop it and let the next measurement through.
+          if (isGeometryEqual(lastGeometry, nextGeometry)) {
+            lastGeometry = null;
+          }
+          if (isDetachedSurfaceError(error)) {
+            switchDebug("terminal.surface.bounds.detached", {
+              localSessionId: sessionId,
+              backendSessionId: targetSessionId,
+            });
+            return;
+          }
+          switchDebug("terminal.surface.bounds.error", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+            error: String(error),
+          });
+          reportNativeTerminalIpcFailure("cmd_native_terminal_set_bounds", error);
+          if (isSubscribed) {
+            setError("Failed to update native terminal bounds");
+          }
+        })
+        .finally(() => {
+          inFlight = false;
+          if (!isSubscribed) return;
+          if (pendingGeometry) {
+            const next = pendingGeometry;
+            pendingGeometry = null;
+            if (!isGeometryEqual(lastGeometry, next)) {
+              dispatchBounds(next);
+            }
+          }
+        });
     };
 
     const reportBounds = () => {
@@ -304,63 +536,16 @@ export function NativeTerminalPane({
         return;
       }
 
-      if (
-        lastGeometry &&
-        lastGeometry.bounds.x === currentGeometry.bounds.x &&
-        lastGeometry.bounds.y === currentGeometry.bounds.y &&
-        lastGeometry.bounds.width === currentGeometry.bounds.width &&
-        lastGeometry.bounds.height === currentGeometry.bounds.height &&
-        lastGeometry.scaleFactor === currentGeometry.scaleFactor
-      ) {
+      if (inFlight) {
+        pendingGeometry = currentGeometry;
         return;
       }
 
-      lastGeometry = currentGeometry;
-      scaleFactorRef.current = currentGeometry.scaleFactor;
-      switchDebug("terminal.surface.bounds.start", {
-        localSessionId: sessionId,
-        backendSessionId: targetSessionId,
-        bounds: currentGeometry.bounds,
-        scaleFactor: currentGeometry.scaleFactor,
-      });
+      if (isGeometryEqual(lastGeometry, currentGeometry)) {
+        return;
+      }
 
-      void invoke<NativeTerminalReceipt>("cmd_native_terminal_set_bounds", {
-        sessionId: targetSessionId,
-        bounds: currentGeometry.bounds,
-        scaleFactor: currentGeometry.scaleFactor,
-      })
-        .then((receipt) => {
-          if (isSubscribed) {
-            setError(null);
-            updateImeAnchor(receipt);
-            presentNativeTerminalLifecycle(targetSessionId);
-            switchDebug("terminal.surface.presented", {
-              localSessionId: sessionId,
-              backendSessionId: targetSessionId,
-              cursorCol: receipt.cursorCol,
-              cursorRow: receipt.cursorRow,
-              cellWidthPx: receipt.cellWidthPx,
-              cellHeightPx: receipt.cellHeightPx,
-            });
-          }
-        })
-        .catch((error: unknown) => {
-          // The cached geometry stands for "the compositor already has this".
-          // Keeping it after a failure would suppress every identical retry, so
-          // drop it and let the next measurement through.
-          if (lastGeometry === currentGeometry) {
-            lastGeometry = null;
-          }
-          switchDebug("terminal.surface.bounds.error", {
-            localSessionId: sessionId,
-            backendSessionId: targetSessionId,
-            error: String(error),
-          });
-          reportNativeTerminalIpcFailure("cmd_native_terminal_set_bounds", error);
-          if (isSubscribed) {
-            setError("Failed to update native terminal bounds");
-          }
-        });
+      dispatchBounds(currentGeometry);
     };
 
     const initialGeometry = measureGeometry();
@@ -393,6 +578,7 @@ export function NativeTerminalPane({
         });
         if (!isSubscribed) return;
         setError(null);
+        refreshScrollbar();
         reportBounds();
         inputRef.current?.focus();
 
@@ -446,7 +632,9 @@ export function NativeTerminalPane({
           reportNativeTerminalIpcFailure("cmd_native_terminal_detach", error);
         });
     };
-  }, [sessionId, targetSessionId, visible]);
+  }, [refreshScrollbar, sessionId, targetSessionId, visible]);
+
+  const thumb = nativeScrollbarThumb(scrollbar);
 
   return (
     <div
@@ -469,16 +657,18 @@ export function NativeTerminalPane({
         const rows = Math.trunc(event.deltaY / 20) || (event.deltaY > 0 ? 1 : -1);
         void invoke("cmd_native_terminal_scroll", {
           sessionId: targetSessionId,
-          behavior: { Delta: { rows } },
-        }).catch((error: unknown) => {
-          reportNativeTerminalIpcFailure("cmd_native_terminal_scroll", error);
-        });
+          behavior: { type: "delta", rows },
+        })
+          .then(refreshScrollbar)
+          .catch((error: unknown) => {
+            reportNativeTerminalIpcFailure("cmd_native_terminal_scroll", error);
+          });
       }}
     >
       <div
         ref={viewportRef}
         data-testid="native-terminal-viewport"
-        className="absolute inset-0"
+        className="absolute inset-y-0 left-0 right-3"
       >
         <textarea
           ref={inputRef}
@@ -600,6 +790,68 @@ export function NativeTerminalPane({
             }
           }}
         />
+      </div>
+      <div
+        ref={scrollbarTrackRef}
+        data-testid="native-terminal-scrollbar-track"
+        {...(thumb.visible
+          ? {
+              role: "scrollbar",
+              "aria-label": "Terminal scrollback",
+              "aria-orientation": "vertical",
+              "aria-valuemin": 0,
+              "aria-valuemax": Math.max(0, (scrollbar?.total ?? 0) - (scrollbar?.len ?? 0)),
+              "aria-valuenow": scrollbar?.offset ?? 0,
+            }
+          : {})}
+        className="absolute inset-y-0 right-0 w-3 bg-terminal"
+        onPointerDown={thumb.visible ? (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const rect = event.currentTarget.getBoundingClientRect();
+            const trackHeight = Math.max(1, rect.height);
+            const thumbHeightPx = Math.max(
+              NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX,
+              (thumb.heightPercent / 100) * trackHeight,
+            );
+            scrollbarDragRef.current = {
+              pointerId: event.pointerId,
+              grabOffsetPx: thumbHeightPx / 2,
+            };
+            document.body.style.cursor = "row-resize";
+            scrollToTrackPosition(event.clientY, thumbHeightPx / 2);
+          } : undefined}
+      >
+        {thumb.visible ? (
+          <div
+            data-testid="native-terminal-scrollbar-thumb"
+            aria-hidden="true"
+            className="absolute inset-x-[3px] rounded-full bg-muted-foreground/45 transition-colors hover:bg-muted-foreground/70"
+            style={{
+              top: `${thumb.positionPercent}%`,
+              height: `${thumb.heightPercent}%`,
+              minHeight: `${NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX}px`,
+              transform: `translateY(-${thumb.positionPercent}%)`,
+            }}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const track = scrollbarTrackRef.current;
+              if (!track) return;
+              const rect = track.getBoundingClientRect();
+              const thumbHeightPx = Math.max(
+                NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX,
+                (thumb.heightPercent / 100) * rect.height,
+              );
+              const thumbTopPx = (thumb.positionPercent / 100) * (rect.height - thumbHeightPx);
+              scrollbarDragRef.current = {
+                pointerId: event.pointerId,
+                grabOffsetPx: Math.max(0, event.clientY - rect.top - thumbTopPx),
+              };
+              document.body.style.cursor = "row-resize";
+            }}
+          />
+        ) : null}
       </div>
       {error ? (
         <div

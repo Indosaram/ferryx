@@ -161,3 +161,89 @@ fn test_retina_scale_2_renderer_viewport_and_config_update() {
         }
     }
 }
+
+#[test]
+fn test_render_snapshot_offscreen_frame_with_color_emoji() {
+    let cols = 20u16;
+    let rows = 2u16;
+    let mut grid = vec![vec![super::snapshot_builder::empty_cell(); cols as usize]; rows as usize];
+    grid[0][0] = super::snapshot_builder::make_cell(
+        "(",
+        ferryx_lib::native_terminal::CellWide::Narrow,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    grid[0][1] = super::snapshot_builder::make_cell(
+        "😺",
+        ferryx_lib::native_terminal::CellWide::Wide,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    grid[0][2] = super::snapshot_builder::make_cell(
+        "",
+        ferryx_lib::native_terminal::CellWide::SpacerTail,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    grid[0][3] = super::snapshot_builder::make_cell(
+        ")",
+        ferryx_lib::native_terminal::CellWide::Narrow,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let snapshot = RenderSnapshot {
+        cols,
+        rows,
+        cursor: ferryx_lib::native_terminal::CursorSnapshot {
+            x: 0,
+            y: 0,
+            visible: false,
+            blinking: false,
+            wide_tail: false,
+            visual_style: ferryx_lib::native_terminal::CursorVisualStyle::Block,
+        },
+        grid,
+    };
+
+    let config = RendererConfig {
+        cell_width_px: 10,
+        cell_height_px: 20,
+        device_scale_factor: 1.0,
+        ..Default::default()
+    };
+
+    let mut renderer = match NativeTerminalRenderer::new(config) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let frame = renderer
+        .render_snapshot(&snapshot, None)
+        .expect("render snapshot with color emoji");
+
+    assert_eq!(frame.width_px, 200);
+    assert_eq!(frame.height_px, 40);
+
+    let non_zero_pixels = frame.pixels.chunks_exact(4).filter(|p| p[3] > 0).count();
+    assert!(
+        non_zero_pixels > 0,
+        "rendered frame with emoji must produce visible pixels"
+    );
+}

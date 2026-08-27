@@ -9,11 +9,18 @@ import { NativeTerminalPane } from "./NativeTerminalPane";
 const tauriCoreMocks = vi.hoisted(() => ({
   invoke: vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined),
   isTauri: vi.fn(() => true),
+  listen: vi.fn(async () => () => undefined),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauriCoreMocks.invoke,
   isTauri: tauriCoreMocks.isTauri,
+}));
+
+// isTauri() is mocked true, so event subscriptions pass their runtime guard and
+// would reach the real bridge, which has no __TAURI_INTERNALS__ under jsdom.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: tauriCoreMocks.listen,
 }));
 
 class TestResizeObserver implements ResizeObserver {

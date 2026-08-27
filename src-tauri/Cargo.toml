@@ -42,6 +42,8 @@ native-terminal = [
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+regex = "1"
+toml = "0.8"
 tokio = { version = "1.43", features = ["full"] }
 portable-pty = "0.8"
 base64 = "0.22"
@@ -55,6 +57,7 @@ uuid = { version = "1.13", features = ["v4"] }
 axum = { version = "0.8", features = ["ws"] }
 mime_guess = "2.0"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rand = "0.8"
 sha2 = "0.10"
 futures-util = "0.3"
@@ -84,6 +87,9 @@ ab_glyph = { version = "0.2", optional = true }
 tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFString", "CFURL", "CFBase", "CFAttributedString", "CFDictionary"] }
+objc2-core-text = { version = "0.3", default-features = false, features = ["std", "CTFont", "CTFontDescriptor", "CTFontTraits", "CTLine", "CTStringAttributes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGGeometry"] }
 objc2 = { version = "0.6", features = ["exception"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -109,6 +115,9 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "block2",
     "UNUserNotificationCenter",
     "UNNotificationSettings",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationTrigger",
 ] }
 dispatch2 = "0.3"
 block2 = "0.6"

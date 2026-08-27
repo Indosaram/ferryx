@@ -173,6 +173,8 @@ pub fn build_row_instances(
                             entry.uv_max[1],
                         ],
                         color: fg_color,
+                        is_color: if entry.is_color { 1.0 } else { 0.0 },
+                        _pad: [0.0; 3],
                     });
                 }
             }

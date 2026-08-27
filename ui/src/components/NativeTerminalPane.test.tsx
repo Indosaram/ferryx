@@ -1,4 +1,4 @@
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
@@ -10,9 +10,27 @@ const tauriCoreMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
 }));
 
+const nativeTerminalEventMocks = vi.hoisted(() => ({
+  scrollbarListener: null as ((payload: { sessionId: string; total: number; offset: number; len: number }) => void) | null,
+  onNativeTerminalScrollbar: vi.fn(async (handler: (payload: {
+    sessionId: string;
+    total: number;
+    offset: number;
+    len: number;
+  }) => void) => {
+    nativeTerminalEventMocks.scrollbarListener = handler;
+    return () => undefined;
+  }),
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauriCoreMocks.invoke,
   isTauri: tauriCoreMocks.isTauri,
+}));
+
+vi.mock("../lib/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/tauri")>()),
+  onNativeTerminalScrollbar: nativeTerminalEventMocks.onNativeTerminalScrollbar,
 }));
 
 type ResizeRecord = {
@@ -90,6 +108,8 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
+    nativeTerminalEventMocks.scrollbarListener = null;
+    nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
     resizeRecords.length = 0;
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
@@ -171,6 +191,42 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
 
     consoleSpy.mockRestore();
   });
+
+  it("stays silent when a bounds update loses the race with its own detach", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const session = createSession("term-session-1");
+
+    // The compositor released this surface before the in-flight geometry update landed, which is
+    // exactly what rapid tab switching produces. It is a benign no-op, not a terminal failure.
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_set_bounds") {
+        throw {
+          code: "SESSION_NOT_FOUND",
+          message: "Native terminal session term-session-1 has no attached surface",
+        };
+      }
+      return undefined;
+    });
+
+    const { queryByRole } = render(
+      <NativeTerminalPane sessionId="term-session-1" session={session} />,
+    );
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_set_bounds",
+        expect.anything(),
+      );
+    });
+
+    expect(queryByRole("alert")).not.toBeInTheDocument();
+    expect(consoleSpy).not.toHaveBeenCalledWith(
+      "Native terminal IPC command failed",
+      expect.objectContaining({ command: "cmd_native_terminal_set_bounds" }),
+    );
+
+    consoleSpy.mockRestore();
+  });
 });
 
 describe("NativeTerminalPane geometry reporting contract", () => {
@@ -182,6 +238,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
+    nativeTerminalEventMocks.scrollbarListener = null;
+    nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
 
     resizeRecords.length = 0;
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
@@ -344,7 +402,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     });
   });
 
-    it("reports changed bounds payload once when geometry changes", async () => {
+  it("reports changed bounds payload once when geometry changes", async () => {
     const session = createSession("term-session-1");
 
     const { container } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
@@ -400,6 +458,144 @@ describe("NativeTerminalPane geometry reporting contract", () => {
           scaleFactor: 2,
         },
       );
+    });
+  });
+
+  it("coalesces rapid height increases until the prior native resize completes", async () => {
+    const session = createSession("term-session-resize-coalesce");
+    let resolveInitialBounds!: () => void;
+    const initialBounds = new Promise<void>((resolve) => {
+      resolveInitialBounds = resolve;
+    });
+    tauriCoreMocks.invoke.mockImplementation(async (command, args) => {
+      if (
+        command === "cmd_native_terminal_set_bounds" &&
+        args?.bounds.height === 600
+      ) {
+        await initialBounds;
+      }
+      return undefined;
+    });
+
+    const { container } = render(
+      <NativeTerminalPane sessionId={session.id} session={session} />,
+    );
+    const boundsCalls = () =>
+      tauriCoreMocks.invoke.mock.calls.filter(
+        ([command]) => command === "cmd_native_terminal_set_bounds",
+      );
+
+    await waitFor(() => {
+      expect(boundsCalls()).toHaveLength(1);
+    });
+
+    const observedElement = container.firstElementChild as HTMLElement;
+    const primaryRecord = resizeRecords[0];
+    let height = 700;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return {
+        x: 10,
+        y: 20,
+        width: 800,
+        height,
+        top: 20,
+        bottom: 20 + height,
+        left: 10,
+        right: 810,
+        toJSON: () => ({}),
+      } as DOMRect;
+    };
+
+    act(() => {
+      primaryRecord.callback(
+        [
+          {
+            target: observedElement,
+            contentRect: new DOMRectReadOnly(10, 20, 800, height),
+            borderBoxSize: [],
+            contentBoxSize: [],
+            devicePixelContentBoxSize: [],
+          } as unknown as ResizeObserverEntry,
+        ],
+        primaryRecord.observer,
+      );
+      height = 800;
+      primaryRecord.callback(
+        [
+          {
+            target: observedElement,
+            contentRect: new DOMRectReadOnly(10, 20, 800, height),
+            borderBoxSize: [],
+            contentBoxSize: [],
+            devicePixelContentBoxSize: [],
+          } as unknown as ResizeObserverEntry,
+        ],
+        primaryRecord.observer,
+      );
+    });
+
+    expect(boundsCalls()).toHaveLength(1);
+
+    resolveInitialBounds();
+    await waitFor(() => {
+      expect(boundsCalls()).toHaveLength(2);
+      expect(boundsCalls()[1]).toEqual([
+        "cmd_native_terminal_set_bounds",
+        {
+          sessionId: "term-session-resize-coalesce",
+          bounds: { x: 10, y: 20, width: 800, height: 800 },
+          scaleFactor: 2,
+        },
+      ]);
+    });
+  });
+
+  it("refreshes the thumb metrics after a height resize changes visible rows", async () => {
+    const session = createSession("term-session-resize-scrollbar");
+    let metrics = { total: 200, offset: 0, len: 20 };
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_scrollbar") return metrics;
+      return undefined;
+    });
+
+    const { container, getByTestId } = render(
+      <NativeTerminalPane sessionId={session.id} session={session} />,
+    );
+    const thumb = await waitFor(() => getByTestId("native-terminal-scrollbar-thumb"));
+    expect(thumb).toHaveStyle({ height: "10%" });
+
+    metrics = { total: 200, offset: 0, len: 40 };
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return {
+        x: 10,
+        y: 20,
+        width: 800,
+        height: 800,
+        top: 20,
+        bottom: 820,
+        left: 10,
+        right: 810,
+        toJSON: () => ({}),
+      } as DOMRect;
+    };
+    const primaryRecord = resizeRecords[0];
+    act(() => {
+      primaryRecord.callback(
+        [
+          {
+            target: container.firstElementChild as HTMLElement,
+            contentRect: new DOMRectReadOnly(10, 20, 800, 800),
+            borderBoxSize: [],
+            contentBoxSize: [],
+            devicePixelContentBoxSize: [],
+          } as unknown as ResizeObserverEntry,
+        ],
+        primaryRecord.observer,
+      );
+    });
+
+    await waitFor(() => {
+      expect(thumb).toHaveStyle({ height: "20%" });
     });
   });
 
@@ -1051,8 +1247,65 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
       sessionId: "term-session-1",
-      behavior: { Delta: { rows: 3 } },
+      behavior: { type: "delta", rows: 3 },
     });
+
+    tauriCoreMocks.invoke.mockClear();
+    act(() => {
+      pane.dispatchEvent(new WheelEvent("wheel", { deltaY: -60, bubbles: true }));
+    });
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "term-session-1",
+      behavior: { type: "delta", rows: -3 },
+    });
+  });
+
+  it("shows, repositions, and drags the native scrollback thumb", async () => {
+    const session = createSession("term-session-scrollbar");
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_scrollbar") {
+        return { total: 200, offset: 0, len: 20 };
+      }
+      return undefined;
+    });
+    const { getByRole, getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-scrollbar" session={session} />,
+    );
+
+    const track = await waitFor(() => getByRole("scrollbar", { name: "Terminal scrollback" }));
+    const thumb = getByTestId("native-terminal-scrollbar-thumb");
+    expect(track).toHaveAttribute("aria-valuemin", "0");
+    expect(track).toHaveAttribute("aria-valuemax", "180");
+    expect(track).toHaveAttribute("aria-valuenow", "0");
+    expect(thumb).toHaveStyle({ top: "0%", height: "10%" });
+
+    act(() => {
+      nativeTerminalEventMocks.scrollbarListener?.({
+        sessionId: "term-session-scrollbar",
+        total: 200,
+        offset: 90,
+        len: 20,
+      });
+    });
+    expect(track).toHaveAttribute("aria-valuenow", "90");
+    expect(thumb).toHaveStyle({ top: "50%" });
+
+    tauriCoreMocks.invoke.mockClear();
+    fireEvent.pointerDown(track, { clientY: 620, pointerId: 7 });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "term-session-scrollbar",
+      behavior: { type: "row", offset: 180 },
+    });
+
+    tauriCoreMocks.invoke.mockClear();
+    fireEvent.pointerDown(thumb, { clientY: 290, pointerId: 8 });
+    fireEvent.pointerMove(window, { clientY: 620, pointerId: 8 });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
+      sessionId: "term-session-scrollbar",
+      behavior: { type: "row", offset: 180 },
+    });
+    fireEvent.pointerUp(window, { clientY: 620, pointerId: 8 });
   });
 
   it("copies native selection to navigator.clipboard on platform copy shortcut", async () => {

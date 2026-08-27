@@ -36,6 +36,14 @@ pub struct NativeTerminalBoundsReceipt {
     pub cell_height_px: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalScrollbarReceipt {
+    pub total: u64,
+    pub offset: u64,
+    pub len: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum NativeTerminalScrollBehavior {
@@ -112,10 +120,6 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
 ) -> Result<(), IpcError> {
-    let attachment = match daemon_client.attach(&session_id, None).await {
-        Ok(attachment) => attachment,
-        Err(err) => return Err(err),
-    };
     let logical_bounds = match (bounds, scale_factor) {
         (Some(rect), Some(scale)) if scale.is_finite() && scale > 0.0 => Some(LogicalBounds {
             x: rect.x,
@@ -125,6 +129,18 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
             scale_factor: scale,
         }),
         _ => None,
+    };
+    match state
+        .reattach_existing_session_with_bounds(&session_id, logical_bounds)
+        .map_err(|error| IpcError::internal(error.to_string()))?
+    {
+        true => return Ok(()),
+        false => {}
+    }
+
+    let attachment = match daemon_client.attach(&session_id, None).await {
+        Ok(attachment) => attachment,
+        Err(err) => return Err(err),
     };
     if let Err(err) = state.attach_daemon_attachment_with_bounds(
         &session_id,
@@ -144,6 +160,16 @@ pub async fn cmd_native_terminal_detach<R: Runtime>(
     session_id: String,
 ) -> Result<(), IpcError> {
     state.detach_session(&session_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_native_terminal_close<R: Runtime>(
+    _app: AppHandle<R>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+) -> Result<(), IpcError> {
+    state.close_session(&session_id);
     Ok(())
 }
 
@@ -178,7 +204,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
             let result = state_inner
                 .render(&surface_window, request)
                 .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
-                .map_err(|error| IpcError::internal(error.to_string()));
+                .map_err(IpcError::from);
             let _ = sender.send(result);
         })
         .map_err(|error| {
@@ -237,15 +263,28 @@ pub async fn cmd_native_terminal_set_focus<R: Runtime>(
 /// callers by lazily creating a VT state. The production IPC boundary must not use that
 /// fallback: after a lifecycle detach it would allow PTY writes while the daemon output
 /// pump and compositor owner are gone, making typed bytes look silently lost.
+///
+/// A detached session outlives its surface so a backgrounded agent keeps streaming, so session
+/// existence alone does not prove a pane owns it. `ensure_surface_attached` is the predicate that
+/// distinguishes the two.
 pub fn encode_attached_native_input(
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
     input: &NativeTerminalInput,
 ) -> Result<Vec<u8>, NativeTerminalError> {
-    if state.snapshot_for_session(session_id)?.is_none() {
-        return Err(NativeTerminalError::NoValue);
-    }
+    require_attached_surface(state, session_id)?;
     state.encode_input(session_id, input)
+}
+
+fn require_attached_surface(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+) -> Result<(), NativeTerminalError> {
+    match state.ensure_surface_attached(session_id) {
+        Ok(()) => Ok(()),
+        Err(NativeTerminalError::SessionDetached(_)) => Err(NativeTerminalError::NoValue),
+        Err(err) => Err(err),
+    }
 }
 
 /// Encode clipboard paste text for a native session only if currently attached.
@@ -254,6 +293,7 @@ pub fn encode_attached_native_paste(
     session_id: &str,
     text: &str,
 ) -> Result<Vec<u8>, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
     state.with_session_terminal(session_id, |term| term.encode_paste(text))
 }
 
@@ -263,6 +303,7 @@ pub fn encode_attached_native_mouse(
     session_id: &str,
     event: &MouseEvent,
 ) -> Result<Vec<u8>, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
     state.with_session_terminal(session_id, |term| term.encode_mouse(event))
 }
 
@@ -272,7 +313,23 @@ pub fn scroll_attached_native_terminal(
     session_id: &str,
     behavior: ScrollViewport,
 ) -> Result<(), NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
     state.with_session_terminal(session_id, |term| term.scroll_viewport(behavior))
+}
+
+pub fn scrollbar_for_attached_native_terminal(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+) -> Result<NativeTerminalScrollbarReceipt, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
+    state.with_session_terminal(session_id, |term| {
+        let scrollbar = term.scrollbar()?;
+        Ok(NativeTerminalScrollbarReceipt {
+            total: scrollbar.total,
+            offset: scrollbar.offset,
+            len: scrollbar.len,
+        })
+    })
 }
 
 /// Perform grid selection on an attached native session.
@@ -281,6 +338,7 @@ pub fn select_attached_native_terminal(
     session_id: &str,
     mode: &NativeTerminalSelectMode,
 ) -> Result<NativeTerminalSelectionReceipt, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
     state.with_session_terminal(session_id, |term| {
         let selection_res = match mode {
             NativeTerminalSelectMode::All => term.select_all(),
@@ -313,6 +371,7 @@ pub fn copy_attached_native_selection(
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
 ) -> Result<String, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
     state.with_session_terminal(session_id, |term| {
         let text = term.selection_text()?.unwrap_or_default();
         Ok(text)
@@ -326,6 +385,7 @@ pub fn search_attached_native_terminal(
     query: &str,
     case_sensitive: bool,
 ) -> Result<NativeTerminalSearchResult, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
     state.with_session_terminal(session_id, |term| {
         let raw_matches = term.search_grid(query, case_sensitive)?;
         let matches = raw_matches
@@ -448,6 +508,15 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
             "Main thread stopped before native terminal scroll completed",
         )),
     }
+}
+
+#[tauri::command]
+pub async fn cmd_native_terminal_scrollbar(
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+) -> Result<NativeTerminalScrollbarReceipt, IpcError> {
+    scrollbar_for_attached_native_terminal(state.inner(), &session_id)
+        .map_err(|error| IpcError::internal(error.to_string()))
 }
 
 #[tauri::command]

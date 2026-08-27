@@ -29,7 +29,7 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
 
     // Rasterize ASCII char 'A'
     let ascii_mask =
-        global_mgr.rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false);
+        global_mgr.rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false).into_buffer();
     assert_eq!(
         ascii_mask.len(),
         (metrics.width_px * metrics.height_px) as usize,
@@ -38,7 +38,7 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
 
     // Rasterize CJK char '가' (wide cell: 2 * width)
     let cjk_mask =
-        global_mgr.rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false);
+        global_mgr.rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false).into_buffer();
     assert_eq!(
         cjk_mask.len(),
         (metrics.width_px * 2 * metrics.height_px) as usize,
@@ -76,21 +76,21 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
     );
 
     // Missing glyph with no fonts must return an empty mask without panicking
-    let isolated_ascii = isolated_mgr.rasterize_glyph("A", 10, 20, false, false);
+    let isolated_ascii = isolated_mgr.rasterize_glyph("A", 10, 20, false, false).into_buffer();
     assert_eq!(isolated_ascii.len(), 200);
     assert!(
         isolated_ascii.iter().all(|&b| b == 0),
         "isolated manager with no faces must return an all-zero alpha mask for ASCII"
     );
 
-    let isolated_cjk = isolated_mgr.rasterize_glyph("가", 20, 20, false, false);
+    let isolated_cjk = isolated_mgr.rasterize_glyph("가", 20, 20, false, false).into_buffer();
     assert_eq!(isolated_cjk.len(), 400);
     assert!(
         isolated_cjk.iter().all(|&b| b == 0),
         "isolated manager with no faces must return an all-zero alpha mask for CJK"
     );
 
-    let isolated_combining = isolated_mgr.rasterize_glyph("e\u{0301}", 10, 20, true, true);
+    let isolated_combining = isolated_mgr.rasterize_glyph("e\u{0301}", 10, 20, true, true).into_buffer();
     assert_eq!(isolated_combining.len(), 200);
     assert!(
         isolated_combining.iter().all(|&b| b == 0),
@@ -164,9 +164,9 @@ fn test_retina_scale_glyph_rasterization_sharpness() {
     let m2 = global_mgr.cell_metrics_for_scale(2.0);
 
     let mask_1x =
-        global_mgr.rasterize_glyph_for_scale("A", m1.width_px, m1.height_px, false, false, 1.0);
+        global_mgr.rasterize_glyph_for_scale("A", m1.width_px, m1.height_px, false, false, 1.0).into_buffer();
     let mask_2x =
-        global_mgr.rasterize_glyph_for_scale("A", m2.width_px, m2.height_px, false, false, 2.0);
+        global_mgr.rasterize_glyph_for_scale("A", m2.width_px, m2.height_px, false, false, 2.0).into_buffer();
 
     assert_eq!(
         mask_1x.len(),

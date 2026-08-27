@@ -22,6 +22,11 @@ pub enum NativeTerminalError {
     #[error("Requested value does not exist (NoValue)")]
     NoValue,
 
+    /// The session has no mounted compositor surface: it was detached or closed before this
+    /// request arrived. Geometry updates racing a tab switch land here and are benign.
+    #[error("Native terminal session {0} has no attached surface")]
+    SessionDetached(String),
+
     #[error("I/O error across FFI boundary: {0}")]
     IoError(String),
 

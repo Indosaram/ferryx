@@ -1,6 +1,8 @@
 //! Native Terminal GPU Renderer (Phase 2).
 
 pub mod atlas;
+pub mod color_glyph;
+pub mod fallback_resolver;
 pub mod font_manager;
 pub mod gpu_context;
 pub mod instances;
@@ -17,6 +19,7 @@ pub mod types;
 pub use font_manager::FontManager;
 pub use instances::build_row_instances;
 pub use pipeline::{GlyphInstance, RectInstance};
+pub use rasterizer::{rasterize_glyph, rasterize_glyph_with_scale, RasterizedGlyph};
 pub use renderer::NativeTerminalRenderer;
 pub use scenario::canonical_scenario;
 pub use types::{

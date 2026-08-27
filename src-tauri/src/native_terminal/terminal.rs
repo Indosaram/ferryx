@@ -329,3 +329,61 @@ impl TerminalEngine for NativeTerminal {
         self.context.bell_counter.swap(0, Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::NativeTerminal;
+    use crate::native_terminal::engine::TerminalEngine;
+
+    #[test]
+    fn native_terminal_ffi_probe_osc_2_reports_title_change_and_value() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create live native terminal");
+        assert!(
+            !terminal.take_title_changed(),
+            "new terminal has no pending title event"
+        );
+
+        terminal
+            .feed(b"\x1b]2;some-agent-title\x07")
+            .expect("feed OSC 2 title through NativeTerminal::feed");
+
+        let title_changed = terminal.take_title_changed();
+        let title = terminal.title().expect("query title after OSC 2 callback");
+        println!("title_changed={title_changed} title={title:?}");
+        assert!(
+            title_changed,
+            "OSC 2 did not invoke the registered title callback"
+        );
+        assert_eq!(title, "some-agent-title");
+        assert!(
+            !terminal.take_title_changed(),
+            "title event was not drained"
+        );
+    }
+
+    #[test]
+    fn native_terminal_ffi_probe_bel_reports_counter_observation() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create live native terminal");
+        assert_eq!(
+            terminal.take_bell_count(),
+            0,
+            "new terminal has no pending bells"
+        );
+
+        terminal
+            .feed(&[0x07])
+            .expect("feed BEL through NativeTerminal::feed");
+
+        let bell_count = terminal.take_bell_count();
+        println!("bell_count={bell_count}");
+        assert_eq!(
+            bell_count, 1,
+            "BEL did not invoke the registered bell callback"
+        );
+        assert_eq!(
+            terminal.take_bell_count(),
+            0,
+            "bell observation was not drained"
+        );
+    }
+}

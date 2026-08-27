@@ -204,12 +204,22 @@ async fn native_session_handles_replay_gaps_and_session_cleanup_deterministicall
         .expect("encode text input");
     assert_eq!(encoded, b"ls -la\n");
 
-    // Detach and verify session cleanup
+    // Detach releases the compositor surface but keeps the session so a backgrounded agent keeps
+    // streaming; only close_session discards it.
     state.detach_session(session_id);
     let detached_snapshot = state
         .snapshot_for_session(session_id)
         .expect("snapshot query after detach");
-    assert!(detached_snapshot.is_none());
+    assert!(
+        detached_snapshot.is_some(),
+        "detach must keep the session alive for background streaming"
+    );
+
+    state.close_session(session_id);
+    let closed_snapshot = state
+        .snapshot_for_session(session_id)
+        .expect("snapshot query after close");
+    assert!(closed_snapshot.is_none());
 }
 
 #[test]
@@ -382,6 +392,8 @@ async fn native_terminal_daemon_pump_pushes_title_and_bell_and_detach_stops_even
             NativeTerminalEvent::Bell(payload) => {
                 bell_tx.send_replace(Some(payload));
             }
+            NativeTerminalEvent::AgentState(_) => {}
+            NativeTerminalEvent::Scrollbar(_) => {}
         }
     }));
 
@@ -458,8 +470,9 @@ async fn native_terminal_daemon_pump_pushes_title_and_bell_and_detach_stops_even
         "title and explicit bell input must each surface exactly once"
     );
 
+    // Detach only releases the compositor surface. A backgrounded agent must keep reporting title
+    // and bell, otherwise its tab would freeze on the last state observed before the tab switch.
     let detached_title_changed = title_rx.changed();
-    let detached_bell_changed = bell_rx.changed();
     state.detach_session(session_id);
     let _ = tx
         .send(DaemonStreamMessage::Output {
@@ -469,19 +482,133 @@ async fn native_terminal_daemon_pump_pushes_title_and_bell_and_detach_stops_even
             metrics_read_unix_micros: None,
         })
         .await;
-    let detached_event = async {
+    tokio::time::timeout(std::time::Duration::from_secs(5), detached_title_changed)
+        .await
+        .expect("detached session must still report title changes")
+        .expect("title event sender remains connected");
+    assert_eq!(
+        title_rx.borrow().clone(),
+        Some(NativeTerminalTitlePayload {
+            session_id: session_id.to_string(),
+            title: "detached-title".to_string(),
+        })
+    );
+
+    // The same output carried a bell; drain that notification so the post-close watchers only
+    // observe events produced after the session is gone.
+    tokio::time::timeout(std::time::Duration::from_secs(5), bell_rx.changed())
+        .await
+        .expect("detached session must still report bell changes")
+        .expect("bell event sender remains connected");
+
+    // Closing the session tears down the pump, so no further output can produce events.
+    let closed_title_changed = title_rx.changed();
+    let closed_bell_changed = bell_rx.changed();
+    state.close_session(session_id);
+    let _ = tx
+        .send(DaemonStreamMessage::Output {
+            session_id: Cow::Borrowed(session_id),
+            sequence: 4,
+            data: Cow::Borrowed(b"\x1b]2;closed-title\x07\x07"),
+            metrics_read_unix_micros: None,
+        })
+        .await;
+    let closed_event = async {
         tokio::select! {
-            result = detached_title_changed => ("title", result),
-            result = detached_bell_changed => ("bell", result),
+            result = closed_title_changed => ("title", result),
+            result = closed_bell_changed => ("bell", result),
         }
     };
     assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(2), detached_event)
+        tokio::time::timeout(std::time::Duration::from_secs(2), closed_event)
             .await
             .is_err(),
-        "detached session must not emit title or bell events"
+        "closed session must not emit title or bell events"
     );
-    assert_eq!(observed_events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn native_terminal_daemon_pump_emits_scrollbar_only_for_scrollback_state_changes() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "term-native-scrollbar-events";
+    let (scrollbar_tx, mut scrollbar_rx) = tokio::sync::mpsc::unbounded_channel();
+    state.set_event_sink(Arc::new(move |event| {
+        if let NativeTerminalEvent::Scrollbar(payload) = event {
+            scrollbar_tx
+                .send(payload)
+                .expect("scrollbar receiver remains live");
+        }
+    }));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    state
+        .attach_daemon_attachment::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: None,
+                end_sequence: None,
+                gap: None,
+                history: Vec::new(),
+                messages: rx,
+                stream_task: tokio::spawn(std::future::pending()),
+            },
+            None,
+        )
+        .expect("attach native scrollbar session");
+
+    let mut updates = state
+        .subscribe_session_update(session_id)
+        .expect("subscribe before output");
+    tx.send(DaemonStreamMessage::Output {
+        session_id: Cow::Borrowed(session_id),
+        sequence: 1,
+        data: Cow::Borrowed(b"one short line\r\n"),
+        metrics_read_unix_micros: None,
+    })
+    .await
+    .expect("send short output");
+    tokio::time::timeout(std::time::Duration::from_secs(2), updates.changed())
+        .await
+        .expect("short output processed")
+        .expect("session update remains live");
+    assert!(
+        scrollbar_rx.try_recv().is_err(),
+        "output without scrollback must not emit a scrollbar event"
+    );
+
+    let history = (0..100)
+        .map(|row| format!("row-{row:03}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    tx.send(DaemonStreamMessage::Output {
+        session_id: Cow::Borrowed(session_id),
+        sequence: 2,
+        data: Cow::Owned(history.into_bytes()),
+        metrics_read_unix_micros: None,
+    })
+    .await
+    .expect("send scrollback output");
+    let visible = tokio::time::timeout(std::time::Duration::from_secs(2), scrollbar_rx.recv())
+        .await
+        .expect("scrollback event arrives")
+        .expect("scrollbar sender remains live");
+    assert!(visible.total > visible.len);
+
+    tx.send(DaemonStreamMessage::Gap {
+        session_id: Cow::Borrowed(session_id),
+        requested_after_sequence: 2,
+        available_from_sequence: 3,
+    })
+    .await
+    .expect("send replay gap");
+    let hidden = tokio::time::timeout(std::time::Duration::from_secs(2), scrollbar_rx.recv())
+        .await
+        .expect("reset scrollbar event arrives")
+        .expect("scrollbar sender remains live");
+    assert_eq!(hidden.total, hidden.len);
+    assert_eq!(hidden.offset, 0);
 }
 
 #[tokio::test]
@@ -525,14 +652,229 @@ async fn native_terminal_active_session_detach_resets_host_layout_and_preserves_
     assert!(state.snapshot_for_session(session_a).unwrap().is_some());
     assert!(state.snapshot_for_session(session_b).unwrap().is_some());
 
-    // Detaching session A leaves session B intact
+    // Detaching session A releases its surface without disturbing session B.
     state.detach_session(session_a);
-    assert!(state.snapshot_for_session(session_a).unwrap().is_none());
+    assert!(
+        state.ensure_surface_attached(session_a).is_err(),
+        "detached session must refuse further geometry work"
+    );
+    assert!(state.snapshot_for_session(session_a).unwrap().is_some());
+    assert!(state.ensure_surface_attached(session_b).is_ok());
     assert!(state.snapshot_for_session(session_b).unwrap().is_some());
 
-    // Detaching session B cleanly empties sessions
-    state.detach_session(session_b);
+    // Closing discards each session entirely.
+    state.close_session(session_a);
+    assert!(state.snapshot_for_session(session_a).unwrap().is_none());
+    state.close_session(session_b);
     assert!(state.snapshot_for_session(session_b).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn native_terminal_reattach_preserves_retained_output_without_replaying_history() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "term-retained-replay";
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let startup_block = b"unique-agent-startup-block\r\n";
+
+    state
+        .attach_daemon_attachment::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(1),
+                end_sequence: Some(1),
+                gap: None,
+                history: startup_block.to_vec(),
+                messages: rx,
+                stream_task: tokio::spawn(std::future::pending()),
+            },
+            None,
+        )
+        .expect("attach initial daemon history");
+
+    let mut updates = state
+        .subscribe_session_update(session_id)
+        .expect("subscribe before background output");
+    state.detach_session(session_id);
+    tx.send(DaemonStreamMessage::Output {
+        session_id: Cow::Borrowed(session_id),
+        sequence: 2,
+        data: Cow::Borrowed(b"background-output\r\n"),
+        metrics_read_unix_micros: None,
+    })
+    .await
+    .expect("send output while pane is detached");
+    tokio::time::timeout(std::time::Duration::from_secs(2), updates.changed())
+        .await
+        .expect("background output processed")
+        .expect("retained session update channel remains live");
+
+    assert!(
+        state
+            .reattach_existing_session_with_bounds(
+                session_id,
+                Some(LogicalBounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 480.0,
+                    scale_factor: 1.0,
+                }),
+            )
+            .expect("reattach retained session without daemon replay"),
+        "existing background session must be resumed locally"
+    );
+
+    let snapshot = state
+        .snapshot_for_session(session_id)
+        .expect("snapshot lookup after reattach")
+        .expect("retained session remains available");
+    let text = snapshot
+        .grid
+        .iter()
+        .flat_map(|row| row.iter().map(|cell| cell.text.as_str()))
+        .collect::<String>();
+    assert_eq!(
+        text.matches("unique-agent-startup-block").count(),
+        1,
+        "reattaching a retained stream must not append daemon history again"
+    );
+    assert!(text.contains("background-output"));
+}
+
+#[tokio::test]
+async fn native_terminal_recovery_attach_replaces_stale_terminal_history() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "term-recovery-history";
+    let (_old_tx, old_rx) = tokio::sync::mpsc::channel(16);
+
+    state
+        .attach_daemon_attachment::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(1),
+                end_sequence: Some(1),
+                gap: None,
+                history: b"stale-native-history\r\n".to_vec(),
+                messages: old_rx,
+                stream_task: tokio::spawn(std::future::pending()),
+            },
+            None,
+        )
+        .expect("attach stale native terminal state");
+
+    let (_fresh_tx, fresh_rx) = tokio::sync::mpsc::channel(16);
+    state
+        .attach_daemon_attachment::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(1),
+                end_sequence: Some(2),
+                gap: None,
+                history: b"authoritative-daemon-history\r\n".to_vec(),
+                messages: fresh_rx,
+                stream_task: tokio::spawn(std::future::pending()),
+            },
+            None,
+        )
+        .expect("recover from a fresh daemon attachment");
+
+    let snapshot = state
+        .snapshot_for_session(session_id)
+        .expect("snapshot after recovery")
+        .expect("recovered session remains available");
+    let text = snapshot
+        .grid
+        .iter()
+        .flat_map(|row| row.iter().map(|cell| cell.text.as_str()))
+        .collect::<String>();
+    assert!(text.contains("authoritative-daemon-history"));
+    assert!(
+        !text.contains("stale-native-history"),
+        "a full daemon recovery must replace, not append to, stale native history"
+    );
+}
+
+/// Rapid tab switching lets a pane's `ResizeObserver` callback reach the backend after the pane
+/// already detached. Such a late geometry update must be refused as a benign detached state rather
+/// than rebuilding a compositor surface for a pane nobody can see.
+#[tokio::test]
+async fn native_terminal_geometry_update_after_detach_is_refused_until_reattach() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "term-bounds-race";
+    let (_tx, rx) = tokio::sync::mpsc::channel(16);
+
+    state
+        .attach_daemon_attachment::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(1),
+                end_sequence: Some(1),
+                gap: None,
+                history: b"prompt> ".to_vec(),
+                messages: rx,
+                stream_task: tokio::spawn(async {}),
+            },
+            None,
+        )
+        .expect("attach session");
+
+    assert!(
+        state.ensure_surface_attached(session_id).is_ok(),
+        "an attached pane must accept geometry updates"
+    );
+
+    state.detach_session(session_id);
+    assert_eq!(
+        state.ensure_surface_attached(session_id),
+        Err(NativeTerminalError::SessionDetached(session_id.to_string())),
+        "a geometry update racing detach must report the detached state, not a hard failure"
+    );
+
+    // An unknown session is the same benign case: the pane is simply gone.
+    assert_eq!(
+        state.ensure_surface_attached("term-never-existed"),
+        Err(NativeTerminalError::SessionDetached(
+            "term-never-existed".to_string()
+        ))
+    );
+
+    // Re-attaching the same session restores geometry handling.
+    let (_tx2, rx2) = tokio::sync::mpsc::channel(16);
+    state
+        .attach_daemon_attachment_with_bounds::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(1),
+                end_sequence: Some(1),
+                gap: None,
+                history: Vec::new(),
+                messages: rx2,
+                stream_task: tokio::spawn(async {}),
+            },
+            None,
+            Some(LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+                scale_factor: 2.0,
+            }),
+        )
+        .expect("re-attach session");
+    assert!(
+        state.ensure_surface_attached(session_id).is_ok(),
+        "re-attaching must restore geometry handling"
+    );
 }
 
 #[test]
@@ -638,8 +980,13 @@ async fn native_terminal_surface_host_state_coalescing_seam_tracks_session_lifec
     assert!(state.schedule_session_render(session_id));
     assert!(state.consume_session_render(session_id));
 
-    // Detach clears session
+    // Detach drains any pending render but keeps the coordinator with the surviving session.
     state.detach_session(session_id);
+    assert!(state.session_render_coordinator(session_id).is_some());
+    assert!(!state.is_session_render_pending(session_id));
+
+    // Close discards the session and with it the coordinator.
+    state.close_session(session_id);
     assert!(state.session_render_coordinator(session_id).is_none());
     assert!(!state.schedule_session_render(session_id));
     assert!(!state.is_session_render_pending(session_id));

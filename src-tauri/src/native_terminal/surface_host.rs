@@ -24,6 +24,13 @@ use crate::terminal::preferences::cached_terminal_preferences;
 
 pub const NATIVE_TERMINAL_TITLE_EVENT: &str = "native_terminal_title";
 pub const NATIVE_TERMINAL_BELL_EVENT: &str = "native_terminal_bell";
+pub const NATIVE_TERMINAL_AGENT_STATE_EVENT: &str = "native_terminal_agent_state";
+
+/// Marks a state the agent reported about itself through the Ferryx extension. Such a report is
+/// authoritative: screen rules only infer, so once a session speaks for itself the inferred
+/// source must never overwrite it.
+pub const AGENT_EXTENSION_MANIFEST_ID: &str = "ferryx-extension";
+pub const NATIVE_TERMINAL_SCROLLBAR_EVENT: &str = "native_terminal_scrollbar";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,10 +46,30 @@ pub struct NativeTerminalBellPayload {
     pub count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalAgentStatePayload {
+    pub session_id: String,
+    pub state: String,
+    pub rule_id: String,
+    pub manifest_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalScrollbarPayload {
+    pub session_id: String,
+    pub total: u64,
+    pub offset: u64,
+    pub len: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeTerminalEvent {
     Title(NativeTerminalTitlePayload),
     Bell(NativeTerminalBellPayload),
+    AgentState(NativeTerminalAgentStatePayload),
+    Scrollbar(NativeTerminalScrollbarPayload),
 }
 
 pub type NativeTerminalEventSink = Arc<dyn Fn(NativeTerminalEvent) + Send + Sync>;
@@ -158,6 +185,19 @@ pub struct NativeTerminalSession {
     pub last_sequence: Option<u64>,
     pub update_sender: tokio::sync::watch::Sender<()>,
     pub render_coordinator: Arc<RenderScheduleCoordinator>,
+    pub last_agent_activity: Option<crate::agent_detect::AgentActivity>,
+    pub last_scrollbar: Option<NativeTerminalScrollbarPayload>,
+    /// Set once the agent reports its own state through the Ferryx extension, which permanently
+    /// disables screen inference for this session.
+    pub agent_reports_own_state: bool,
+    /// Whether a frontend pane currently owns a compositor surface for this session.
+    ///
+    /// A session outlives its surface: [`NativeTerminalSurfaceHostState::detach_session`] keeps the
+    /// daemon pump running for a backgrounded agent while releasing the GPU host. Geometry updates
+    /// that were already in flight when that happened must not resurrect a surface for a pane that
+    /// is no longer on screen, so they are rejected with
+    /// [`NativeTerminalError::SessionDetached`] instead.
+    pub surface_attached: bool,
 }
 
 pub struct NativeTerminalSurfaceHostState {
@@ -190,7 +230,7 @@ fn take_native_terminal_events(
     session: &mut NativeTerminalSession,
     session_id: &str,
 ) -> Vec<NativeTerminalEvent> {
-    let mut events = Vec::with_capacity(2);
+    let mut events = Vec::with_capacity(3);
     if session.terminal.take_title_changed() {
         match session.terminal.title() {
             Ok(title) => events.push(NativeTerminalEvent::Title(NativeTerminalTitlePayload {
@@ -211,7 +251,72 @@ fn take_native_terminal_events(
             count,
         }));
     }
+    if let Some(event) = take_native_terminal_scrollbar_event(session, session_id) {
+        events.push(event);
+    }
+
+    if session.agent_reports_own_state {
+        return events;
+    }
+
+    if let Ok(snapshot) = session.terminal.render_snapshot() {
+        let rows = (0..snapshot.rows as usize)
+            .map(|r| snapshot.row_text(r))
+            .collect();
+        let title = session.terminal.title().unwrap_or_default();
+        let input = crate::agent_detect::ScreenInput { rows, title };
+        let engine = crate::agent_detect::default_engine();
+        if let Some(detection) = engine.detect(&input, session.last_agent_activity) {
+            if session.last_agent_activity != Some(detection.state) {
+                session.last_agent_activity = Some(detection.state);
+                let state_str = match detection.state {
+                    crate::agent_detect::AgentActivity::Working => "working",
+                    crate::agent_detect::AgentActivity::Blocked => "blocked",
+                    crate::agent_detect::AgentActivity::Idle => "idle",
+                };
+                tracing::info!(
+                    session_id,
+                    state = state_str,
+                    rule_id = %detection.rule_id,
+                    manifest_id = %detection.manifest_id,
+                    "agent screen detection state change"
+                );
+                events.push(NativeTerminalEvent::AgentState(
+                    NativeTerminalAgentStatePayload {
+                        session_id: session_id.to_string(),
+                        state: state_str.to_string(),
+                        rule_id: detection.rule_id,
+                        manifest_id: detection.manifest_id,
+                    },
+                ));
+            }
+        }
+    }
+
     events
+}
+
+fn take_native_terminal_scrollbar_event(
+    session: &mut NativeTerminalSession,
+    session_id: &str,
+) -> Option<NativeTerminalEvent> {
+    let scrollbar = session.terminal.scrollbar().ok()?;
+    let payload = NativeTerminalScrollbarPayload {
+        session_id: session_id.to_string(),
+        total: scrollbar.total,
+        offset: scrollbar.offset,
+        len: scrollbar.len,
+    };
+    if session.last_scrollbar.as_ref() == Some(&payload) {
+        return None;
+    }
+    let was_visible = session
+        .last_scrollbar
+        .as_ref()
+        .is_some_and(|previous| previous.total > previous.len);
+    let is_visible = payload.total > payload.len;
+    session.last_scrollbar = Some(payload.clone());
+    (was_visible || is_visible).then_some(NativeTerminalEvent::Scrollbar(payload))
 }
 
 fn emit_native_terminal_event<R: Runtime>(
@@ -223,6 +328,12 @@ fn emit_native_terminal_event<R: Runtime>(
         let result = match &event {
             NativeTerminalEvent::Title(payload) => app.emit(NATIVE_TERMINAL_TITLE_EVENT, payload),
             NativeTerminalEvent::Bell(payload) => app.emit(NATIVE_TERMINAL_BELL_EVENT, payload),
+            NativeTerminalEvent::AgentState(payload) => {
+                app.emit(NATIVE_TERMINAL_AGENT_STATE_EVENT, payload)
+            }
+            NativeTerminalEvent::Scrollbar(payload) => {
+                app.emit(NATIVE_TERMINAL_SCROLLBAR_EVENT, payload)
+            }
         };
         if let Err(error) = result {
             tracing::debug!(%error, "Failed to emit native terminal event");
@@ -266,6 +377,19 @@ impl NativeTerminalSurfaceHostState {
         f(&mut session.terminal)
     }
 
+    /// Rejects geometry work for a session with no mounted compositor surface.
+    ///
+    /// Returns [`NativeTerminalError::SessionDetached`] for both a closed session and one that is
+    /// still streaming in the background after its pane unmounted.
+    pub fn ensure_surface_attached(&self, session_id: &str) -> Result<(), NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let sessions = self.sessions.lock();
+        match sessions.get(session_id) {
+            Some(session) if session.surface_attached => Ok(()),
+            Some(_) | None => Err(NativeTerminalError::SessionDetached(session_id.to_string())),
+        }
+    }
+
     pub fn prepare_session_layout(
         &self,
         request: NativeTerminalBoundsRequest,
@@ -292,6 +416,10 @@ impl NativeTerminalSurfaceHostState {
                         last_sequence: None,
                         update_sender,
                         render_coordinator,
+                        last_agent_activity: None,
+                        last_scrollbar: None,
+                        agent_reports_own_state: false,
+                        surface_attached: true,
                     },
                 );
                 sessions
@@ -323,6 +451,11 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
         if let Some(bounds) = bounds {
+            // Re-arm the surface before laying out: an attach following a detach must accept its own
+            // initial geometry even though the detach cleared the attached flag.
+            if let Some(session) = self.sessions.lock().get_mut(session_id) {
+                session.surface_attached = true;
+            }
             let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
             self.prepare_session_layout(
                 NativeTerminalBoundsRequest {
@@ -335,6 +468,52 @@ impl NativeTerminalSurfaceHostState {
         self.attach_daemon_attachment(session_id, attachment, app)
     }
 
+    pub fn reattach_existing_session_with_bounds(
+        &self,
+        session_id: &str,
+        bounds: Option<LogicalBounds>,
+    ) -> Result<bool, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let mut sessions = self.sessions.lock();
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Ok(false);
+        };
+        let stream_is_live = session
+            .stream_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished());
+        let pump_is_live = session
+            .pump_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished());
+        if !stream_is_live || !pump_is_live {
+            return Ok(false);
+        }
+
+        session.surface_attached = true;
+        if let Some(bounds) = bounds {
+            let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
+            let layout = NativeTerminalBoundsRequest {
+                session_id: session_id.to_string(),
+                bounds,
+            }
+            .layout(metrics)?;
+            if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+                session.terminal.resize(
+                    layout.cols,
+                    layout.rows,
+                    metrics.width_px,
+                    metrics.height_px,
+                )?;
+            }
+            session.layout = Some(layout);
+            session.logical_bounds = Some(bounds);
+            session.cell_metrics = Some(metrics);
+        }
+        session.render_coordinator.consume_render();
+        Ok(true)
+    }
+
     pub fn attach_daemon_attachment<R: Runtime>(
         &self,
         session_id: &str,
@@ -345,52 +524,68 @@ impl NativeTerminalSurfaceHostState {
 
         let initial_dims = (80, 24);
 
-        let (update_sender, render_coordinator) = {
+        let (update_sender, render_coordinator, events) = {
             let mut sessions = self.sessions.lock();
-            if let Some(session) = sessions.get_mut(session_id) {
-                if let Some(task) = session.stream_task.take() {
-                    task.abort();
-                }
-                if let Some(task) = session.pump_task.take() {
-                    task.abort();
-                }
-                if attachment.gap.is_some() {
+            let (update_sender, render_coordinator) =
+                if let Some(session) = sessions.get_mut(session_id) {
+                    // A backgrounded session kept streaming without a surface; this attach gives it
+                    // one again and re-enables geometry updates.
+                    session.surface_attached = true;
+                    if let Some(task) = session.stream_task.take() {
+                        task.abort();
+                    }
+                    if let Some(task) = session.pump_task.take() {
+                        task.abort();
+                    }
                     session.terminal.reset();
-                }
-                if !attachment.history.is_empty() {
-                    session.terminal.feed(&attachment.history)?;
-                }
-                session.last_sequence = attachment.end_sequence;
-                session.render_coordinator.consume_render();
-                (
-                    session.update_sender.clone(),
-                    Arc::clone(&session.render_coordinator),
-                )
-            } else {
-                let mut terminal = NativeTerminal::new(initial_dims.0, initial_dims.1)?;
-                if !attachment.history.is_empty() {
-                    terminal.feed(&attachment.history)?;
-                }
-                let (update_sender, _) = tokio::sync::watch::channel(());
-                let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
-                sessions.insert(
-                    session_id.to_string(),
-                    NativeTerminalSession {
-                        terminal,
-                        focused: false,
-                        layout: None,
-                        logical_bounds: None,
-                        cell_metrics: None,
-                        stream_task: None,
-                        pump_task: None,
-                        last_sequence: attachment.end_sequence,
-                        update_sender: update_sender.clone(),
-                        render_coordinator: Arc::clone(&render_coordinator),
-                    },
-                );
-                (update_sender, render_coordinator)
-            }
+                    if !attachment.history.is_empty() {
+                        session.terminal.feed(&attachment.history)?;
+                    }
+                    session.last_sequence = attachment.end_sequence;
+                    session.render_coordinator.consume_render();
+                    (
+                        session.update_sender.clone(),
+                        Arc::clone(&session.render_coordinator),
+                    )
+                } else {
+                    let mut terminal = NativeTerminal::new(initial_dims.0, initial_dims.1)?;
+                    if !attachment.history.is_empty() {
+                        terminal.feed(&attachment.history)?;
+                    }
+                    // A fresh session created by an attach owns a surface by definition.
+                    let (update_sender, _) = tokio::sync::watch::channel(());
+                    let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
+                    sessions.insert(
+                        session_id.to_string(),
+                        NativeTerminalSession {
+                            terminal,
+                            focused: false,
+                            layout: None,
+                            logical_bounds: None,
+                            cell_metrics: None,
+                            stream_task: None,
+                            pump_task: None,
+                            last_sequence: attachment.end_sequence,
+                            update_sender: update_sender.clone(),
+                            render_coordinator: Arc::clone(&render_coordinator),
+                            last_agent_activity: None,
+                            last_scrollbar: None,
+                            agent_reports_own_state: false,
+                            surface_attached: true,
+                        },
+                    );
+                    (update_sender, render_coordinator)
+                };
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or(NativeTerminalError::NoValue)?;
+            let events = take_native_terminal_events(session, session_id);
+            (update_sender, render_coordinator, events)
         };
+
+        for event in events {
+            emit_native_terminal_event(app.as_ref(), &self.event_sink, event);
+        }
 
         let stream_task = attachment.stream_task;
         let mut messages = attachment.messages;
@@ -520,13 +715,63 @@ impl NativeTerminalSurfaceHostState {
                         }
                     }
                     DaemonStreamMessage::Gap { .. } => {
-                        {
+                        let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
                                 sess.terminal.reset();
+                                (true, take_native_terminal_events(sess, &session_id_owned))
+                            } else {
+                                (false, Vec::new())
+                            }
+                        };
+                        for event in events {
+                            emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
+                        }
+                        if session_exists {
+                            update_sender.send_replace(());
+                        }
+                    }
+                    DaemonStreamMessage::AgentState { state, agent, .. } => {
+                        let reported = match state.as_ref() {
+                            "working" => Some(crate::agent_detect::AgentActivity::Working),
+                            "blocked" => Some(crate::agent_detect::AgentActivity::Blocked),
+                            "idle" => Some(crate::agent_detect::AgentActivity::Idle),
+                            _ => None,
+                        };
+                        if let Some(reported) = reported {
+                            let changed = {
+                                let mut sessions_guard = sessions.lock();
+                                match sessions_guard.get_mut(&session_id_owned) {
+                                    Some(sess) => {
+                                        sess.agent_reports_own_state = true;
+                                        if sess.last_agent_activity == Some(reported) {
+                                            false
+                                        } else {
+                                            sess.last_agent_activity = Some(reported);
+                                            true
+                                        }
+                                    }
+                                    None => false,
+                                }
+                            };
+                            if changed {
+                                emit_native_terminal_event(
+                                    app_handle.as_ref(),
+                                    &event_sink,
+                                    NativeTerminalEvent::AgentState(
+                                        NativeTerminalAgentStatePayload {
+                                            session_id: session_id_owned.clone(),
+                                            state: state.to_string(),
+                                            rule_id: String::new(),
+                                            manifest_id: agent
+                                                .as_deref()
+                                                .unwrap_or(AGENT_EXTENSION_MANIFEST_ID)
+                                                .to_string(),
+                                        },
+                                    ),
+                                );
                             }
                         }
-                        update_sender.send_replace(());
                     }
                     DaemonStreamMessage::Exit { .. } => {
                         update_sender.send_replace(());
@@ -547,7 +792,27 @@ impl NativeTerminalSurfaceHostState {
         Ok(())
     }
 
+    /// Releases the GPU surface for an unmounted pane while KEEPING the terminal session and its
+    /// daemon pump alive, so a backgrounded agent keeps reporting title/bell/agent-state instead of
+    /// freezing on its last observed value. Use [`Self::close_session`] to discard the session.
     pub fn detach_session(&self, session_id: &str) {
+        {
+            let mut sessions = self.sessions.lock();
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.focused = false;
+                session.layout = None;
+                session.logical_bounds = None;
+                session.surface_attached = false;
+                session.render_coordinator.consume_render();
+            }
+        }
+
+        let mut hosts = self.hosts.lock();
+        hosts.remove(session_id);
+    }
+
+    /// Discards a session entirely, aborting its daemon stream and pump tasks.
+    pub fn close_session(&self, session_id: &str) {
         let mut sessions = self.sessions.lock();
         if let Some(mut session) = sessions.remove(session_id) {
             if let Some(task) = session.stream_task.take() {
@@ -684,6 +949,10 @@ impl NativeTerminalSurfaceHostState {
                         last_sequence: None,
                         update_sender,
                         render_coordinator,
+                        last_agent_activity: None,
+                        last_scrollbar: None,
+                        agent_reports_own_state: false,
+                        surface_attached: true,
                     },
                 );
                 sessions
@@ -725,6 +994,11 @@ impl NativeTerminalSurfaceHostState {
         let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
         let logical_bounds = request.bounds;
         let session_id = request.session_id.clone();
+        // A pane that unmounted while its ResizeObserver callback was still in flight (rapid tab
+        // switching) sends geometry for a session the compositor has already released. Rendering it
+        // would rebuild a GPU surface for a pane nobody can see, so report the benign detached state
+        // and let the caller drop the update.
+        self.ensure_surface_attached(&session_id)?;
         let layout = self.prepare_session_layout(request, cell_metrics)?;
         let snapshot = {
             let sessions = self.sessions.lock();
@@ -962,6 +1236,52 @@ mod tests {
         _renderer: DropRecorder,
     }
 
+    #[tokio::test]
+    async fn attach_replayed_history_emits_title_for_new_and_existing_sessions() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "replayed-title-session";
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed);
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::Title(payload) = event {
+                observed_for_sink.lock().push(payload);
+            }
+        }));
+
+        for (sequence, title) in [(1, "new-session-title"), (2, "existing-session-title")] {
+            let (_tx, messages) = tokio::sync::mpsc::channel(1);
+            let attachment = DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(sequence),
+                end_sequence: Some(sequence),
+                gap: None,
+                history: format!("\x1b]2;{title}\x07").into_bytes(),
+                messages,
+                stream_task: tokio::spawn(std::future::pending()),
+            };
+
+            state
+                .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+                .expect("attach replayed daemon history");
+        }
+
+        assert_eq!(
+            *observed.lock(),
+            vec![
+                NativeTerminalTitlePayload {
+                    session_id: session_id.to_string(),
+                    title: "new-session-title".to_string(),
+                },
+                NativeTerminalTitlePayload {
+                    session_id: session_id.to_string(),
+                    title: "existing-session-title".to_string(),
+                },
+            ]
+        );
+        state.teardown();
+    }
+
     #[test]
     fn surface_host_drop_order_guarantees_surface_drops_before_target() {
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -1040,5 +1360,208 @@ mod tests {
         assert!(coordinator.schedule_render());
         assert!(coordinator.is_render_pending());
         assert!(coordinator.consume_render());
+    }
+
+    #[tokio::test]
+    async fn driver_edge_triggered_agent_state_emission() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "edge-triggered-session";
+        let observed_states = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed_states);
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::AgentState(payload) = event {
+                observed_for_sink.lock().push(payload);
+            }
+        }));
+
+        // First feed: triggers 'working'
+        {
+            let (_tx, messages) = tokio::sync::mpsc::channel(1);
+            let attachment = DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(1),
+                end_sequence: Some(1),
+                gap: None,
+                history: b"Working (esc to interrupt)\r\n".to_vec(),
+                messages,
+                stream_task: tokio::spawn(std::future::pending()),
+            };
+            state
+                .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+                .expect("attach first daemon history");
+        }
+
+        // Check first emission
+        assert_eq!(observed_states.lock().len(), 1);
+        assert_eq!(observed_states.lock()[0].state, "working");
+
+        // Second feed with same 'working' state: must NOT emit duplicate event
+        {
+            let (_tx, messages) = tokio::sync::mpsc::channel(1);
+            let attachment = DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(2),
+                end_sequence: Some(2),
+                gap: None,
+                history: b"Still Working (esc to interrupt)\r\n".to_vec(),
+                messages,
+                stream_task: tokio::spawn(std::future::pending()),
+            };
+            state
+                .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+                .expect("attach second daemon history");
+        }
+
+        // Count should still be 1 (edge-triggered)
+        assert_eq!(observed_states.lock().len(), 1);
+
+        // Third feed: triggers state transition to 'blocked'
+        {
+            let (_tx, messages) = tokio::sync::mpsc::channel(1);
+            let attachment = DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(3),
+                end_sequence: Some(3),
+                gap: None,
+                history: b"\x1b[2J\x1b[HAction Required: allow command?\r\npress enter to confirm or esc to cancel\r\n".to_vec(),
+                messages,
+                stream_task: tokio::spawn(std::future::pending()),
+            };
+            state
+                .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+                .expect("attach third daemon history");
+        }
+
+        // Now count should be 2, with new state 'blocked'
+        assert_eq!(observed_states.lock().len(), 2);
+        assert_eq!(observed_states.lock()[1].state, "blocked");
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn detached_session_still_reports_agent_state_transitions() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "backgrounded-session";
+        let observed_states = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed_states);
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::AgentState(payload) = event {
+                observed_for_sink.lock().push(payload.state);
+            }
+        }));
+
+        let (tx, messages) = tokio::sync::mpsc::channel(4);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"Working (esc to interrupt)\r\n".to_vec(),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon history");
+        assert_eq!(observed_states.lock().clone(), vec!["working".to_string()]);
+
+        // The pane scrolls off screen: React unmounts it and the UI detaches the surface.
+        state.detach_session(session_id);
+
+        // The agent keeps running in the daemon and now blocks for input.
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 2,
+            data: b"\x1b[2J\x1b[HAction Required: allow command?\r\npress enter to confirm or esc to cancel\r\n"
+                .to_vec()
+                .into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send daemon output to a detached session");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while observed_states.lock().len() < 2 && std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            observed_states.lock().clone(),
+            vec!["working".to_string(), "blocked".to_string()],
+            "a backgrounded pane must keep reporting agent state; otherwise its spinner spins forever"
+        );
+
+        state.teardown();
+    }
+    #[tokio::test]
+    async fn extension_reported_state_wins_over_screen_inference() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "extension-owned-session";
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed);
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::AgentState(payload) = event {
+                observed_for_sink
+                    .lock()
+                    .push((payload.state, payload.manifest_id));
+            }
+        }));
+
+        let (tx, messages) = tokio::sync::mpsc::channel(4);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: Vec::new(),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach");
+
+        tx.send(DaemonStreamMessage::AgentState {
+            session_id: session_id.into(),
+            state: "blocked".into(),
+            agent: Some("omo".into()),
+        })
+        .await
+        .expect("send agent state report");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while observed.lock().is_empty() && std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            observed.lock().clone(),
+            vec![("blocked".to_string(), "omo".to_string())]
+        );
+
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 2,
+            data: b"  Working (esc to interrupt)\r\n".to_vec().into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send screen output");
+
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            observed.lock().len(),
+            1,
+            "screen inference must stay disabled once the agent reports its own state"
+        );
+
+        state.teardown();
     }
 }
