@@ -4,10 +4,12 @@ import {
   DEFAULT_GENERAL_SETTINGS,
   GENERAL_SETTINGS_EVENT,
   loadGeneralSettings,
+  loadSidebarOpenStartup,
   resetGeneralSettings,
   saveGeneralSettings,
+  saveSidebarOpenStartup,
 } from "./generalSettings";
-import { GENERAL_SETTINGS_STORAGE_KEY } from "./storageKeys";
+import { GENERAL_SETTINGS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY } from "./storageKeys";
 
 describe("generalSettings", () => {
   beforeEach(() => {
@@ -54,5 +56,23 @@ describe("generalSettings", () => {
     const settings = loadGeneralSettings();
     expect(settings.confirmCloseTab).toBe(true);
     expect(localStorage.getItem(GENERAL_SETTINGS_STORAGE_KEY)).toBe(JSON.stringify({ confirmCloseTab: true }));
+  });
+
+  it("loads and persists sidebar open startup preference", () => {
+    expect(loadSidebarOpenStartup()).toBe(true);
+
+    saveSidebarOpenStartup(false);
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
+    expect(loadSidebarOpenStartup()).toBe(false);
+
+    saveSidebarOpenStartup(true);
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("true");
+    expect(loadSidebarOpenStartup()).toBe(true);
+  });
+
+  it("migrates legacy sidebar open key upon loading startup preference", () => {
+    localStorage.setItem("orca.sidebar.open", "false");
+    expect(loadSidebarOpenStartup()).toBe(false);
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
   });
 });

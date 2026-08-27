@@ -22,26 +22,7 @@ import {
   setBrowserZoom,
 } from "../lib/browserTauri";
 import type { BrowserSessionSummary } from "../lib/types";
-
-function SettingRow({
-  label,
-  description,
-  children,
-}: {
-  label: string;
-  description: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-h-14 items-center justify-between gap-5 border-b border-border py-3 last:border-b-0">
-      <div className="min-w-0">
-        <div className="text-xs font-medium text-foreground">{label}</div>
-        <div className="mt-0.5 max-w-xl text-[11px] leading-4 text-muted-foreground">{description}</div>
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  );
-}
+import { SettingRow, SettingsHeading } from "./ui/SettingsPrimitives";
 
 function Toggle({ checked, onChange, label, id }: { checked: boolean; onChange: (checked: boolean) => void; label: string; id?: string }) {
   return (
@@ -156,12 +137,14 @@ export function BrowserSettingsPanel() {
 
   return (
     <section aria-labelledby="settings-browser-heading">
-      <div className="mb-5 flex items-start gap-3">
-        <Globe className="mt-0.5 size-5 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
-          <h2 id="settings-browser-heading" className="text-sm font-semibold">Browser</h2>
-          <p className="mt-1 text-xs text-muted-foreground">Configure navigation, link routing, browser sessions, and cookies.</p>
-        </div>
+      <SettingsHeading
+        icon={<Globe />}
+        title="Browser"
+        description="Configure navigation, link routing, browser sessions, and cookies."
+      />
+      <h2 id="settings-browser-heading" className="sr-only">Browser</h2>
+      <div className="mb-5 flex items-center justify-between border-b border-border pb-3">
+        <h3 className="text-[12px] font-semibold">Web & Navigation</h3>
         <button
           type="button"
           onClick={() => {
@@ -176,8 +159,6 @@ export function BrowserSettingsPanel() {
           Reset to defaults
         </button>
       </div>
-
-      <h3 className="border-b border-border pb-2 text-[12px] font-semibold">Web & Navigation</h3>
       <div className="border-b border-border">
         <SettingRow label="Default Home Page" description="New browser tabs open this URL. Leave it blank to open a blank tab.">
           <div className="w-[330px]">
@@ -204,7 +185,7 @@ export function BrowserSettingsPanel() {
             aria-label="Default search engine"
             value={settings.searchEngine}
             onChange={(event) => void update({ searchEngine: event.target.value as BrowserSettingsState["searchEngine"] })}
-            className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+            className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none transition-colors focus:border-ring"
           >
             <option value="google">Google</option>
             <option value="bing">Bing</option>
@@ -219,7 +200,7 @@ export function BrowserSettingsPanel() {
             aria-label="Default zoom level"
             value={settings.defaultZoom}
             onChange={(event) => void update({ defaultZoom: Number(event.target.value) })}
-            className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+            className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none transition-colors focus:border-ring"
           >
             {BROWSER_ZOOM_LEVELS.map((level) => <option key={level} value={level}>{level}%</option>)}
           </select>
@@ -309,12 +290,12 @@ export function BrowserSettingsPanel() {
               {isDefault ? (
                 <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium">Default</span>
               ) : (
-                <button type="button" onClick={() => void update({ defaultProfileId: profile.id })} className="h-7 rounded border border-border px-2 text-[10px] hover:bg-accent">Make Default</button>
+                <button type="button" onClick={() => void update({ defaultProfileId: profile.id })} className="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent">Make Default</button>
               )}
               <button
                 type="button"
                 onClick={() => void importCookies(profile.id)}
-                className="flex h-7 items-center gap-1 rounded border border-border px-2 text-[10px] hover:bg-accent"
+                className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[11px] hover:bg-accent"
               >
                 <FolderOpen className="size-3" /> Import Cookies
               </button>
@@ -344,7 +325,7 @@ export function BrowserSettingsPanel() {
                 <div className="truncate text-xs font-medium">{browser.title || browser.url || browser.browserId}</div>
                 <div className="truncate font-mono text-[9px] text-muted-foreground">{browser.url} · profile:{browser.profileId}</div>
               </div>
-              <button type="button" onClick={() => void focusBrowser(browser.browserId)} className="h-7 rounded border border-border px-2 text-[10px] hover:bg-accent">Focus</button>
+              <button type="button" onClick={() => void focusBrowser(browser.browserId)} className="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent">Focus</button>
             </div>
           ))}
         </div>

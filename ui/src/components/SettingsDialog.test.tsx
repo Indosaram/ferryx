@@ -6,6 +6,7 @@ import {
   loadAppearanceSettings,
 } from "../lib/appearanceSettings";
 import { SHORTCUTS, shortcutLabel } from "../lib/shortcuts";
+import { SIDEBAR_OPEN_STORAGE_KEY } from "../lib/storageKeys";
 import { TERMINAL_SETTINGS_STORAGE_KEY } from "../lib/terminalSettings";
 import { SettingsDialog } from "./SettingsDialog";
 
@@ -25,6 +26,8 @@ const native = vi.hoisted(() => ({
   enableRemoteGateway: vi.fn(),
   disableRemoteGateway: vi.fn(),
   createPairingCode: vi.fn(),
+  getCliLauncherStatus: vi.fn(),
+  installCliLauncher: vi.fn(),
 }));
 
 const browserNative = vi.hoisted(() => ({
@@ -66,6 +69,8 @@ vi.mock(import("../lib/tauri"), async (importOriginal) => {
     enableRemoteGateway: native.enableRemoteGateway,
     disableRemoteGateway: native.disableRemoteGateway,
     createPairingCode: native.createPairingCode,
+    getCliLauncherStatus: native.getCliLauncherStatus,
+    installCliLauncher: native.installCliLauncher,
   };
 });
 
@@ -102,6 +107,16 @@ beforeEach(() => {
     status: {},
     testSubmitted: true,
   });
+  native.getCliLauncherStatus.mockReset();
+  native.getCliLauncherStatus.mockResolvedValue({
+    launcherPath: "/Users/test/.local/bin/ferryx",
+    isInstalled: true,
+    isSymlink: true,
+    currentTarget: null,
+    activeExecutable: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+    isSupported: true,
+  });
+  native.installCliLauncher.mockReset();
   native.openNotificationSystemSettings.mockReset();
   native.openNotificationSystemSettings.mockResolvedValue({ opened: true });
   native.playNotificationSound.mockReset();
@@ -230,6 +245,31 @@ describe("SettingsDialog", () => {
     fireEvent.click(checkbox);
     expect(checkbox).toBeChecked();
     expect(localStorage.getItem("ferryx.settings.general")).toContain('"confirmCloseTab":true');
+  });
+
+  it("moves the Ferryx CLI launcher card into the General section", async () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "General" })).toBeInTheDocument();
+    expect(await screen.findByText("Ferryx CLI")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Browser" }));
+    expect(screen.queryByText("Ferryx CLI")).not.toBeInTheDocument();
+  });
+
+  it("persists the show-sidebar-on-startup toggle", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "General" })).toBeInTheDocument();
+
+    const checkbox = screen.getByLabelText("Show sidebar on startup");
+    expect(checkbox).toBeChecked();
+
+    fireEvent.click(checkbox);
+    expect(checkbox).not.toBeChecked();
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
+
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("true");
   });
 
   it("fetches Ghostty preferences and shows the effective terminal value/source", async () => {
@@ -716,7 +756,9 @@ describe("SettingsDialog", () => {
 
     const overview = screen.getByTestId("settings-general-overview");
     expect(overview).toBeInTheDocument();
-    expect(overview.querySelectorAll("li").length).toBeGreaterThanOrEqual(4);
+    expect(screen.getByLabelText("Confirm before closing a tab")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show sidebar on startup")).toBeInTheDocument();
+    expect(screen.getByText("Software Update")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "General" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Theme mode")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Accent color")).not.toBeInTheDocument();

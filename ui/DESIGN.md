@@ -67,7 +67,22 @@ Reusable, already shipped — compose these; do not hand-roll equivalents.
 - `ui/IconButton` — square icon control (`size-6` sm / `size-7` md), `aria-label` + `title` required.
 - `ui/SectionHeader` — `h-8` section title with optional count pill and trailing actions.
 - `ui/StatusDot` — maps `AgentState` to a status glyph; `working` pulses, `motion-reduce` safe.
+- `ui/SettingsPrimitives` — exports `SettingsHeading` (`icon`, `title`, `description`) and `SettingRow` (`label`, `description`, `children`). Standard primitives for all settings dialog panels.
 - `lib/cn` — `twMerge(clsx(...))` for conditional classes. All conditional styling goes through it.
+
+### Button recipes (S5)
+- **Secondary Action Standard**: `h-7 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground` (padding may extend to `px-2.5` for buttons with icons).
+- **Primary Action Standard**: `h-7 rounded-md bg-primary px-2 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 shadow-sm`.
+
+### Border alpha discipline (S6)
+All section grouping containers, card wrappers, and separators must use full-alpha `border-border`. The only permitted alpha modifier is `SettingRow`'s internal hairline divider `border-border/40`.
+
+### Settings layout and surface rules (S7)
+- **Primary User Preferences**: Configurable settings rows must live inside `border-y border-border` row groups built with `SettingRow`.
+- **Management & Operational Content**: Self-contained management blocks (Software Update card, CLI Launcher card, Paired Devices lists, Active Web Tabs) must render inside `rounded-lg border border-border bg-card` cards.
+
+### Keycap styling recipe
+Keycap pills in `ShortcutSettings` retain muted background tones (`rounded border border-border bg-muted/70 px-1.5 py-0.5 font-mono text-[10px]`, `border-border/60 bg-muted/40`).
 
 ### Agent tab identity
 - A terminal tab with an agent type in `SUPPORTED_AGENT_LOGOS` displays that local brand SVG at `size-4`.

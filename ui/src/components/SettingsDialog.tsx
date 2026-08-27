@@ -35,7 +35,11 @@ import {
   useAppearanceSettings,
   type AppearanceSettingsState,
 } from "../lib/appearanceSettings";
-import { useGeneralSettings } from "../lib/generalSettings";
+import {
+  loadSidebarOpenStartup,
+  saveSidebarOpenStartup,
+  useGeneralSettings,
+} from "../lib/generalSettings";
 import { useNotificationSettings } from "../lib/notificationSettings";
 import { SHORTCUTS, isMacShortcutPlatform, shortcutAliasesLabels, shortcutLabel } from "../lib/shortcuts";
 import {
@@ -76,6 +80,7 @@ import { focusBrowser, listBrowsers, setBrowserZoom } from "../lib/browserTauri"
 import { useTerminalSettings } from "../lib/terminalSettings";
 import type { BrowserSessionSummary, NotificationPermissionStatus, Worktree } from "../lib/types";
 import { BrowserSettingsPanel } from "./BrowserSettingsPanel";
+import { SettingRow, SettingsHeading } from "./ui/SettingsPrimitives";
 
 export type SettingsDialogProps = {
   open: boolean;
@@ -249,48 +254,18 @@ function NavButton({
   );
 }
 
-function SettingsHeading({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) {
-  return (
-    <header className="mb-8 border-b border-border pb-5">
-      <div className="mb-2 flex items-center gap-2 text-[15px] font-semibold">
-        <span className="text-muted-foreground [&>svg]:size-4">{icon}</span>
-        {title}
-      </div>
-      <p className="max-w-2xl text-[12px] leading-5 text-muted-foreground">{description}</p>
-    </header>
-  );
-}
-
-function GeneralSettings() {
-  const isMac = isMacShortcutPlatform();
+export function GeneralSettings() {
   const { settings, updateSettings } = useGeneralSettings();
+  const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
   return (
-    <section aria-label="General">
+    <section aria-labelledby="settings-general-heading">
       <SettingsHeading
         icon={<MonitorCog />}
         title="General"
-        description="Desktop shell overview and how Ferryx settings are organized."
+        description="Tab behavior, startup, CLI helper, and software updates."
       />
-      <div data-testid="settings-general-overview" className="space-y-4">
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="text-[12px] font-semibold">Ferryx desktop</h3>
-          <p className="mt-1 text-[12px] leading-5 text-muted-foreground">
-            Local terminal, browser, and agent workspace. Open Settings anytime with {shortcutLabel("settings.toggle", isMac)}.
-          </p>
-        </div>
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="text-[12px] font-semibold">Settings sections</h3>
-          <ul className="mt-2 space-y-1.5 text-[12px] leading-5 text-muted-foreground">
-            <li>Appearance — theme, accent, and interface scale</li>
-            <li>Terminal — font, scrollback, and Ghostty import</li>
-            <li>Keyboard Shortcuts — registered bindings</li>
-            <li>Workspace — projects and worktrees</li>
-            <li>Agents — CLI assistants and the default agent preference</li>
-            <li>Browser — search provider, zoom, and tab restore</li>
-            <li>Notifications — permission, sounds, and delivery tests</li>
-            <li>Remote Access — session-only gateway and device pairing</li>
-          </ul>
-        </div>
+      <h2 id="settings-general-heading" className="sr-only">General</h2>
+      <div data-testid="settings-general-overview" className="space-y-6">
         <div className="border-y border-border">
           <SettingRow
             label="Confirm before closing a tab"
@@ -305,7 +280,25 @@ function GeneralSettings() {
               className="size-4 accent-foreground"
             />
           </SettingRow>
+          <SettingRow
+            label="Show sidebar on startup"
+            description="Keep the project sidebar open when Ferryx launches. Changes apply on next app start."
+          >
+            <input
+              id="general-show-sidebar-startup"
+              aria-label="Show sidebar on startup"
+              type="checkbox"
+              checked={sidebarOpenStartup}
+              onChange={(event) => {
+                const next = event.target.checked;
+                setSidebarOpenStartup(next);
+                saveSidebarOpenStartup(next);
+              }}
+              className="size-4 accent-foreground"
+            />
+          </SettingRow>
         </div>
+        <CliLauncherCard />
         <SoftwareUpdateCard />
       </div>
     </section>
@@ -533,9 +526,10 @@ function TerminalSettings({
         title="Terminal"
         description="Ghostty preferences are imported by the native runtime. Explicit values set here take precedence locally."
       />
+      <h2 id="settings-terminal-heading" className="sr-only">Terminal</h2>
       <div className="mb-5 flex items-start justify-between gap-5 border-y border-border py-3">
         <div className="min-w-0">
-          <h2 id="settings-terminal-heading" className="text-[12px] font-semibold">Effective preferences</h2>
+          <div className="text-[12px] font-semibold">Effective preferences</div>
           <div className="mt-1 text-[11px] text-muted-foreground">{source}</div>
           {sourcePath ? <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground/65">{sourcePath}</div> : null}
         </div>
@@ -774,7 +768,7 @@ function WorkspaceSettings({
                     <button
                       type="button"
                       disabled
-                      className="h-7 rounded border border-border px-2.5 text-[11px] font-medium text-muted-foreground opacity-50"
+                      className="h-7 rounded-md border border-border px-2.5 text-[11px] font-medium text-muted-foreground opacity-50"
                     >
                       Active
                     </button>
@@ -782,7 +776,7 @@ function WorkspaceSettings({
                     <button
                       type="button"
                       onClick={() => onSelectProject(project)}
-                      className="h-7 rounded border border-border px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      className="h-7 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                     >
                       Select
                     </button>
@@ -823,12 +817,7 @@ const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
 };
 
 export function BrowserSettings() {
-  return (
-    <>
-      <BrowserSettingsPanel />
-      <CliLauncherCard />
-    </>
-  );
+  return <BrowserSettingsPanel />;
 }
 
 export function LegacyBrowserSettings() {
@@ -986,7 +975,7 @@ export function LegacyBrowserSettings() {
                   type="button"
                   aria-label={`Focus browser tab ${b.title || b.browserId}`}
                   onClick={() => void handleFocus(b.browserId)}
-                  className="h-7 rounded border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                  className="h-7 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
                 >
                   Focus
                 </button>
@@ -995,8 +984,6 @@ export function LegacyBrowserSettings() {
           )}
         </div>
       </div>
-
-      <CliLauncherCard />
     </section>
   );
 }
@@ -1037,7 +1024,7 @@ function CliLauncherCard() {
   };
 
   return (
-    <div className="mt-8 rounded-lg border border-border bg-card p-4">
+    <div className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-center gap-2">
         <TerminalSquare className="size-4 text-muted-foreground" />
         <h3 className="text-[12px] font-semibold">Ferryx CLI</h3>
@@ -1185,30 +1172,16 @@ export function NotificationSettings() {
   const isNotDetermined = auth === "not-determined" || auth === "unknown";
 
   return (
-    <section role="region" aria-label="Notifications" className="space-y-6">
-      <div className="flex items-center justify-between border-b border-border/70 pb-4">
-        <div>
-          <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
-            <Bell className="size-4 text-muted-foreground" />
-            Notifications
-          </h2>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Configure desktop alerts, audio feedback, and agent completion triggers.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => resetSettings()}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground rounded border border-border hover:bg-accent transition-colors"
-          title="Reset to defaults"
-        >
-          <RotateCcw className="size-3" />
-          Reset
-        </button>
-      </div>
+    <section aria-labelledby="settings-notifications-heading">
+      <SettingsHeading
+        icon={<Bell />}
+        title="Notifications"
+        description="Configure desktop alerts, audio feedback, and agent completion triggers."
+      />
+      <h2 id="settings-notifications-heading" className="sr-only">Notifications</h2>
 
       {/* Permission Status */}
-      <div className="rounded-md border border-border/70 bg-card p-4 space-y-3">
+      <div className="mb-6 rounded-lg border border-border bg-card p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-xs font-medium text-muted-foreground">OS Permission Status:</span>
@@ -1248,59 +1221,63 @@ export function NotificationSettings() {
         </div>
       </div>
 
-      <div className="space-y-1">
+      <div className="mb-5 flex items-center justify-between border-b border-border pb-3">
+        <h3 className="text-[12px] font-semibold">Alerts & Sounds</h3>
+        <button
+          type="button"
+          onClick={() => resetSettings()}
+          className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Reset to defaults"
+        >
+          <RotateCcw className="size-3" />
+          Reset to defaults
+        </button>
+      </div>
+
+      <div className="border-y border-border">
         <SettingRow
-          title="Enable Notifications"
+          label="Enable Notifications"
           description="Master toggle for all desktop notifications and audio cues."
         >
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              aria-label="Enable Notifications"
-              checked={settings.enabled}
-              onChange={(e) => updateSettings({ enabled: e.target.checked })}
-              className="sr-only peer"
-            />
-            <div className="w-9 h-5 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary" />
-          </label>
+          <input
+            type="checkbox"
+            aria-label="Enable Notifications"
+            checked={settings.enabled}
+            onChange={(e) => updateSettings({ enabled: e.target.checked })}
+            className="size-4 accent-foreground"
+          />
         </SettingRow>
 
         <SettingRow
-          title="Agent Task Complete"
+          label="Agent Task Complete"
           description="Notify when background agent tasks transition to waiting or done."
         >
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              aria-label="Agent Task Complete"
-              checked={settings.agentTaskComplete}
-              disabled={!settings.enabled}
-              onChange={(e) => updateSettings({ agentTaskComplete: e.target.checked })}
-              className="sr-only peer"
-            />
-            <div className="w-9 h-5 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary" />
-          </label>
+          <input
+            type="checkbox"
+            aria-label="Agent Task Complete"
+            checked={settings.agentTaskComplete}
+            disabled={!settings.enabled}
+            onChange={(e) => updateSettings({ agentTaskComplete: e.target.checked })}
+            className="size-4 accent-foreground"
+          />
         </SettingRow>
 
         <SettingRow
-          title="Terminal Bell"
+          label="Terminal Bell"
           description="Notify when background terminal sessions produce a bell signal."
         >
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              aria-label="Terminal Bell"
-              checked={settings.terminalBell}
-              disabled={!settings.enabled}
-              onChange={(e) => updateSettings({ terminalBell: e.target.checked })}
-              className="sr-only peer"
-            />
-            <div className="w-9 h-5 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary" />
-          </label>
+          <input
+            type="checkbox"
+            aria-label="Terminal Bell"
+            checked={settings.terminalBell}
+            disabled={!settings.enabled}
+            onChange={(e) => updateSettings({ terminalBell: e.target.checked })}
+            className="size-4 accent-foreground"
+          />
         </SettingRow>
 
         <SettingRow
-          title="Notification Sound"
+          label="Notification Sound"
           description="Audio played when a desktop notification is dispatched."
         >
           <div className="flex flex-col gap-2">
@@ -1309,7 +1286,7 @@ export function NotificationSettings() {
               value={settings.customSoundId}
               disabled={!settings.enabled}
               onChange={(e) => updateSettings({ customSoundId: e.target.value })}
-              className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none"
+              className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors focus:border-ring"
             >
               <option value="system">System Default</option>
               <option value="none">None (Mute)</option>
@@ -1324,7 +1301,7 @@ export function NotificationSettings() {
                   type="button"
                   aria-label="Browse custom audio file"
                   onClick={handlePickAudio}
-                  className="px-2 py-1 text-xs border border-border rounded hover:bg-accent"
+                  className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
                   Browse...
                 </button>
@@ -1332,7 +1309,7 @@ export function NotificationSettings() {
                   type="button"
                   onClick={handlePreviewSound}
                   disabled={!settings.customSoundPath}
-                  className="px-2 py-1 text-xs border border-border rounded hover:bg-accent"
+                  className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
                   Preview
                 </button>
@@ -1342,7 +1319,7 @@ export function NotificationSettings() {
         </SettingRow>
 
         <SettingRow
-          title="Volume"
+          label="Volume"
           description="Adjust the playback volume of notification alerts."
         >
           <div className="flex items-center gap-3">
@@ -1355,7 +1332,7 @@ export function NotificationSettings() {
               value={settings.customSoundVolume}
               disabled={!settings.enabled || settings.customSoundId === "none"}
               onChange={(e) => updateSettings({ customSoundVolume: parseFloat(e.target.value) })}
-              className="w-32 accent-primary"
+              className="w-32 accent-foreground"
             />
             <span className="text-xs text-muted-foreground w-8">
               {Math.round(settings.customSoundVolume * 100)}%
@@ -1364,14 +1341,14 @@ export function NotificationSettings() {
         </SettingRow>
 
         <SettingRow
-          title="Test Notification"
+          label="Test Notification"
           description="Send a sample notification immediately to verify OS delivery."
         >
           <button
             type="button"
             onClick={handleTestNotification}
             disabled={isTesting}
-            className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+            className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 shadow-sm transition-colors disabled:opacity-50"
           >
             {isTesting ? "Sending..." : "Send Test Notification"}
           </button>
@@ -1537,7 +1514,7 @@ function RemoteAccessSettings() {
             <button
               onClick={() => handleToggle(!status?.enabled)}
               disabled={loading}
-              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+              className={`h-7 rounded-md border border-transparent px-2.5 text-[11px] font-medium transition-colors ${
                 status?.enabled
                   ? "bg-primary text-primary-foreground hover:bg-primary/90"
                   : "bg-muted text-muted-foreground hover:bg-muted/80"
@@ -1592,7 +1569,7 @@ function RemoteAccessSettings() {
                         setPinCopied(false);
                         void generatePairing();
                       }}
-                      className="px-2.5 py-1 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 text-xs font-medium transition-colors"
+                      className="h-7 rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 px-2.5 text-[11px] font-medium transition-colors"
                     >
                       Retry
                     </button>
@@ -1606,7 +1583,7 @@ function RemoteAccessSettings() {
                         setPinCopied(false);
                         void generatePairing();
                       }}
-                      className="px-3 py-1.5 rounded bg-primary text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                      className="h-7 rounded-md bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 shadow-sm transition-colors"
                     >
                       Generate QR Code
                     </button>
@@ -1714,14 +1691,14 @@ function RemoteAccessSettings() {
                         type="button"
                         aria-label={`Confirm revoke ${dev.name || dev.id}`}
                         onClick={() => void handleRevoke(dev.id)}
-                        className="h-7 rounded bg-destructive px-2 text-[11px] font-medium text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                        className="h-7 rounded-md bg-destructive px-2 text-[11px] font-medium text-destructive-foreground hover:bg-destructive/90 transition-colors"
                       >
                         Confirm Revoke
                       </button>
                       <button
                         type="button"
                         onClick={() => setConfirmRevokeId(null)}
-                        className="h-7 rounded border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent transition-colors"
+                        className="h-7 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent transition-colors"
                       >
                         Cancel
                       </button>
@@ -1731,7 +1708,7 @@ function RemoteAccessSettings() {
                       type="button"
                       aria-label={`Revoke device ${dev.name || dev.id}`}
                       onClick={() => setConfirmRevokeId(dev.id)}
-                      className="inline-flex h-7 items-center gap-1 rounded border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-destructive transition-colors"
+                      className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-destructive transition-colors"
                     >
                       <Trash2 className="size-3" />
                       Revoke
@@ -1828,7 +1805,7 @@ export function AgentsSettings() {
             <button
               type="button"
               onClick={() => setDefaultAgent(null)}
-              className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+              className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-medium transition-colors ${
                 settings.defaultAgentId === null
                   ? "border-primary bg-primary text-primary-foreground"
                   : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1840,7 +1817,7 @@ export function AgentsSettings() {
             <button
               type="button"
               onClick={() => setDefaultAgent("none")}
-              className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+              className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-medium transition-colors ${
                 settings.defaultAgentId === "none"
                   ? "border-primary bg-primary text-primary-foreground"
                   : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1857,7 +1834,7 @@ export function AgentsSettings() {
                   key={agent.name}
                   type="button"
                   onClick={() => setDefaultAgent(agent.name)}
-                  className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+                  className={`no-drag flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-medium transition-colors ${
                     isSelected
                       ? "border-primary bg-primary text-primary-foreground"
                       : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1891,7 +1868,7 @@ export function AgentsSettings() {
           </button>
         </div>
 
-        <div className="divide-y divide-border/40 border-y border-border">
+        <div className="divide-y divide-border border-y border-border">
           {resolvedAgents.map((agent) => {
             const isExpanded = Boolean(expandedAgents[agent.name]);
             const displayName = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
@@ -1945,7 +1922,7 @@ export function AgentsSettings() {
                 </div>
 
                 {isExpanded ? (
-                  <div className="mt-3 pl-5 space-y-3 rounded-md bg-muted/30 p-3 border border-border/50">
+                  <div className="mt-3 pl-5 space-y-3 rounded-md bg-muted/30 p-3 border border-border">
                     <div>
                       <label htmlFor={`agent-cmd-${agent.name}`} className="block text-[11px] font-medium text-muted-foreground mb-1">
                         Command
@@ -1982,28 +1959,5 @@ export function AgentsSettings() {
         </div>
       </div>
     </section>
-  );
-}
-
-function SettingRow({
-  label,
-  title,
-  description,
-  children,
-}: {
-  label?: string;
-  title?: string;
-  description?: string;
-  children: React.ReactNode;
-}) {
-  const heading = title ?? label ?? "";
-  return (
-    <div className="flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0">
-      <div className="space-y-0.5 max-w-[480px]">
-        <div className="text-xs font-medium text-foreground">{heading}</div>
-        {description ? <p className="text-[11px] text-muted-foreground">{description}</p> : null}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
   );
 }

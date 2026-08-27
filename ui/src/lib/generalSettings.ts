@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { GENERAL_SETTINGS_STORAGE_KEY, getMigratedItem } from "./storageKeys";
+import {
+  GENERAL_SETTINGS_STORAGE_KEY,
+  SIDEBAR_OPEN_STORAGE_KEY,
+  getMigratedItem,
+} from "./storageKeys";
 
 export type GeneralSettings = {
   confirmCloseTab: boolean;
@@ -70,6 +74,24 @@ export function resetGeneralSettings(storage: Storage | null = browserStorage())
     window.dispatchEvent(new CustomEvent<GeneralSettings>(GENERAL_SETTINGS_EVENT, { detail: next }));
   }
   return next;
+}
+
+export function loadSidebarOpenStartup(storage: Storage | null = browserStorage()): boolean {
+  try {
+    const raw = getMigratedItem(SIDEBAR_OPEN_STORAGE_KEY, storage);
+    return raw !== null ? raw !== "false" : true;
+  } catch {
+    return true;
+  }
+}
+
+export function saveSidebarOpenStartup(open: boolean, storage: Storage | null = browserStorage()): boolean {
+  try {
+    storage?.setItem(SIDEBAR_OPEN_STORAGE_KEY, String(open));
+  } catch (error) {
+    console.warn("Failed to persist sidebar open startup preference", error);
+  }
+  return open;
 }
 
 export function useGeneralSettings() {

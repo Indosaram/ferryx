@@ -71,12 +71,12 @@ const unsupportedLauncher: CliLauncherStatus = {
   isSupported: false,
 };
 
-async function renderBrowserSettings() {
-  const { BrowserSettings } = await import("./SettingsDialog");
-  return render(<BrowserSettings />);
+async function renderGeneralSettings() {
+  const { GeneralSettings } = await import("./SettingsDialog");
+  return render(<GeneralSettings />);
 }
 
-describe("Settings > Browser Ferryx CLI launcher", () => {
+describe("Settings > General Ferryx CLI launcher", () => {
   beforeEach(() => {
     cleanup();
     localStorage.clear();
@@ -88,7 +88,7 @@ describe("Settings > Browser Ferryx CLI launcher", () => {
   afterEach(cleanup);
 
   it("shows the launcher location and opt-in install control when missing", async () => {
-    await renderBrowserSettings();
+    await renderGeneralSettings();
 
     expect(await screen.findByText("Ferryx CLI")).toBeInTheDocument();
     expect(screen.getByText(missingLauncher.launcherPath)).toBeInTheDocument();
@@ -98,7 +98,7 @@ describe("Settings > Browser Ferryx CLI launcher", () => {
 
   it("installs the launcher and renders the returned installed state", async () => {
     installCliLauncher.mockResolvedValue(installedLauncher);
-    await renderBrowserSettings();
+    await renderGeneralSettings();
 
     fireEvent.click(await screen.findByRole("button", { name: "Install Ferryx CLI" }));
 
@@ -114,7 +114,7 @@ describe("Settings > Browser Ferryx CLI launcher", () => {
         resolveInstall = resolve;
       }),
     );
-    await renderBrowserSettings();
+    await renderGeneralSettings();
 
     fireEvent.click(await screen.findByRole("button", { name: "Install Ferryx CLI" }));
 
@@ -127,7 +127,7 @@ describe("Settings > Browser Ferryx CLI launcher", () => {
 
   it("shows an accessible backend installation failure", async () => {
     installCliLauncher.mockRejectedValue(new Error("launcher path contains a regular file"));
-    await renderBrowserSettings();
+    await renderGeneralSettings();
 
     fireEvent.click(await screen.findByRole("button", { name: "Install Ferryx CLI" }));
 
@@ -137,14 +137,14 @@ describe("Settings > Browser Ferryx CLI launcher", () => {
 
   it("does not offer a desktop-only install outside supported runtimes", async () => {
     getCliLauncherStatus.mockResolvedValue(unsupportedLauncher);
-    await renderBrowserSettings();
+    await renderGeneralSettings();
 
     expect(await screen.findByText(/available in the ferryx desktop app/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Install Ferryx CLI" })).not.toBeInTheDocument();
   });
 
   it("states that PATH and shell profiles are never changed automatically", async () => {
-    await renderBrowserSettings();
+    await renderGeneralSettings();
 
     expect(await screen.findByText(/does not alter shell profiles or PATH/i)).toBeInTheDocument();
     expect(screen.getByText(/Ensure/)).toHaveTextContent("~/.local/bin");
