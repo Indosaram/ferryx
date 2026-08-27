@@ -39,6 +39,10 @@ class Catcher extends React.Component<{ onError: () => void; children: React.Rea
   render() { return this.state.failed ? null : this.props.children; }
 }
 function DemoWindow() {
+  // Phones get a terminal-only hero: the 236px sidebar plus a side-by-side split leaves
+  // ~80px per pane on a 390px viewport, so narrow visitors see just the terminal.
+  // Decided once at mount; the demo never re-stages, so rotation keeps the initial shape.
+  const [isNarrow] = useState(() => window.matchMedia("(max-width: 639px)").matches);
   const [projects] = useState([project]);
   const store = useWorkspaceStore({ workspaceId: project.workspaceId });
   const { state } = store;
@@ -52,6 +56,10 @@ function DemoWindow() {
   // and the await below leaves a window where a ref alone still admits a second tab.
   useEffect(() => {
     if (splitStagedRef.current) return;
+    if (isNarrow) {
+      splitStagedRef.current = true;
+      return;
+    }
     if (state.layout.tabs.some((tab) => tab.kind === "browser")) {
       splitStagedRef.current = true;
       return;
@@ -64,7 +72,7 @@ function DemoWindow() {
       const browserTabId = await store.createBrowserTab(DEMO_BROWSER_URL, "Preview");
       if (browserTabId) store.moveTabToSplit(browserTabId, groupId, "horizontal", "second");
     })().catch(reportRuntimeError);
-  }, [state.layout, store, reportRuntimeError]);
+  }, [isNarrow, state.layout, store, reportRuntimeError]);
 
   const browser = useMemo(() => state.layout.tabs.find((tab): tab is BrowserTab => tab.kind === "browser"), [state.layout]);
 
@@ -87,6 +95,7 @@ function DemoWindow() {
   }, [state.layout]);
   // The browser pane mounts after this effect's first run, so retry until it exists.
   useEffect(() => {
+    if (isNarrow) return;
     const attach = () => {
       const viewport = document.querySelector('[data-testid="browser-viewport"]');
       if (!viewport) return false;
@@ -102,14 +111,14 @@ function DemoWindow() {
     });
     observer.observe(document.body, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [browser?.url, state.layout]);
+  }, [isNarrow, browser?.url, state.layout]);
   const action = (fn: (...args: any[]) => any) => (...args: any[]) => void Promise.resolve(fn(...args)).catch(reportRuntimeError);
   return <div className="demo-locked-split relative h-[560px] overflow-hidden rounded-[20px] ring-1 ring-black/10 shadow-window bg-background">
-    <div className="flex h-full min-h-0 select-none font-sans text-foreground"><Sidebar open projects={projects} activeProjectId={project.workspaceId} worktrees={state.worktrees} agents={store.agents} activePath={state.activeWorktreePath ?? ""} onSelectWorktree={(w) => void store.ensureTabForWorktree(w)} onCreateWorktree={() => undefined} onOpenCommandPalette={() => undefined} />
-      <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"><TerminalSplitView layout={state.layout} sessions={state.sessions} unreadTabIds={state.unreadTabIds} activityByTabId={store.tabActivity} agents={DEMO_AGENTS} defaultAgentId="claude" onOpenSettings={() => setSettingsOpen(true)} onLaunchAgent={() => { const w = state.worktrees[0]; if (w) void store.openTab(w); }} onActivateTab={store.activateTab} onCloseTab={action(store.closeTab)} onMoveTabToGroup={store.moveTabToGroup} onRenameTab={store.renameTab} onToggleTabPin={store.setTabPinned} onCloseOtherTabs={store.closeOtherTabs} onCloseTabsToRight={store.closeTabsToRight} onCloseTabsToLeft={store.closeTabsToLeft} onSplitPane={() => undefined} onClosePane={() => undefined} onMoveTabToSplit={() => undefined} onSetRatio={store.setPaneRatio} onSetGroupRatio={store.setTabGroupRatio} onSwapPanes={store.swapPanes} onFocusPane={store.focusPane} onAddTab={() => { const w = state.worktrees[0]; if (w) void store.openTab(w); }} onAddBrowserTab={(url) => void store.createBrowserTab(url ?? DEMO_BROWSER_URL)} onNavigateBrowserTab={(id, url) => void store.navigateBrowserTab(id, url)} onReloadBrowserTab={(id) => void store.reloadBrowserTab(id)} onTitleChange={(id, title, session) => store.updateSessionTitleActivity(id, title, session)} /></main>
+    <div className="flex h-full min-h-0 select-none font-sans text-foreground"><Sidebar open={!isNarrow} projects={projects} activeProjectId={project.workspaceId} worktrees={state.worktrees} agents={store.agents} activePath={state.activeWorktreePath ?? ""} onSelectWorktree={(w) => void store.ensureTabForWorktree(w)} onCreateWorktree={() => undefined} onOpenCommandPalette={() => undefined} />
+      <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"><TerminalSplitView layout={state.layout} sessions={state.sessions} unreadTabIds={state.unreadTabIds} activityByTabId={store.tabActivity} agents={DEMO_AGENTS} defaultAgentId="claude" leadingSpacer={isNarrow ? 72 : 0} onOpenSettings={() => setSettingsOpen(true)} onLaunchAgent={() => { const w = state.worktrees[0]; if (w) void store.openTab(w); }} onActivateTab={store.activateTab} onCloseTab={action(store.closeTab)} onMoveTabToGroup={store.moveTabToGroup} onRenameTab={store.renameTab} onToggleTabPin={store.setTabPinned} onCloseOtherTabs={store.closeOtherTabs} onCloseTabsToRight={store.closeTabsToRight} onCloseTabsToLeft={store.closeTabsToLeft} onSplitPane={() => undefined} onClosePane={() => undefined} onMoveTabToSplit={() => undefined} onSetRatio={store.setPaneRatio} onSetGroupRatio={store.setTabGroupRatio} onSwapPanes={store.swapPanes} onFocusPane={store.focusPane} onAddTab={() => { const w = state.worktrees[0]; if (w) void store.openTab(w); }} onAddBrowserTab={(url) => void store.createBrowserTab(url ?? DEMO_BROWSER_URL)} onNavigateBrowserTab={(id, url) => void store.navigateBrowserTab(id, url)} onReloadBrowserTab={(id) => void store.reloadBrowserTab(id)} onTitleChange={(id, title, session) => store.updateSessionTitleActivity(id, title, session)} /></main>
     </div>
-    {/* The desktop window gets native macOS controls; the sidebar only reserves a 72px
-       pad for them, so the web demo draws them into that reserved space. */}
+    {/* The desktop window gets native macOS controls; the sidebar (mobile: the tab strip's
+       leading spacer) reserves a 72px pad, and the demo draws the lights into it. */}
     <div className="pointer-events-none absolute left-0 top-0 z-30 flex h-titlebar items-center gap-2 pl-3.5">
       <i className="h-3 w-3 rounded-full bg-[#ff5f57]" />
       <i className="h-3 w-3 rounded-full bg-[#febc2e]" />
