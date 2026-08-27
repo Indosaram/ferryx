@@ -91,3 +91,9 @@ Create scrollback with `seq 1 200`, then repeatedly increase and decrease the pa
 the split divider. The thumb must change smoothly toward its new size, without oscillating; the
 native terminal surface must not flash. Then click and drag the thumb once to confirm the existing
 scroll interaction still follows output.
+
+### Desktop verification result
+
+On 2026-08-28, the user rechecked the height-resize behavior in Ferryx and reported that it works
+as expected. The thumb remained stable while resizing and existing scrollbar interaction continued
+to work. This supplies the required native AppKit surface observation for the height-resize fix.
