@@ -1,0 +1,21 @@
+# Ported from herdr (/Users/indo/.local/bin/herdr) on 2026-08-28.
+# Source manifest id "cline"; extracted byte-accurately from the embedded corpus.
+id = "cline"
+version = "2026.06.10.1"
+min_engine_version = 1
+updated_at = "2026-06-10T00:00:00Z"
+# Dropped for Ferryx global evaluation: default_cline_working (regex '(?s).+' matched any non-empty screen; also priority -10 < 1).
+
+[[rules]]
+id = "tool_permission"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["let cline use this tool"] },
+  { contains = ["[act mode]", "execute command?", "yes"] },
+  { contains = ["[act mode]", "use this tool?", "yes"] },
+  { contains = ["[plan mode]", "execute command?", "yes"] },
+  { contains = ["[plan mode]", "use this tool?", "yes"] },
+]

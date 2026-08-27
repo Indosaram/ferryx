@@ -1,0 +1,38 @@
+# Ported from herdr (/Users/indo/.local/bin/herdr) on 2026-08-28.
+# Source manifest id "agy"; extracted byte-accurately from the embedded corpus.
+# id renamed agy -> antigravity: the UI resolves a pane's brand icon with
+# resolveAgentLogo(manifest_id), whose key is "antigravity". Keeping "agy" would
+# leave antigravity panes unidentified. herdr's original id is kept as an alias.
+id = "antigravity"
+version = "2026.06.24.1"
+min_engine_version = 1
+updated_at = "2026-06-24T00:00:00Z"
+aliases = ["agy", "antigravity-cli"]
+
+[[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+contains = ["requesting permission for:"]
+any = [
+  { contains = ["do you want to proceed?"] },
+  { contains = ["tab amend", "edit command"] },
+]
+
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+line_regex = ['^\s*[\u2800-\u28FF]+\s+\p{Alphabetic}+\w*ing\b']
+
+[[rules]]
+id = "background_tasks_working"
+state = "working"
+priority = 90
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = ['(?i)·\s*[1-9][0-9]*\s+task']

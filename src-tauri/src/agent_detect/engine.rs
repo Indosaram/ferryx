@@ -103,6 +103,15 @@ pub static SHIPPED_MANIFESTS: &[&str] = &[
     include_str!("manifests/codex.toml"),
     include_str!("manifests/claude.toml"),
     include_str!("manifests/gemini.toml"),
+    // Ported from herdr's embedded corpus 2026-08-28. All manifests are evaluated
+    // globally (see agent_detect/mod.rs), so every rule here must identify a STATE
+    // specifically enough to be safe outside its own agent's pane.
+    include_str!("manifests/antigravity.toml"),
+    include_str!("manifests/cline.toml"),
+    include_str!("manifests/copilot.toml"),
+    include_str!("manifests/cursor.toml"),
+    include_str!("manifests/grok.toml"),
+    include_str!("manifests/kimi.toml"),
 ];
 
 pub fn default_engine() -> &'static DetectionEngine {

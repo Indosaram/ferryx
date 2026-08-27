@@ -420,6 +420,211 @@ all = [
             engine.detect(&gemini_idle, None).map(|d| d.state),
             Some(AgentActivity::Idle)
         );
+
+        // --- ANTIGRAVITY (AGY) ---
+        let agy_working = ScreenInput {
+            rows: vec![
+                "⠋ Analyzing repository structure...".to_string(),
+                "Scanning dependencies...".to_string(),
+            ],
+            title: "antigravity".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&agy_working, None).map(|d| d.state),
+            Some(AgentActivity::Working)
+        );
+
+        let agy_blocked = ScreenInput {
+            rows: vec![
+                "requesting permission for: rm -rf target/".to_string(),
+                "do you want to proceed?".to_string(),
+                "[y]es / [n]o".to_string(),
+            ],
+            title: "antigravity".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&agy_blocked, None).map(|d| d.state),
+            Some(AgentActivity::Blocked)
+        );
+
+        // --- CLINE ---
+        // Cline has only tool_permission (other rules dropped during global evaluation port)
+        let cline_blocked = ScreenInput {
+            rows: vec![
+                "Cline wants to execute a terminal command:".to_string(),
+                "let cline use this tool".to_string(),
+                "1. Approve  2. Reject".to_string(),
+            ],
+            title: "cline".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&cline_blocked, None).map(|d| d.state),
+            Some(AgentActivity::Blocked)
+        );
+
+        // --- COPILOT ---
+        let copilot_working = ScreenInput {
+            rows: vec![
+                "Generating suggestions for optimization...".to_string(),
+                "esc again to cancel".to_string(),
+            ],
+            title: "copilot".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&copilot_working, None).map(|d| d.state),
+            Some(AgentActivity::Working)
+        );
+
+        // Path 1: legacy selection_blocker
+        let copilot_blocked_selection = ScreenInput {
+            rows: vec![
+                "Select action:".to_string(),
+                "❯ 1. Apply suggested edits".to_string(),
+                "esc to cancel · enter to select".to_string(),
+            ],
+            title: "copilot".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&copilot_blocked_selection, None).map(|d| d.state),
+            Some(AgentActivity::Blocked)
+        );
+
+        // Path 2: numeric_confirm_footer_blocked (real capture of Copilot CLI 0.0.375)
+        let copilot_blocked_numeric = ScreenInput {
+            rows: vec![
+                "Do you trust the files in this folder?".to_string(),
+                "❯ 1. Yes".to_string(),
+                "  2. No".to_string(),
+                "Confirm with number keys or ↑↓ keys and Enter, Cancel with Esc".to_string(),
+            ],
+            title: "copilot".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&copilot_blocked_numeric, None).map(|d| d.state),
+            Some(AgentActivity::Blocked)
+        );
+
+        // --- CURSOR ---
+        // NOTE: herdr's `stop_hint_working` ("ctrl+c to stop") is deliberately NOT shipped -
+        // it fabricated Working on any dev-server pane under global evaluation. Cursor's
+        // working coverage comes from spinner_working / background_task_status_working.
+        let cursor_working = ScreenInput {
+            rows: vec![
+                "Updating file src/agent_detect/mod.rs...".to_string(),
+                "⬢ Editing files".to_string(),
+            ],
+            title: "cursor".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&cursor_working, None).map(|d| d.state),
+            Some(AgentActivity::Working)
+        );
+
+        let cursor_blocked = ScreenInput {
+            rows: vec![
+                "Cursor proposing file changes:".to_string(),
+                "write to this file?".to_string(),
+                "proceed (y)".to_string(),
+                "reject & propose changes".to_string(),
+            ],
+            title: "cursor".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&cursor_blocked, None).map(|d| d.state),
+            Some(AgentActivity::Blocked)
+        );
+
+        // --- GROK ---
+        let grok_working = ScreenInput {
+            rows: vec![
+                "⠧ Waiting on subagent… 2.8s   13s ⇣29.7k [stop]".to_string(),
+            ],
+            title: "⠧ grok".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&grok_working, None).map(|d| d.state),
+            Some(AgentActivity::Working)
+        );
+
+        let grok_blocked = ScreenInput {
+            rows: vec![
+                "┃  1 (○) Yes, proceed".to_string(),
+                "┃  2 (○) No, cancel".to_string(),
+                "1/3:select │ Ctrl+o:yolo │ Ctrl+c:cancel".to_string(),
+            ],
+            title: "grok".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&grok_blocked, None).map(|d| d.state),
+            Some(AgentActivity::Blocked)
+        );
+
+        let grok_idle = ScreenInput {
+            rows: vec![
+                "Grok Build ready for input".to_string(),
+                "ctrl+.:shortcuts".to_string(),
+            ],
+            title: "grok".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&grok_idle, None).map(|d| d.state),
+            Some(AgentActivity::Idle)
+        );
+
+        // --- KIMI ---
+        let kimi_working = ScreenInput {
+            rows: vec![
+                "⠋ thinking...".to_string(),
+            ],
+            title: "kimi".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&kimi_working, None).map(|d| d.state),
+            Some(AgentActivity::Working)
+        );
+
+        let kimi_blocked = ScreenInput {
+            rows: vec![
+                "run this command? cargo check".to_string(),
+                "1/2 choose".to_string(),
+                "approve".to_string(),
+                "↵ confirm".to_string(),
+            ],
+            title: "kimi".to_string(),
+        };
+        assert_eq!(
+            engine.detect(&kimi_blocked, None).map(|d| d.state),
+            Some(AgentActivity::Blocked)
+        );
+
+        // Kimi welcome screen must NOT produce Working or Blocked
+        let kimi_welcome = ScreenInput {
+            rows: vec![
+                "┌──────────────────────────────────────────────┐".to_string(),
+                "│ Welcome to Kimi Code CLI!                    │".to_string(),
+                "│ Send /help for help information.             │".to_string(),
+                "│ Directory: /Users/indo/code/project/orca-lite │".to_string(),
+                "│ Session: 550e8400-e29b-41d4-a716-446655440000 │".to_string(),
+                "│ Model: kimi-k1.5                             │".to_string(),
+                "└──────────────────────────────────────────────┘".to_string(),
+            ],
+            title: "kimi".to_string(),
+        };
+        let kimi_welcome_det = engine.detect(&kimi_welcome, None);
+        assert!(
+            kimi_welcome_det.is_none() || kimi_welcome_det.as_ref().map(|d| d.state) == Some(AgentActivity::Idle),
+            "kimi welcome screen must produce None or Idle, got: {kimi_welcome_det:?}"
+        );
+        assert_ne!(
+            kimi_welcome_det.as_ref().map(|d| d.state),
+            Some(AgentActivity::Working),
+            "kimi welcome screen must not fabricate Working"
+        );
+        assert_ne!(
+            kimi_welcome_det.as_ref().map(|d| d.state),
+            Some(AgentActivity::Blocked),
+            "kimi welcome screen must not fabricate Blocked"
+        );
     }
 }
 

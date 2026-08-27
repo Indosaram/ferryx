@@ -1,0 +1,52 @@
+# Ported from herdr (/Users/indo/.local/bin/herdr) on 2026-08-28.
+# Source manifest id "copilot"; extracted byte-accurately from the embedded corpus.
+id = "copilot"
+version = "2026.07.07.1"
+min_engine_version = 1
+updated_at = "2026-07-07T14:15:00Z"
+aliases = ["github-copilot", "ghcs"]
+
+[[rules]]
+id = "selection_blocker"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+all = [
+  { any = [
+    { contains = ["esc to cancel"] },
+    { contains = ["esc cancel"] },
+  ] },
+  { any = [
+    { contains = ["enter to select"] },
+    { contains = ["enter to confirm"] },
+    { contains = ["enter to submit"] },
+    { contains = ["enter accept"] },
+  ] },
+]
+
+# Added 2026-08-28 from a REAL capture of GitHub Copilot CLI 0.0.375 (see
+# docs/evidence/agent-screen-rules/). That build's confirmation footer reads
+# "Confirm with number keys or ↑↓ keys and Enter, Cancel with Esc", which matches
+# none of herdr's ported terms above, so the ported rules alone miss it.
+# Both substrings are required (contains is AND), keeping it safe under global evaluation.
+[[rules]]
+id = "numeric_confirm_footer_blocked"
+state = "blocked"
+priority = 310
+region = "whole_recent"
+visible_blocker = true
+contains = ["confirm with number keys", "cancel with esc"]
+
+[[rules]]
+id = "working_cancel_hint"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+any = [
+  { contains = ["esc to cancel"] },
+  { contains = ["esc cancel"] },
+  { contains = ["esc again to cancel"] },
+  { contains = ["esc interrupt"] }
+]
