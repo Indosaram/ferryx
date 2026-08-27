@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { NativeTerminalBellPayload, NativeTerminalTitlePayload, Worktree } from "../lib/types";
+import type { NativeTerminalAgentStatePayload, NativeTerminalBellPayload, NativeTerminalTitlePayload, Worktree } from "../lib/types";
 
 /**
  * Guards the defect a green suite missed: activity was fed by the legacy `terminal_output` OSC
@@ -11,6 +11,7 @@ import type { NativeTerminalBellPayload, NativeTerminalTitlePayload, Worktree } 
 const nativeListeners = vi.hoisted(() => ({
   title: new Set<(payload: NativeTerminalTitlePayload) => void>(),
   bell: new Set<(payload: NativeTerminalBellPayload) => void>(),
+  agentState: new Set<(payload: NativeTerminalAgentStatePayload) => void>(),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -26,6 +27,10 @@ vi.mock("../lib/tauri", () => ({
   onNativeTerminalBell: vi.fn(async (handler: (payload: NativeTerminalBellPayload) => void) => {
     nativeListeners.bell.add(handler);
     return () => nativeListeners.bell.delete(handler);
+  }),
+  onNativeTerminalAgentState: vi.fn(async (handler: (payload: NativeTerminalAgentStatePayload) => void) => {
+    nativeListeners.agentState.add(handler);
+    return () => nativeListeners.agentState.delete(handler);
   }),
 }));
 

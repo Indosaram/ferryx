@@ -533,3 +533,26 @@ fn current_platform_is_detected() {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     assert_eq!(platform, NotificationPlatform::Other);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_submits_through_user_notifications_not_the_legacy_bridge() {
+    // usernoted refuses to serve one process over both APIs: querying UNUserNotificationCenter for
+    // permission makes us a "modern" client, so submitting over the legacy NSUserNotification
+    // bridge is denied with "You can't mix modern clients with legacy clients". Submission must
+    // therefore use UNUserNotificationCenter too.
+    let content = NotificationContent {
+        title: "Agent finished".into(),
+        body: "omo completed a task".into(),
+    };
+
+    let outcome = crate::notification::permission::macos::submit_notification(&content);
+
+    // An unbundled test binary has no bundle proxy, so UNUserNotificationCenter would raise
+    // NSInternalInconsistencyException. The submitter must refuse cleanly instead of aborting.
+    assert_eq!(
+        outcome,
+        Err("notifications require a bundled .app".to_string()),
+        "unbundled submit must fail cleanly, not raise"
+    );
+}

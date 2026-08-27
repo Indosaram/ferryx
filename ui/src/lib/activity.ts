@@ -7,6 +7,16 @@ export type TerminalActivity = {
   title: string;
   isAgent: boolean;
   agentType?: string;
+  source?: "screen" | "title";
+  /**
+   * The user has already seen this completion, so it must not light an attention dot.
+   *
+   * A `done` state is a request for attention, not a durable property of the session. It is set
+   * when the completion happens on a visible tab and when the user activates the tab, and it is
+   * dropped again by the next `working`/`waiting` turn. The activity entry itself survives so the
+   * tab keeps its agent brand icon.
+   */
+  seen?: boolean;
 };
 
 export type ActivitySummary = {
@@ -43,7 +53,7 @@ export function summarizeActivities(
   for (const activity of activities) {
     if (activity.state === "working") workingCount += 1;
     else if (activity.state === "waiting") waitingCount += 1;
-    else doneCount += 1;
+    else if (!activity.seen) doneCount += 1;
 
     if (activity.agentType !== undefined) {
       const rank = stateRank(activity.state);

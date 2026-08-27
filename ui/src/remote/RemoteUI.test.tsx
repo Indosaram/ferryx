@@ -1,8 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SUPPORTED_AGENT_LOGOS } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
 import { RemoteApp } from "./RemoteApp";
+import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({ sessionId }: { sessionId: string }) => (
@@ -1067,5 +1069,176 @@ describe("Remote UI Components", () => {
     // Must navigate to pairing page and clear token
     expect(await screen.findByPlaceholderText(/6-digit PIN/i)).toBeInTheDocument();
     expect(localStorage.getItem("ferryx_remote_token")).toBeNull();
+  });
+
+  it("normalizeRemoteWorkspaceState parses activityState, agentType, and attention and drops invalid values defensively", () => {
+    const rawState = {
+      activeWorkspaceId: "project-1",
+      activeContext: {
+        workspaceId: "project-1",
+        worktreeSlug: "wt-main",
+        worktreeLabel: "main",
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Claude Agent", activityState: "working", agentType: "claude" },
+          { id: "tab-2", label: "Codex Agent", activityState: "waiting", agentType: "codex" },
+          { id: "tab-3", label: "Omo Agent", activityState: "done", agentType: "omo" },
+          { id: "tab-4", label: "Invalid State", activityState: "unknown_state", agentType: "/bin/sh" },
+          { id: "tab-5", label: "Invalid State 2", activityState: "starting", agentType: "copilot" },
+        ],
+      },
+      projects: [
+        {
+          workspaceId: "project-1",
+          worktrees: [
+            { worktreeSlug: "wt-main", worktreeLabel: "main", attention: "waiting" },
+            { worktreeSlug: "wt-feature", worktreeLabel: "feature", attention: "working" },
+            { worktreeSlug: "wt-done", worktreeLabel: "done-wt", attention: "done" },
+            { worktreeSlug: "wt-invalid", worktreeLabel: "invalid-wt", attention: "unsupported" },
+          ],
+        },
+      ],
+      worktrees: [
+        { worktreeSlug: "wt-main", worktreeLabel: "main", attention: "waiting" },
+      ],
+      sessions: [],
+    };
+
+    const model = normalizeRemoteWorkspaceState(rawState);
+    const tabs = model.context.terminalTabs!;
+    expect(tabs).toHaveLength(5);
+    expect(tabs[0]).toEqual({ id: "tab-1", label: "Claude Agent", activityState: "working", agentType: "claude" });
+    expect(tabs[1]).toEqual({ id: "tab-2", label: "Codex Agent", activityState: "waiting", agentType: "codex" });
+    expect(tabs[2]).toEqual({ id: "tab-3", label: "Omo Agent", activityState: "done", agentType: "omo" });
+    expect(tabs[3]).toEqual({ id: "tab-4", label: "Invalid State" });
+    expect(tabs[4]).toEqual({ id: "tab-5", label: "Invalid State 2", agentType: "copilot" });
+
+    const mainOpt = model.options.find((opt) => opt.worktreeSlug === "wt-main");
+    expect(mainOpt?.attention).toBe("waiting");
+
+    const featOpt = model.options.find((opt) => opt.worktreeSlug === "wt-feature");
+    expect(featOpt?.attention).toBe("working");
+
+    const doneOpt = model.options.find((opt) => opt.worktreeSlug === "wt-done");
+    expect(doneOpt?.attention).toBe("done");
+
+    const invalidOpt = model.options.find((opt) => opt.worktreeSlug === "wt-invalid");
+    expect(invalidOpt?.attention).toBeUndefined();
+  });
+
+  it("tab strip renders state indicators for waiting and working tabs discoverable by accessible name", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithActivity = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", activityState: "working" },
+          { id: "tab-2", label: "Dev Server", activityState: "waiting" },
+          { id: "tab-3", label: "Tests" },
+        ],
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithActivity)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    expect(tablist).toBeInTheDocument();
+
+    const workingTab = within(tablist).getByRole("tab", { name: /editor.*working/i });
+    expect(workingTab).toBeInTheDocument();
+    expect(within(workingTab).getByTestId("tab-working-indicator")).toBeInTheDocument();
+
+    const waitingTab = within(tablist).getByRole("tab", { name: /dev server.*waiting/i });
+    expect(waitingTab).toBeInTheDocument();
+    expect(within(waitingTab).getByTestId("tab-waiting-indicator")).toBeInTheDocument();
+  });
+
+  it("tab strip renders brand logo image for supported agentType and fallback terminal icon for unknown/missing agentType", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithAgents = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Claude Agent", agentType: "claude" },
+          { id: "tab-2", label: "Unknown Agent", agentType: "unsupported-tool" },
+          { id: "tab-3", label: "Plain Terminal" },
+        ],
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithAgents)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const claudeTab = within(tablist).getByRole("tab", { name: /claude agent/i });
+    const unknownTab = within(tablist).getByRole("tab", { name: /unknown agent/i });
+    const plainTab = within(tablist).getByRole("tab", { name: /plain terminal/i });
+
+    // Claude tab has img with claude logo
+    const claudeImg = within(claudeTab).getByTestId("tab-agent-icon");
+    expect(claudeImg).toHaveAttribute("src", SUPPORTED_AGENT_LOGOS.claude);
+    expect(claudeImg).toHaveAttribute("data-agent-type", "claude");
+    expect(within(claudeTab).queryByTestId("tab-terminal-icon")).not.toBeInTheDocument();
+
+    // Unknown agent and plain tab do not have agent logo img, they have terminal fallback icon
+    const unknownIcon = within(unknownTab).getByTestId("tab-terminal-icon");
+    expect(unknownIcon).toBeInTheDocument();
+    expect(within(unknownTab).queryByTestId("tab-agent-icon")).not.toBeInTheDocument();
+
+    const plainIcon = within(plainTab).getByTestId("tab-terminal-icon");
+    expect(plainIcon).toBeInTheDocument();
+    expect(within(plainTab).queryByTestId("tab-agent-icon")).not.toBeInTheDocument();
+  });
+
+  it("context selector exposes worktree attention in its accessible name", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithAttention = {
+      ...focusedState,
+      projects: [
+        {
+          workspaceId: "ferryx-ui",
+          worktrees: [
+            { worktreeSlug: "main", worktreeLabel: "main", attention: "waiting" },
+          ],
+        },
+        {
+          workspaceId: "api-service",
+          worktrees: [
+            { worktreeSlug: "feature/remote-safe", worktreeLabel: "feature/remote-safe", attention: "working" },
+          ],
+        },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithAttention)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
+
+    // The worktree with waiting attention exposes "waiting" in its button accessible name
+    const waitingOption = within(selector).getByRole("button", {
+      name: /ferryx-ui.*main.*waiting/i,
+    });
+    expect(waitingOption).toBeInTheDocument();
+
+    const workingOption = within(selector).getByRole("button", {
+      name: /api-service.*feature\/remote-safe.*working/i,
+    });
+    expect(workingOption).toBeInTheDocument();
   });
 });

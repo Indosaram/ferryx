@@ -78,6 +78,10 @@ async fn setup_test_daemon() -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHa
     (dir, client, server_task)
 }
 
+// A real login shell must start before it can echo, so this bounds the await on the
+// expected output rather than the shell's startup cost, which varies with machine load.
+const REAL_SHELL_OUTPUT_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+
 #[tokio::test]
 async fn tauri_mock_terminal_events_use_registered_workspace() {
     let (repo, registry) = setup_workspace();
@@ -127,7 +131,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
     .expect("write");
 
     let mut collected = Vec::new();
-    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+    tokio::time::timeout(REAL_SHELL_OUTPUT_DEADLINE, async {
         while !String::from_utf8_lossy(&collected).contains("hello_orca_terminal") {
             let payload = rx_event.recv().await.expect("terminal output");
             assert_eq!(payload.session_id, spawned.session_id);
@@ -208,7 +212,7 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
     .expect("write");
 
     let mut collected = Vec::new();
-    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+    tokio::time::timeout(REAL_SHELL_OUTPUT_DEADLINE, async {
         while !String::from_utf8_lossy(&collected).contains("initial_attach_test") {
             let payload = rx_event.recv().await.expect("output event");
             assert_eq!(payload.session_id, spawned.session_id);
@@ -392,7 +396,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
     .expect("write raw bytes");
 
     let mut raw = Vec::new();
-    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+    tokio::time::timeout(REAL_SHELL_OUTPUT_DEADLINE, async {
         while !raw.windows(2).any(|window| window == [0xff, 0xfe]) {
             let payload = output_rx.recv().await.expect("output event");
             assert_eq!(payload.session_id, spawned.session_id);
@@ -518,7 +522,7 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
 
     let mut event_count = 0;
     let mut collected = Vec::new();
-    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+    tokio::time::timeout(REAL_SHELL_OUTPUT_DEADLINE, async {
         while !String::from_utf8_lossy(&collected).contains("LINE_20") {
             let payload = output_rx.recv().await.expect("output event");
             assert_eq!(payload.session_id, spawned.session_id);

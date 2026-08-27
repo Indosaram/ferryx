@@ -10,10 +10,13 @@ import {
   X,
 } from "lucide-react";
 import React, { useMemo, useState, type ReactNode } from "react";
+import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 
 export type RemoteTerminalTabInfo = {
   id: string;
   label: string;
+  activityState?: "working" | "waiting" | "done";
+  agentType?: string;
 };
 
 export type RemoteTerminalItem = {
@@ -38,6 +41,7 @@ export type RemoteContextOption = {
   worktreeSlug: string | null;
   worktreeLabel: string | null;
   tabId?: string | null;
+  attention?: "working" | "waiting" | "done";
 };
 
 export type RemoteWorkspaceModel = {
@@ -81,13 +85,34 @@ function terminal(value: unknown): RemoteTerminalItem | null {
   };
 }
 
+function parseActivityState(value: unknown): "working" | "waiting" | "done" | undefined {
+  if (value === "working" || value === "waiting" || value === "done") {
+    return value;
+  }
+  return undefined;
+}
+
+function attentionRank(state?: "working" | "waiting" | "done"): number {
+  if (state === "waiting") return 3;
+  if (state === "working") return 2;
+  if (state === "done") return 1;
+  return 0;
+}
+
 function tabItem(value: unknown): RemoteTerminalTabInfo | null {
   const item = record(value);
   const id = safeContextText(item?.id ?? item?.tabId);
   const rawLabel = item?.label ?? item?.tabLabel ?? item?.title;
   const label = safeContextText(rawLabel) ?? "Terminal";
   if (!id) return null;
-  return { id, label };
+  const activityState = parseActivityState(item?.activityState ?? item?.activity_state ?? item?.state);
+  const agentType = safeContextText(item?.agentType ?? item?.agent_type) ?? undefined;
+  return {
+    id,
+    label,
+    ...(activityState ? { activityState } : {}),
+    ...(agentType ? { agentType } : {}),
+  };
 }
 
 function tabItems(value: unknown): RemoteTerminalTabInfo[] {
@@ -103,16 +128,25 @@ function contextOption(value: unknown, fallbackWorkspaceId: string | null): Remo
   if (!workspaceId) return null;
   const worktreeSlug = safeContextText(item.worktreeSlug ?? item.slug);
   const worktreeLabel = safeContextText(item.worktreeLabel ?? item.label ?? item.branch);
-  return { workspaceId, worktreeSlug, worktreeLabel: worktreeLabel ?? worktreeSlug };
+  const attention = parseActivityState(item.attention ?? item.activityState ?? item.activity_state);
+  return {
+    workspaceId,
+    worktreeSlug,
+    worktreeLabel: worktreeLabel ?? worktreeSlug,
+    ...(attention ? { attention } : {}),
+  };
 }
 
 function appendOption(options: RemoteContextOption[], option: RemoteContextOption | null) {
   if (!option) return;
   const key = `${option.workspaceId}\u0000${option.worktreeSlug ?? ""}\u0000${option.worktreeLabel ?? ""}`;
-  if (!options.some((candidate) =>
+  const existing = options.find((candidate) =>
     `${candidate.workspaceId}\u0000${candidate.worktreeSlug ?? ""}\u0000${candidate.worktreeLabel ?? ""}` === key
-  )) {
+  );
+  if (!existing) {
     options.push(option);
+  } else if (option.attention && (!existing.attention || attentionRank(option.attention) > attentionRank(existing.attention))) {
+    existing.attention = option.attention;
   }
 }
 
@@ -122,22 +156,25 @@ function optionFromGitWorktree(value: unknown, workspaceId: string): RemoteConte
 
   const explicitSlug = safeContextText(item.worktreeSlug ?? item.slug);
   const explicitLabel = safeContextText(item.worktreeLabel ?? item.label);
+  const attention = parseActivityState(item.attention ?? item.activityState ?? item.activity_state);
   if (explicitSlug || explicitLabel) {
     return {
       workspaceId,
       worktreeSlug: explicitSlug,
       worktreeLabel: explicitLabel ?? explicitSlug,
+      ...(attention ? { attention } : {}),
     };
   }
 
   const branch = safeContextText(item.branch)?.replace(/^refs\/heads\//, "") ?? null;
-  if (!branch) return { workspaceId, worktreeSlug: null, worktreeLabel: null };
+  if (!branch) return { workspaceId, worktreeSlug: null, worktreeLabel: null, ...(attention ? { attention } : {}) };
   const prefix = `orca/${workspaceId}/`;
   const slug = branch.startsWith(prefix) ? branch.slice(prefix.length) : null;
   return {
     workspaceId,
     worktreeSlug: safeContextText(slug),
     worktreeLabel: safeContextText(slug ?? branch),
+    ...(attention ? { attention } : {}),
   };
 }
 
@@ -246,7 +283,8 @@ function contextName(context: Pick<RemoteContext, "workspaceId" | "worktreeLabel
 }
 
 function optionName(option: RemoteContextOption) {
-  return contextName(option);
+  const name = contextName(option);
+  return option.attention ? `${name} (${option.attention})` : name;
 }
 
 function isCurrentOption(option: RemoteContextOption, context: RemoteContext) {
@@ -355,48 +393,93 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 No selectable desktop contexts are available.
               </p>
             ) : (
-              groupedOptions.map(([workspaceId, options]) => (
-                <section key={workspaceId} className="mb-2 last:mb-0" aria-label={workspaceId}>
-                  <h3 className="px-2 py-1 text-xs font-semibold text-muted-foreground">{workspaceId}</h3>
-                  <div className="space-y-1">
-                    {options.map((option) => {
-                      const active = isCurrentOption(option, model.context);
-                      const loading = pending
-                        ? pending.workspaceId === option.workspaceId &&
-                          pending.worktreeSlug === option.worktreeSlug &&
-                          pending.worktreeLabel === option.worktreeLabel
-                        : false;
-                      const worktree = option.worktreeLabel ?? option.worktreeSlug;
-                      return (
-                        <button
-                          key={`${option.workspaceId}:${option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`}
-                          type="button"
-                          aria-current={active ? "true" : undefined}
-                          aria-label={optionName(option)}
-                          disabled={pending !== null}
-                          onClick={() => onSelect(option)}
-                          className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-                        >
-                          <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
-                            {loading ? (
-                              <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                            ) : (
-                              <GitBranch className="size-4" aria-hidden="true" />
-                            )}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-medium">{workspaceId}</span>
-                            <span className="block truncate font-mono text-xs text-muted-foreground">
-                              {worktree ?? "Primary worktree"}
+              groupedOptions.map(([workspaceId, options]) => {
+                const projectAttention = options.reduce<"working" | "waiting" | "done" | undefined>((acc, opt) => {
+                  if (!opt.attention) return acc;
+                  if (!acc || attentionRank(opt.attention) > attentionRank(acc)) return opt.attention;
+                  return acc;
+                }, undefined);
+
+                return (
+                  <section key={workspaceId} className="mb-2 last:mb-0" aria-label={workspaceId}>
+                    <div className="flex items-center justify-between px-2 py-1">
+                      <h3 className="text-xs font-semibold text-muted-foreground">{workspaceId}</h3>
+                      {projectAttention === "working" ? (
+                        <LoaderCircle
+                          aria-hidden="true"
+                          className="size-3 animate-spin text-status-working motion-reduce:animate-none"
+                        />
+                      ) : projectAttention === "waiting" ? (
+                        <span
+                          aria-hidden="true"
+                          className="size-1.5 rounded-full bg-status-warning ring-2 ring-status-warning/20"
+                        />
+                      ) : projectAttention === "done" ? (
+                        <span
+                          aria-hidden="true"
+                          className="size-1.5 rounded-full bg-status-success"
+                        />
+                      ) : null}
+                    </div>
+                    <div className="space-y-1">
+                      {options.map((option) => {
+                        const active = isCurrentOption(option, model.context);
+                        const loading = pending
+                          ? pending.workspaceId === option.workspaceId &&
+                            pending.worktreeSlug === option.worktreeSlug &&
+                            pending.worktreeLabel === option.worktreeLabel
+                          : false;
+                        const worktree = option.worktreeLabel ?? option.worktreeSlug;
+                        return (
+                          <button
+                            key={`${option.workspaceId}:${option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`}
+                            type="button"
+                            aria-current={active ? "true" : undefined}
+                            aria-label={optionName(option)}
+                            disabled={pending !== null}
+                            onClick={() => onSelect(option)}
+                            className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                          >
+                            <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+                              {loading ? (
+                                <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                              ) : (
+                                <GitBranch className="size-4" aria-hidden="true" />
+                              )}
                             </span>
-                          </span>
-                          {active ? <Check className="size-4 shrink-0 text-status-success" aria-label="Active" /> : null}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-              ))
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm font-medium">{workspaceId}</span>
+                              <span className="block truncate font-mono text-xs text-muted-foreground">
+                                {worktree ?? "Primary worktree"}
+                              </span>
+                            </span>
+                            {option.attention === "working" ? (
+                              <LoaderCircle
+                                aria-hidden="true"
+                                data-testid="worktree-working-indicator"
+                                className="size-3.5 shrink-0 animate-spin text-status-working motion-reduce:animate-none"
+                              />
+                            ) : option.attention === "waiting" ? (
+                              <span
+                                aria-hidden="true"
+                                data-testid="worktree-waiting-indicator"
+                                className="size-2 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20"
+                              />
+                            ) : option.attention === "done" ? (
+                              <span
+                                aria-hidden="true"
+                                data-testid="worktree-done-indicator"
+                                className="size-2 shrink-0 rounded-full bg-status-success"
+                              />
+                            ) : null}
+                            {active ? <Check className="size-4 shrink-0 text-status-success" aria-label="Active" /> : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })
             )}
           </div>
         </div>
@@ -463,12 +546,16 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             >
               {tabs.map((tab) => {
                 const isActive = tab.id === model.context.activeTabId;
+                const tabAriaLabel = tab.activityState ? `${tab.label} (${tab.activityState})` : tab.label;
+                const logo = resolveAgentLogo(tab.agentType);
+                const isMonochrome = isMonochromeAgentLogo(tab.agentType);
+
                 return (
                   <button
                     key={tab.id}
                     role="tab"
                     aria-selected={isActive}
-                    aria-label={tab.label}
+                    aria-label={tabAriaLabel}
                     disabled={pending !== null}
                     onClick={() => {
                       if (isActive || !model.context.workspaceId) return;
@@ -479,14 +566,44 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                         tabId: tab.id,
                       });
                     }}
-                    className={`flex h-7 min-w-0 max-w-40 items-center gap-1 rounded px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
+                    className={`flex h-7 min-w-0 max-w-40 items-center gap-1.5 rounded px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
                       isActive
                         ? "bg-accent text-accent-foreground font-semibold"
                         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                     }`}
                   >
-                    <TerminalIcon className="size-3 shrink-0 opacity-70" aria-hidden="true" />
+                    {logo ? (
+                      <img
+                        src={logo}
+                        alt=""
+                        aria-hidden="true"
+                        data-testid="tab-agent-icon"
+                        data-agent-type={tab.agentType}
+                        className={`size-3 shrink-0 ${isMonochrome ? "agent-tab-logo--monochrome opacity-80" : ""}`}
+                      />
+                    ) : (
+                      <TerminalIcon data-testid="tab-terminal-icon" className="size-3 shrink-0 opacity-70" aria-hidden="true" />
+                    )}
                     <span className="truncate">{tab.label}</span>
+                    {tab.activityState === "working" ? (
+                      <LoaderCircle
+                        aria-hidden="true"
+                        data-testid="tab-working-indicator"
+                        className="size-2.5 shrink-0 animate-spin text-status-working motion-reduce:animate-none"
+                      />
+                    ) : tab.activityState === "waiting" ? (
+                      <span
+                        aria-hidden="true"
+                        data-testid="tab-waiting-indicator"
+                        className="size-1.5 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20"
+                      />
+                    ) : tab.activityState === "done" ? (
+                      <span
+                        aria-hidden="true"
+                        data-testid="tab-done-indicator"
+                        className="size-1.5 shrink-0 rounded-full bg-status-success"
+                      />
+                    ) : null}
                   </button>
                 );
               })}

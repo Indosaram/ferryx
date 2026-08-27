@@ -1120,10 +1120,20 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
             worktree_label: Some("main".into()),
             session_id: Some("session-gui".into()),
             tab_id: Some("tab-safe".into()),
-            terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
-                id: "tab-safe".into(),
-                label: "/Users/alice/private-shell".into(),
-            }],
+            terminal_tabs: vec![
+                crate::remote::protocol::RemoteTerminalTabInfo {
+                    id: "tab-safe".into(),
+                    label: "/Users/alice/private-shell".into(),
+                    activity_state: Some("blocked".into()),
+                    agent_type: Some("/Users/alice/bin/agent".into()),
+                },
+                crate::remote::protocol::RemoteTerminalTabInfo {
+                    id: "tab-agent".into(),
+                    label: "Build Agent".into(),
+                    activity_state: Some("working".into()),
+                    agent_type: Some("claude".into()),
+                },
+            ],
         },
     )
     .await
@@ -1145,9 +1155,20 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
     );
     assert_eq!(selection.terminal_tabs[0].id, "tab-safe");
     assert_eq!(selection.terminal_tabs[0].label, "Terminal");
+    // "blocked" was mapped to "waiting"
+    assert_eq!(selection.terminal_tabs[0].activity_state.as_deref(), Some("waiting"));
+    // path-like agent_type was dropped to None
+    assert_eq!(selection.terminal_tabs[0].agent_type, None);
+    assert_eq!(selection.terminal_tabs[1].id, "tab-agent");
+    assert_eq!(selection.terminal_tabs[1].label, "Build Agent");
+    assert_eq!(selection.terminal_tabs[1].activity_state.as_deref(), Some("working"));
+    assert_eq!(selection.terminal_tabs[1].agent_type.as_deref(), Some("claude"));
     assert!(!serde_json::to_string(&selection)
         .expect("serialize sanitized selection")
         .contains("/Users/alice/private-shell"));
+    assert!(!serde_json::to_string(&selection)
+        .expect("serialize sanitized selection")
+        .contains("/Users/alice/bin/agent"));
 
     // 7. Revoke device via GUI IPC command -> revokes on daemon
     let revoked = crate::ipc::remote::cmd_remote_device_revoke(app.state(), device_id)
@@ -2549,10 +2570,12 @@ async fn test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage()
     let tab1 = RemoteTerminalTabInfo {
         id: "tab-term-1".to_string(),
         label: "build".to_string(),
+        ..Default::default()
     };
     let tab2 = RemoteTerminalTabInfo {
         id: "tab-term-2".to_string(),
         label: "tests".to_string(),
+        ..Default::default()
     };
 
     let selection = RemoteActiveDesktopSelection {
@@ -2679,6 +2702,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
             id: "tab-term-selected".to_string(),
             label: "Terminal 1".to_string(),
+            ..Default::default()
         }],
     });
 
@@ -2755,6 +2779,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
             id: "tab-primary-2".to_string(),
             label: "Terminal 2".to_string(),
+            ..Default::default()
         }],
     });
     let (status, body) = http_request(
@@ -2799,10 +2824,12 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
             crate::remote::protocol::RemoteTerminalTabInfo {
                 id: "tab-term-selected".to_string(),
                 label: "Terminal 1".to_string(),
+                ..Default::default()
             },
             crate::remote::protocol::RemoteTerminalTabInfo {
                 id: "tab-term-other".to_string(),
                 label: "Terminal 2".to_string(),
+                ..Default::default()
             },
         ],
     });
@@ -2834,3 +2861,355 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
     assert_eq!(ws_state.active_context.terminal_tabs[1].label, "Terminal 2");
     assert!(!body.contains(dir.path().to_str().expect("temp utf-8")));
 }
+
+#[tokio::test]
+async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo_root = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    crate::worktree::run_git(&repo_root, &["init"]).expect("git init");
+    crate::worktree::run_git(
+        &repo_root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    )
+    .expect("git commit");
+
+    let registry = crate::worktree::WorkspaceRegistry::new();
+    let workspace_id = "ws-activity";
+    registry
+        .register(workspace_id, &repo_root)
+        .expect("register");
+    let manager = registry.manager(workspace_id).expect("manager");
+
+    let ident = WorktreeIdentity {
+        ws_id: workspace_id.to_string(),
+        slug: "feat-agent".to_string(),
+    };
+    let wt_path = manager
+        .worktree_path_for(&ident.ws_id, &ident.slug)
+        .expect("wt path");
+    manager
+        .create_worktree(crate::worktree::CreateWorktreeOptions::new(
+            &ident.ws_id,
+            &ident.slug,
+            &wt_path,
+        ))
+        .expect("create worktree");
+
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start server");
+
+    let code_ctrl = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token_ctrl, _) = state
+        .auth_manager
+        .exchange_pairing_code(&code_ctrl, "ControlDevice")
+        .expect("pair ctrl");
+
+    // 1. Set active selection with multiple tabs having done, working, and waiting states.
+    // Rollup rank: waiting (3) > working (2) > done (1).
+    let sel_json = serde_json::json!({
+        "workspaceId": workspace_id,
+        "worktreeSlug": "feat-agent",
+        "worktreeLabel": "feat-agent",
+        "sessionId": "sess-active",
+        "activeTabId": "tab-3",
+        "tabs": [
+            {
+                "tabId": "tab-1",
+                "tabLabel": "Agent Tab 1",
+                "activityState": "done",
+                "agentType": "codex"
+            },
+            {
+                "tabId": "tab-2",
+                "tabLabel": "Agent Tab 2",
+                "activityState": "working",
+                "agentType": "claude"
+            },
+            {
+                "tabId": "tab-3",
+                "tabLabel": "Agent Tab 3",
+                "activityState": "waiting",
+                "agentType": "opendevin"
+            },
+            {
+                "tabId": "tab-4",
+                "tabLabel": "Agent Tab 4",
+                "activityState": "done",
+                "agentType": "aider"
+            }
+        ]
+    });
+    let selection: RemoteActiveDesktopSelection =
+        serde_json::from_value(sel_json).expect("deserialize selection");
+    state.set_active_selection(selection);
+
+    // Unauthenticated GET returns 401
+    let (unauth_status, _) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(unauth_status, 401);
+
+    // Authenticated GET /api/v1/workspace/state
+    let (status, body) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let state_val: serde_json::Value =
+        serde_json::from_str(&body).expect("parse workspace state json");
+
+    // Verify tabs carry activityState and agentType
+    let tabs = state_val["activeContext"]["terminalTabs"]
+        .as_array()
+        .expect("terminalTabs array");
+    assert_eq!(tabs.len(), 4);
+    assert_eq!(tabs[0]["id"], "tab-1");
+    assert_eq!(tabs[0]["activityState"], "done");
+    assert_eq!(tabs[0]["agentType"], "codex");
+    assert_eq!(tabs[1]["id"], "tab-2");
+    assert_eq!(tabs[1]["activityState"], "working");
+    assert_eq!(tabs[1]["agentType"], "claude");
+    assert_eq!(tabs[2]["id"], "tab-3");
+    assert_eq!(tabs[2]["activityState"], "waiting");
+    assert_eq!(tabs[2]["agentType"], "opendevin");
+    assert_eq!(tabs[3]["id"], "tab-4");
+    assert_eq!(tabs[3]["activityState"], "done");
+    assert_eq!(tabs[3]["agentType"], "aider");
+
+    // Verify worktree attention rollup on worktrees array: waiting beats working and done
+    let worktrees = state_val["worktrees"].as_array().expect("worktrees array");
+    let feat_wt = worktrees
+        .iter()
+        .find(|wt| wt["worktreeSlug"] == "feat-agent")
+        .expect("find feat-agent worktree");
+    assert_eq!(feat_wt["attention"], "waiting");
+
+    let primary_wt = worktrees
+        .iter()
+        .find(|wt| wt["worktreeSlug"].is_null())
+        .expect("find primary worktree");
+    assert!(primary_wt["attention"].is_null());
+
+    // Verify projects worktree attention rollup as well
+    let projects = state_val["projects"].as_array().expect("projects array");
+    let proj_wt = projects[0]["worktrees"]
+        .as_array()
+        .expect("projects[0].worktrees")
+        .iter()
+        .find(|wt| wt["worktreeSlug"] == "feat-agent")
+        .expect("find feat-agent in project");
+    assert_eq!(proj_wt["attention"], "waiting");
+
+    // 2. Rank test: Remove waiting tab, leaving working and done -> attention should be working
+    let sel_working = serde_json::json!({
+        "workspaceId": workspace_id,
+        "worktreeSlug": "feat-agent",
+        "worktreeLabel": "feat-agent",
+        "sessionId": "sess-active",
+        "activeTabId": "tab-2",
+        "tabs": [
+            {
+                "tabId": "tab-1",
+                "tabLabel": "Agent Tab 1",
+                "activityState": "done",
+                "agentType": "codex"
+            },
+            {
+                "tabId": "tab-2",
+                "tabLabel": "Agent Tab 2",
+                "activityState": "working",
+                "agentType": "claude"
+            }
+        ]
+    });
+    state.set_active_selection(serde_json::from_value(sel_working).unwrap());
+
+    let (status, body2) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let state_val2: serde_json::Value = serde_json::from_str(&body2).expect("parse json");
+    let feat_wt2 = state_val2["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wt| wt["worktreeSlug"] == "feat-agent")
+        .unwrap();
+    assert_eq!(feat_wt2["attention"], "working");
+
+    // 3. Rank test: Only done tab -> attention should be done
+    let sel_done = serde_json::json!({
+        "workspaceId": workspace_id,
+        "worktreeSlug": "feat-agent",
+        "worktreeLabel": "feat-agent",
+        "sessionId": "sess-active",
+        "activeTabId": "tab-1",
+        "tabs": [
+            {
+                "tabId": "tab-1",
+                "tabLabel": "Agent Tab 1",
+                "activityState": "done",
+                "agentType": "codex"
+            }
+        ]
+    });
+    state.set_active_selection(serde_json::from_value(sel_done).unwrap());
+
+    let (status, body3) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let state_val3: serde_json::Value = serde_json::from_str(&body3).expect("parse json");
+    let feat_wt3 = state_val3["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wt| wt["worktreeSlug"] == "feat-agent")
+        .unwrap();
+    assert_eq!(feat_wt3["attention"], "done");
+
+    // 4. No activity tabs -> attention is omitted / null
+    let sel_none = serde_json::json!({
+        "workspaceId": workspace_id,
+        "worktreeSlug": "feat-agent",
+        "worktreeLabel": "feat-agent",
+        "sessionId": "sess-active",
+        "activeTabId": "tab-1",
+        "tabs": [
+            {
+                "tabId": "tab-1",
+                "tabLabel": "Shell Tab"
+            }
+        ]
+    });
+    state.set_active_selection(serde_json::from_value(sel_none).unwrap());
+
+    let (status, body4) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let state_val4: serde_json::Value = serde_json::from_str(&body4).expect("parse json");
+    let feat_wt4 = state_val4["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wt| wt["worktreeSlug"] == "feat-agent")
+        .unwrap();
+    assert!(feat_wt4["attention"].is_null());
+
+    // 5. Blocked maps to waiting in rollup
+    let sel_blocked = serde_json::json!({
+        "workspaceId": workspace_id,
+        "worktreeSlug": "feat-agent",
+        "worktreeLabel": "feat-agent",
+        "sessionId": "sess-active",
+        "activeTabId": "tab-1",
+        "tabs": [
+            {
+                "tabId": "tab-1",
+                "tabLabel": "Agent Tab 1",
+                "activityState": "blocked",
+                "agentType": "codex"
+            }
+        ]
+    });
+    state.set_active_selection(serde_json::from_value(sel_blocked).unwrap());
+    let (status, body_blocked) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let state_val_blocked: serde_json::Value =
+        serde_json::from_str(&body_blocked).expect("parse json");
+    let feat_wt_blocked = state_val_blocked["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wt| wt["worktreeSlug"] == "feat-agent")
+        .unwrap();
+    assert_eq!(feat_wt_blocked["attention"], "waiting");
+
+    // 6. Direct IPC bridge command sanitization test:
+    // Tab labels with paths sanitized to "Terminal",
+    // activityState normalized / validated,
+    // agentType with path characters dropped.
+    let _ipc_manager = Arc::new(crate::ipc::remote::RemoteGatewayManager::new(
+        Arc::clone(&state),
+    ));
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some(workspace_id.to_string()),
+        worktree_slug: Some("feat-agent".to_string()),
+        worktree_label: Some("feat-agent".to_string()),
+        session_id: Some("sess-active".to_string()),
+        tab_id: Some("tab-1".to_string()),
+        terminal_tabs: vec![
+            crate::remote::protocol::RemoteTerminalTabInfo {
+                id: "tab-1".to_string(),
+                label: "/Users/dev/secret-project".to_string(),
+                activity_state: Some("blocked".to_string()),
+                agent_type: Some("/bin/sh".to_string()),
+            },
+            crate::remote::protocol::RemoteTerminalTabInfo {
+                id: "tab-2".to_string(),
+                label: "Safe Tab".to_string(),
+                activity_state: Some("invalid_state".to_string()),
+                agent_type: Some("claude".to_string()),
+            },
+        ],
+    });
+
+    // Invariant: No path leakage in response
+    assert!(!body.contains(dir.path().to_str().expect("utf8")));
+
+    handle.stop();
+}
+

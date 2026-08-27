@@ -1,5 +1,10 @@
 # Agent Activity Implementation Verification — 2026-08-26
 
+> **Later work supersedes the architecture described here.** The reporting path is no longer inferred
+> from terminal titles alone: the agent reports its own state over a daemon UDS socket. See
+> `docs/AGENT_ACTIVITY_STATE_MODEL_2026-08-27.md`, and
+> `docs/AGENT_ACTIVITY_NOTIFICATION_MANUAL_E2E.md` section J for the checks that path needs.
+
 ## Result
 
 Three agent-activity features were reviewed; only one was reachable from the running app. Activity detection already drove the spinner and status dots, but desktop notifications and agent-type tab icons were complete, tested modules with **zero non-test callers** — dead code behind a green suite. Four correctness bugs sat alongside them.

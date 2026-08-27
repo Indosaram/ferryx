@@ -26,6 +26,82 @@ type RemoteActiveSelectionChange = {
   readonly selection: RemoteActiveSelectionEvent | null;
 };
 
+export type WaitingTabTarget = {
+  readonly tabId?: string | null;
+  readonly label: string;
+  readonly workspaceId: string;
+  readonly worktreeSlug: string | null;
+  readonly worktreeLabel: string | null;
+};
+
+function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] {
+  const targets: WaitingTabTarget[] = [];
+  const seen = new Set<string>();
+
+  const currentWorkspaceId = model.context.workspaceId;
+  const currentWorktreeSlug = model.context.worktreeSlug;
+  const currentWorktreeLabel = model.context.worktreeLabel;
+  const activeTabId = model.context.activeTabId;
+
+  if (currentWorkspaceId && model.context.terminalTabs) {
+    for (const tab of model.context.terminalTabs) {
+      if (tab.activityState === "waiting" && tab.id !== activeTabId) {
+        const key = `${currentWorkspaceId}\u0000${currentWorktreeSlug ?? ""}\u0000${tab.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          targets.push({
+            tabId: tab.id,
+            label: tab.label,
+            workspaceId: currentWorkspaceId,
+            worktreeSlug: currentWorktreeSlug,
+            worktreeLabel: currentWorktreeLabel,
+          });
+        }
+      }
+    }
+  }
+
+  for (const option of model.options) {
+    if (option.attention === "waiting") {
+      const isCurrent =
+        option.workspaceId === currentWorkspaceId &&
+        (option.worktreeSlug ?? option.worktreeLabel) === (currentWorktreeSlug ?? currentWorktreeLabel) &&
+        (!option.tabId || option.tabId === activeTabId);
+      if (!isCurrent) {
+        const key = `${option.workspaceId}\u0000${option.worktreeSlug ?? ""}\u0000${option.tabId ?? ""}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          targets.push({
+            tabId: option.tabId ?? null,
+            label: option.worktreeLabel ?? option.worktreeSlug ?? option.workspaceId,
+            workspaceId: option.workspaceId,
+            worktreeSlug: option.worktreeSlug,
+            worktreeLabel: option.worktreeLabel,
+          });
+        }
+      }
+    }
+  }
+
+  return targets;
+}
+
+function formatAttentionAriaLabel(
+  target: WaitingTabTarget,
+  currentContext: RemoteWorkspaceModel["context"],
+  waitingCount: number,
+): string {
+  const currentWorktree = currentContext.worktreeSlug ?? currentContext.worktreeLabel;
+  const targetWorktree = target.worktreeLabel ?? target.worktreeSlug;
+  const differentWorktree =
+    (target.workspaceId && currentContext.workspaceId && target.workspaceId !== currentContext.workspaceId) ||
+    (Boolean(targetWorktree) && Boolean(currentWorktree) && targetWorktree !== currentWorktree);
+
+  const location = differentWorktree && targetWorktree ? ` (${targetWorktree})` : "";
+  const countSuffix = waitingCount > 1 ? ` (${waitingCount} waiting)` : " (waiting)";
+  return `${target.label}${location}${countSuffix}`;
+}
+
 const EMPTY_MODEL: RemoteWorkspaceModel = {
   context: {
     workspaceId: null,
@@ -278,9 +354,47 @@ export const RemoteApp: React.FC = () => {
     }
   }, [clearPendingSelection, confirmSelection, pending, refreshWorkspace, token]);
 
+  const tabs = model.context.terminalTabs;
+  const activeIndex = tabs && model.context.activeTabId
+    ? tabs.findIndex((tab) => tab.id === model.context.activeTabId)
+    : 0;
+  const currentIndex = activeIndex >= 0 ? activeIndex : 0;
+
+  const handleSwipePreviousTab = useCallback(() => {
+    if (!tabs || tabs.length <= 1 || currentIndex <= 0 || !model.context.workspaceId) return;
+    const prevTab = tabs[currentIndex - 1];
+    if (prevTab) {
+      void selectContext({
+        workspaceId: model.context.workspaceId,
+        worktreeSlug: model.context.worktreeSlug,
+        worktreeLabel: model.context.worktreeLabel,
+        tabId: prevTab.id,
+      });
+    }
+  }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
+
+  const handleSwipeNextTab = useCallback(() => {
+    if (!tabs || tabs.length <= 1 || currentIndex >= tabs.length - 1 || !model.context.workspaceId) return;
+    const nextTab = tabs[currentIndex + 1];
+    if (nextTab) {
+      void selectContext({
+        workspaceId: model.context.workspaceId,
+        worktreeSlug: model.context.worktreeSlug,
+        worktreeLabel: model.context.worktreeLabel,
+        tabId: nextTab.id,
+      });
+    }
+  }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
+
   if (!token) return <PairingPage onPaired={handlePaired} />;
 
   const activeTerminal = model.context.activeTerminal;
+  const waitingTargets = collectWaitingTargets(model);
+  const firstWaiting = waitingTargets.length > 0 ? waitingTargets[0] : null;
+  const waitingCount = waitingTargets.length;
+  const attentionAriaLabel = firstWaiting
+    ? formatAttentionAriaLabel(firstWaiting, model.context, waitingCount)
+    : "";
 
   return (
     <div className="flex h-[100dvh] min-h-screen flex-col overflow-hidden bg-background text-foreground">
@@ -292,13 +406,40 @@ export const RemoteApp: React.FC = () => {
           <h1 className="truncate text-xs font-semibold leading-none">Ferryx Remote</h1>
           <span className="hidden text-[10px] text-muted-foreground sm:inline leading-none">Following Ferryx Desktop</span>
         </div>
-        <button
-          type="button"
-          onClick={disconnect}
-          className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          Disconnect
-        </button>
+        <div className="flex items-center gap-1.5">
+          {firstWaiting ? (
+            <button
+              type="button"
+              data-testid="remote-attention-badge"
+              aria-label={attentionAriaLabel}
+              disabled={pending !== null}
+              onClick={() => {
+                void selectContext({
+                  workspaceId: firstWaiting.workspaceId,
+                  worktreeSlug: firstWaiting.worktreeSlug,
+                  worktreeLabel: firstWaiting.worktreeLabel,
+                  tabId: firstWaiting.tabId,
+                });
+              }}
+              className="flex h-5 items-center gap-1 rounded bg-status-warning/15 px-1.5 text-[11px] font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+            >
+              <span className="size-1.5 rounded-full bg-status-warning ring-2 ring-status-warning/20 motion-reduce:animate-none" aria-hidden="true" />
+              <span className="truncate max-w-28 sm:max-w-40">{firstWaiting.label}</span>
+              {waitingCount > 1 ? (
+                <span className="rounded bg-status-warning/20 px-1 text-[10px] font-mono leading-tight">
+                  {waitingCount}
+                </span>
+              ) : null}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={disconnect}
+            className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Disconnect
+          </button>
+        </div>
       </header>
 
       <RemoteWorkspaceMirror
@@ -313,6 +454,8 @@ export const RemoteApp: React.FC = () => {
             token={token}
             onBack={() => undefined}
             embedded
+            onSwipePreviousTab={handleSwipePreviousTab}
+            onSwipeNextTab={handleSwipeNextTab}
           />
         ) : null}
       </RemoteWorkspaceMirror>

@@ -78,25 +78,60 @@ describe("SortableTab agent icon rendering", () => {
     const agentIcon = screen.getByTestId("tab-agent-icon");
     expect(agentIcon).toBeInTheDocument();
     expect(agentIcon).toHaveAttribute("data-agent-type", "codex");
+    expect(agentIcon.className).toMatch(/agent-tab-logo--monochrome/);
 
     const workingIndicator = screen.getByTestId("tab-working-indicator");
     expect(workingIndicator).toBeInTheDocument();
     expect(workingIndicator.querySelector('[data-status-state="working"]')).toBeInTheDocument();
   });
 
-  it("renders tab-agent-icon with generic fallback for an unknown agentType", () => {
+  it("renders [data-testid='tab-agent-icon'][data-agent-type='omo'] without invert filter for OMO light badge", () => {
     const act = makeActivity({
-      agentType: "not-a-known-agent",
+      agentType: "omo",
+      workingCount: 1,
+      runningCount: 1,
+      hasWorking: true,
     });
 
     renderSortableTab({ activity: act });
 
     const agentIcon = screen.getByTestId("tab-agent-icon");
     expect(agentIcon).toBeInTheDocument();
-    expect(agentIcon).toHaveAttribute("data-agent-type", "not-a-known-agent");
+    expect(agentIcon).toHaveAttribute("data-agent-type", "omo");
+    expect(agentIcon.className).not.toMatch(/\binvert\b/);
   });
 
-  it("renders NO tab-agent-icon when activity summary has no agentType", () => {
+  it("renders a terminal fallback icon for an unsupported agentType", () => {
+    const act = makeActivity({
+      agentType: "not-a-known-agent",
+    });
+
+    renderSortableTab({ activity: act });
+
+    expect(screen.queryByTestId("tab-agent-icon")).not.toBeInTheDocument();
+    expect(screen.getByTestId("tab-terminal-icon")).toBeInTheDocument();
+  });
+
+  it("never renders the Codex logo for non-Codex or unknown agent identities", () => {
+    const nonCodexTypes = ["generic", "terminal", "aider", "devin", "not-codex", "unknown"];
+    for (const nonCodexType of nonCodexTypes) {
+      const { unmount } = renderSortableTab({
+        activity: makeActivity({
+          agentType: nonCodexType,
+          workingCount: 1,
+          runningCount: 1,
+          hasWorking: true,
+        }),
+      });
+
+      expect(screen.queryByTestId("tab-agent-icon")).not.toBeInTheDocument();
+      expect(document.querySelector('[data-agent-type="codex"]')).toBeNull();
+      expect(screen.getByTestId("tab-terminal-icon")).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("renders a terminal icon when activity summary has no agentType", () => {
     const act = makeActivity({
       workingCount: 1,
       runningCount: 1,
@@ -106,6 +141,23 @@ describe("SortableTab agent icon rendering", () => {
     renderSortableTab({ activity: act });
 
     expect(screen.queryByTestId("tab-agent-icon")).not.toBeInTheDocument();
+    expect(screen.getByTestId("tab-terminal-icon")).toBeInTheDocument();
     expect(screen.getByTestId("tab-working-indicator")).toBeInTheDocument();
+  });
+});
+
+describe("working indicator placement alongside an agent icon", () => {
+  it("renders the spinner as a sibling of the agent icon, not nested inside it", () => {
+    renderSortableTab({
+      activity: makeActivity({ workingCount: 1, runningCount: 1, hasWorking: true, agentType: "codex" }),
+    });
+
+    const icon = screen.getByTestId("tab-agent-icon");
+    const indicator = screen.getByTestId("tab-working-indicator");
+
+    expect(icon.contains(indicator)).toBe(false);
+    expect(indicator.parentElement).toBe(icon.parentElement);
+    expect(indicator.className).not.toMatch(/absolute/);
+    expect(screen.getByTestId("tab-working-indicator").querySelector('[data-status-state="working"]')).not.toBeNull();
   });
 });

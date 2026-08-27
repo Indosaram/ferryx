@@ -10,6 +10,10 @@ export function setWorkspaceSnapshot(workspaceId: string, state: WorkspaceState)
   snapshots.set(workspaceId, state);
 }
 
+export function listWorkspaceSnapshots(): ReadonlyArray<readonly [string, WorkspaceState]> {
+  return [...snapshots.entries()];
+}
+
 export function clearWorkspaceSnapshot(workspaceId?: string): void {
   if (workspaceId) {
     snapshots.delete(workspaceId);

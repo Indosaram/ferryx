@@ -1,0 +1,99 @@
+=== claude --resume <real id> -p ===
+argv: claude --resume ace816c1-3d21-4eb0-9a98-00f933234474 -p Reply with exactly: RESUMED_OK
+rc: 1
+stdout:
+You've hit your session limit · resets 2:30am (Asia/Seoul)
+
+stderr:
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+
+
+=== claude --resume <bogus id> (negative control) ===
+argv: claude --resume 00000000-0000-0000-0000-000000000000 -p hi
+rc: 1
+stdout:
+
+stderr:
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+No conversation found with session ID: 00000000-0000-0000-0000-000000000000
+
+
+=== copilot real id ===
+argv: copilot --resume dccfd8a8-1cb5-4b08-a88b-38cd5c940cb9 -p say RESUMED_OK
+rc: 1
+stdout:
+
+stderr:
+
+Model call failed: The requested model is not supported. (Request ID: C17E:3FEE99:18CB67A:1CDC87E:6A904A16)
+
+Model call failed: The requested model is not supported. (Request ID: C17E:3FEE99:18CD54A:1CDEB55:6A904A17)
+
+Model call failed: The requested model is not supported. (Request ID: C17E:3FEE99:18CFD02:1CE1851:6A904A1D)
+
+Model call failed: The requested model is not supported. (Request ID: C17E:3FEE99:18D2B07:1CE4CA0:6A904A26)
+
+Model call failed: The requested model is not supported. (Request ID: C17E:3FEE99:18D6B29:1CE9543:6A904A30)
+
+Model call failed: The requested model is not supported. (Request ID: C17E:3FEE99:18DBF59:1CEF4FE:6A904A3F)
+
+Execution failed: Error: Failed to get response from the AI model; retried 5 times (total retry wait time: 90.03280779213516 seconds)
+
+Total usag
+
+=== copilot bogus id ===
+argv: copilot --resume 00000000-0000-0000-0000-000000000000 -p hi
+rc: 1
+stdout:
+
+stderr:
+
+
+=== codex real id ===
+argv: codex resume 01a02f35-3f3f-7cc3-93a0-55c40fe6ca10 --help
+rc: 0
+stdout:
+Resume a previous interactive session (picker by default; use --last to continue the most recent)
+
+Usage: codex resume [OPTIONS] [SESSION_ID] [PROMPT]
+
+Arguments:
+  [SESSION_ID]
+          Session id (UUID) or session name. UUIDs take precedence if it parses. If omitted, use
+          --last to pick the most recent recorded session
+
+  [PROMPT]
+          Optional user prompt to start the session
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --last
+          Continue the most recent session without showing the picker
+
+      --all
+          Show all sessions (disables cwd filtering and shows CWD column)
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disab
+stderr:
+
+
+=== codex bogus id ===
+argv: codex resume 00000000-0000-0000-0000-000000000000 hi
+rc: 1
+stdout:
+
+stderr:
+Error: stdin is not a terminal
+
+

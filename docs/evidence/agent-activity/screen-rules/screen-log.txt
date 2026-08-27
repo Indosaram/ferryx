@@ -1,0 +1,69 @@
+✓ Ferryx agent-activity surface QA
+  http://127.0.0.1:5173/activity-qa.html
+✓ Done
+loaded http://127.0.0.1:5173/activity-qa.html
+=== agent-activity real-surface capture: screen ===
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-working-background.png
+SCENARIO working-background: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"working\",\"spinning\":true,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"working\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-working-background.png
+✓ Done
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-nonstatus-after-working.png
+SCENARIO nonstatus-after-working: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"working\",\"spinning\":true,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"working\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-nonstatus-after-working.png
+✓ Done
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-shell-repaint.png
+SCENARIO shell-repaint: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"working\",\"spinning\":true,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"working\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-shell-repaint.png
+✓ Done
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-done-background.png
+SCENARIO done-background: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"unread\",\"spinning\":false,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"unread\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-done-background.png
+✓ Done
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-waiting-background.png
+SCENARIO waiting-background: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"waiting\",\"spinning\":false,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"waiting\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-waiting-background.png
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-screen-working.png
+SCENARIO screen-working: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"working\",\"spinning\":true,\"agentIcon\":false}},\"worktrees\":[\"idle\",\"working\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-screen-working.png
+✓ Done
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-screen-title-cannot-override.png
+SCENARIO screen-title-cannot-override: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"working\",\"spinning\":true,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"working\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-screen-title-cannot-override.png
+✓ Done
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-screen-blocked.png
+SCENARIO screen-blocked: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"waiting\",\"spinning\":false,\"agentIcon\":false}},\"worktrees\":[\"idle\",\"waiting\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-screen-blocked.png
+✓ Done
+✓ Done
+✓ Done
+✓ Done
+✓ Screenshot saved to docs/evidence/agent-activity/screen-rules/screen-screen-idle-attention.png
+SCENARIO screen-idle-attention: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"unread\",\"spinning\":false,\"agentIcon\":false}},\"worktrees\":[\"idle\",\"unread\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-screen-idle-attention.png
+✓ Browser closed
+browser closed
+=== capture complete: docs/evidence/agent-activity/screen-rules ===

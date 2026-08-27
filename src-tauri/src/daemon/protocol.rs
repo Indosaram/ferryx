@@ -242,10 +242,27 @@ pub enum DaemonStreamMessage<'a> {
         history: Cow<'a, [u8]>,
     },
     #[serde(rename_all = "camelCase")]
+    AgentState {
+        session_id: Cow<'a, str>,
+        state: Cow<'a, str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<Cow<'a, str>>,
+    },
+    #[serde(rename_all = "camelCase")]
     Exit {
         session_id: Cow<'a, str>,
         exit_code: Option<i32>,
     },
+}
+
+/// One state report from the Ferryx agent extension running inside a PTY session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStateReport {
+    pub session_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Serialize one daemon streaming message using the production newline-delimited JSON frame.

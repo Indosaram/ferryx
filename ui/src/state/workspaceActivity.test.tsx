@@ -316,6 +316,40 @@ describe("workspace activity tracking", () => {
     ]);
   });
 
+  it("labels a notification target from agentType when the extension reported state and the title carries no agent name", () => {
+    const state: WorkspaceState = {
+      workspaceId: "default",
+      worktrees: [featureWorktree],
+      activeWorktreePath: featureWorktree.path,
+      sessions: {
+        "session-a": {
+          id: "session-a",
+          cwd: featureWorktree.path,
+          workspaceId: "default",
+          worktree: { wsId: "default", slug: "feature" },
+          backendSessionId: "backend-a",
+          lifecycle: "working",
+        },
+      },
+      layout: {
+        tabs: [{ id: "tab-a", label: "feature", sessionId: "session-a" }],
+        activeTabId: "tab-a",
+        layoutsByTabId: {},
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {
+        // The extension reports state directly; omo's own title is just a bare name, so the
+        // notification label can only come from agentType.
+        "session-a": { state: "done", title: "", isAgent: true, agentType: "omo", source: "screen" },
+      },
+    } as unknown as WorkspaceState;
+
+    const targets = selectActivityNotificationTargets(state);
+    expect(targets).toHaveLength(1);
+    expect(targets[0]?.agentLabel).toBe("OMO");
+  });
+
   it("memoizes selector outputs when renderedState does not change", () => {
     const workspaceServices = services();
     const { result, rerender } = renderHook(() =>

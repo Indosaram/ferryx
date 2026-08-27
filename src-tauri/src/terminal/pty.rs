@@ -96,7 +96,7 @@ impl PtyManager {
     fn spawn_with_id_and_worktree(
         &self,
         session_id: String,
-        cmd: CommandBuilder,
+        mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         worktree_path: Option<std::path::PathBuf>,
@@ -106,6 +106,26 @@ impl PtyManager {
                 "PTY session '{session_id}' already exists"
             )));
         }
+
+        // The agent extension reports state for the pane it runs in, so it needs the session
+        // identity here: this is the first point where the id exists and the child is not yet
+        // spawned.
+        cmd.env("FERRYX_SESSION_ID", &session_id);
+        cmd.env(
+            "FERRYX_AGENT_STATE_SOCKET",
+            crate::daemon::agent_state_socket_path(),
+        );
+
+        // A GUI-launched daemon inherits TERM=dumb, which agent TUIs read as a non-interactive
+        // terminal: they drop to plain mode and stop reporting activity. A PTY is a real
+        // terminal, so it must advertise one.
+        if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(true) {
+            cmd.env("TERM", "xterm-256color");
+        }
+
+        // TERM=xterm-256color only claims 256 indexed colors. Truecolor-capable agent TUIs read
+        // COLORTERM instead, and degrade to a reduced palette when it is missing.
+        cmd.env("COLORTERM", "truecolor");
 
         let pty_size = PtySize {
             rows,

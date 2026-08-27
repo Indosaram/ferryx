@@ -1,5 +1,10 @@
 # Agent Activity — Commit Plan (pending user approval)
 
+> **Later work supersedes the architecture described here.** The reporting path is no longer inferred
+> from terminal titles alone: the agent reports its own state over a daemon UDS socket. See
+> `docs/AGENT_ACTIVITY_STATE_MODEL_2026-08-27.md`, and
+> `docs/AGENT_ACTIVITY_NOTIFICATION_MANUAL_E2E.md` section J for the checks that path needs.
+
 Written 2026-08-26. Nothing has been committed. The work is verified and sits in the working tree.
 
 ## Why this is not committed yet

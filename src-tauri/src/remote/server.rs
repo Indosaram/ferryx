@@ -261,6 +261,71 @@ pub(crate) struct WorkspaceSnapshotCache {
     workspaces: Vec<WorkspaceSnapshot>,
 }
 
+fn activity_rank(state: &str) -> u8 {
+    match state {
+        "waiting" | "blocked" => 3,
+        "working" => 2,
+        "done" => 1,
+        _ => 0,
+    }
+}
+
+pub(crate) fn compute_attention_rollup<'a>(
+    states: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mut best_rank = 0u8;
+    for s in states {
+        let rank = activity_rank(s);
+        if rank > best_rank {
+            best_rank = rank;
+        }
+    }
+    match best_rank {
+        3 => Some("waiting".to_string()),
+        2 => Some("working".to_string()),
+        1 => Some("done".to_string()),
+        _ => None,
+    }
+}
+
+fn worktree_matches_selection(
+    workspace_id: &str,
+    wt_slug: Option<&str>,
+    wt_label: Option<&str>,
+    sel: &RemoteActiveDesktopSelection,
+) -> bool {
+    let sel_ws = sel.workspace_id.as_deref();
+    if sel_ws.is_some() && sel_ws != Some(workspace_id) {
+        return false;
+    }
+    if let Some(target_slug) = sel.worktree_slug.as_deref() {
+        wt_slug == Some(target_slug)
+    } else if wt_slug.is_some() {
+        false
+    } else if let (Some(target_label), Some(label)) = (sel.worktree_label.as_deref(), wt_label) {
+        target_label == label
+    } else {
+        true
+    }
+}
+
+fn compute_worktree_attention(
+    workspace_id: &str,
+    wt_slug: Option<&str>,
+    wt_label: Option<&str>,
+    selection: Option<&RemoteActiveDesktopSelection>,
+) -> Option<String> {
+    let sel = selection?;
+    if !worktree_matches_selection(workspace_id, wt_slug, wt_label, sel) {
+        return None;
+    }
+    compute_attention_rollup(
+        sel.terminal_tabs
+            .iter()
+            .filter_map(|tab| tab.activity_state.as_deref()),
+    )
+}
+
 impl WorkspaceSnapshotCache {
     pub(crate) fn build(registry: &crate::worktree::WorkspaceRegistry) -> Self {
         let mut entries = registry.list();
@@ -278,7 +343,7 @@ impl WorkspaceSnapshotCache {
         Self { workspaces }
     }
 
-    fn projects(&self) -> Vec<RemoteProjectInfo> {
+    fn projects(&self, selection: Option<&RemoteActiveDesktopSelection>) -> Vec<RemoteProjectInfo> {
         self.workspaces
             .iter()
             .map(|w| RemoteProjectInfo {
@@ -286,9 +351,20 @@ impl WorkspaceSnapshotCache {
                 worktrees: w
                     .worktrees
                     .iter()
-                    .map(|worktree| RemoteWorktreeInfo {
-                        worktree_slug: worktree.orca_info().map(|info| info.slug),
-                        worktree_label: worktree.branch_short_name().map(str::to_string),
+                    .map(|worktree| {
+                        let slug = worktree.orca_info().map(|info| info.slug);
+                        let label = worktree.branch_short_name().map(str::to_string);
+                        let attention = compute_worktree_attention(
+                            &w.workspace_id,
+                            slug.as_deref(),
+                            label.as_deref(),
+                            selection,
+                        );
+                        RemoteWorktreeInfo {
+                            worktree_slug: slug,
+                            worktree_label: label,
+                            attention,
+                        }
                     })
                     .collect(),
             })
@@ -297,7 +373,11 @@ impl WorkspaceSnapshotCache {
 
     /// Previously listed worktrees for `workspace_id`, if registered. Reuses the
     /// snapshot captured at cache-build time instead of re-listing from disk.
-    fn worktrees_for(&self, workspace_id: &str) -> Vec<RemoteWorktreeInfo> {
+    fn worktrees_for(
+        &self,
+        workspace_id: &str,
+        selection: Option<&RemoteActiveDesktopSelection>,
+    ) -> Vec<RemoteWorktreeInfo> {
         self.workspaces
             .iter()
             .find(|w| w.workspace_id == workspace_id)
@@ -305,9 +385,20 @@ impl WorkspaceSnapshotCache {
                 workspace
                     .worktrees
                     .iter()
-                    .map(|worktree| RemoteWorktreeInfo {
-                        worktree_slug: worktree.orca_info().map(|info| info.slug),
-                        worktree_label: worktree.branch_short_name().map(str::to_string),
+                    .map(|worktree| {
+                        let slug = worktree.orca_info().map(|info| info.slug);
+                        let label = worktree.branch_short_name().map(str::to_string);
+                        let attention = compute_worktree_attention(
+                            workspace_id,
+                            slug.as_deref(),
+                            label.as_deref(),
+                            selection,
+                        );
+                        RemoteWorktreeInfo {
+                            worktree_slug: slug,
+                            worktree_label: label,
+                            attention,
+                        }
                     })
                     .collect()
             })
@@ -439,14 +530,14 @@ async fn get_workspace_state(
     let cache = WorkspaceSnapshotCache::build(&state.workspace_registry);
 
     let active_selection = state.active_selection.read().clone();
-    let projects = cache.projects();
+    let projects = cache.projects(active_selection.as_ref());
     let active_ws = active_selection
         .as_ref()
         .and_then(|sel| sel.workspace_id.clone())
         .filter(|id| !id.is_empty())
         .or_else(|| projects.first().map(|p| p.workspace_id.clone()))
         .unwrap_or_else(|| "default".into());
-    let active_context = active_selection.unwrap_or(RemoteActiveDesktopSelection {
+    let active_context = active_selection.clone().unwrap_or(RemoteActiveDesktopSelection {
         workspace_id: Some(active_ws.clone()),
         worktree_slug: None,
         worktree_label: None,
@@ -454,7 +545,7 @@ async fn get_workspace_state(
         tab_id: None,
         terminal_tabs: Vec::new(),
     });
-    let worktrees = cache.worktrees_for(&active_ws);
+    let worktrees = cache.worktrees_for(&active_ws, active_selection.as_ref());
     let sessions = get_active_running_sessions(&state, &cache);
 
     Ok(Json(RemoteWorkspaceState {
@@ -595,6 +686,7 @@ async fn create_worktree(
     Ok(Json(RemoteWorktreeInfo {
         worktree_slug: created.orca_info().map(|info| info.slug),
         worktree_label: created.branch_short_name().map(str::to_string),
+        attention: None,
     }))
 }
 

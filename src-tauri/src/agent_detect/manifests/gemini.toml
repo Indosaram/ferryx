@@ -1,0 +1,33 @@
+id = "gemini"
+version = "2026.08.27.1"
+min_engine_version = 1
+aliases = ["gemini-cli"]
+
+[[rules]]
+id = "apply_or_allow_change"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["Apply this change"] },
+  { contains = ["Allow execution"] },
+  { all = [{ contains = ["yes"] }, { any = [{ contains = ["waiting for user confirmation"] }, { contains = ["Do you want to proceed"] }, { contains = ["do you want to proceed?"] }] }] },
+  { line_regex = ['(?i)^\s*.*(yes|allow)'] },
+]
+
+[[rules]]
+id = "gemini_title_idle"
+state = "idle"
+priority = 250
+region = "osc_title"
+visible_idle = true
+line_regex = ['(?i)^\s*[\x{25C7}\x{25C6}\x{25CA}]?\s*Ready\b']
+
+[[rules]]
+id = "esc_cancel_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+contains = ["esc to cancel"]

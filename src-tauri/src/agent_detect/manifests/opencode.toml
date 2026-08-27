@@ -1,0 +1,43 @@
+id = "opencode"
+version = "2026.08.27.1"
+min_engine_version = 1
+aliases = ["open-code", "herdr:opencode"]
+
+[[rules]]
+id = "permission_required"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["Permission required"] },
+  { contains = ["esc dismiss"], any = [{ contains = ["enter confirm"] }, { contains = ["enter submit"] }, { contains = ["enter toggle"] }] },
+]
+
+[[rules]]
+id = "interrupt_hint_working"
+state = "working"
+priority = 110
+region = "whole_recent"
+visible_working = true
+any = [
+  { contains = ["esc to interrupt"] },
+  { contains = ["ctrl+c to interrupt"] },
+  { contains = ["press esc to interrupt"] },
+  { line_regex = ['(?i).*opencode.*esc (again to )?interrupt'] },
+]
+
+[[rules]]
+id = "opencode_prompt_idle"
+state = "idle"
+priority = 70
+region = "bottom_non_empty_lines(3)"
+visible_idle = true
+any = [
+  { contains = ["Ask anything"] },
+  { contains = ["ctrl+p commands"] },
+]
+not = [
+  { contains = ["esc to interrupt"] },
+  { contains = ["Permission required"] },
+]

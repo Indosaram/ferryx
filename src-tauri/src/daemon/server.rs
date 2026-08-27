@@ -1,7 +1,7 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 use crate::daemon::protocol::{
-    DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
-    DAEMON_PROTOCOL_VERSION,
+    AgentStateReport, DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+    DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
@@ -312,6 +312,14 @@ struct StoredSessionMeta {
     cwd: PathBuf,
 }
 
+pub fn get_agent_state_socket_path() -> PathBuf {
+    get_runtime_dir().join("agent-state.sock")
+}
+
+pub fn agent_state_socket_path() -> String {
+    get_agent_state_socket_path().to_string_lossy().into_owned()
+}
+
 pub struct DaemonServer {
     terminal_service: Arc<TerminalService>,
     workspace_registry: WorkspaceRegistry,
@@ -321,6 +329,7 @@ pub struct DaemonServer {
     spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
     spawn_lock: tokio::sync::Mutex<()>,
     session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
+    agent_state_tx: broadcast::Sender<(String, String, Option<String>)>,
 }
 
 impl Default for DaemonServer {
@@ -374,6 +383,7 @@ impl DaemonServer {
             workspace_registry,
             remote_state,
             remote_server_handle: Arc::new(Mutex::new(None)),
+            agent_state_tx: broadcast::channel(64).0,
             epoch,
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
             spawn_lock: tokio::sync::Mutex::new(()),
@@ -395,6 +405,52 @@ impl DaemonServer {
 
     pub fn remote_state(&self) -> &Arc<RemoteGatewayState> {
         &self.remote_state
+    }
+
+    #[cfg(unix)]
+    /// Parses one newline-delimited extension report, rejecting states the UI cannot render.
+    fn parse_agent_state_report(line: &str) -> Option<(String, String, Option<String>)> {
+        let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
+        if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
+            return None;
+        }
+        Some((report.session_id, report.state, report.agent))
+    }
+
+    #[cfg(unix)]
+    fn spawn_agent_state_listener(self: &Arc<Self>) {
+        let path = get_agent_state_socket_path();
+        let _ = fs::remove_file(&path);
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to bind agent state socket");
+                return;
+            }
+        };
+        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(%error, "Failed to secure agent state socket");
+        }
+
+        let tx = self.agent_state_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    continue;
+                };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                        if let Some(report) = Self::parse_agent_state_report(&line) {
+                            let _ = tx.send(report);
+                        }
+                        line.clear();
+                    }
+                });
+            }
+        });
     }
 
     pub async fn run_server(self: Arc<Self>) -> Result<(), String> {
@@ -449,6 +505,10 @@ impl DaemonServer {
             .map_err(|error| format!("Failed to secure daemon socket: {error}"))?;
 
         tracing::info!("rorca daemon listening on {}", socket_path.display());
+
+        #[cfg(unix)]
+        self.spawn_agent_state_listener();
+        crate::daemon::agent_extension::install_agent_state_extension();
 
         let persisted_remote_config = self.remote_state.config.read().clone();
         if persisted_remote_config.mode != RemoteNetworkMode::Off {
@@ -597,11 +657,12 @@ impl DaemonServer {
                             let _ = write_half.write_all(resp_json.as_bytes()).await;
                             let _ = write_half.flush().await;
 
-                            Self::pump_sequenced_stream(
+                            Self::pump_sequenced_stream_with_agent_state(
                                 session_id,
                                 attachment.receiver,
                                 hub,
                                 write_half,
+                                Some(self.agent_state_tx.subscribe()),
                             )
                             .await;
                             return;
@@ -971,9 +1032,21 @@ impl DaemonServer {
 
     pub async fn pump_sequenced_stream<W>(
         session_id: String,
+        rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
+        hub: Arc<TerminalOutputHub>,
+        writer: W,
+    ) where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::pump_sequenced_stream_with_agent_state(session_id, rx, hub, writer, None).await
+    }
+
+    pub async fn pump_sequenced_stream_with_agent_state<W>(
+        session_id: String,
         mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
         writer: W,
+        mut agent_state_rx: Option<broadcast::Receiver<(String, String, Option<String>)>>,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -981,7 +1054,34 @@ impl DaemonServer {
         let mut last_seen_sequence: Option<u64> = None;
 
         loop {
-            match rx.recv().await {
+            let received = match agent_state_rx.as_mut() {
+                Some(state_rx) => tokio::select! {
+                    output = rx.recv() => output,
+                    report = state_rx.recv() => {
+                        if let Ok((reported_session_id, state, agent)) = report {
+                            if reported_session_id == session_id {
+                                let msg = DaemonStreamMessage::AgentState {
+                                    session_id: Cow::Borrowed(&session_id),
+                                    state: Cow::Borrowed(&state),
+                                    agent: agent.as_deref().map(Cow::Borrowed),
+                                };
+                                let mut json = serde_json::to_string(&msg).unwrap();
+                                json.push('\n');
+                                if writer.write_all(json.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                                if writer.flush().await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                },
+                None => rx.recv().await,
+            };
+
+            match received {
                 Ok(chunk) => {
                     if last_seen_sequence.is_some_and(|last| chunk.sequence <= last) {
                         continue;
@@ -1618,5 +1718,102 @@ mod tests {
         assert_eq!(attachment.snapshot.history, b"chunk2");
         assert_eq!(attachment.snapshot.history_start_sequence, Some(2));
         assert_eq!(attachment.snapshot.history_end_sequence, Some(2));
+    }
+    #[tokio::test]
+    async fn agent_state_report_reaches_only_its_own_session_stream() {
+        let server = Arc::new(DaemonServer::new());
+        let (client, mut server_side) = tokio::io::duplex(4096);
+        let session_id = "session-under-test".to_string();
+        let other_session = "unrelated-session".to_string();
+
+        let hub = Arc::clone(server.terminal_service().output_hub());
+        let (_raw_rx, rx) = hub.register_session_channels(&session_id);
+        let agent_rx = server.agent_state_tx.subscribe();
+
+        let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
+            session_id.clone(),
+            rx,
+            hub,
+            client,
+            Some(agent_rx),
+        ));
+
+        // Send the foreign report FIRST, then this session's own report. The pump processes the
+        // broadcast in order, so the first frame that arrives is decisive: with a correct filter it
+        // is this session's report, and a leak shows up as the foreign one arriving ahead of it.
+        // This orders the assertion on the channel itself instead of on elapsed time.
+        server
+            .agent_state_tx
+            .send((
+                other_session.clone(),
+                "working".to_string(),
+                Some("codex".to_string()),
+            ))
+            .expect("send unrelated report");
+        server
+            .agent_state_tx
+            .send((
+                session_id.clone(),
+                "blocked".to_string(),
+                Some("omo".to_string()),
+            ))
+            .expect("send own report");
+
+        let mut reader = BufReader::new(&mut server_side);
+        let mut line = String::new();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("stream produced a frame")
+        .expect("frame read");
+
+        let msg: serde_json::Value = serde_json::from_str(line.trim()).expect("json frame");
+        assert_eq!(msg["type"], "agentState");
+        assert_eq!(msg["sessionId"], "session-under-test");
+        assert_eq!(
+            msg["agent"], "omo",
+            "the foreign report for {other_session} must be dropped, not relabelled onto this stream"
+        );
+        assert_eq!(
+            msg["state"], "blocked",
+            "the reported state must survive the hop verbatim"
+        );
+
+        pump.abort();
+    }
+
+    #[test]
+    fn agent_state_reports_are_parsed_and_filtered() {
+        assert_eq!(
+            DaemonServer::parse_agent_state_report(
+                r#"{"type":"agentState","sessionId":"s1","state":"working","agent":"omo"}"#
+            ),
+            Some((
+                "s1".to_string(),
+                "working".to_string(),
+                Some("omo".to_string())
+            ))
+        );
+        assert_eq!(
+            DaemonServer::parse_agent_state_report(
+                r#"{"type":"agentState","sessionId":"s1","state":"idle"}"#
+            ),
+            Some(("s1".to_string(), "idle".to_string(), None)),
+            "agent is optional so older extension copies keep working"
+        );
+        for rejected in [
+            r#"{"type":"agentState","sessionId":"s1","state":"bogus"}"#,
+            r#"{"sessionId":"s1"}"#,
+            "not json at all",
+            "",
+        ] {
+            assert_eq!(
+                DaemonServer::parse_agent_state_report(rejected),
+                None,
+                "must reject {rejected:?}"
+            );
+        }
     }
 }

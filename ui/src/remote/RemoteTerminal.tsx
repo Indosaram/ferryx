@@ -19,7 +19,20 @@ type RemoteTerminalProps = {
   readonly title?: string;
   readonly onBack?: () => void;
   readonly embedded?: boolean;
+  readonly onSwipeNextTab?: () => void;
+  readonly onSwipePreviousTab?: () => void;
 };
+
+export const MIN_TERMINAL_FONT_SIZE = 10;
+export const MAX_TERMINAL_FONT_SIZE = 36;
+export const SWIPE_THRESHOLD_PX = 40;
+
+export const MIN_FONT_SIZE = MIN_TERMINAL_FONT_SIZE;
+export const MAX_FONT_SIZE = MAX_TERMINAL_FONT_SIZE;
+
+export function clampTerminalFontSize(fontSize: number): number {
+  return Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, Math.round(fontSize)));
+}
 
 type CellMetrics = {
   readonly width: number;
@@ -185,7 +198,15 @@ function cursorOverlayStyle(cursor: GridCursor, cell: CellMetrics, color: string
   };
 }
 
-export function RemoteTerminal({ sessionId, token, title, onBack, embedded = false }: RemoteTerminalProps) {
+export function RemoteTerminal({
+  sessionId,
+  token,
+  title,
+  onBack,
+  embedded = false,
+  onSwipeNextTab,
+  onSwipePreviousTab,
+}: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const cellMeasureRef = useRef<HTMLSpanElement>(null);
@@ -198,6 +219,14 @@ export function RemoteTerminal({ sessionId, token, title, onBack, embedded = fal
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
   const [cellMetrics, setCellMetrics] = useState<CellMetrics>({ width: 0, height: 0 });
   const { settings, refreshNativePreferences } = useTerminalSettings();
+
+  const [userFontSize, setUserFontSize] = useState<number | null>(null);
+  const activeFontSize = clampTerminalFontSize(userFontSize ?? settings.fontSize);
+
+  const touchStartRef = useRef<{ readonly x: number; readonly y: number } | null>(null);
+  const touchLastRef = useRef<{ readonly x: number; readonly y: number } | null>(null);
+  const pinchStartRef = useRef<{ readonly distance: number; readonly initialFontSize: number } | null>(null);
+  const isPinchActiveRef = useRef<boolean>(false);
 
   useEffect(() => {
     void refreshNativePreferences();
@@ -260,7 +289,7 @@ export function RemoteTerminal({ sessionId, token, title, onBack, embedded = fal
       observer.disconnect();
       if (requestResizeRef.current === measureAndResize) requestResizeRef.current = () => {};
     };
-  }, [sessionId, settings.fontFamily, settings.fontSize, token]);
+  }, [sessionId, settings.fontFamily, activeFontSize, token]);
 
   useEffect(() => {
     if (!socketRequest) return;
@@ -298,6 +327,74 @@ export function RemoteTerminal({ sessionId, token, title, onBack, embedded = fal
       }
     };
   }, [socketRequest]);
+
+  const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length >= 2) {
+      isPinchActiveRef.current = true;
+      touchStartRef.current = null;
+      touchLastRef.current = null;
+      const t1 = event.touches[0];
+      const t2 = event.touches[1];
+      const distance = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      pinchStartRef.current = {
+        distance,
+        initialFontSize: activeFontSize,
+      };
+    } else if (event.touches.length === 1 && !isPinchActiveRef.current) {
+      const touch = event.touches[0];
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+      touchLastRef.current = { x: touch.clientX, y: touch.clientY };
+    }
+  };
+
+  const handleTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length >= 2 && pinchStartRef.current) {
+      const t1 = event.touches[0];
+      const t2 = event.touches[1];
+      const distance = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      if (pinchStartRef.current.distance > 0) {
+        const scale = distance / pinchStartRef.current.distance;
+        const targetSize = clampTerminalFontSize(pinchStartRef.current.initialFontSize * scale);
+        setUserFontSize(targetSize);
+      }
+    } else if (event.touches.length === 1 && touchStartRef.current) {
+      const touch = event.touches[0];
+      touchLastRef.current = { x: touch.clientX, y: touch.clientY };
+    }
+  };
+
+  const handleTouchEnd = (event: React.TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length === 0) {
+      if (!isPinchActiveRef.current && touchStartRef.current) {
+        const changedTouch = event.changedTouches[0];
+        const endX = changedTouch ? changedTouch.clientX : (touchLastRef.current?.x ?? touchStartRef.current.x);
+        const endY = changedTouch ? changedTouch.clientY : (touchLastRef.current?.y ?? touchStartRef.current.y);
+        const deltaX = endX - touchStartRef.current.x;
+        const deltaY = endY - touchStartRef.current.y;
+
+        if (Math.abs(deltaX) >= SWIPE_THRESHOLD_PX && Math.abs(deltaX) > Math.abs(deltaY)) {
+          if (deltaX < 0) {
+            onSwipeNextTab?.();
+          } else {
+            onSwipePreviousTab?.();
+          }
+        }
+      }
+      touchStartRef.current = null;
+      touchLastRef.current = null;
+      pinchStartRef.current = null;
+      isPinchActiveRef.current = false;
+    } else if (event.touches.length === 1) {
+      pinchStartRef.current = null;
+    }
+  };
+
+  const handleTouchCancel = () => {
+    touchStartRef.current = null;
+    touchLastRef.current = null;
+    pinchStartRef.current = null;
+    isPinchActiveRef.current = false;
+  };
 
   const sendKey = (key: string) => {
     const socket = socketRef.current;
@@ -344,6 +441,10 @@ export function RemoteTerminal({ sessionId, token, title, onBack, embedded = fal
         ref={surfaceRef}
         data-testid="remote-terminal-grid"
         tabIndex={0}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchCancel}
         onKeyDown={(event) => {
           if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
             event.preventDefault();
@@ -369,12 +470,12 @@ export function RemoteTerminal({ sessionId, token, title, onBack, embedded = fal
           event.preventDefault();
           sendKey(event.clipboardData.getData("text"));
         }}
-        className="relative min-h-0 flex-1 overflow-auto bg-terminal outline-none"
+        className="relative min-h-0 flex-1 overflow-auto bg-terminal outline-none motion-reduce:transition-none"
         style={{
           backgroundColor: settings.theme.background,
           color: settings.theme.foreground,
           fontFamily: settings.fontFamily,
-          fontSize: `${settings.fontSize}px`,
+          fontSize: `${activeFontSize}px`,
           lineHeight: 1,
           whiteSpace: "pre",
         }}

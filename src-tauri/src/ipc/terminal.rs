@@ -192,6 +192,7 @@ pub fn start_managed_pump<R: Runtime>(
                                     Some(&epoch_str),
                                 );
                             }
+                            Ok(DaemonStreamMessage::AgentState { .. }) => {}
                             Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
                                 flush_terminal_output(
                                     &app,
@@ -265,6 +266,7 @@ pub fn start_managed_pump<R: Runtime>(
                         Some(&epoch_str),
                     );
                 }
+                Some(DaemonStreamMessage::AgentState { .. }) => {}
                 Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
                     flush_terminal_output(
                         &app,

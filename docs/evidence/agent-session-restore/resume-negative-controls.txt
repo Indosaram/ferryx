@@ -1,0 +1,89 @@
+RESUME FLAG NEGATIVE CONTROLS — real CLI invocations
+Captured 2026-08-28 on darwin/arm64. Non-destructive: each ran in a throwaway temp cwd,
+stdin=/dev/null, 15s kill deadline, and every artifact created was deleted afterwards.
+
+WHY THIS TEST: a unit test asserting buildResumeArgv() === ["omo","--session",id] proves
+self-consistency, not that the flag resolves a session. The falsifiable question is:
+given a VALID-SHAPED BUT NONEXISTENT session id, does the CLI REJECT it (proving the flag
+genuinely looks up an existing session), or does it silently start a new session (proving
+the flag is wrong)? Bogus id used: 00000000-0000-4000-8000-000000000000
+
+================================================================================
+omo  —  PROVEN RESUME-ONLY
+================================================================================
+$ omo --session 00000000-0000-4000-8000-000000000000
+rc=1
+No session found matching '00000000-0000-4000-8000-000000000000'
+
+$ find ~/.omo/sessions -name '*00000000-0000-4000-8000-000000000000*'
+(none — correctly refused, created nothing)
+
+VERDICT: `--session <id>` resolves an existing session and rejects unknown ids.
+Confirms the fix from `--resume <id>` (which takes NO value and is an interactive
+picker — it would have parsed the id as a positional PROMPT and started a NEW session).
+
+================================================================================
+opencode  —  PROVEN RESUME-ONLY
+================================================================================
+$ opencode -s 00000000-0000-4000-8000-000000000000
+rc=1
+Error: Invalid session ID: unknown error
+
+VERDICT: top-level `-s <id>` resolves a session id and rejects invalid ones.
+Confirms the fix from `run -s <id>` (`run [message..]` is the non-interactive one-shot
+path; in a pane it would have run headless and exited instead of resuming the TUI).
+
+================================================================================
+kimi  —  FLAG CORRECT, BUT SEMANTICS ARE CREATE-OR-RESUME  (residual hazard)
+================================================================================
+$ kimi --session 00000000-0000-4000-8000-000000000000
+rc=1
+  ▐█▛█▛█▌  Welcome to Kimi Code CLI!
+  Directory: /private/var/folders/.../ferryx-resume-probe-...
+  Session: 00000000-0000-40...            <-- ACCEPTED the nonexistent id
+
+$ find ~/.kimi -name '*00000000-0000-4000-8000-000000000000*'
+~/.kimi/sessions/f9b65068978ed3aa0154069fb1a71687/00000000-0000-4000-8000-000000000000
+(created by the probe; deleted immediately afterwards)
+
+`kimi --help` documents:  --session -S TEXT   Session ID to resume for the session.
+                          --continue -C       Continue the previous session
+
+VERDICT: documented as "resume", empirically CREATE-OR-RESUME. A negative control is
+therefore impossible for kimi — a wrong/stale id does not error, it silently creates a
+new session under that id. Ferryx still never mints (it only ever replays an id kimi
+itself generated), so the hard constraint holds; but kimi is the one agent where a stale
+id degrades silently instead of loudly. `--continue` is resume-only but cannot target a
+SPECIFIC session, so it is not a substitute for id-based restore.
+
+================================================================================
+cursor  —  UNVERIFIABLE (credential-gated)
+================================================================================
+$ cursor-agent --resume 00000000-0000-4000-8000-000000000000
+rc=1
+Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY.
+
+VERDICT: the flag was never evaluated — the process exits at auth before touching the id.
+Flag SHAPE is proven from `--help` (`--resume [chatId]`) and the on-disk chat store shape
+is proven (see below), but the round-trip is unverified. Not pursued: logging in would
+mean using the operator's credentials.
+
+================================================================================
+gemini  —  UNVERIFIABLE, AND OUT OF THE ID MODEL BY DESIGN
+================================================================================
+$ gemini -r 999999
+rc=42
+Loaded cached credentials.
+Error authenticating: GaxiosError: This service has been disabled in this account for
+violation of Terms of Service.
+
+VERDICT: account-level auth failure, inconclusive. Independently, gemini resumes by INDEX
+or the literal `latest` (`-r <index|latest>`), NOT by a session id — so there is no id to
+discover or replay. It is excluded from id-based discovery by design, not by omission.
+
+================================================================================
+SUMMARY
+================================================================================
+proven resume-only ...... omo, opencode          (+ claude, copilot, codex previously)
+create-or-resume hazard . kimi
+unverifiable ............ cursor (auth), gemini (auth + index-based by design)

@@ -10,6 +10,14 @@
 @tailwind components;
 @tailwind utilities;
 
+.agent-tab-logo--monochrome {
+  filter: invert(1);
+}
+
+:root[data-theme="light"] .agent-tab-logo--monochrome {
+  filter: none;
+}
+
 :root {
   color-scheme: dark;
 

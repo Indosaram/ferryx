@@ -406,3 +406,70 @@ async fn test_terminal_service_sequence_safe_attach_and_replay() {
     service.close_session(&session_id).await.expect("close");
     assert!(!service.output_hub().has_session(&session_id));
 }
+
+#[tokio::test]
+async fn spawned_pty_advertises_a_real_terminal_type() {
+    // A PTY is a real terminal, so TERM must never be inherited as `dumb` from a GUI-launched
+    // daemon: agent TUIs downgrade to non-interactive mode and stop reporting their state.
+    let manager = PtyManager::new();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.args(["-c", "printf 'TERMIS<%s>' \"$TERM\""]);
+    let (_session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await {
+            Ok(Some(chunk)) => {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                if seen.contains("TERMIS<") && seen.contains('>') {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    let start = seen.find("TERMIS<").expect("shell reported TERM") + "TERMIS<".len();
+    let rest = &seen[start..];
+    let term = &rest[..rest.find('>').expect("terminated marker")];
+    assert_ne!(term, "dumb", "a PTY must not advertise TERM=dumb");
+    assert!(
+        term.starts_with("xterm"),
+        "expected an xterm-family TERM, got {term}"
+    );
+}
+
+#[tokio::test]
+async fn spawned_pty_advertises_truecolor_support() {
+    // TERM=xterm-256color only claims 256 indexed colors. Truecolor-capable agent TUIs read
+    // COLORTERM to decide, and render a degraded monochrome palette when it is absent.
+    let manager = PtyManager::new();
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.args(["-c", "printf 'CTIS<%s>' \"$COLORTERM\""]);
+    let (_session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn");
+
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await {
+            Ok(Some(chunk)) => {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                if seen.contains("CTIS<") && seen.contains('>') {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    let start = seen.find("CTIS<").expect("shell reported COLORTERM") + "CTIS<".len();
+    let rest = &seen[start..];
+    let colorterm = &rest[..rest.find('>').expect("terminated marker")];
+    assert_eq!(
+        colorterm, "truecolor",
+        "a PTY must advertise truecolor so agent TUIs keep their full palette"
+    );
+}

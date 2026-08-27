@@ -1,0 +1,52 @@
+id = "omo"
+version = "2026.08.27.1"
+min_engine_version = 1
+aliases = ["herdr:pi", "pi", "omo-agent"]
+
+[[rules]]
+id = "approval_footer_blocked"
+state = "blocked"
+priority = 400
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["waiting for approval"] },
+  { contains = ["allow command?"] },
+  { contains = ["do you want to proceed?"] },
+  { contains = ["requesting permission for:"] },
+  { contains = ["confirm tool call"] },
+  { contains = ["approve"], any = [{ contains = ["allow all"] }, { contains = ["deny"] }] },
+]
+
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 200
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = ['^[\x{2800}-\x{28FF}]']
+
+[[rules]]
+id = "esc_cancel_working"
+state = "working"
+priority = 150
+region = "whole_recent"
+visible_working = true
+any = [
+  { contains = ["esc to cancel"] },
+  { contains = ["esc to interrupt"] },
+]
+
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 50
+region = "bottom_non_empty_lines(3)"
+visible_idle = true
+line_regex = ['^\s*>\s*$']
+not = [
+  { line_regex = ['[\x{2800}-\x{28FF}]'] },
+  { contains = ["esc to interrupt"] },
+  { contains = ["esc to cancel"] },
+  { contains = ["waiting for approval"] },
+]

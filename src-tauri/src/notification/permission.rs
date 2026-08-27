@@ -57,9 +57,12 @@ pub mod macos {
     use super::*;
     use block2::RcBlock;
     use objc2_foundation::{NSBundle, NSError};
+    use super::super::model::NotificationContent;
+    use objc2_foundation::NSString;
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting,
-        UNNotificationSettings, UNUserNotificationCenter,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+        UNNotificationRequest, UNNotificationSetting, UNNotificationSettings,
+        UNUserNotificationCenter,
     };
     use std::ptr::NonNull;
     use std::sync::mpsc;
@@ -84,6 +87,41 @@ pub mod macos {
             UNNotificationSetting::Disabled => Some(false),
             _ => None,
         }
+    }
+
+    /// Submit one notification through `UNUserNotificationCenter`.
+    ///
+    /// `usernoted` refuses to serve a single process over both notification APIs: querying
+    /// authorization already registers us as a modern client, so a legacy `NSUserNotification`
+    /// submission is denied ("You can't mix modern clients with legacy clients"). Submitting here
+    /// keeps the process on one API.
+    pub fn submit_notification(content: &NotificationContent) -> Result<(), String> {
+        if !has_bundle_identity() {
+            return Err("notifications require a bundled .app".into());
+        }
+
+        let identifier = format!("ferryx-{}", std::process::id());
+        let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+            let native = unsafe { UNMutableNotificationContent::new() };
+            unsafe {
+                native.setTitle(&NSString::from_str(&content.title));
+                native.setBody(&NSString::from_str(&content.body));
+            }
+            let request = unsafe {
+                UNNotificationRequest::requestWithIdentifier_content_trigger(
+                    &NSString::from_str(&identifier),
+                    &native,
+                    None,
+                )
+            };
+            let center = UNUserNotificationCenter::currentNotificationCenter();
+            unsafe { center.addNotificationRequest_withCompletionHandler(&request, None) };
+        }));
+
+        if dispatched.is_err() {
+            return Err("UNUserNotificationCenter submission raised an exception".into());
+        }
+        Ok(())
     }
 
     pub fn has_bundle_identity() -> bool {

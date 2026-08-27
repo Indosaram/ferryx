@@ -56,6 +56,12 @@ export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
   { pattern: /\bmimo\b/i, type: "mimo", name: "Mimo" },
 ];
 
+/** Display name for an already-classified agent type, e.g. when the agent reported its own state. */
+export function agentDisplayNameForType(agentType: string | undefined): string | undefined {
+  if (!agentType) return undefined;
+  return KNOWN_AGENT_MATCHERS.find((matcher) => matcher.type === agentType)?.name;
+}
+
 /** `omo: done` -> `done`: the status segment is whatever follows the agent name. */
 const AGENT_PREFIX_RE = new RegExp(
   `^(?:${KNOWN_AGENT_MATCHERS.map((agent) => agent.pattern.source).join("|")})\\s*[:\\-–—|]?\\s*`,
@@ -127,6 +133,22 @@ function resolveParsedAgentState(normalized: string): AgentState {
 
 export function stripLeadingActivityGlyphs(title: string): string {
   return title.replace(LEADING_ACTIVITY_GLYPHS_RE, "").trim();
+}
+
+export function isBareAgentTitle(rawTitle: string): boolean {
+  const normalized = normalizeTerminalTitle(rawTitle);
+  if (!normalized || containsAgentSpinnerGlyph(normalized) || classifyTerminalTitleActivity(normalized)) {
+    return false;
+  }
+  const withoutSpinner = stripLeadingActivityGlyphs(normalized);
+  for (const agent of KNOWN_AGENT_MATCHERS) {
+    const taskPattern = new RegExp(`^(?:${agent.pattern.source})\\s*[:\\-–—|]?\\s*(.*)$`, "i");
+    const match = taskPattern.exec(withoutSpinner);
+    if (match && !match[1]?.trim()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function parseAgentTitle(rawTitle: string): ParsedAgentInfo | null {

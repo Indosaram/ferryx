@@ -8,6 +8,10 @@ pub struct RemoteTerminalTabInfo {
     pub id: String,
     #[serde(alias = "tabLabel", alias = "title")]
     pub label: String,
+    #[serde(default, alias = "activity_state", alias = "state", skip_serializing_if = "Option::is_none")]
+    pub activity_state: Option<String>,
+    #[serde(default, alias = "agent_type", skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -76,11 +80,13 @@ pub struct RemoteProjectInfo {
     pub worktrees: Vec<RemoteWorktreeInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteWorktreeInfo {
     pub worktree_slug: Option<String>,
     pub worktree_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

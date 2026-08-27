@@ -319,6 +319,37 @@ fn remote_terminal_tab_label(label: String) -> String {
     }
 }
 
+fn sanitize_activity_state(state: Option<String>) -> Option<String> {
+    let s = state?;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "working" => Some("working".to_string()),
+        "waiting" | "blocked" => Some("waiting".to_string()),
+        "done" => Some("done".to_string()),
+        _ => None,
+    }
+}
+
+fn sanitize_agent_type(agent_type: Option<String>) -> Option<String> {
+    let s = agent_type?;
+    let trimmed = s.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 64
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('\\')
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("~\\")
+        || trimmed.starts_with("file:")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || (trimmed.as_bytes().get(1) == Some(&b':')
+            && matches!(trimmed.as_bytes().first(), Some(b'A'..=b'Z' | b'a'..=b'z')))
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_remote_set_active_selection(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -345,6 +376,8 @@ pub async fn cmd_remote_set_active_selection(
                 .map(|tab| RemoteTerminalTabInfo {
                     id: tab.id,
                     label: remote_terminal_tab_label(tab.label),
+                    activity_state: sanitize_activity_state(tab.activity_state),
+                    agent_type: sanitize_agent_type(tab.agent_type),
                 })
                 .collect(),
         })

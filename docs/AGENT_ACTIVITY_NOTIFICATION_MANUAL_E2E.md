@@ -4,11 +4,70 @@ Run these manual checks on a packaged desktop build or local desktop session. De
 
 ## Launch
 
+Three traps will make a correct build look broken. All three were hit during verification, so do
+these in order.
+
+**1. Kill the daemon first.** The daemon owns PTY spawning, and it survives quitting the app.
+Launching a new build while an old daemon is running means your panes are spawned by the *old*
+binary, so you reproduce the old behavior and conclude the fix failed.
+
 ```bash
-cargo tauri dev --manifest-path src-tauri/Cargo.toml
+pkill -f 'Ferryx|ferryx' ; sleep 1
+open src-tauri/target/debug/Ferryx.app
 ```
 
-For macOS notification permission tests, use the packaged app bundle (`Ferryx.app`). Dev builds without a bundle identifier cannot register with macOS Notification Center.
+**2. Launch the bundle, not the bare binary.** macOS attributes a notification to the *responsible
+process*. Started from a terminal, notifications are attributed to that terminal (they appeared as
+`cmux` during verification), not to Ferryx. Use `open ...Ferryx.app` as above.
+
+**3. A debug bundle needs the Vite dev server.** The debug binary is `cfg(dev)`, so Tauri loads
+`devUrl` at `http://127.0.0.1:5173`. Without it the window renders fully black.
+
+```bash
+bun run --cwd ui dev    # leave running, in a separate shell
+```
+
+For a release-style check instead, build the bundle so no dev server is needed:
+`bun run --cwd ui build && cargo tauri build --manifest-path src-tauri/Cargo.toml`.
+
+### Known open defect: no banner is delivered, and it is not our permission logic
+
+Measured on the running app. Clicking Settings > Notifications > Send Test Notification logs:
+
+```
+ferryx: (UserNotifications) [com.ferryx.app] Getting notification settings (async)
+ferryx: (UserNotifications) [com.ferryx.app] Got notification settings [ hasResult: 1 ... ]
+```
+
+macOS answers by bundle id and returns real settings, so registration works and the in-app
+`authorized` status is authoritative (`permission.rs` `read_settings` sets `authoritative: true`; the
+`dev_fallback_status` path would report `false`). `preflight()` therefore returns `Submit`.
+
+But filtering the same window for `com.apple.UserNotifications` lines excluding those two settings
+queries returns **empty**, across repeated clicks: `builder().show()` reports no error yet no
+add-request ever reaches `usernoted`. The gap is inside the Tauri notification plugin's submit path,
+not Ferryx's permission logic, signing, Focus, or SIP.
+
+Until that is resolved, treat every notification row below as blocked, and verify the rest of the
+chain (spinner, attention marker) which does work.
+
+Two measurement traps: the mtime of
+`~/Library/Group Containers/group.com.apple.usernoted/db2/db` does **not** change even for a
+notification that demonstrably arrives, so use `log show` instead. And a dead Vite dev server
+collapses the accessibility tree to window chrome only (6 elements) with a black window, which looks
+exactly like a broken app.
+
+### Sanity check before judging any agent behavior
+
+In a fresh Ferryx pane:
+
+```bash
+echo "TERM=$TERM FSID=${FERRYX_SESSION_ID:-unset} SOCK=${FERRYX_AGENT_STATE_SOCKET:-unset}"
+```
+
+`TERM` must not be `dumb`, and both `FERRYX_*` values must be set. If `TERM` is `dumb`, agent TUIs
+run non-interactive and never report state (this was the root cause of "no agent feature works"). If
+the `FERRYX_*` values are unset, the pane belongs to an older daemon generation: quit and redo step 1.
 
 Record PASS or FAIL for every item, including what you observed if a step fails.
 
@@ -109,3 +168,31 @@ queued with `sleep` **before** switching away, because you cannot type into a ta
 | I3 | Open a second project (or worktree) so its tabs live in a different layout, start a working title in one of its tabs, switch to a tab in the first project, unfocus Ferryx, and let the queued completion fire. | PASS: The completion notification names the other project's worktree and its tab is marked unread. FAIL: Nothing arrives, which means the daemon stream pump for the parked layout is not attached — record this as a finding, it is a known open question. |
 | I4 | In Tab 1 run `sleep 10; printf '\a'`, switch to Tab 2, unfocus Ferryx, and enable Settings > Notifications > Terminal Bell first. | PASS: The bell notification arrives for Tab 1 while it is unmounted. FAIL: No bell notification, which means bells are still mount-scoped. |
 | I5 | With the window focused and Tab 1 active, run `printf '\033]2;⠋ codex: working\007'` then `printf '\033]2;codex: done\007'` in Tab 1 itself. | PASS: The icon and dot update in place and NO notification fires, because the user is watching that tab. FAIL: A notification fires for the tab currently on screen (double-fire regression). |
+
+---
+
+## J. Real agent, extension-reported state (the omo path)
+
+Sections A-I drive state with `printf` OSC titles. That covers `agy`, `codex`, and every agent that
+announces status in its terminal title, but it does **not** cover `omo`: omo's title is just a bare
+name, so its state can only ever come from the agent extension reporting over
+`/tmp/rorca-$UID/agent-state.sock`. This section is the only one that exercises that path, and it is
+the one remaining check that cannot be automated from a coding session.
+
+Complete the Launch steps and the sanity check first. If `TERM` is `dumb`, stop: nothing here can pass.
+
+| # | Action | Expected (PASS / FAIL) |
+|---|---|---|
+| J1 | Open Tab 1 and run `agy`. | PASS: Tab 1 shows the Antigravity brand mark. FAIL: it shows the plain terminal icon. |
+| J2 | Open Tab 2 and run `omo`. | PASS: Tab 2 shows the **terminal icon**. This is correct, not a bug: there is no vetted omo brand mark, and `ui/src/assets/agent-logos/ATTRIBUTION.md` requires agents without one to use the terminal icon. FAIL: any invented or generic stand-in glyph appears. |
+| J3 | In Tab 2, send omo a prompt that takes a few seconds, then **switch to Tab 1** while it is still working. | PASS: Tab 2 (now non-active) shows a spinning working dot. FAIL: no dot, which means the extension is not reporting - re-run the sanity check. |
+| J4 | Stay on Tab 1, unfocus Ferryx, and let the omo turn finish. | PASS: a notification banner arrives attributed to **Ferryx** and naming the agent as `OMO`, and Tab 2 gets the attention dot. FAIL: no banner (check Settings > Notifications > Agent Task Complete), a banner attributed to your terminal app (you skipped Launch step 2), or a banner with no agent name. |
+| J5 | Repeat J3 but stay **on** Tab 2 with Ferryx focused. | PASS: the dot animates in place and **no** notification fires, because you are already watching. FAIL: a notification fires for the tab on screen. |
+
+### Why J4's agent name matters
+
+`selectActivityNotificationTargets` originally derived the notification's agent label only from the
+terminal title. Because the extension reducer keeps the previous (empty) title while setting
+`agentType`, a completed omo turn produced a notification with **no agent name**. That is fixed via
+`agentDisplayNameForType`, so J4 checking for the literal `OMO` in the banner is a real regression
+guard, not cosmetic.

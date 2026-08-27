@@ -1,0 +1,71 @@
+id = "codex"
+version = "2026.08.27.1"
+min_engine_version = 1
+aliases = ["codex-cli"]
+
+[[rules]]
+id = "osc_title_blocked"
+state = "blocked"
+priority = 1100
+region = "osc_title"
+visible_blocker = true
+contains = ["Action Required"]
+
+[[rules]]
+id = "osc_title_working"
+state = "working"
+priority = 1050
+region = "osc_title"
+visible_working = true
+regex = ['(?:^| )[\x{2800}-\x{28FF}](?: |$)']
+
+[[rules]]
+id = "trust_directory"
+state = "blocked"
+priority = 950
+region = "top_non_empty_lines(20)"
+visible_blocker = true
+all = [
+  { regex = ['(?s)\A> You are in [^\r\n]+(?:\r?\n|$)'] },
+  { regex = ['(?s)Do\s+you\s+trust\s+the\s+contents\s+of\s+this\s+directory\?'] },
+]
+
+[[rules]]
+id = "live_strong_blocker"
+state = "blocked"
+priority = 900
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["press enter to confirm or esc to cancel"] },
+  { contains = ["enter to submit answer"] },
+  { contains = ["enter to submit all"] },
+  { contains = ["allow command?"] },
+]
+
+[[rules]]
+id = "screen_working_fallback"
+state = "working"
+priority = 500
+region = "bottom_non_empty_lines(3)"
+visible_working = true
+line_regex = ['^[\x{2800}-\x{28FF}\s]*Working \([^)]*esc to interrupt\)(?:.*)?$']
+not = [{ contains = ["Conversation interrupted"] }]
+
+[[rules]]
+id = "codex_prompt_idle"
+state = "idle"
+priority = 65
+region = "bottom_non_empty_lines(3)"
+visible_idle = true
+any = [
+  { contains = ["Ask Codex anything"] },
+  { line_regex = ['^\s*>\s*$'] },
+]
+not = [
+  { contains = ["Working ("] },
+  { contains = ["esc to interrupt"] },
+  { line_regex = ['[\x{2800}-\x{28FF}]'] },
+  { contains = ["allow command?"] },
+  { contains = ["Action Required"] },
+]

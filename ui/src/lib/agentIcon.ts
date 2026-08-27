@@ -1,59 +1,42 @@
-import {
-  Bird,
-  Bot,
-  Boxes,
-  Braces,
-  BrainCircuit,
-  CircleDot,
-  Code2,
-  Cpu,
-  Gem,
-  Github,
-  Hand,
-  MessageCircle,
-  Moon,
-  MousePointer2,
-  Network,
-  Rocket,
-  ScrollText,
-  Smartphone,
-  Sparkles,
-  TerminalSquare,
-  WandSparkles,
-  Workflow,
-  Zap,
-  type LucideIcon,
-} from "lucide-react";
+import antigravityLogo from "../assets/agent-logos/antigravity.svg";
+import claudeLogo from "../assets/agent-logos/claude.svg";
+import codexLogo from "../assets/agent-logos/codex.svg";
+import copilotLogo from "../assets/agent-logos/copilot.svg";
+import clineLogo from "../assets/agent-logos/cline.svg";
+import cursorLogo from "../assets/agent-logos/cursor.svg";
+import geminiLogo from "../assets/agent-logos/gemini.svg";
+import grokLogo from "../assets/agent-logos/grok.svg";
+import kimiLogo from "../assets/agent-logos/kimi.svg";
+import omoLogo from "../assets/agent-logos/omo.svg";
+import opencodeLogo from "../assets/agent-logos/opencode.svg";
+import piLogo from "../assets/agent-logos/pi.svg";
 
-export const GENERIC_AGENT_ICON: LucideIcon = Bot;
+export const SUPPORTED_AGENT_LOGOS = {
+  antigravity: antigravityLogo,
+  claude: claudeLogo,
+  codex: codexLogo,
+  gemini: geminiLogo,
+  opencode: opencodeLogo,
+  pi: piLogo,
+  copilot: copilotLogo,
+  cursor: cursorLogo,
+  grok: grokLogo,
+  kimi: kimiLogo,
+  cline: clineLogo,
+  omo: omoLogo,
+} as const;
 
-export const AGENT_ICON_BY_TYPE: Record<string, LucideIcon> = {
-  antigravity: Rocket,
-  omo: Workflow,
-  claude: Sparkles,
-  codex: Code2,
-  opencode: Braces,
-  omp: Boxes,
-  pi: CircleDot,
-  aider: WandSparkles,
-  cursor: MousePointer2,
-  gemini: Gem,
-  grok: Zap,
-  devin: BrainCircuit,
-  droid: Smartphone,
-  hermes: ScrollText,
-  kimi: Moon,
-  goose: Bird,
-  cline: TerminalSquare,
-  codebuff: Cpu,
-  rovo: Network,
-  openclaw: Hand,
-  copilot: Github,
-  mimo: MessageCircle,
-  generic: GENERIC_AGENT_ICON,
-};
+export const SUPPORTED_AGENT_TYPES = Object.keys(SUPPORTED_AGENT_LOGOS) as readonly string[];
 
-export function resolveAgentIcon(agentType?: string | null): LucideIcon {
-  const normalized = agentType?.trim().toLowerCase();
-  return (normalized && AGENT_ICON_BY_TYPE[normalized]) || GENERIC_AGENT_ICON;
+export function resolveAgentLogo(agentType?: string | null): string | null {
+  if (!agentType) return null;
+  const normalized = agentType.trim().toLowerCase();
+  return SUPPORTED_AGENT_LOGOS[normalized as keyof typeof SUPPORTED_AGENT_LOGOS] ?? null;
+}
+
+export function isMonochromeAgentLogo(agentType?: string | null): boolean {
+  if (!agentType) return false;
+  const normalized = agentType.trim().toLowerCase();
+  if (normalized === "omo") return false;
+  return normalized in SUPPORTED_AGENT_LOGOS;
 }

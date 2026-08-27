@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
 /// Native backend built on `tauri-plugin-notification`.
@@ -34,13 +35,23 @@ impl<R: Runtime> TauriNotificationBackend<R> {
 
 impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
     fn submit(&self, content: &NotificationContent) -> Result<(), String> {
-        self.app
-            .notification()
-            .builder()
-            .title(&content.title)
-            .body(&content.body)
-            .show()
-            .map_err(|error| error.to_string())
+        // macOS refuses to serve one process over both notification APIs, and our permission
+        // query already registers us as a modern UNUserNotificationCenter client, so the plugin's
+        // legacy bridge would be denied. Submit over the same API we query.
+        #[cfg(target_os = "macos")]
+        {
+            return crate::notification::permission::macos::submit_notification(content);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.app
+                .notification()
+                .builder()
+                .title(&content.title)
+                .body(&content.body)
+                .show()
+                .map_err(|error| error.to_string())
+        }
     }
 }
 

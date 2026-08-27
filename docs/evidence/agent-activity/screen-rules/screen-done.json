@@ -1,0 +1,3 @@
+SCENARIO done-background: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"unread\",\"spinning\":false,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"unread\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-done-background.png
+"{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"unread\",\"spinning\":false,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"unread\"]}"

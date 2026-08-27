@@ -1,0 +1,3 @@
+SCENARIO waiting-background: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"waiting\",\"spinning\":false,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"waiting\"]}"
+  screenshot=docs/evidence/agent-activity/screen-rules/screen-waiting-background.png
+"{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"waiting\",\"spinning\":false,\"agentIcon\":true}},\"worktrees\":[\"idle\",\"waiting\"]}"
