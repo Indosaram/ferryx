@@ -65,6 +65,10 @@ const native = {
   remoteSelectionHandler: null as null | ((payload: any) => void),
 };
 
+const updater = {
+  checkForUpdate: vi.fn(),
+};
+
 const workspace = {
   activateTab: vi.fn(),
   activatePrimary: vi.fn(),
@@ -150,6 +154,14 @@ vi.mock("./lib/tauri", () => ({
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
 }));
+
+vi.mock("./lib/updater", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/updater")>();
+  return {
+    ...actual,
+    checkForUpdate: updater.checkForUpdate,
+  };
+});
 
 const workspaceStoreModule = await import("./state/workspaceStore");
 let storeSpy: any;
@@ -358,6 +370,8 @@ describe("App project workspace flow", () => {
       };
     });
     native.onRemoteSelectionRequested.mockReset();
+    updater.checkForUpdate.mockReset();
+    updater.checkForUpdate.mockResolvedValue(undefined);
     native.remoteSelectionHandler = null;
     native.onRemoteSelectionRequested.mockImplementation(async (handler: (payload: any) => void) => {
       native.remoteSelectionHandler = handler;
@@ -482,6 +496,89 @@ describe("App project workspace flow", () => {
     expect(await screen.findByText("Active project orca-lite")).toBeInTheDocument();
     expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite");
+  });
+
+  it("checks for a signed update when the native app starts", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+
+    render(<App />);
+
+    await waitFor(() => expect(updater.checkForUpdate).toHaveBeenCalledOnce());
+  });
+
+  it("restores projects lost from WebView storage using the native session catalog", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+    native.loadSession.mockResolvedValue({
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "beta",
+      workspaces: {
+        alpha: {
+          workspaceId: "alpha",
+          repoRoot: "/repos/alpha",
+          worktrees: [],
+          activeWorktreePath: "/repos/alpha",
+          layout: { splitMode: "none", primaryTabId: null, secondaryTabId: null, activeTabId: null, tabs: [] },
+          terminalSessions: {},
+        },
+        beta: {
+          workspaceId: "beta",
+          repoRoot: "/repos/beta",
+          worktrees: [],
+          activeWorktreePath: "/repos/beta",
+          layout: { splitMode: "none", primaryTabId: null, secondaryTabId: null, activeTabId: null, tabs: [] },
+          terminalSessions: {},
+        },
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project beta")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Project alpha" })).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) ?? "[]")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }),
+        expect.objectContaining({ workspaceId: "alpha", repoRoot: "/repos/alpha" }),
+        expect.objectContaining({ workspaceId: "beta", repoRoot: "/repos/beta" }),
+      ]),
+    );
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("beta");
+  });
+
+  it("does not restore historical projects into an existing multi-project catalog", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    localStorage.setItem(
+      PROJECTS_STORAGE_KEY,
+      JSON.stringify([
+        { workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" },
+        { workspaceId: "current", repoRoot: "/repos/current" },
+      ]),
+    );
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "current");
+    native.loadSession.mockResolvedValue({
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "historical",
+      workspaces: {
+        historical: {
+          workspaceId: "historical",
+          repoRoot: "/repos/historical",
+          worktrees: [],
+          activeWorktreePath: "/repos/historical",
+          layout: { splitMode: "none", primaryTabId: null, secondaryTabId: null, activeTabId: null, tabs: [] },
+          terminalSessions: {},
+        },
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project current")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Project historical" })).not.toBeInTheDocument();
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("current");
   });
 
   it("keeps the native shell initializing until persisted workspace tabs are preloaded", async () => {

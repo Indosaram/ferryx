@@ -148,6 +148,21 @@ describe("updater status machine", () => {
     expect(relaunch).toHaveBeenCalledTimes(1);
   });
 
+  it("flushes workspace persistence guards before restarting for an installed update", async () => {
+    const updater = await freshModule();
+    const callOrder: string[] = [];
+    updater.registerWindowCloseGuard(() => {
+      callOrder.push("persist-workspace");
+    });
+    relaunch.mockImplementation(async () => {
+      callOrder.push("relaunch");
+    });
+
+    await updater.relaunchApp();
+
+    expect(callOrder).toEqual(["persist-workspace", "relaunch"]);
+  });
+
   it("reads the running app version", async () => {
     getVersion.mockResolvedValue("2026.08.25");
     const updater = await freshModule();

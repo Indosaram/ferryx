@@ -130,5 +130,6 @@ export async function downloadAndInstallUpdate(): Promise<void> {
 
 export async function relaunchApp(): Promise<void> {
   if (!isTauri()) return;
+  await flushCloseGuards();
   await relaunch();
 }

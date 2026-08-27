@@ -52,6 +52,7 @@ import {
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
+import type { PersistedWorkspaceSession } from "./lib/types";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
 import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
@@ -64,7 +65,7 @@ import {
   type WorkspaceTab,
   type Worktree,
 } from "./lib/types";
-import { registerWindowCloseGuard } from "./lib/updater";
+import { checkForUpdate, registerWindowCloseGuard } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
@@ -83,6 +84,57 @@ type ProjectBootstrap = {
 
 function loadProjectBootstrap(): ProjectBootstrap {
   return { projects: loadProjects(), activeProjectId: loadActiveProjectId() };
+}
+
+function recoverProjectBootstrap(session: PersistedWorkspaceSession | null): ProjectBootstrap | null {
+  if (!session) return null;
+
+  const projects = Object.values(session.workspaces).reduce<RegisteredProject[]>((recovered, workspace) => {
+    if (!workspace.workspaceId || !workspace.repoRoot) return recovered;
+    if (!recovered.some((project) => project.workspaceId === workspace.workspaceId)) {
+      recovered.push({ workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot });
+    }
+    return recovered;
+  }, []);
+  if (projects.length === 0) return null;
+
+  const activeProjectId = projects.some((project) => project.workspaceId === session.activeWorkspaceId)
+    ? session.activeWorkspaceId
+    : projects[0].workspaceId;
+  return { projects, activeProjectId };
+}
+
+function mergeRecoveredProjectBootstrap(
+  stored: ProjectBootstrap,
+  recovered: ProjectBootstrap | null,
+  startup: RegisteredProject,
+): ProjectBootstrap {
+  if (!recovered) return stored;
+
+  const isReducedToStartup =
+    stored.projects.length === 1 &&
+    stored.projects[0].workspaceId === startup.workspaceId &&
+    stored.projects[0].repoRoot === startup.repoRoot &&
+    recovered.projects.some((project) => project.workspaceId !== startup.workspaceId);
+  const isUninitialized =
+    stored.projects.length === 1 &&
+    stored.projects[0].workspaceId === DEFAULT_WORKSPACE_ID &&
+    stored.projects[0].repoRoot === ".";
+  if (!isUninitialized && !isReducedToStartup) return stored;
+
+  const projects = stored.projects.filter(
+    (project) => project.workspaceId !== DEFAULT_WORKSPACE_ID || (project.repoRoot !== "." && project.repoRoot !== ""),
+  );
+  for (const recoveredProject of recovered.projects) {
+    if (!projects.some((project) => project.workspaceId === recoveredProject.workspaceId)) {
+      projects.push(recoveredProject);
+    }
+  }
+
+  const activeProjectId = projects.some((project) => project.workspaceId === recovered.activeProjectId)
+    ? recovered.activeProjectId
+    : (projects[0]?.workspaceId ?? stored.activeProjectId);
+  return { projects, activeProjectId };
 }
 
 function isInitialProjectPlaceholder(project: RegisteredProject, startup: RegisteredProject) {
@@ -115,12 +167,29 @@ export function App() {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (isNativeRuntime) void checkForUpdate();
+  }, [isNativeRuntime]);
+
+  useEffect(() => {
     if (!isNativeRuntime) return;
     let cancelled = false;
     void getInitialProject()
       .then(async (startup) => {
-        const prepared = canonicalizeProjectBootstrap(loadProjectBootstrap(), startup);
-        await preloadWorkspaceSnapshots(prepared.projects.map((project) => project.workspaceId)).catch(
+        const storedBootstrap = loadProjectBootstrap();
+        const savedSession = await loadSession().catch(() => null);
+        const recovered = recoverProjectBootstrap(savedSession);
+        const prepared = canonicalizeProjectBootstrap(
+          mergeRecoveredProjectBootstrap(storedBootstrap, recovered, startup),
+          startup,
+        );
+        if (recovered && prepared !== storedBootstrap) {
+          persistProjects(prepared.projects);
+          persistActiveProjectId(prepared.activeProjectId);
+        }
+        await preloadWorkspaceSnapshots(
+          prepared.projects.map((project) => project.workspaceId),
+          async () => savedSession,
+        ).catch(
           (error) => {
             console.warn("Workspace session preload skipped:", error);
           },
