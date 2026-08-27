@@ -70,7 +70,7 @@ Reusable, already shipped — compose these; do not hand-roll equivalents.
 - `lib/cn` — `twMerge(clsx(...))` for conditional classes. All conditional styling goes through it.
 
 ### Agent tab identity
-- A terminal tab with an agent type in `SUPPORTED_AGENT_LOGOS` displays that local brand SVG at `size-3`.
+- A terminal tab with an agent type in `SUPPORTED_AGENT_LOGOS` displays that local brand SVG at `size-4`.
 - Brand SVGs are decorative (`alt=""`) because the tab label supplies the accessible name.
 - Any unknown, unsupported, or terminal-only type uses `TerminalSquare`; never substitute a generic bot or a guessed logo.
 - The separate `StatusDot` remains adjacent to the identity icon, so working/waiting/done is not encoded by the logo.

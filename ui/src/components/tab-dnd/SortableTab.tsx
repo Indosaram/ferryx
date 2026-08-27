@@ -105,13 +105,13 @@ export const SortableTab = memo(function SortableTab({
               data-testid="tab-agent-icon"
               data-agent-type={agentType}
               className={cn(
-                "size-3 shrink-0",
+                "size-4 shrink-0",
                 isMonochrome && "agent-tab-logo--monochrome opacity-80 group-hover:opacity-100",
                 isMonochrome && active && "opacity-100",
               )}
             />
           ) : (
-            <TerminalSquare data-testid="tab-terminal-icon" className="size-3 shrink-0" />
+            <TerminalSquare data-testid="tab-terminal-icon" className="size-4 shrink-0" />
           )}
           {activityIndicator ? (
             <span

@@ -65,7 +65,7 @@ function renderSortableTab({
 }
 
 describe("SortableTab agent icon rendering", () => {
-  it("renders [data-testid='tab-agent-icon'][data-agent-type='codex'] and the working status dot when agentType is codex and working", () => {
+  it("renders [data-testid='tab-agent-icon'][data-agent-type='codex'] with size-4 and the working status dot when agentType is codex and working", () => {
     const act = makeActivity({
       agentType: "codex",
       workingCount: 1,
@@ -78,6 +78,7 @@ describe("SortableTab agent icon rendering", () => {
     const agentIcon = screen.getByTestId("tab-agent-icon");
     expect(agentIcon).toBeInTheDocument();
     expect(agentIcon).toHaveAttribute("data-agent-type", "codex");
+    expect(agentIcon.className).toMatch(/\bsize-4\b/);
     expect(agentIcon.className).toMatch(/agent-tab-logo--monochrome/);
 
     const workingIndicator = screen.getByTestId("tab-working-indicator");
@@ -101,7 +102,7 @@ describe("SortableTab agent icon rendering", () => {
     expect(agentIcon.className).not.toMatch(/\binvert\b/);
   });
 
-  it("renders a terminal fallback icon for an unsupported agentType", () => {
+  it("renders a terminal fallback icon for an unsupported agentType with size-4", () => {
     const act = makeActivity({
       agentType: "not-a-known-agent",
     });
@@ -109,7 +110,9 @@ describe("SortableTab agent icon rendering", () => {
     renderSortableTab({ activity: act });
 
     expect(screen.queryByTestId("tab-agent-icon")).not.toBeInTheDocument();
-    expect(screen.getByTestId("tab-terminal-icon")).toBeInTheDocument();
+    const fallbackIcon = screen.getByTestId("tab-terminal-icon");
+    expect(fallbackIcon).toBeInTheDocument();
+    expect(fallbackIcon.getAttribute("class")).toMatch(/\bsize-4\b/);
   });
 
   it("never renders the Codex logo for non-Codex or unknown agent identities", () => {
