@@ -93,6 +93,34 @@ test("windows and linux updater bundles land on their own targets", () => {
   }
 });
 
+test("Tauri v2 NSIS and AppImage artifacts land on their own targets", () => {
+  const dir = seed({
+    "Ferryx_2026.826.8_x64-setup.exe": "windows-nsis-bundle",
+    "Ferryx_2026.826.8_x64-setup.exe.sig": "windows-nsis-signature",
+    "Ferryx_2026.826.8_amd64.AppImage": "linux-appimage-bundle",
+    "Ferryx_2026.826.8_amd64.AppImage.sig": "linux-appimage-signature",
+  });
+  try {
+    const { result, out } = runScript(dir);
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+
+    const manifest = JSON.parse(readFileSync(out, "utf8"));
+    assert.deepEqual(Object.keys(manifest.platforms).sort(), ["linux-x86_64", "windows-x86_64"]);
+    assert.equal(manifest.platforms["windows-x86_64"].signature, "windows-nsis-signature");
+    assert.equal(
+      manifest.platforms["windows-x86_64"].url,
+      `https://github.com/${REPO}/releases/download/${TAG}/Ferryx_2026.826.8_x64-setup.exe`,
+    );
+    assert.equal(manifest.platforms["linux-x86_64"].signature, "linux-appimage-signature");
+    assert.equal(
+      manifest.platforms["linux-x86_64"].url,
+      `https://github.com/${REPO}/releases/download/${TAG}/Ferryx_2026.826.8_amd64.AppImage`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("an architecture-specific macOS bundle claims only its own target", () => {
   const dir = seed({
     "Ferryx_aarch64.app.tar.gz": "macos-arm-bundle",

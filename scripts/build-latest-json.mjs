@@ -2,7 +2,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const UPDATER_ARTIFACT = /\.(app\.tar\.gz|nsis\.zip|AppImage\.tar\.gz)$/;
+const UPDATER_ARTIFACT = /(\.app\.tar\.gz|\.nsis\.zip|-setup\.exe|\.AppImage(?:\.tar\.gz)?)$/;
 
 function parseArgs(argv) {
   const args = new Map();
@@ -25,8 +25,12 @@ function targetsFor(filename) {
     if (/x64|x86_64/i.test(filename)) return ["darwin-x86_64"];
     return ["darwin-aarch64", "darwin-x86_64"];
   }
-  if (filename.endsWith(".nsis.zip")) return ["windows-x86_64"];
-  if (filename.endsWith(".AppImage.tar.gz")) return ["linux-x86_64"];
+  if (filename.endsWith(".nsis.zip") || filename.endsWith("-setup.exe")) {
+    return ["windows-x86_64"];
+  }
+  if (filename.endsWith(".AppImage.tar.gz") || filename.endsWith(".AppImage")) {
+    return ["linux-x86_64"];
+  }
   return [];
 }
 

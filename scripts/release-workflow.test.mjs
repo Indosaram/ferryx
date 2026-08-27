@@ -57,6 +57,8 @@ test("signatures and updater bundles are collected as release artifacts", () => 
   assert.match(WORKFLOW, /-name "\*\.sig"/);
   assert.match(WORKFLOW, /-name "\*\.nsis\.zip"/);
   assert.match(WORKFLOW, /-name "\*\.AppImage\.tar\.gz"/);
+  assert.match(WORKFLOW, /-name "\*-setup\.exe"/);
+  assert.match(WORKFLOW, /-name "\*\.AppImage"/);
 });
 
 test("macOS updater archives are scrubbed and validated before publishing", () => {
