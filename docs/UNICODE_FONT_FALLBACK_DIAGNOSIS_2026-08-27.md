@@ -97,3 +97,31 @@ User-side config change from earlier recommendation (swap to Apple SD Gothic Neo
 LONGER needed — Ghostty config stays as-is.
 
 Probe source kept at `/tmp/fontprobe` during investigation; safe to delete.
+
+## FINAL STATE 2026-08-28: full CoreText font stack (option B shipped)
+
+The ab_glyph/fontdb renderer was replaced entirely by CoreText after the emoji gap and a
+mid-migration live-app flip incident:
+
+- `coretext_font.rs`: CTFont lifecycle per style (symbolic traits), explicit
+  `kCTFontVariationAttribute` wght=400/700 for variable fonts — a probe proved CoreText
+  defaults to the fvar default instance (this machine's Noto Sans KR VF defaults to
+  Thin(100): ink 0.098 vs Regular 0.188 without the attribute), and per-char cascade via
+  `CTFontCreateForString` replacing the configured-tier + sweep + fallback_resolver.rs
+  (module deleted).
+- `coretext_raster.rs`: CGBitmapContext RGBA alpha extraction. CRITICAL: CTLineDraw into a
+  bitmap context is ALREADY top-down — row mapping must be `src_y = y`, NO flip. A flip
+  renders every glyph upside down. Orientation regression tests ('L' bottom-heavy,
+  'P' top-heavy, 'g' descender, '─' centered) lock this for both raster paths.
+- `color_glyph.rs`: emoji path aligned to the same no-flip mapping; the earlier flip made
+  emoji render upside down while coverage-only tests passed. New '⬆️'/'⬇️' asymmetry tests
+  catch vertical inversion of color glyphs.
+- `font_manager.rs`: 1137 → 573 LOC facade; ab_glyph + fontdb dependencies removed from
+  Cargo.toml entirely; zero references remain in the crate.
+- Metrics parity locked by test: MesloLGS NF @13pt = 8x16 cells.
+- Gates: cargo test --lib (335 passed) + native_terminal_renderer_contract (21 passed),
+  exit 0, re-run independently.
+
+Incident note: the dev runner watch-rebuilt the app from the live working tree mid-task and
+the user saw fully flipped text from an intermediate build. See memory
+`ferryx-devrunner-live-rebuild-hazard` for the pause-worktree-or-gate rule.

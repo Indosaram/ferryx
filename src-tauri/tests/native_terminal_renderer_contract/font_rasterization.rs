@@ -1,7 +1,6 @@
 //! Contract tests for real font rasterization, CJK/Unicode fallback, and cell metrics derivation.
 
 use ferryx_lib::native_terminal::renderer::font_manager::FontManager;
-use fontdb::Database;
 
 #[test]
 fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
@@ -28,8 +27,9 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
     );
 
     // Rasterize ASCII char 'A'
-    let ascii_mask =
-        global_mgr.rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false).into_buffer();
+    let ascii_mask = global_mgr
+        .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false)
+        .into_buffer();
     assert_eq!(
         ascii_mask.len(),
         (metrics.width_px * metrics.height_px) as usize,
@@ -37,33 +37,23 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
     );
 
     // Rasterize CJK char '가' (wide cell: 2 * width)
-    let cjk_mask =
-        global_mgr.rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false).into_buffer();
+    let cjk_mask = global_mgr
+        .rasterize_glyph("가", metrics.width_px * 2, metrics.height_px, false, false)
+        .into_buffer();
     assert_eq!(
         cjk_mask.len(),
         (metrics.width_px * 2 * metrics.height_px) as usize,
         "CJK mask length must equal 2 * width * height"
     );
 
-    // If system fonts are present, ASCII 'A' must produce non-empty alpha pixels
-    let has_faces = {
-        let mut db = Database::new();
-        db.load_system_fonts();
-        let has = db.faces().next().is_some();
-        has
-    };
+    let ascii_non_empty = ascii_mask.iter().any(|&b| b > 0);
+    assert!(
+        ascii_non_empty,
+        "ASCII 'A' must produce a non-empty alpha mask when system fonts exist"
+    );
 
-    if has_faces {
-        let ascii_non_empty = ascii_mask.iter().any(|&b| b > 0);
-        assert!(
-            ascii_non_empty,
-            "ASCII 'A' must produce a non-empty alpha mask when system fonts exist"
-        );
-    }
-
-    // 2. Empty / isolated font database test: must never panic and must return an empty alpha mask
-    let empty_db = Database::new();
-    let isolated_mgr = FontManager::new_with_db(empty_db, "monospace", 14.0);
+    // 2. Missing glyph test: unassigned codepoint must never panic and must return an all-zero alpha mask
+    let isolated_mgr = FontManager::new_with_family_and_size("monospace", 14.0);
 
     let iso_metrics = isolated_mgr.cell_metrics();
     assert!(
@@ -75,35 +65,30 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
         "fallback cell height without fonts must still be non-zero"
     );
 
-    // Missing glyph with no fonts must return an empty mask without panicking
-    let isolated_ascii = isolated_mgr.rasterize_glyph("A", 10, 20, false, false).into_buffer();
-    assert_eq!(isolated_ascii.len(), 200);
+    // Unassigned PUA codepoint must return an empty mask without panicking
+    let isolated_missing = isolated_mgr
+        .rasterize_glyph("\u{10fffd}", 10, 20, false, false)
+        .into_buffer();
+    assert_eq!(isolated_missing.len(), 200);
     assert!(
-        isolated_ascii.iter().all(|&b| b == 0),
-        "isolated manager with no faces must return an all-zero alpha mask for ASCII"
+        isolated_missing.iter().all(|&b| b == 0),
+        "unassigned codepoint must return an all-zero alpha mask"
     );
 
-    let isolated_cjk = isolated_mgr.rasterize_glyph("가", 20, 20, false, false).into_buffer();
-    assert_eq!(isolated_cjk.len(), 400);
+    let whitespace_mask = isolated_mgr
+        .rasterize_glyph("   ", 10, 20, false, false)
+        .into_buffer();
+    assert_eq!(whitespace_mask.len(), 200);
     assert!(
-        isolated_cjk.iter().all(|&b| b == 0),
-        "isolated manager with no faces must return an all-zero alpha mask for CJK"
-    );
-
-    let isolated_combining = isolated_mgr.rasterize_glyph("e\u{0301}", 10, 20, true, true).into_buffer();
-    assert_eq!(isolated_combining.len(), 200);
-    assert!(
-        isolated_combining.iter().all(|&b| b == 0),
-        "isolated manager with combining marks must return an all-zero mask without panic"
+        whitespace_mask.iter().all(|&b| b == 0),
+        "whitespace must return an all-zero mask without panic"
     );
 }
 
 #[test]
 fn test_derived_cell_metrics_consistency_with_configured_font_sizes() {
     for size in [10.0, 13.0, 16.0, 24.0] {
-        let mut db = Database::new();
-        db.load_system_fonts();
-        let mgr = FontManager::new_with_db(db, "monospace", size);
+        let mgr = FontManager::new_with_family_and_size("monospace", size);
         let metrics = mgr.cell_metrics();
 
         assert!(
@@ -163,10 +148,12 @@ fn test_retina_scale_glyph_rasterization_sharpness() {
     let m1 = global_mgr.cell_metrics_for_scale(1.0);
     let m2 = global_mgr.cell_metrics_for_scale(2.0);
 
-    let mask_1x =
-        global_mgr.rasterize_glyph_for_scale("A", m1.width_px, m1.height_px, false, false, 1.0).into_buffer();
-    let mask_2x =
-        global_mgr.rasterize_glyph_for_scale("A", m2.width_px, m2.height_px, false, false, 2.0).into_buffer();
+    let mask_1x = global_mgr
+        .rasterize_glyph_for_scale("A", m1.width_px, m1.height_px, false, false, 1.0)
+        .into_buffer();
+    let mask_2x = global_mgr
+        .rasterize_glyph_for_scale("A", m2.width_px, m2.height_px, false, false, 2.0)
+        .into_buffer();
 
     assert_eq!(
         mask_1x.len(),
@@ -188,4 +175,74 @@ fn test_retina_scale_glyph_rasterization_sharpness() {
             "2x scale rasterization of 'A' must occupy more pixels ({count_2x}) than 1x ({count_1x})"
         );
     }
+}
+
+#[test]
+fn test_glyph_orientation_regression_contract() {
+    let global_mgr = FontManager::global();
+    let metrics = global_mgr.cell_metrics();
+    let w = metrics.width_px;
+    let h = metrics.height_px;
+    let mid_y = (h / 2) as usize;
+
+    // 'L': bottom-half ink > top-half ink
+    let l_mask = global_mgr
+        .rasterize_glyph("L", w, h, false, false)
+        .into_buffer();
+    let mut top_ink_l = 0u64;
+    let mut bottom_ink_l = 0u64;
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let val = l_mask[y * (w as usize) + x] as u64;
+            if y < mid_y {
+                top_ink_l += val;
+            } else {
+                bottom_ink_l += val;
+            }
+        }
+    }
+    assert!(
+        bottom_ink_l > top_ink_l,
+        "'L' bottom-half ink ({bottom_ink_l}) must be strictly greater than top-half ink ({top_ink_l})"
+    );
+
+    // 'P': top-half ink > bottom-half ink
+    let p_mask = global_mgr
+        .rasterize_glyph("P", w, h, false, false)
+        .into_buffer();
+    let mut top_ink_p = 0u64;
+    let mut bottom_ink_p = 0u64;
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let val = p_mask[y * (w as usize) + x] as u64;
+            if y < mid_y {
+                top_ink_p += val;
+            } else {
+                bottom_ink_p += val;
+            }
+        }
+    }
+    assert!(
+        top_ink_p > bottom_ink_p,
+        "'P' top-half ink ({top_ink_p}) must be strictly greater than bottom-half ink ({bottom_ink_p})"
+    );
+
+    // '─': horizontal bar must be centered within ±2px of buffer middle
+    let line_mask = global_mgr
+        .rasterize_glyph("─", w, h, false, false)
+        .into_buffer();
+    let mut row_sums: Vec<(usize, u64)> = (0..h as usize)
+        .map(|y| {
+            let sum: u64 = (0..w as usize)
+                .map(|x| line_mask[y * (w as usize) + x] as u64)
+                .sum();
+            (y, sum)
+        })
+        .collect();
+    row_sums.sort_by_key(|&(_, sum)| std::cmp::Reverse(sum));
+    let max_ink_row = row_sums[0].0;
+    assert!(
+        (max_ink_row as isize - mid_y as isize).abs() <= 2,
+        "'─' ink row ({max_ink_row}) must be centered within 2px of middle ({mid_y})"
+    );
 }

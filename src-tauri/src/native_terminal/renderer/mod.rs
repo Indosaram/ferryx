@@ -2,7 +2,8 @@
 
 pub mod atlas;
 pub mod color_glyph;
-pub mod fallback_resolver;
+pub mod coretext_font;
+pub mod coretext_raster;
 pub mod font_manager;
 pub mod gpu_context;
 pub mod instances;

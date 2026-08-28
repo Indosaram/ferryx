@@ -22,6 +22,11 @@ name = "native_terminal_renderer_poc"
 path = "src/bin/native_terminal_renderer_poc.rs"
 required-features = ["native-terminal"]
 
+[[bin]]
+name = "terminal_selection_evidence"
+path = "src/bin/terminal_selection_evidence.rs"
+required-features = ["native-terminal"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -34,8 +39,6 @@ native-terminal = [
     "dep:png",
     "dep:bytemuck",
     "dep:pollster",
-    "dep:fontdb",
-    "dep:ab_glyph",
 ]
 
 [dependencies]
@@ -80,8 +83,6 @@ rodio = { version = "0.22", default-features = false, features = [
     "vorbis",
     "mp4",
 ] }
-fontdb = { version = "0.16", optional = true }
-ab_glyph = { version = "0.2", optional = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"

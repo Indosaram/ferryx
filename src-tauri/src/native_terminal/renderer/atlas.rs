@@ -281,7 +281,10 @@ mod tests {
         let mask_entry = atlas
             .get_or_insert("A", false, false, false, &config, &gpu.queue)
             .expect("must insert 'A'");
-        assert!(!mask_entry.is_color, "'A' should be a mask entry (not color)");
+        assert!(
+            !mask_entry.is_color,
+            "'A' should be a mask entry (not color)"
+        );
 
         #[cfg(target_os = "macos")]
         {
@@ -301,4 +304,3 @@ mod tests {
         }
     }
 }
-

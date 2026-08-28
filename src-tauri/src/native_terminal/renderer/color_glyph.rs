@@ -36,7 +36,8 @@ pub mod macos {
 
     const K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST: u32 = 1;
     const K_CG_BITMAP_BYTE_ORDER_32_BIG: u32 = 4 << 12; // 0x4000
-    const BITMAP_INFO_RGBA: u32 = K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST | K_CG_BITMAP_BYTE_ORDER_32_BIG;
+    const BITMAP_INFO_RGBA: u32 =
+        K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST | K_CG_BITMAP_BYTE_ORDER_32_BIG;
 
     static LOGGED_ERROR: AtomicBool = AtomicBool::new(false);
 
@@ -97,8 +98,7 @@ pub mod macos {
                 Some((line, typographic_width, ascent, descent))
             };
 
-            let (mut line, mut typographic_width, mut ascent, mut descent) =
-                create_line(&font)?;
+            let (mut line, mut typographic_width, mut ascent, mut descent) = create_line(&font)?;
 
             if typographic_width <= 0.0 && ascent <= 0.0 {
                 return None;
@@ -173,18 +173,7 @@ pub mod macos {
                 return None;
             }
 
-            // Flip rows vertically from bottom-left origin (CoreGraphics) to top-left origin
-            let mut flipped = vec![0u8; total_bytes];
-            let row_bytes = (width as usize) * 4;
-            for y in 0..(height as usize) {
-                let src_y = (height as usize) - 1 - y;
-                let src_offset = src_y * row_bytes;
-                let dst_offset = y * row_bytes;
-                flipped[dst_offset..dst_offset + row_bytes]
-                    .copy_from_slice(&raw_buffer[src_offset..src_offset + row_bytes]);
-            }
-
-            Some(flipped)
+            Some(raw_buffer)
         });
 
         match result {
@@ -226,7 +215,10 @@ mod tests {
         let height = 32;
         let font_size = 16.0;
         let result = rasterize_color_glyph("😺", width, height, font_size);
-        assert!(result.is_some(), "rasterize_color_glyph(\"😺\") must return Some");
+        assert!(
+            result.is_some(),
+            "rasterize_color_glyph(\"😺\") must return Some"
+        );
 
         let buffer = result.unwrap();
         assert_eq!(buffer.len(), (width * height * 4) as usize);
@@ -257,7 +249,58 @@ mod tests {
             let result = rasterize_color_glyph(emoji, 32, 32, 16.0);
             assert!(result.is_some(), "emoji {emoji:?} must rasterize");
             let buf = result.unwrap();
-            assert!(buf.iter().any(|&b| b > 0), "emoji {emoji:?} must have non-zero pixels");
+            assert!(
+                buf.iter().any(|&b| b > 0),
+                "emoji {emoji:?} must have non-zero pixels"
+            );
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_rasterize_color_glyph_orientation() {
+        let width = 32;
+        let height = 32;
+        let font_size = 16.0;
+
+        // Extracts white arrow symbol pixel counts per row inside the emoji button
+        let arrow_pixels_per_row = |buf: &[u8]| -> Vec<usize> {
+            (0..height)
+                .map(|y| {
+                    (0..width)
+                        .filter(|&x| {
+                            let idx = ((y * width + x) * 4) as usize;
+                            let r = buf[idx];
+                            let g = buf[idx + 1];
+                            let b = buf[idx + 2];
+                            let a = buf[idx + 3];
+                            a > 128 && r > 180 && g > 180 && b > 180
+                        })
+                        .count()
+                })
+                .collect()
+        };
+
+        // Up arrow '⬆️' (U+2B06 U+FE0F): arrowhead is in upper half (rows 12..17), shaft in lower half (rows 18..24)
+        let up_arrow = rasterize_color_glyph("⬆\u{fe0f}", width, height, font_size)
+            .expect("must rasterize up arrow");
+        let up_rows = arrow_pixels_per_row(&up_arrow);
+        let up_upper_head: usize = up_rows[12..=17].iter().sum();
+        let up_lower_shaft: usize = up_rows[18..=24].iter().sum();
+        assert!(
+            up_upper_head > up_lower_shaft,
+            "Up arrow '⬆️' must have more pixels in upper arrowhead ({up_upper_head}) than lower shaft ({up_lower_shaft})"
+        );
+
+        // Down arrow '⬇️' (U+2B07 U+FE0F): shaft in upper half (rows 11..17), arrowhead in lower half (rows 18..23)
+        let down_arrow = rasterize_color_glyph("⬇\u{fe0f}", width, height, font_size)
+            .expect("must rasterize down arrow");
+        let down_rows = arrow_pixels_per_row(&down_arrow);
+        let down_upper_shaft: usize = down_rows[11..=17].iter().sum();
+        let down_lower_head: usize = down_rows[18..=23].iter().sum();
+        assert!(
+            down_lower_head > down_upper_shaft,
+            "Down arrow '⬇️' must have more pixels in lower arrowhead ({down_lower_head}) than upper shaft ({down_upper_shaft})"
+        );
     }
 }
