@@ -15,6 +15,11 @@ pub fn snapshot_for_layout(
         italic: false,
         underline: false,
         inverse: false,
+        faint: false,
+        blink: false,
+        invisible: false,
+        strikethrough: false,
+        overline: false,
     };
     let cols = layout.cols as usize;
     let rows = layout.rows as usize;

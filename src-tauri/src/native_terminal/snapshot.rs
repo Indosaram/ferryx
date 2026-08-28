@@ -53,6 +53,36 @@ pub struct CellSnapshot {
     pub underline: bool,
     /// Inverse / reverse video text decoration.
     pub inverse: bool,
+    /// Faint / dim text decoration (SGR 2).
+    pub faint: bool,
+    /// Blinking text decoration (SGR 5).
+    pub blink: bool,
+    /// Invisible / concealed text decoration (SGR 8).
+    pub invisible: bool,
+    /// Strikethrough / crossed-out text decoration (SGR 9).
+    pub strikethrough: bool,
+    /// Overline text decoration (SGR 53).
+    pub overline: bool,
+}
+
+impl Default for CellSnapshot {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            wide: CellWide::Narrow,
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+            faint: false,
+            blink: false,
+            invisible: false,
+            strikethrough: false,
+            overline: false,
+        }
+    }
 }
 
 /// Fully-owned, independent render snapshot of terminal screen and state.

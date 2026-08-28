@@ -30,6 +30,11 @@ fn cell(
         italic: it,
         underline: false,
         inverse: false,
+        faint: false,
+        blink: false,
+        invisible: false,
+        strikethrough: false,
+        overline: false,
     }
 }
 
@@ -87,3 +92,20 @@ pub fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
         },
     )
 }
+
+pub fn single_cell_scenario(cell: CellSnapshot) -> RenderSnapshot {
+    RenderSnapshot {
+        cols: 1,
+        rows: 1,
+        cursor: CursorSnapshot {
+            x: 0,
+            y: 0,
+            visible: false,
+            blinking: false,
+            wide_tail: false,
+            visual_style: CursorVisualStyle::Block,
+        },
+        grid: vec![vec![cell]],
+    }
+}
+

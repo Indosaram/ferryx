@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime, State};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::DaemonClient;
 use crate::ipc::IpcError;
@@ -111,6 +111,40 @@ pub struct NativeTerminalSearchResult {
     pub total_matches: usize,
 }
 
+fn install_pty_resize_dispatcher(
+    state: &NativeTerminalSurfaceHostState,
+    daemon_client: Arc<DaemonClient>,
+) {
+    let (sender, mut receiver) = mpsc::unbounded_channel::<(String, u16, u16)>();
+    let installed = state.set_pty_resize_sink_if_absent(Arc::new(move |session_id, cols, rows| {
+        if let Err(error) = sender.send((session_id.to_string(), cols, rows)) {
+            tracing::warn!(
+                session_id,
+                cols,
+                rows,
+                %error,
+                "Failed to queue native terminal PTY resize"
+            );
+        }
+    }));
+    if !installed {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        while let Some((session_id, cols, rows)) = receiver.recv().await {
+            if let Err(error) = daemon_client.resize_terminal(&session_id, cols, rows).await {
+                tracing::warn!(
+                    session_id,
+                    cols,
+                    rows,
+                    %error,
+                    "Failed to resize native terminal PTY"
+                );
+            }
+        }
+    });
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_attach<R: Runtime>(
     app: AppHandle<R>,
@@ -120,6 +154,7 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
 ) -> Result<(), IpcError> {
+    install_pty_resize_dispatcher(state.inner(), Arc::clone(daemon_client.inner()));
     let logical_bounds = match (bounds, scale_factor) {
         (Some(rect), Some(scale)) if scale.is_finite() && scale > 0.0 => Some(LogicalBounds {
             x: rect.x,
@@ -176,7 +211,6 @@ pub async fn cmd_native_terminal_close<R: Runtime>(
 #[tauri::command]
 pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
     app: AppHandle<R>,
-    daemon_client: State<'_, Arc<DaemonClient>>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     bounds: NativeTerminalLogicalRect,
@@ -212,15 +246,9 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                 "Could not dispatch native terminal render: {error}"
             ))
         })?;
-    let receipt = receiver.await.map_err(|_| {
+    receiver.await.map_err(|_| {
         IpcError::internal("Main thread stopped before native terminal render completed")
-    })??;
-
-    let _ = daemon_client
-        .resize_terminal(&session_id, receipt.cols, receipt.rows)
-        .await;
-
-    Ok(receipt)
+    })?
 }
 
 #[tauri::command]

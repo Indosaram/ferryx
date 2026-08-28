@@ -162,7 +162,13 @@ pub fn extract_cell_snapshot(
 
     let bold = NativeTerminalError::decode_c_bool(style.bold, "style.bold")?;
     let italic = NativeTerminalError::decode_c_bool(style.italic, "style.italic")?;
+    let faint = NativeTerminalError::decode_c_bool(style.faint, "style.faint")?;
+    let blink = NativeTerminalError::decode_c_bool(style.blink, "style.blink")?;
     let inverse = NativeTerminalError::decode_c_bool(style.inverse, "style.inverse")?;
+    let invisible = NativeTerminalError::decode_c_bool(style.invisible, "style.invisible")?;
+    let strikethrough =
+        NativeTerminalError::decode_c_bool(style.strikethrough, "style.strikethrough")?;
+    let overline = NativeTerminalError::decode_c_bool(style.overline, "style.overline")?;
     let underline = decode_underline_mode(style.underline)?;
 
     Ok(CellSnapshot {
@@ -174,5 +180,70 @@ pub fn extract_cell_snapshot(
         italic,
         underline,
         inverse,
+        faint,
+        blink,
+        invisible,
+        strikethrough,
+        overline,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::native_terminal::engine::TerminalEngine;
+    use crate::native_terminal::NativeTerminal;
+
+    fn snapshot_cells(seq: &[u8]) -> (super::CellSnapshot, super::CellSnapshot) {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create live native terminal");
+        terminal.feed(seq).expect("feed escape sequence");
+        let snapshot = terminal.render_snapshot().expect("render snapshot");
+        let cell_a = snapshot.cell(0, 0).cloned().expect("cell 0");
+        let cell_b = snapshot.cell(1, 0).cloned().expect("cell 1");
+        (cell_a, cell_b)
+    }
+
+    #[test]
+    fn test_extract_cell_snapshot_faint_roundtrip() {
+        let (cell_a, cell_b) = snapshot_cells(b"\x1b[2mA\x1b[22mB");
+        assert_eq!(cell_a.text, "A");
+        assert!(cell_a.faint, "expected cell_a.faint == true");
+        assert_eq!(cell_b.text, "B");
+        assert!(!cell_b.faint, "expected cell_b.faint == false");
+    }
+
+    #[test]
+    fn test_extract_cell_snapshot_blink_roundtrip() {
+        let (cell_a, cell_b) = snapshot_cells(b"\x1b[5mA\x1b[25mB");
+        assert_eq!(cell_a.text, "A");
+        assert!(cell_a.blink, "expected cell_a.blink == true");
+        assert_eq!(cell_b.text, "B");
+        assert!(!cell_b.blink, "expected cell_b.blink == false");
+    }
+
+    #[test]
+    fn test_extract_cell_snapshot_invisible_roundtrip() {
+        let (cell_a, cell_b) = snapshot_cells(b"\x1b[8mA\x1b[28mB");
+        assert_eq!(cell_a.text, "A");
+        assert!(cell_a.invisible, "expected cell_a.invisible == true");
+        assert_eq!(cell_b.text, "B");
+        assert!(!cell_b.invisible, "expected cell_b.invisible == false");
+    }
+
+    #[test]
+    fn test_extract_cell_snapshot_strikethrough_roundtrip() {
+        let (cell_a, cell_b) = snapshot_cells(b"\x1b[9mA\x1b[29mB");
+        assert_eq!(cell_a.text, "A");
+        assert!(cell_a.strikethrough, "expected cell_a.strikethrough == true");
+        assert_eq!(cell_b.text, "B");
+        assert!(!cell_b.strikethrough, "expected cell_b.strikethrough == false");
+    }
+
+    #[test]
+    fn test_extract_cell_snapshot_overline_roundtrip() {
+        let (cell_a, cell_b) = snapshot_cells(b"\x1b[53mA\x1b[55mB");
+        assert_eq!(cell_a.text, "A");
+        assert!(cell_a.overline, "expected cell_a.overline == true");
+        assert_eq!(cell_b.text, "B");
+        assert!(!cell_b.overline, "expected cell_b.overline == false");
+    }
 }

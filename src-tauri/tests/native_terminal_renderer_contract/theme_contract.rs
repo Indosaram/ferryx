@@ -32,6 +32,11 @@ fn make_test_snapshot(cols: u16, rows: u16, text: &str) -> RenderSnapshot {
                 italic: false,
                 underline: false,
                 inverse: false,
+                faint: false,
+                blink: false,
+                invisible: false,
+                strikethrough: false,
+                overline: false,
                 wide: CellWide::Narrow,
             });
         }

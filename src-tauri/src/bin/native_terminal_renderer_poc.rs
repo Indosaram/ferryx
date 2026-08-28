@@ -24,6 +24,11 @@ fn blank_cell() -> CellSnapshot {
         italic: false,
         underline: false,
         inverse: false,
+        faint: false,
+        blink: false,
+        invisible: false,
+        strikethrough: false,
+        overline: false,
     }
 }
 

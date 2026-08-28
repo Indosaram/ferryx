@@ -27,6 +27,11 @@ name = "terminal_selection_evidence"
 path = "src/bin/terminal_selection_evidence.rs"
 required-features = ["native-terminal"]
 
+[[bin]]
+name = "terminal_attribute_evidence"
+path = "src/bin/terminal_attribute_evidence.rs"
+required-features = ["native-terminal"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

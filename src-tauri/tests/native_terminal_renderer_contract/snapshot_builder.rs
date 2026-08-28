@@ -14,6 +14,11 @@ pub fn empty_cell() -> CellSnapshot {
         italic: false,
         underline: false,
         inverse: false,
+        faint: false,
+        blink: false,
+        invisible: false,
+        strikethrough: false,
+        overline: false,
     }
 }
 
@@ -36,6 +41,11 @@ pub fn make_cell(
         italic,
         underline,
         inverse,
+        faint: false,
+        blink: false,
+        invisible: false,
+        strikethrough: false,
+        overline: false,
     }
 }
 

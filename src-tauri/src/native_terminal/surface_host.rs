@@ -73,6 +73,7 @@ pub enum NativeTerminalEvent {
 }
 
 pub type NativeTerminalEventSink = Arc<dyn Fn(NativeTerminalEvent) + Send + Sync>;
+pub type NativeTerminalPtyResizeSink = Arc<dyn Fn(&str, u16, u16) + Send + Sync>;
 
 fn validate_session_id(session_id: &str) -> Result<(), NativeTerminalError> {
     if session_id.trim().is_empty() {
@@ -204,6 +205,7 @@ pub struct NativeTerminalSurfaceHostState {
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
     sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
+    pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
 }
 
 impl Clone for NativeTerminalSurfaceHostState {
@@ -212,6 +214,7 @@ impl Clone for NativeTerminalSurfaceHostState {
             hosts: Arc::clone(&self.hosts),
             sessions: Arc::clone(&self.sessions),
             event_sink: Arc::clone(&self.event_sink),
+            pty_resize_sink: Arc::clone(&self.pty_resize_sink),
         }
     }
 }
@@ -222,6 +225,7 @@ impl Default for NativeTerminalSurfaceHostState {
             hosts: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_sink: Arc::new(RwLock::new(None)),
+            pty_resize_sink: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -350,6 +354,21 @@ impl NativeTerminalSurfaceHostState {
         *self.event_sink.write() = Some(sink);
     }
 
+    pub fn set_pty_resize_sink_if_absent(&self, sink: NativeTerminalPtyResizeSink) -> bool {
+        let mut current = self.pty_resize_sink.write();
+        if current.is_some() {
+            return false;
+        }
+        *current = Some(sink);
+        true
+    }
+
+    fn notify_pty_resize(&self, session_id: &str, cols: u16, rows: u16) {
+        if let Some(sink) = self.pty_resize_sink.read().clone() {
+            sink(session_id, cols, rows);
+        }
+    }
+
     pub fn session_layout(&self, session_id: &str) -> Option<SurfaceCompositionLayout> {
         self.sessions
             .lock()
@@ -397,8 +416,8 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<SurfaceCompositionLayout, NativeTerminalError> {
         let layout = request.layout(cell_metrics)?;
         let mut sessions = self.sessions.lock();
-        let session = match sessions.get_mut(&request.session_id) {
-            Some(session) => session,
+        let (session, initialized) = match sessions.get_mut(&request.session_id) {
+            Some(session) => (session, false),
             None => {
                 let terminal = NativeTerminal::new(layout.cols, layout.rows)?;
                 let (update_sender, _) = tokio::sync::watch::channel(());
@@ -422,23 +441,33 @@ impl NativeTerminalSurfaceHostState {
                         surface_attached: true,
                     },
                 );
-                sessions
-                    .get_mut(&request.session_id)
-                    .ok_or(NativeTerminalError::NoValue)?
+                (
+                    sessions
+                        .get_mut(&request.session_id)
+                        .ok_or(NativeTerminalError::NoValue)?,
+                    true,
+                )
             }
         };
 
-        if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+        let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
             session.terminal.resize(
                 layout.cols,
                 layout.rows,
                 cell_metrics.width_px,
                 cell_metrics.height_px,
             )?;
-        }
+            true
+        } else {
+            false
+        };
         session.layout = Some(layout);
         session.logical_bounds = Some(request.bounds);
         session.cell_metrics = Some(cell_metrics);
+        drop(sessions);
+        if initialized || resized {
+            self.notify_pty_resize(&request.session_id, layout.cols, layout.rows);
+        }
         Ok(layout)
     }
 
@@ -491,26 +520,36 @@ impl NativeTerminalSurfaceHostState {
         }
 
         session.surface_attached = true;
-        if let Some(bounds) = bounds {
+        let resized_dimensions = if let Some(bounds) = bounds {
             let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
             let layout = NativeTerminalBoundsRequest {
                 session_id: session_id.to_string(),
                 bounds,
             }
             .layout(metrics)?;
-            if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+            let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
                 session.terminal.resize(
                     layout.cols,
                     layout.rows,
                     metrics.width_px,
                     metrics.height_px,
                 )?;
-            }
+                true
+            } else {
+                false
+            };
             session.layout = Some(layout);
             session.logical_bounds = Some(bounds);
             session.cell_metrics = Some(metrics);
-        }
+            resized.then_some((layout.cols, layout.rows))
+        } else {
+            None
+        };
         session.render_coordinator.consume_render();
+        drop(sessions);
+        if let Some((cols, rows)) = resized_dimensions {
+            self.notify_pty_resize(session_id, cols, rows);
+        }
         Ok(true)
     }
 
@@ -1308,6 +1347,47 @@ mod tests {
             vec!["surface", "target", "renderer"],
             "Surface must drop before target child view to prevent unparenting NSView while WGPU Surface is active"
         );
+    }
+
+    #[test]
+    fn ghostty_grid_resize_notifies_pty_with_matching_dimensions() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "pty-resize-contract";
+        let cell_metrics = font_manager::derived_cell_metrics();
+        let request = |width| NativeTerminalBoundsRequest {
+            session_id: session_id.to_string(),
+            bounds: LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 480.0,
+                scale_factor: 1.0,
+            },
+        };
+        state
+            .prepare_session_layout(request(400.0), cell_metrics)
+            .expect("create initial grid");
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed);
+        assert!(state.set_pty_resize_sink_if_absent(Arc::new(
+            move |resized_session_id, cols, rows| {
+                observed_for_sink
+                    .lock()
+                    .push((resized_session_id.to_string(), cols, rows));
+            },
+        )));
+
+        let layout = state
+            .prepare_session_layout(request(800.0), cell_metrics)
+            .expect("resize grid");
+
+        assert_eq!(
+            observed.lock().as_slice(),
+            &[(session_id.to_string(), layout.cols, layout.rows)],
+            "the PTY resize path must receive the exact ghostty grid dimensions"
+        );
+        state.teardown();
     }
 
     #[test]
