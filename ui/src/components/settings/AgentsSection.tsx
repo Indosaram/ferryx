@@ -187,61 +187,32 @@ export function AgentsSection() {
           label="Default Agent"
           description="When this agent is enabled and available, it appears first in the New Tab agent list with a Default label. Clicking a listed agent still launches that agent. Ferryx does not auto-launch it. Auto stores no preference. None stores none. Unavailable, disabled, or missing selections keep the natural agent order."
         >
-          <div
-            className="flex flex-wrap items-center gap-1.5"
-            role="group"
-            aria-label="Default Agent"
+          <Select
+            value={settings.defaultAgentId ?? DEFAULT_AGENT_AUTO}
+            onValueChange={(value) =>
+              setDefaultAgent(value === DEFAULT_AGENT_AUTO ? null : value)
+            }
           >
-            <Button
-              type="button"
-              variant={settings.defaultAgentId === null ? "default" : "outline"}
-              size="sm"
-              onClick={() => setDefaultAgent(null)}
-              className={`no-drag h-7 gap-1.5 px-2.5 text-[11px] font-medium transition-colors ${
-                settings.defaultAgentId === null
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
-              }`}
+            <SelectTrigger
+              id="settings-default-agent"
+              aria-label="Default Agent"
+              className="no-drag h-8 w-[180px] text-[11px]"
             >
-              {settings.defaultAgentId === null ? <Check className="size-3" /> : null}
-              Auto
-            </Button>
-            <Button
-              type="button"
-              variant={settings.defaultAgentId === "none" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setDefaultAgent("none")}
-              className={`no-drag h-7 gap-1.5 px-2.5 text-[11px] font-medium transition-colors ${
-                settings.defaultAgentId === "none"
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
-              }`}
-            >
-              {settings.defaultAgentId === "none" ? <Check className="size-3" /> : null}
-              None
-            </Button>
-            {availableAgents.map((agent) => {
-              const isSelected = settings.defaultAgentId === agent.name;
-              const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
-              return (
-                <Button
-                  key={agent.name}
-                  type="button"
-                  variant={isSelected ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setDefaultAgent(agent.name)}
-                  className={`no-drag h-7 gap-1.5 px-2.5 text-[11px] font-medium transition-colors ${
-                    isSelected
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
-                  }`}
-                >
-                  {isSelected ? <Check className="size-3" /> : null}
-                  {label}
-                </Button>
-              );
-            })}
-          </div>
+              <SelectValue placeholder="Default Agent" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={DEFAULT_AGENT_AUTO}>Auto</SelectItem>
+              <SelectItem value="none">None</SelectItem>
+              {availableAgents.map((agent) => (
+                <SelectItem key={agent.name} value={agent.name}>
+                  <span className="flex items-center gap-2">
+                    <AgentIcon name={agent.command} className="size-3.5 shrink-0" />
+                    {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </SettingRow>
       </div>
 
@@ -307,6 +278,7 @@ export function AgentsSection() {
                             isExpanded ? "" : "-rotate-90"
                           }`}
                         />
+                        <AgentIcon name={agent.command} className="size-4 shrink-0" />
                         <span>{displayName}</span>
                       </button>
                       {agent.custom ? (
@@ -333,7 +305,7 @@ export function AgentsSection() {
                         </Badge>
                       )}
                     </div>
-                    <div className="mt-0.5 pl-5 font-mono text-[11px] text-muted-foreground truncate">
+                    <div className="mt-0.5 pl-[2.375rem] font-mono text-[11px] text-muted-foreground truncate">
                       {commandDisplay}
                     </div>
                   </div>

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SUPPORTED_AGENT_LOGOS } from "../lib/agentIcon";
+import { resolveAgentLogo } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
 import { RemoteApp } from "./RemoteApp";
@@ -1296,7 +1296,7 @@ describe("Remote UI Components", () => {
 
     // Claude tab has img with claude logo
     const claudeImg = within(claudeTab).getByTestId("tab-agent-icon");
-    expect(claudeImg).toHaveAttribute("src", SUPPORTED_AGENT_LOGOS.claude);
+    expect(claudeImg).toHaveAttribute("src", resolveAgentLogo("claude")!);
     expect(claudeImg).toHaveAttribute("data-agent-type", "claude");
     expect(within(claudeTab).queryByTestId("tab-terminal-icon")).not.toBeInTheDocument();
 

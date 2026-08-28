@@ -79,7 +79,8 @@ describe("SortableTab agent icon rendering", () => {
     expect(agentIcon).toBeInTheDocument();
     expect(agentIcon).toHaveAttribute("data-agent-type", "codex");
     expect(agentIcon.className).toMatch(/\bsize-4\b/);
-    expect(agentIcon.className).toMatch(/agent-tab-logo--monochrome/);
+    // Codex ships a full-color brand mark, so it must not be inverted.
+    expect(agentIcon.className).not.toMatch(/agent-tab-logo--monochrome/);
 
     const workingIndicator = screen.getByTestId("tab-working-indicator");
     expect(workingIndicator).toBeInTheDocument();
@@ -116,7 +117,7 @@ describe("SortableTab agent icon rendering", () => {
   });
 
   it("never renders the Codex logo for non-Codex or unknown agent identities", () => {
-    const nonCodexTypes = ["generic", "terminal", "aider", "devin", "not-codex", "unknown"];
+    const nonCodexTypes = ["generic", "terminal", "devin", "not-codex", "unknown"];
     for (const nonCodexType of nonCodexTypes) {
       const { unmount } = renderSortableTab({
         activity: makeActivity({

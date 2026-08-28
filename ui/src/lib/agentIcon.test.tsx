@@ -7,10 +7,10 @@ import {
   SUPPORTED_AGENT_LOGOS,
   SUPPORTED_AGENT_TYPES,
 } from "./agentIcon";
+import { AGENT_CANDIDATES } from "./agentsSettings";
 
 const unsupportedAgentTypes = [
   "kilo",
-  "aider",
   "devin",
   "hermes",
   "goose",
@@ -18,7 +18,6 @@ const unsupportedAgentTypes = [
   "rovo",
   "openclaw",
   "mimo",
-  "droid",
   "generic",
   "terminal",
   "not-a-known-agent",
@@ -26,27 +25,43 @@ const unsupportedAgentTypes = [
 ];
 
 describe("agent icon mapping and resolution contract", () => {
-  it("resolves every supported agent type to its dedicated bundled logo asset", () => {
-    for (const [agentType, expectedLogo] of Object.entries(SUPPORTED_AGENT_LOGOS)) {
-      expect(resolveAgentLogo(agentType)).toBe(expectedLogo);
-      expect(expectedLogo).toMatch(/^data:image\/svg\+xml,/);
+  it("resolves every supported agent type to its bundled logo asset verbatim", () => {
+    for (const [agentType, asset] of Object.entries(SUPPORTED_AGENT_LOGOS)) {
+      expect(resolveAgentLogo(agentType)).toBe(asset);
+    }
+    for (const agentType of SUPPORTED_AGENT_TYPES) {
+      expect(resolveAgentLogo(agentType)).toBeTruthy();
+    }
+  });
+
+  it("ships a logo for every agent Ferryx probes by default", () => {
+    for (const candidate of AGENT_CANDIDATES) {
+      expect(resolveAgentLogo(candidate)).toBeTruthy();
     }
   });
 
   it("normalizes whitespace and casing for supported agent types", () => {
-    expect(resolveAgentLogo("  CLAUDE  ")).toBe(SUPPORTED_AGENT_LOGOS.claude);
-    expect(resolveAgentLogo("OpEnCoDe")).toBe(SUPPORTED_AGENT_LOGOS.opencode);
-    expect(resolveAgentLogo("  GEMINI ")).toBe(SUPPORTED_AGENT_LOGOS.gemini);
-    expect(resolveAgentLogo("PI")).toBe(SUPPORTED_AGENT_LOGOS.pi);
-    expect(resolveAgentLogo("  OmO ")).toBe(SUPPORTED_AGENT_LOGOS.omo);
+    expect(resolveAgentLogo("  CLAUDE  ")).toBe(resolveAgentLogo("claude"));
+    expect(resolveAgentLogo("OpEnCoDe")).toBe(resolveAgentLogo("opencode"));
+    expect(resolveAgentLogo("  GEMINI ")).toBe(resolveAgentLogo("gemini"));
+    expect(resolveAgentLogo("PI")).toBe(resolveAgentLogo("pi"));
+    expect(resolveAgentLogo("  OmO ")).toBe(resolveAgentLogo("omo"));
+    expect(resolveAgentLogo("CODEX")).toBe(SUPPORTED_AGENT_LOGOS.codex);
   });
 
-  it("identifies monochrome vs standalone full-color logos correctly", () => {
-    expect(isMonochromeAgentLogo("claude")).toBe(true);
-    expect(isMonochromeAgentLogo("codex")).toBe(true);
-    expect(isMonochromeAgentLogo("gemini")).toBe(true);
-    expect(isMonochromeAgentLogo("pi")).toBe(true);
-    expect(isMonochromeAgentLogo("omo")).toBe(false);
+  it("resolves the cursor-agent binary name to the cursor logo", () => {
+    expect(resolveAgentLogo("cursor-agent")).toBe(SUPPORTED_AGENT_LOGOS.cursor);
+  });
+
+  it("only inverts brands whose official mark is a single flat color", () => {
+    for (const flat of ["cursor", "grok", "opencode", "cline", "pi", "droid", "omo"]) {
+      expect(isMonochromeAgentLogo(flat)).toBe(true);
+    }
+    // Brands that publish a full-color mark must never be filtered.
+    for (const colored of ["claude", "codex", "gemini", "kimi", "copilot", "antigravity", "aider", "crush"]) {
+      expect(isMonochromeAgentLogo(colored)).toBe(false);
+    }
+    expect(isMonochromeAgentLogo("cursor-agent")).toBe(true);
     expect(isMonochromeAgentLogo("unsupported")).toBe(false);
     expect(isMonochromeAgentLogo(null)).toBe(false);
     expect(isMonochromeAgentLogo(undefined)).toBe(false);

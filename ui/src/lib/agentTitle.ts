@@ -53,6 +53,7 @@ export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
   { pattern: /\brovo\b/i, type: "rovo", name: "Rovo" },
   { pattern: /\bopenclaw\b/i, type: "openclaw", name: "OpenClaw" },
   { pattern: /\bcopilot\b/i, type: "copilot", name: "GitHub Copilot" },
+  { pattern: /\bcrush\b/i, type: "crush", name: "Crush" },
   { pattern: /\bmimo\b/i, type: "mimo", name: "Mimo" },
 ];
 

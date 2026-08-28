@@ -1,5 +1,8 @@
+import aiderLogo from "../assets/agent-logos/aider.png";
 import antigravityLogo from "../assets/agent-logos/antigravity.svg";
 import claudeLogo from "../assets/agent-logos/claude.svg";
+import crushLogo from "../assets/agent-logos/crush.png";
+import droidLogo from "../assets/agent-logos/droid.svg";
 import codexLogo from "../assets/agent-logos/codex.svg";
 import copilotLogo from "../assets/agent-logos/copilot.svg";
 import clineLogo from "../assets/agent-logos/cline.svg";
@@ -24,6 +27,9 @@ export const SUPPORTED_AGENT_LOGOS = {
   kimi: kimiLogo,
   cline: clineLogo,
   omo: omoLogo,
+  aider: aiderLogo,
+  crush: crushLogo,
+  droid: droidLogo,
 } as const;
 
 export const SUPPORTED_AGENT_TYPES = Object.keys(SUPPORTED_AGENT_LOGOS) as readonly string[];
@@ -33,28 +39,42 @@ export const AGENT_LOGO_ALIASES: Record<string, keyof typeof SUPPORTED_AGENT_LOG
   "cursor-agent": "cursor",
 };
 
+// Brands whose official mark carries no color of its own (Cursor, xAI, OpenCode,
+// Cline, Pi, Factory Droid, OMO). These invert to stay legible on dark chrome;
+// every other logo ships its real brand colors and must never be filtered.
+const ADAPTIVE_MONOCHROME_LOGOS: ReadonlySet<string> = new Set([
+  "cursor",
+  "grok",
+  "opencode",
+  "cline",
+  "pi",
+  "droid",
+  "omo",
+]);
+
+function canonicalAgentType(value?: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return null;
+  return AGENT_LOGO_ALIASES[normalized] ?? normalized;
+}
+
 export function resolveAgentLogo(agentType?: string | null): string | null {
-  if (!agentType) return null;
-  const normalized = agentType.trim().toLowerCase();
+  const normalized = canonicalAgentType(agentType);
+  if (!normalized) return null;
   return SUPPORTED_AGENT_LOGOS[normalized as keyof typeof SUPPORTED_AGENT_LOGOS] ?? null;
 }
 
 export function resolveAgentLogoByCommandName(name?: string | null): string | null {
-  if (!name) return null;
-  const normalized = name.trim().toLowerCase();
-  const aliased = AGENT_LOGO_ALIASES[normalized];
-  return aliased ? SUPPORTED_AGENT_LOGOS[aliased] : resolveAgentLogo(normalized);
+  return resolveAgentLogo(name);
 }
 
 export function isMonochromeAgentLogoByCommandName(name?: string | null): boolean {
-  if (!name) return false;
-  const normalized = name.trim().toLowerCase();
-  return isMonochromeAgentLogo(AGENT_LOGO_ALIASES[normalized] ?? normalized);
+  return isMonochromeAgentLogo(name);
 }
 
 export function isMonochromeAgentLogo(agentType?: string | null): boolean {
-  if (!agentType) return false;
-  const normalized = agentType.trim().toLowerCase();
-  if (normalized === "omo") return false;
-  return normalized in SUPPORTED_AGENT_LOGOS;
+  const normalized = canonicalAgentType(agentType);
+  if (!normalized) return false;
+  return ADAPTIVE_MONOCHROME_LOGOS.has(normalized);
 }
