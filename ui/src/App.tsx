@@ -116,11 +116,15 @@ function mergeRecoveredProjectBootstrap(
     stored.projects[0].workspaceId === startup.workspaceId &&
     stored.projects[0].repoRoot === startup.repoRoot &&
     recovered.projects.some((project) => project.workspaceId !== startup.workspaceId);
+  const isRepresentedSingleProject =
+    stored.projects.length === 1 &&
+    recovered.projects.length > 1 &&
+    recovered.projects.some((project) => project.workspaceId === stored.projects[0].workspaceId);
   const isUninitialized =
     stored.projects.length === 1 &&
     stored.projects[0].workspaceId === DEFAULT_WORKSPACE_ID &&
     stored.projects[0].repoRoot === ".";
-  if (!isUninitialized && !isReducedToStartup) return stored;
+  if (!isUninitialized && !isReducedToStartup && !isRepresentedSingleProject) return stored;
 
   const projects = stored.projects.filter(
     (project) => project.workspaceId !== DEFAULT_WORKSPACE_ID || (project.repoRoot !== "." && project.repoRoot !== ""),

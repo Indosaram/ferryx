@@ -50,3 +50,30 @@ tsc && vite build: success
 
 `docs/AUTO_UPDATE_MANUAL_E2E.md`의 절차로 직전 버전에서 hotfix를 설치한다. 재시작 뒤 현재 version, update
 자동 확인 상태, 복구된 프로젝트/worktree, 기존 agent/session의 지속 여부를 기록한다.
+
+## 실제 설치 E2E 후속 발견 (2026-08-28)
+
+`/Applications/Ferryx.app`에 설치한 공개 `2026.826.9` 앱에서 실제 업데이트를 실행했다.
+
+- Settings가 `Version 2026.826.10 is available.`와 활성화된 **Install and Relaunch**를 표시했다.
+- 다운로드 진행률이 화면에 표시된 뒤, `2026.826.9` GUI PID가 종료됐다.
+- `/Applications/Ferryx.app` 번들은 `2026.826.10`으로 교체됐고 새 GUI PID가 기동됐다.
+- 기존 headless daemon PID는 종료되지 않았다.
+
+그러나 클린 `2026.826.10` 재기동 뒤 Sidebar는 WebView에 남은 단일 프로젝트만 표시했다. native
+`session_state.json`에는 `default`, `maho-workspace`, `orca-lite`, `superwiki-mail-otp`,
+`orca-lite-release-verify-13768`의 다섯 workspace와 기존 terminal session이 남아 있었으므로, 이는
+설치/서명/relaunch 실패가 아니라 project catalog recovery의 실제 회귀다.
+
+원인은 `mergeRecoveredProjectBootstrap()`이 단일 WebView catalog를 복구 대상으로 보려면 그 프로젝트가
+현재 process의 `getInitialProject()` 결과와 정확히 같아야 한다는 조건이었다. Finder 또는 `/Applications`에서
+기동하면 startup root가 저장된 마지막 프로젝트와 다를 수 있어, 여러 native workspace가 존재해도 recovery를
+건너뛰었다.
+
+후속 hotfix는 다음 회귀 테스트로 고정한다.
+
+- native session이 여러 workspace를 포함하고 localStorage catalog가 그중 하나인 단일 프로젝트일 때,
+  startup project가 달라도 모든 session workspace를 복구한다.
+- 이미 여러 프로젝트를 가진 catalog에는 과거 workspace를 추가하지 않는다.
+
+이 항목은 후속 서명 릴리스에서 실제 설치 E2E를 다시 통과하기 전까지 성공으로 판정하지 않는다.
