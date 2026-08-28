@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Bot, Check, ChevronDown, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, Bot, ChevronDown, Plus, RotateCw, TerminalSquare, Trash2 } from "lucide-react";
 
 import {
-  AGENT_CANDIDATES,
+  isMonochromeAgentLogoByCommandName,
+  resolveAgentLogoByCommandName,
+} from "../../lib/agentIcon";
+
+import {
+  detectionTargets,
   loadAgentSettings,
   mergeDetections,
+  normalizeCustomAgentName,
+  removeCustomAgent,
   saveAgentSettings,
+  upsertCustomAgent,
+  validateCustomAgent,
   type AgentOverride,
   type AgentSettings,
+  type CustomAgentValidationError,
 } from "../../lib/agentsSettings";
 import { detectAgents, type AgentDetection } from "../../lib/tauri";
 import { Alert, AlertDescription } from "../ui/alert";
@@ -15,8 +25,51 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { SettingRow, SettingsHeading } from "./primitives";
+
+const DEFAULT_AGENT_AUTO = "__auto__";
+
+function AgentIcon({ name, className }: { name: string; className?: string }) {
+  const logo = resolveAgentLogoByCommandName(name);
+  if (!logo) {
+    return (
+      <TerminalSquare
+        data-testid="settings-agent-terminal-icon"
+        data-agent-name={name}
+        className={className}
+      />
+    );
+  }
+  return (
+    <img
+      src={logo}
+      alt=""
+      aria-hidden="true"
+      data-testid="settings-agent-icon"
+      data-agent-name={name}
+      className={`${className ?? ""} ${
+        isMonochromeAgentLogoByCommandName(name) ? "agent-tab-logo--monochrome" : ""
+      }`.trim()}
+    />
+  );
+}
+
+const VALIDATION_MESSAGES: Record<CustomAgentValidationError, string> = {
+  "empty-name": "Enter a name for the agent.",
+  "empty-command": "Enter the command Ferryx should run.",
+  "reserved-name": "That name is reserved for a built-in agent.",
+  "duplicate-name": "A custom agent with that name already exists.",
+};
+
+type CustomAgentDraft = {
+  name: string;
+  command: string;
+  args: string;
+};
+
+const EMPTY_DRAFT: CustomAgentDraft = { name: "", command: "", args: "" };
 
 export function AgentsSection() {
   const [settings, setSettings] = useState<AgentSettings>(loadAgentSettings);
@@ -24,27 +77,38 @@ export function AgentsSection() {
   const [refreshing, setRefreshing] = useState(false);
   const [detectionError, setDetectionError] = useState<string | null>(null);
   const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
+  const [draft, setDraft] = useState<CustomAgentDraft | null>(null);
+  const [editingName, setEditingName] = useState<string | null>(null);
+  const [draftError, setDraftError] = useState<string | null>(null);
 
-  const runDetection = useCallback(async () => {
-    setRefreshing(true);
+  const targetKey = useMemo(() => detectionTargets(settings).join("\u0000"), [settings]);
+
+  const runDetection = useCallback(async (names: string[], manual: boolean) => {
+    if (manual) setRefreshing(true);
     setDetectionError(null);
     try {
-      const results = await detectAgents([...AGENT_CANDIDATES]);
+      const results = await detectAgents(names);
       setDetections(results);
     } catch (err) {
       // Keep the last successful detection results when refresh fails.
       setDetectionError(err instanceof Error ? err.message : "Failed to detect installed agents");
     } finally {
-      setRefreshing(false);
+      if (manual) setRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
-    void runDetection();
-  }, [runDetection]);
+    void runDetection(targetKey.split("\u0000"), false);
+  }, [runDetection, targetKey]);
 
   const resolvedAgents = mergeDetections(settings, detections);
   const availableAgents = resolvedAgents.filter((agent) => agent.available);
+  const customAgents = resolvedAgents.filter((agent) => agent.custom);
+
+  const commitSettings = (next: AgentSettings) => {
+    saveAgentSettings(next);
+    setSettings(next);
+  };
 
   const updateOverride = (name: string, patch: AgentOverride) => {
     setSettings((prev) => {
@@ -71,12 +135,48 @@ export function AgentsSection() {
     });
   };
 
+  const startAddDraft = () => {
+    setEditingName(null);
+    setDraftError(null);
+    setDraft(EMPTY_DRAFT);
+  };
+
+  const startEditDraft = (name: string) => {
+    const existing = settings.custom.find((agent) => agent.name === name);
+    if (!existing) return;
+    setEditingName(name);
+    setDraftError(null);
+    setDraft({ name: existing.name, command: existing.command, args: existing.args });
+  };
+
+  const cancelDraft = () => {
+    setDraft(null);
+    setEditingName(null);
+    setDraftError(null);
+  };
+
+  const saveDraft = () => {
+    if (!draft) return;
+    const failure = validateCustomAgent(draft, settings, editingName ?? undefined);
+    if (failure) {
+      setDraftError(VALIDATION_MESSAGES[failure]);
+      return;
+    }
+    commitSettings(upsertCustomAgent(settings, draft, editingName ?? undefined));
+    cancelDraft();
+  };
+
+  const deleteCustomAgent = (name: string) => {
+    if (editingName === name) cancelDraft();
+    commitSettings(removeCustomAgent(settings, name));
+  };
+
   return (
     <section aria-labelledby="settings-agents-heading" aria-label="Agents">
       <SettingsHeading
         icon={<Bot />}
         title="Agents"
-        description="Configure CLI coding agents detected on your system or customize their launch commands."
+        description="Configure CLI coding agents detected on your system, customize their launch commands, or register your own."
       />
       <h2 id="settings-agents-heading" className="sr-only">
         Agents
@@ -160,7 +260,7 @@ export function AgentsSection() {
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => void runDetection()}
+            onClick={() => void runDetection(targetKey.split("\u0000"), true)}
             disabled={refreshing}
             className="no-drag h-7 gap-1.5 px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
           >
@@ -209,6 +309,14 @@ export function AgentsSection() {
                         />
                         <span>{displayName}</span>
                       </button>
+                      {agent.custom ? (
+                        <Badge
+                          variant="outline"
+                          className="border-border bg-transparent px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground shadow-none"
+                        >
+                          Custom
+                        </Badge>
+                      ) : null}
                       {agent.available ? (
                         <Badge
                           variant="outline"
@@ -231,6 +339,30 @@ export function AgentsSection() {
                   </div>
 
                   <div className="flex items-center gap-3">
+                    {agent.custom ? (
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => startEditDraft(agent.name)}
+                          aria-label={`Edit ${displayName}`}
+                          className="no-drag h-7 px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        >
+                          Edit
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => deleteCustomAgent(agent.name)}
+                          aria-label={`Remove ${displayName}`}
+                          className="no-drag h-7 px-2 text-[11px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          <Trash2 className="size-3" />
+                        </Button>
+                      </>
+                    ) : null}
                     <label
                       htmlFor={`agent-enable-${agent.name}`}
                       className={`flex items-center gap-2 select-none ${
@@ -303,6 +435,141 @@ export function AgentsSection() {
             );
           })}
         </div>
+      </div>
+
+      <div className="mt-8">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h3 className="text-[13px] font-semibold text-foreground">Custom Agents</h3>
+            <Badge
+              variant="secondary"
+              className="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
+            >
+              {customAgents.length} registered
+            </Badge>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={startAddDraft}
+            aria-label="Add custom agent"
+            className="no-drag h-7 gap-1.5 px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <Plus className="size-3" />
+            Add Agent
+          </Button>
+        </div>
+
+        <p className="mb-3 text-[11px] leading-normal text-muted-foreground">
+          Register any CLI coding agent on your PATH. Registered agents are detected, appear in the
+          New Tab agent list, and can be picked as the default agent.
+        </p>
+
+        {draft ? (
+          <form
+            aria-label={editingName ? "Edit custom agent" : "Add custom agent"}
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveDraft();
+            }}
+            className="space-y-3 rounded-md border border-border bg-muted/30 p-3"
+          >
+            <div>
+              <Label
+                htmlFor="custom-agent-name"
+                className="mb-1 block text-[11px] font-medium text-muted-foreground"
+              >
+                Name
+              </Label>
+              <Input
+                id="custom-agent-name"
+                type="text"
+                aria-label="Custom agent name"
+                value={draft.name}
+                placeholder="e.g. my-agent"
+                onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                className="h-8 w-full text-[11px]"
+              />
+            </div>
+            <div>
+              <Label
+                htmlFor="custom-agent-command"
+                className="mb-1 block text-[11px] font-medium text-muted-foreground"
+              >
+                Command
+              </Label>
+              <Input
+                id="custom-agent-command"
+                type="text"
+                aria-label="Custom agent command"
+                value={draft.command}
+                placeholder="e.g. my-agent-cli"
+                onChange={(event) => setDraft({ ...draft, command: event.target.value })}
+                className="h-8 w-full font-mono text-[11px]"
+              />
+            </div>
+            <div>
+              <Label
+                htmlFor="custom-agent-args"
+                className="mb-1 block text-[11px] font-medium text-muted-foreground"
+              >
+                Arguments
+              </Label>
+              <Input
+                id="custom-agent-args"
+                type="text"
+                aria-label="Custom agent arguments"
+                value={draft.args}
+                placeholder="e.g. --resume"
+                onChange={(event) => setDraft({ ...draft, args: event.target.value })}
+                className="h-8 w-full font-mono text-[11px]"
+              />
+            </div>
+
+            {draftError ? (
+              <Alert
+                variant="destructive"
+                className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5 text-[11px] text-destructive [&>svg]:static [&>svg~*]:pl-0"
+              >
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                <AlertDescription className="text-[11px] leading-normal">
+                  {draftError}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {normalizeCustomAgentName(draft.name) || "—"}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={cancelDraft}
+                  className="no-drag h-7 px-2.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  className="no-drag h-7 px-2.5 text-[11px] font-medium"
+                >
+                  {editingName ? "Save Agent" : "Add Agent"}
+                </Button>
+              </div>
+            </div>
+          </form>
+        ) : null}
+
+        {!draft && customAgents.length === 0 ? (
+          <p className="rounded-md border border-dashed border-border p-3 text-[11px] text-muted-foreground">
+            No custom agents registered yet.
+          </p>
+        ) : null}
       </div>
     </section>
   );

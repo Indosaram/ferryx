@@ -5,10 +5,15 @@ import {
   AGENTS_SETTINGS_CHANGED_EVENT,
   AGENTS_SETTINGS_STORAGE_KEY,
   DEFAULT_AGENT_SETTINGS,
+  detectionTargets,
   getLaunchableAgents,
   loadAgentSettings,
   mergeDetections,
+  normalizeCustomAgentName,
+  removeCustomAgent,
   saveAgentSettings,
+  upsertCustomAgent,
+  validateCustomAgent,
   type AgentSettings,
 } from "./agentsSettings";
 
@@ -31,6 +36,7 @@ describe("agentsSettings persistence and pure helpers", () => {
           claude: { enabled: true, command: "claude-code", args: "--dangerously-skip-permissions" },
           aider: { enabled: false },
         },
+        custom: [],
       };
 
       saveAgentSettings(customSettings);
@@ -56,6 +62,7 @@ describe("agentsSettings persistence and pure helpers", () => {
         version: 1,
         defaultAgentId: "codex",
         overrides: {},
+        custom: [],
       };
       saveAgentSettings(payload);
 
@@ -82,6 +89,7 @@ describe("agentsSettings persistence and pure helpers", () => {
         enabled: true,
         command: "claude",
         args: "",
+        custom: false,
       });
 
       const gemini = resolved.find((r) => r.name === "gemini")!;
@@ -91,6 +99,7 @@ describe("agentsSettings persistence and pure helpers", () => {
         enabled: false,
         command: "gemini",
         args: "",
+        custom: false,
       });
     });
 
@@ -102,11 +111,12 @@ describe("agentsSettings persistence and pure helpers", () => {
           claude: { enabled: false, command: "/usr/local/bin/claude", args: "--model sonnet" },
           opencode: { enabled: true, command: "opencode-custom" },
         },
+        custom: [],
       };
 
       const detections = [
-        { name: "claude", available: true },
-        { name: "opencode", available: false },
+        { name: "/usr/local/bin/claude", available: true },
+        { name: "opencode-custom", available: false },
       ];
 
       const resolved = mergeDetections(settings, detections);
@@ -118,6 +128,7 @@ describe("agentsSettings persistence and pure helpers", () => {
         enabled: false, // overridden to false despite available
         command: "/usr/local/bin/claude",
         args: "--model sonnet",
+        custom: false,
       });
 
       const opencode = resolved.find((r) => r.name === "opencode")!;
@@ -127,17 +138,134 @@ describe("agentsSettings persistence and pure helpers", () => {
         enabled: true, // overridden to true despite not available
         command: "opencode-custom",
         args: "",
+        custom: false,
       });
+    });
+
+    it("resolves registered custom agents alongside built-in candidates", () => {
+      const settings: AgentSettings = {
+        version: 1,
+        defaultAgentId: null,
+        overrides: {},
+        custom: [{ name: "my-agent", command: "my-agent-cli", args: "--resume" }],
+      };
+
+      const resolved = mergeDetections(settings, [
+        { name: "my-agent-cli", available: true },
+      ]);
+
+      expect(resolved).toHaveLength(AGENT_CANDIDATES.length + 1);
+      expect(resolved.find((r) => r.name === "my-agent")).toEqual({
+        name: "my-agent",
+        available: true,
+        enabled: true,
+        command: "my-agent-cli",
+        args: "--resume",
+        custom: true,
+      });
+    });
+  });
+
+  describe("custom agent registration", () => {
+    it("normalizes names to a lowercase dashed slug", () => {
+      expect(normalizeCustomAgentName("  My Agent  ")).toBe("my-agent");
+    });
+
+    it("rejects empty, reserved, and duplicate names", () => {
+      const settings: AgentSettings = {
+        ...DEFAULT_AGENT_SETTINGS,
+        custom: [{ name: "my-agent", command: "my-agent-cli", args: "" }],
+      };
+
+      expect(validateCustomAgent({ name: " ", command: "x" }, settings)).toBe("empty-name");
+      expect(validateCustomAgent({ name: "x", command: " " }, settings)).toBe("empty-command");
+      expect(validateCustomAgent({ name: "Claude", command: "x" }, settings)).toBe("reserved-name");
+      expect(validateCustomAgent({ name: "My Agent", command: "x" }, settings)).toBe(
+        "duplicate-name",
+      );
+      expect(validateCustomAgent({ name: "other", command: "x" }, settings)).toBeNull();
+      expect(
+        validateCustomAgent({ name: "My Agent", command: "x" }, settings, "my-agent"),
+      ).toBeNull();
+    });
+
+    it("adds, renames, and removes custom agents while carrying state", () => {
+      const added = upsertCustomAgent(DEFAULT_AGENT_SETTINGS, {
+        name: "My Agent",
+        command: " my-agent-cli ",
+        args: " --resume ",
+      });
+      expect(added.custom).toEqual([
+        { name: "my-agent", command: "my-agent-cli", args: "--resume" },
+      ]);
+
+      const withState: AgentSettings = {
+        ...added,
+        defaultAgentId: "my-agent",
+        overrides: { "my-agent": { enabled: false } },
+      };
+
+      const renamed = upsertCustomAgent(
+        withState,
+        { name: "renamed", command: "my-agent-cli", args: "" },
+        "my-agent",
+      );
+      expect(renamed.custom.map((a) => a.name)).toEqual(["renamed"]);
+      expect(renamed.defaultAgentId).toBe("renamed");
+      expect(renamed.overrides).toEqual({ renamed: { enabled: false } });
+
+      const removed = removeCustomAgent(renamed, "renamed");
+      expect(removed.custom).toEqual([]);
+      expect(removed.defaultAgentId).toBeNull();
+      expect(removed.overrides).toEqual({});
+    });
+
+    it("drops reserved, malformed, and duplicate custom entries when loading", () => {
+      localStorage.setItem(
+        AGENTS_SETTINGS_STORAGE_KEY,
+        JSON.stringify({
+          version: 1,
+          defaultAgentId: null,
+          overrides: {},
+          custom: [
+            { name: "claude", command: "claude" },
+            { name: "My Agent", command: "my-agent-cli", args: "--resume" },
+            { name: "my-agent", command: "duplicate" },
+            { name: "no-command", command: "  " },
+            "garbage",
+          ],
+        }),
+      );
+
+      expect(loadAgentSettings().custom).toEqual([
+        { name: "my-agent", command: "my-agent-cli", args: "--resume" },
+      ]);
+    });
+
+    it("builds detection targets from resolved commands including custom agents", () => {
+      const settings: AgentSettings = {
+        version: 1,
+        defaultAgentId: null,
+        overrides: { claude: { command: "claude-code" } },
+        custom: [{ name: "my-agent", command: "my-agent-cli", args: "" }],
+      };
+
+      const targets = detectionTargets(settings);
+
+      expect(targets).toContain("claude-code");
+      expect(targets).not.toContain("claude");
+      expect(targets).toContain("my-agent-cli");
+      expect(targets).toContain("codex");
     });
   });
 
   describe("getLaunchableAgents", () => {
     it("returns only agents that are both enabled AND available", () => {
       const resolved = [
-        { name: "claude", available: true, enabled: true, command: "claude", args: "" },
-        { name: "codex", available: true, enabled: false, command: "codex", args: "" },
-        { name: "gemini", available: false, enabled: true, command: "gemini", args: "" },
-        { name: "aider", available: true, enabled: true, command: "aider", args: "--chat" },
+        { name: "claude", available: true, enabled: true, command: "claude", args: "", custom: false },
+        { name: "codex", available: true, enabled: false, command: "codex", args: "", custom: false },
+        { name: "gemini", available: false, enabled: true, command: "gemini", args: "", custom: false },
+        { name: "aider", available: true, enabled: true, command: "aider", args: "--chat", custom: false },
       ];
 
       const launchable = getLaunchableAgents(resolved);
