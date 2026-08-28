@@ -24,6 +24,10 @@ pub struct DeviceInfo {
     pub permission: DevicePermission,
     pub created_at: u64,
     pub last_seen_at: u64,
+    /// Always `false` for a live device: revoking deletes the device outright.
+    /// Retained so stores written by older builds, which tombstoned devices
+    /// instead of removing them, can be pruned on load.
+    #[serde(default)]
     pub revoked: bool,
 }
 
@@ -61,10 +65,11 @@ impl AuthManager {
     }
 
     pub fn with_persistence(persistence_path: Option<PathBuf>) -> Self {
-        let persisted = persistence_path
+        let mut persisted = persistence_path
             .as_deref()
             .and_then(load_persisted_auth)
             .unwrap_or_default();
+        prune_revoked_devices(&mut persisted);
         Self {
             pairing_codes: Arc::new(RwLock::new(HashMap::new())),
             devices: Arc::new(RwLock::new(persisted.devices)),
@@ -135,9 +140,6 @@ impl AuthManager {
         let result = {
             let mut devices = self.devices.write();
             let device = devices.get_mut(&device_id).ok_or(AuthError::Unauthorized)?;
-            if device.revoked {
-                return Err(AuthError::RevokedDevice);
-            }
             device.last_seen_at = unix_now();
             device.clone()
         };
@@ -154,11 +156,14 @@ impl AuthManager {
         self.devices.read().values().cloned().collect()
     }
 
+    /// Deletes the device and every token issued to it. The device disappears
+    /// from [`Self::list_devices`] immediately instead of lingering as a
+    /// revoked entry.
     pub fn revoke_device(&self, device_id: &str) -> bool {
         let changed = {
             let mut devices = self.devices.write();
-            if let Some(device) = devices.get_mut(device_id) {
-                device.revoked = true;
+            if devices.remove(device_id).is_some() {
+                self.tokens.write().retain(|_, owner| owner != device_id);
                 true
             } else {
                 false
@@ -202,6 +207,14 @@ fn load_persisted_auth(path: &Path) -> Option<PersistedAuthState> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Drops devices that older builds tombstoned with `revoked: true`, together
+/// with their tokens, so a revoked device never resurfaces in the device list.
+fn prune_revoked_devices(state: &mut PersistedAuthState) {
+    let PersistedAuthState { devices, tokens } = state;
+    devices.retain(|_, device| !device.revoked);
+    tokens.retain(|_, device_id| devices.contains_key(device_id));
+}
+
 /// Writes `value` as JSON, restricting access to the current user.
 ///
 /// On Unix the owner-only modes are applied explicitly, and the file is written to a temporary
@@ -239,8 +252,6 @@ pub enum AuthError {
     ExpiredPairingCode,
     #[error("Unauthorized access")]
     Unauthorized,
-    #[error("Device access has been revoked")]
-    RevokedDevice,
 }
 
 #[cfg(test)]
@@ -248,7 +259,7 @@ mod persistence_tests {
     use super::*;
 
     #[test]
-    fn paired_devices_and_revocations_survive_reopen() {
+    fn revoked_devices_are_deleted_outright_and_never_reappear() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("remote-auth.json");
         let manager = AuthManager::with_persistence(Some(path.clone()));
@@ -256,14 +267,83 @@ mod persistence_tests {
         let (token, device) = manager.exchange_pairing_code(&code, "Phone").expect("pair");
         assert!(manager.revoke_device(&device.id));
 
-        let reopened = AuthManager::with_persistence(Some(path));
-        let listed = reopened.list_devices();
-        assert_eq!(listed.len(), 1);
-        assert!(listed[0].revoked);
+        assert!(
+            manager.list_devices().is_empty(),
+            "revoking must delete the device from the list, not leave a tombstone"
+        );
+        assert!(matches!(
+            manager.validate_token(&token),
+            Err(AuthError::Unauthorized)
+        ));
+
+        let reopened = AuthManager::with_persistence(Some(path.clone()));
+        assert!(
+            reopened.list_devices().is_empty(),
+            "a deleted device must not come back after reopen"
+        );
         assert!(matches!(
             reopened.validate_token(&token),
-            Err(AuthError::RevokedDevice)
+            Err(AuthError::Unauthorized)
         ));
+
+        let persisted = std::fs::read_to_string(&path).expect("read persisted state");
+        assert!(
+            !persisted.contains(&device.id),
+            "the deleted device must not linger on disk: {persisted}"
+        );
+        assert!(
+            !persisted.contains(&token),
+            "the deleted device's token must not linger on disk: {persisted}"
+        );
+    }
+
+    #[test]
+    fn legacy_revoked_tombstones_are_pruned_when_the_store_is_loaded() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("remote-auth.json");
+        let legacy = serde_json::json!({
+            "devices": {
+                "dead-id": {
+                    "id": "dead-id",
+                    "name": "Old Phone",
+                    "permission": "control",
+                    "createdAt": 1,
+                    "lastSeenAt": 2,
+                    "revoked": true
+                },
+                "live-id": {
+                    "id": "live-id",
+                    "name": "Current Phone",
+                    "permission": "control",
+                    "createdAt": 3,
+                    "lastSeenAt": 4,
+                    "revoked": false
+                }
+            },
+            "tokens": { "dead-token": "dead-id", "live-token": "live-id" }
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&legacy).expect("serialize legacy state"),
+        )
+        .expect("write legacy state");
+
+        let manager = AuthManager::with_persistence(Some(path));
+        let listed = manager.list_devices();
+        assert_eq!(
+            listed.len(),
+            1,
+            "pre-existing revoked tombstones must be dropped on load"
+        );
+        assert_eq!(listed[0].id, "live-id");
+        assert!(matches!(
+            manager.validate_token("dead-token"),
+            Err(AuthError::Unauthorized)
+        ));
+        assert_eq!(
+            manager.validate_token("live-token").expect("live token").id,
+            "live-id"
+        );
     }
 
     #[test]

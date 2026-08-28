@@ -345,6 +345,27 @@ fn sanitize_agent_type(agent_type: Option<String>) -> Option<String> {
     }
 }
 
+/// Worktree slugs and branch labels legitimately contain `/` (`orca/<ws-id>/<slug>`), so this
+/// rejects only filesystem-path leaks instead of every separator.
+fn sanitize_worktree_text(value: Option<String>) -> Option<String> {
+    let s = value?;
+    let trimmed = s.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 128
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('\\')
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("~\\")
+        || trimmed.starts_with("file:")
+        || (trimmed.as_bytes().get(1) == Some(&b':')
+            && matches!(trimmed.as_bytes().first(), Some(b'A'..=b'Z' | b'a'..=b'z')))
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_remote_set_active_selection(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -373,6 +394,8 @@ pub async fn cmd_remote_set_active_selection(
                     label: remote_terminal_tab_label(tab.label),
                     activity_state: sanitize_activity_state(tab.activity_state),
                     agent_type: sanitize_agent_type(tab.agent_type),
+                    worktree_slug: sanitize_worktree_text(tab.worktree_slug),
+                    worktree_label: sanitize_worktree_text(tab.worktree_label),
                 })
                 .collect(),
         })

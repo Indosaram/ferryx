@@ -537,14 +537,16 @@ async fn get_workspace_state(
         .filter(|id| !id.is_empty())
         .or_else(|| projects.first().map(|p| p.workspace_id.clone()))
         .unwrap_or_else(|| "default".into());
-    let active_context = active_selection.clone().unwrap_or(RemoteActiveDesktopSelection {
-        workspace_id: Some(active_ws.clone()),
-        worktree_slug: None,
-        worktree_label: None,
-        session_id: None,
-        tab_id: None,
-        terminal_tabs: Vec::new(),
-    });
+    let active_context = active_selection
+        .clone()
+        .unwrap_or(RemoteActiveDesktopSelection {
+            workspace_id: Some(active_ws.clone()),
+            worktree_slug: None,
+            worktree_label: None,
+            session_id: None,
+            tab_id: None,
+            terminal_tabs: Vec::new(),
+        });
     let worktrees = cache.worktrees_for(&active_ws, active_selection.as_ref());
     let sessions = get_active_running_sessions(&state, &cache);
 

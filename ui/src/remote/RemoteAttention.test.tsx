@@ -237,7 +237,6 @@ describe("RemoteAttention Affordance", () => {
         "tab-2-session",
       );
     });
-    expect(screen.getByRole("status")).toHaveTextContent("Desktop context confirmed");
   });
 
   it("is absent from the DOM when no tab is waiting", async () => {

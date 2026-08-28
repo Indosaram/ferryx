@@ -17,6 +17,8 @@ export type RemoteTerminalTabInfo = {
   label: string;
   activityState?: "working" | "waiting" | "done";
   agentType?: string;
+  worktreeSlug?: string;
+  worktreeLabel?: string;
 };
 
 export type RemoteTerminalItem = {
@@ -107,11 +109,15 @@ function tabItem(value: unknown): RemoteTerminalTabInfo | null {
   if (!id) return null;
   const activityState = parseActivityState(item?.activityState ?? item?.activity_state ?? item?.state);
   const agentType = safeContextText(item?.agentType ?? item?.agent_type) ?? undefined;
+  const worktreeSlug = safeContextText(item?.worktreeSlug ?? item?.worktree_slug) ?? undefined;
+  const worktreeLabel = safeContextText(item?.worktreeLabel ?? item?.worktree_label) ?? undefined;
   return {
     id,
     label,
     ...(activityState ? { activityState } : {}),
     ...(agentType ? { agentType } : {}),
+    ...(worktreeSlug ? { worktreeSlug } : {}),
+    ...(worktreeLabel ? { worktreeLabel } : {}),
   };
 }
 
@@ -313,7 +319,6 @@ export function getRemoteDocumentTitle(model: RemoteWorkspaceModel): string {
 type RemoteWorkspaceMirrorProps = {
   model: RemoteWorkspaceModel;
   pending: RemoteContextOption | null;
-  statusMessage: string | null;
   onSelect: (option: RemoteContextOption) => void;
   children?: ReactNode;
 };
@@ -321,7 +326,6 @@ type RemoteWorkspaceMirrorProps = {
 export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   model,
   pending,
-  statusMessage,
   onSelect,
   children,
 }) => {
@@ -359,24 +363,13 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`}
           />
         </button>
-        {statusMessage ? (
-          <div role="status" aria-live="polite" className="mt-1 flex items-center gap-1.5 px-0.5 text-[11px] text-muted-foreground">
-            {pending ? (
-              <LoaderCircle className="size-3 animate-spin text-status-working motion-reduce:animate-none" aria-hidden="true" />
-            ) : (
-              <Check className="size-3 text-status-success" aria-hidden="true" />
-            )}
-            <span className="truncate">{statusMessage}</span>
-          </div>
-        ) : null}
       </div>
 
       {selectorOpen ? (
         <div className="absolute inset-x-2 top-2 z-20 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl" role="dialog" aria-label="Workspace context">
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <div>
-              <h2 className="text-sm font-semibold">Choose desktop context</h2>
-              <p className="text-xs text-muted-foreground">Ferryx Desktop confirms the active terminal.</p>
+              <h2 className="text-sm font-semibold">Choose worktree</h2>
             </div>
             <button
               type="button"
@@ -437,7 +430,10 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                             aria-current={active ? "true" : undefined}
                             aria-label={optionName(option)}
                             disabled={pending !== null}
-                            onClick={() => onSelect(option)}
+                            onClick={() => {
+                              setSelectorOpen(false);
+                              onSelect(option);
+                            }}
                             className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
                           >
                             <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
@@ -448,8 +444,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                               )}
                             </span>
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm font-medium">{workspaceId}</span>
-                              <span className="block truncate font-mono text-xs text-muted-foreground">
+                              <span className="block truncate font-mono text-sm font-medium">
                                 {worktree ?? "Primary worktree"}
                               </span>
                             </span>
@@ -485,7 +480,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         </div>
       ) : null}
 
-      {model.context.terminalTabs && model.context.terminalTabs.length > 1 ? (() => {
+      {model.context.terminalTabs && model.context.terminalTabs.length > 0 ? (() => {
         const tabs = model.context.terminalTabs;
         const activeIdx = tabs.findIndex((tab) => tab.id === model.context.activeTabId);
         const currentIndex = activeIdx >= 0 ? activeIdx : 0;
@@ -503,8 +498,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                   if (prevTab && model.context.workspaceId) {
                     onSelect({
                       workspaceId: model.context.workspaceId,
-                      worktreeSlug: model.context.worktreeSlug,
-                      worktreeLabel: model.context.worktreeLabel,
+                      worktreeSlug: prevTab.worktreeSlug ?? model.context.worktreeSlug,
+                      worktreeLabel: prevTab.worktreeLabel ?? model.context.worktreeLabel,
                       tabId: prevTab.id,
                     });
                   }
@@ -528,8 +523,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                   if (nextTab && model.context.workspaceId) {
                     onSelect({
                       workspaceId: model.context.workspaceId,
-                      worktreeSlug: model.context.worktreeSlug,
-                      worktreeLabel: model.context.worktreeLabel,
+                      worktreeSlug: nextTab.worktreeSlug ?? model.context.worktreeSlug,
+                      worktreeLabel: nextTab.worktreeLabel ?? model.context.worktreeLabel,
                       tabId: nextTab.id,
                     });
                   }
@@ -546,7 +541,15 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             >
               {tabs.map((tab) => {
                 const isActive = tab.id === model.context.activeTabId;
-                const tabAriaLabel = tab.activityState ? `${tab.label} (${tab.activityState})` : tab.label;
+                // Panes from every worktree are listed, so the worktree disambiguates same-named tabs.
+                const foreignWorktree =
+                  tab.worktreeLabel && tab.worktreeLabel !== model.context.worktreeLabel
+                    ? tab.worktreeLabel
+                    : null;
+                const tabDescription = foreignWorktree ? `${tab.label} - ${foreignWorktree}` : tab.label;
+                const tabAriaLabel = tab.activityState
+                  ? `${tabDescription} (${tab.activityState})`
+                  : tabDescription;
                 const logo = resolveAgentLogo(tab.agentType);
                 const isMonochrome = isMonochromeAgentLogo(tab.agentType);
 
@@ -561,8 +564,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                       if (isActive || !model.context.workspaceId) return;
                       onSelect({
                         workspaceId: model.context.workspaceId,
-                        worktreeSlug: model.context.worktreeSlug,
-                        worktreeLabel: model.context.worktreeLabel,
+                        worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
+                        worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
                         tabId: tab.id,
                       });
                     }}
@@ -585,6 +588,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                       <TerminalIcon data-testid="tab-terminal-icon" className="size-3 shrink-0 opacity-70" aria-hidden="true" />
                     )}
                     <span className="truncate">{tab.label}</span>
+                    {foreignWorktree ? (
+                      <span className="shrink-0 truncate text-[10px] font-normal opacity-60">{foreignWorktree}</span>
+                    ) : null}
                     {tab.activityState === "working" ? (
                       <LoaderCircle
                         aria-hidden="true"
@@ -623,7 +629,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
               </span>
               <h2 className="mt-4 text-sm font-semibold text-foreground">No focused terminal</h2>
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                Focus a terminal in Ferryx Desktop to mirror it here. Browser tabs and background terminals stay private.
+                {model.context.terminalTabs && model.context.terminalTabs.length > 0
+                  ? "Pick a terminal from the list above to mirror it here. Browser tabs stay private."
+                  : "Open a terminal in Ferryx Desktop to mirror it here. Browser tabs stay private."}
               </p>
             </div>
           </div>

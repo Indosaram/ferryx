@@ -282,10 +282,8 @@ describe("Remote UI Components", () => {
     });
     fireEvent.click(target);
 
-    expect(screen.getByRole("status")).toHaveTextContent(
-      /Switching to api-service \/ feature\/remote-safe/i,
-    );
-    expect(target).toBeDisabled();
+    // Picking a worktree dismisses the selector instead of leaving it stuck open.
+    expect(screen.queryByRole("dialog", { name: /Workspace context/i })).toBeNull();
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       "/api/v1/workspace/select?token=test-token",
@@ -323,12 +321,9 @@ describe("Remote UI Components", () => {
         "api-service / feature/remote-safe",
       );
     });
-    expect(screen.getByRole("status")).toHaveTextContent(/Desktop context confirmed/i);
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
     expect(screen.getByText("No focused terminal")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Focus a terminal in Ferryx Desktop to mirror it here/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/mirror it here/i)).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("background-terminal");
   });
 
@@ -355,10 +350,9 @@ describe("Remote UI Components", () => {
       }),
     );
 
+    // The selection POST is in flight; the desktop has not confirmed yet.
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(
-        /Waiting for Ferryx Desktop confirmation/i,
-      );
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     act(() => {
@@ -382,6 +376,55 @@ describe("Remote UI Components", () => {
       );
     });
     expect(screen.getByRole("status")).toHaveTextContent(/Desktop context confirmed/i);
+  });
+
+  it("recovers from a desktop that never confirms so the picker stays usable", async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem("ferryx_remote_token", "test-token");
+      // The desktop accepts the request over HTTP but never republishes a
+      // matching selection, which is exactly what a stale/unreachable desktop
+      // listener looks like from the phone.
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(jsonResponse(focusedState))
+        .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+        .mockResolvedValue(jsonResponse(focusedState));
+      vi.stubGlobal("fetch", fetchMock);
+      vi.stubGlobal("WebSocket", EventWebSocket);
+
+      render(<RemoteApp />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+      fireEvent.click(
+        within(screen.getByRole("dialog", { name: /Workspace context/i })).getByRole("button", {
+          name: /api-service.*feature\/remote-safe/i,
+        }),
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      // A selection that is never confirmed must not strand the UI forever:
+      // the pending lock has to expire so the picker becomes usable again.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+      expect(
+        within(screen.getByRole("dialog", { name: /Workspace context/i })).getByRole("button", {
+          name: /api-service.*feature\/remote-safe/i,
+        }),
+      ).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refreshes the mirrored terminal after an unsolicited desktop focus change", async () => {
@@ -1003,7 +1046,6 @@ describe("Remote UI Components", () => {
       );
     });
     expect(screen.getByLabelText("Terminal position: Tab 2 of 3")).toHaveTextContent("2 / 3");
-    expect(screen.getByRole("status")).toHaveTextContent("Desktop context confirmed");
 
     fireEvent.click(screen.getByRole("button", { name: "Previous terminal tab" }));
 
@@ -1157,6 +1199,73 @@ describe("Remote UI Components", () => {
     const waitingTab = within(tablist).getByRole("tab", { name: /dev server.*waiting/i });
     expect(waitingTab).toBeInTheDocument();
     expect(within(waitingTab).getByTestId("tab-waiting-indicator")).toBeInTheDocument();
+  });
+
+  it("lists a published terminal pane even when the desktop has nothing focused", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const inventoryWithoutFocus = {
+      ...focusedState,
+      activeContext: {
+        workspaceId: "ferryx-ui",
+        worktreeSlug: "main",
+        worktreeLabel: "main",
+        terminalTabs: [{ id: "tab-1", label: "Editor", worktreeSlug: "main", worktreeLabel: "main" }],
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(inventoryWithoutFocus)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    const tablist = await screen.findByRole("tablist", { name: /terminal tabs/i });
+    // One entry is enough to render the list, and no mirrored terminal is required to browse it.
+    expect(within(tablist).getAllByRole("tab")).toHaveLength(1);
+    expect(within(tablist).getByRole("tab", { name: /editor/i })).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
+    expect(screen.getByText("No focused terminal")).toBeInTheDocument();
+  });
+
+  it("selects a pane from another worktree using that pane's own worktree", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const crossWorktreeState = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", worktreeSlug: "main", worktreeLabel: "main" },
+          {
+            id: "tab-2::leaf-b",
+            label: "Build (2)",
+            worktreeSlug: "feature/remote-safe",
+            worktreeLabel: "feature/remote-safe",
+          },
+        ],
+      },
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(crossWorktreeState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    const tablist = await screen.findByRole("tablist", { name: /terminal tabs/i });
+    fireEvent.click(within(tablist).getByRole("tab", { name: /build.*feature\/remote-safe/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/v1/workspace/select?token=test-token",
+        expect.objectContaining({
+          method: "POST",
+          // The pane's own worktree travels with the request; the mirrored context is not assumed.
+          body: JSON.stringify({
+            workspaceId: "ferryx-ui",
+            worktreeSlug: "feature/remote-safe",
+            tabId: "tab-2::leaf-b",
+          }),
+        }),
+      ),
+    );
   });
 
   it("tab strip renders brand logo image for supported agentType and fallback terminal icon for unknown/missing agentType", async () => {

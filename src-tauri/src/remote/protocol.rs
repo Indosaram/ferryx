@@ -8,10 +8,27 @@ pub struct RemoteTerminalTabInfo {
     pub id: String,
     #[serde(alias = "tabLabel", alias = "title")]
     pub label: String,
-    #[serde(default, alias = "activity_state", alias = "state", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "activity_state",
+        alias = "state",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub activity_state: Option<String>,
     #[serde(default, alias = "agent_type", skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    #[serde(
+        default,
+        alias = "worktree_slug",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub worktree_slug: Option<String>,
+    #[serde(
+        default,
+        alias = "worktree_label",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub worktree_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

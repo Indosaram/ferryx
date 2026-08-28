@@ -15,6 +15,9 @@ import {
 import { RemoteTerminal } from "./RemoteTerminal";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
+/// How long a selection may stay unconfirmed before the picker is released for
+/// a retry. The desktop normally republishes within one refresh round-trip.
+const CONFIRMATION_TIMEOUT_MS = 6000;
 
 type RemoteActiveSelectionEvent = {
   readonly workspaceId: string | null;
@@ -176,19 +179,18 @@ export const RemoteApp: React.FC = () => {
   const [token, setToken] = useState<string | null>(getRemoteAuthToken);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
   const selectionRequestAcceptedRef = useRef(false);
   const selectionEventReceivedRef = useRef(false);
   const confirmationInFlightRef = useRef(false);
   const workspaceRefreshVersionRef = useRef(0);
+  const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const disconnect = useCallback(() => {
     clearRemoteAuthToken();
     setToken(null);
     setModel(EMPTY_MODEL);
     setPending(null);
-    setStatusMessage(null);
     pendingSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
@@ -265,6 +267,10 @@ export const RemoteApp: React.FC = () => {
   }, [model, token]);
 
   const clearPendingSelection = useCallback(() => {
+    if (confirmationTimeoutRef.current !== null) {
+      clearTimeout(confirmationTimeoutRef.current);
+      confirmationTimeoutRef.current = null;
+    }
     pendingSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
@@ -279,10 +285,7 @@ export const RemoteApp: React.FC = () => {
     confirmationInFlightRef.current = false;
     if (pendingSelectionRef.current !== option) return;
     if (confirmed && modelConfirmsSelection(option, confirmed)) {
-      setStatusMessage("Desktop context confirmed");
       clearPendingSelection();
-    } else {
-      setStatusMessage("Waiting for Ferryx Desktop confirmation...");
     }
   }, [clearPendingSelection, refreshWorkspace]);
 
@@ -309,16 +312,25 @@ export const RemoteApp: React.FC = () => {
     return () => socket.close();
   }, [confirmSelection, token]);
 
+  // A desktop that never republishes a matching selection (stale listener,
+  // closed window) must not strand the picker: every chip is disabled while a
+  // selection is pending, so without a terminal state the phone can only retry
+  // by reloading the page.
+  const armConfirmationTimeout = useCallback((option: RemoteContextOption) => {
+    if (confirmationTimeoutRef.current !== null) clearTimeout(confirmationTimeoutRef.current);
+    confirmationTimeoutRef.current = setTimeout(() => {
+      confirmationTimeoutRef.current = null;
+      if (pendingSelectionRef.current !== option) return;
+      clearPendingSelection();
+    }, CONFIRMATION_TIMEOUT_MS);
+  }, [clearPendingSelection]);
+
   const selectContext = useCallback(async (option: RemoteContextOption) => {
     if (!token || pending) return;
-    const target = option.worktreeLabel ?? option.worktreeSlug;
     pendingSelectionRef.current = option;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
     setPending(option);
-    setStatusMessage(
-      `Switching to ${option.workspaceId}${target ? ` / ${target}` : ""}...`,
-    );
 
     try {
       const response = await fetch(
@@ -341,18 +353,16 @@ export const RemoteApp: React.FC = () => {
       const immediatelyObserved = await refreshWorkspace();
       confirmationInFlightRef.current = false;
       if (immediatelyObserved && modelConfirmsSelection(option, immediatelyObserved)) {
-        setStatusMessage("Desktop context confirmed");
         clearPendingSelection();
         return;
       }
-      setStatusMessage("Waiting for Ferryx Desktop confirmation...");
+      armConfirmationTimeout(option);
       if (selectionEventReceivedRef.current) void confirmSelection(option);
-    } catch (error) {
+    } catch {
       confirmationInFlightRef.current = false;
-      setStatusMessage(error instanceof Error ? error.message : "Context selection failed");
       clearPendingSelection();
     }
-  }, [clearPendingSelection, confirmSelection, pending, refreshWorkspace, token]);
+  }, [armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, refreshWorkspace, token]);
 
   const tabs = model.context.terminalTabs;
   const activeIndex = tabs && model.context.activeTabId
@@ -445,7 +455,6 @@ export const RemoteApp: React.FC = () => {
       <RemoteWorkspaceMirror
         model={model}
         pending={pending}
-        statusMessage={statusMessage}
         onSelect={(option) => void selectContext(option)}
       >
         {activeTerminal ? (

@@ -30,11 +30,12 @@ fn test_auth_manager_pairing_and_revocation() {
     let validated = auth.validate_token(&token).expect("validate success");
     assert_eq!(validated.id, device.id);
 
-    // Revoke device
+    // Revoke device: it is deleted outright, so its token is simply unknown.
     assert!(auth.revoke_device(&device.id));
+    assert!(auth.list_devices().is_empty());
     assert!(matches!(
         auth.validate_token(&token),
-        Err(AuthError::RevokedDevice)
+        Err(AuthError::Unauthorized)
     ));
 }
 
@@ -1083,12 +1084,14 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
                     label: "/Users/alice/private-shell".into(),
                     activity_state: Some("blocked".into()),
                     agent_type: Some("/Users/alice/bin/agent".into()),
+                    ..Default::default()
                 },
                 crate::remote::protocol::RemoteTerminalTabInfo {
                     id: "tab-agent".into(),
                     label: "Build Agent".into(),
                     activity_state: Some("working".into()),
                     agent_type: Some("claude".into()),
+                    ..Default::default()
                 },
             ],
         },
@@ -1113,13 +1116,22 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
     assert_eq!(selection.terminal_tabs[0].id, "tab-safe");
     assert_eq!(selection.terminal_tabs[0].label, "Terminal");
     // "blocked" was mapped to "waiting"
-    assert_eq!(selection.terminal_tabs[0].activity_state.as_deref(), Some("waiting"));
+    assert_eq!(
+        selection.terminal_tabs[0].activity_state.as_deref(),
+        Some("waiting")
+    );
     // path-like agent_type was dropped to None
     assert_eq!(selection.terminal_tabs[0].agent_type, None);
     assert_eq!(selection.terminal_tabs[1].id, "tab-agent");
     assert_eq!(selection.terminal_tabs[1].label, "Build Agent");
-    assert_eq!(selection.terminal_tabs[1].activity_state.as_deref(), Some("working"));
-    assert_eq!(selection.terminal_tabs[1].agent_type.as_deref(), Some("claude"));
+    assert_eq!(
+        selection.terminal_tabs[1].activity_state.as_deref(),
+        Some("working")
+    );
+    assert_eq!(
+        selection.terminal_tabs[1].agent_type.as_deref(),
+        Some("claude")
+    );
     assert!(!serde_json::to_string(&selection)
         .expect("serialize sanitized selection")
         .contains("/Users/alice/private-shell"));
@@ -1136,7 +1148,10 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
     let devices_after = crate::ipc::remote::cmd_remote_devices(app.state())
         .await
         .expect("devices after revoke");
-    assert!(devices_after[0].revoked);
+    assert!(
+        devices_after.is_empty(),
+        "revoking must remove the device from the list outright"
+    );
 
     // 8. Disable via GUI IPC command -> stops daemon listener and sets Off
     let disable_resp = crate::ipc::remote::cmd_remote_disable(app.state())
@@ -2921,14 +2936,7 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
     state.set_active_selection(selection);
 
     // Unauthenticated GET returns 401
-    let (unauth_status, _) = http_request(
-        addr,
-        "GET",
-        "/api/v1/workspace/state",
-        None,
-        None,
-    )
-    .await;
+    let (unauth_status, _) = http_request(addr, "GET", "/api/v1/workspace/state", None, None).await;
     assert_eq!(unauth_status, 401);
 
     // Authenticated GET /api/v1/workspace/state
@@ -3139,9 +3147,9 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
     // Tab labels with paths sanitized to "Terminal",
     // activityState normalized / validated,
     // agentType with path characters dropped.
-    let _ipc_manager = Arc::new(crate::ipc::remote::RemoteGatewayManager::new(
-        Arc::clone(&state),
-    ));
+    let _ipc_manager = Arc::new(crate::ipc::remote::RemoteGatewayManager::new(Arc::clone(
+        &state,
+    )));
     state.set_active_selection(RemoteActiveDesktopSelection {
         workspace_id: Some(workspace_id.to_string()),
         worktree_slug: Some("feat-agent".to_string()),
@@ -3154,12 +3162,14 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
                 label: "/Users/dev/secret-project".to_string(),
                 activity_state: Some("blocked".to_string()),
                 agent_type: Some("/bin/sh".to_string()),
+                ..Default::default()
             },
             crate::remote::protocol::RemoteTerminalTabInfo {
                 id: "tab-2".to_string(),
                 label: "Safe Tab".to_string(),
                 activity_state: Some("invalid_state".to_string()),
                 agent_type: Some("claude".to_string()),
+                ..Default::default()
             },
         ],
     });
@@ -3169,4 +3179,3 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
 
     handle.stop();
 }
-
