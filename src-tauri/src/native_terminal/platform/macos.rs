@@ -283,6 +283,24 @@ impl MacosCompositorTarget {
                 }
             };
 
+            // Live evidence (2026-08-28): calling makeFirstResponder unconditionally after
+            // every presented frame steals first responder from the webview's inner key-handling
+            // view on the echo repaint, so only the first keystroke after each click ever reached
+            // the DOM. Skip the restore when focus is already anywhere inside the webview hierarchy.
+            let first_responder_inside_webview = match ns_window.firstResponder() {
+                Some(responder) => match responder.downcast_ref::<NSView>() {
+                    Some(fr_view) => {
+                        std::ptr::eq(fr_view, &*webview_view)
+                            || fr_view.isDescendantOf(&webview_view)
+                    }
+                    None => false,
+                },
+                None => false,
+            };
+            if first_responder_inside_webview {
+                return;
+            }
+
             let _ = ns_window.makeFirstResponder(Some(&webview_view));
         };
 
