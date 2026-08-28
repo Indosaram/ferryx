@@ -1,3 +1,5 @@
+import tailwindcssAnimate from "tailwindcss-animate";
+
 /** @type {import('tailwindcss').Config} */
 const opaque = (token) => `rgb(var(--${token}-rgb) / <alpha-value>)`;
 const translucent = (token) => `rgb(var(--${token}-rgb) / calc(var(--${token}-alpha) * <alpha-value>))`;
@@ -84,5 +86,5 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [tailwindcssAnimate],
 };
