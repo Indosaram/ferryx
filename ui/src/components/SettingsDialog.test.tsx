@@ -10,6 +10,14 @@ import { SIDEBAR_OPEN_STORAGE_KEY } from "../lib/storageKeys";
 import { TERMINAL_SETTINGS_STORAGE_KEY } from "../lib/terminalSettings";
 import { SettingsDialog } from "./SettingsDialog";
 
+async function selectRadixOption(triggerLabel: string | RegExp, optionText: string | RegExp) {
+  const trigger = screen.getByRole("combobox", { name: triggerLabel });
+  fireEvent.pointerDown(trigger, { pointerId: 1, button: 0 });
+  fireEvent.click(trigger);
+  const option = await screen.findByRole("option", { name: optionText });
+  fireEvent.click(option);
+}
+
 const native = vi.hoisted(() => ({
   getTerminalPreferences: vi.fn(),
   getNotificationPermissionStatus: vi.fn(),
@@ -341,7 +349,7 @@ describe("SettingsDialog", () => {
 
     expect(screen.getByRole("region", { name: "Notifications" })).toBeInTheDocument();
     expect(screen.getByLabelText(/Enable Notifications/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Volume/i)).toBeInTheDocument();
+    expect(screen.getByRole("slider")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Send Test Notification/i })).toBeInTheDocument();
     expect(screen.getByText(/authorized/i)).toBeInTheDocument();
   });
@@ -351,13 +359,13 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
     await waitFor(() => expect(native.getNotificationPermissionStatus).toHaveBeenCalled());
 
-    const toggle = screen.getByLabelText(/Enable Notifications/i) as HTMLInputElement;
-    const initialChecked = toggle.checked;
+    const toggle = screen.getByRole("switch", { name: /Enable Notifications/i });
+    expect(toggle).toBeChecked();
     fireEvent.click(toggle);
 
-    expect(toggle.checked).toBe(!initialChecked);
+    expect(toggle).not.toBeChecked();
     const storedValues = Object.values(localStorage);
-    expect(storedValues.some((val) => val.includes(`"enabled":${!initialChecked}`))).toBe(true);
+    expect(storedValues.some((val) => val.includes(`"enabled":false`))).toBe(true);
   });
 
   it("triggers probeNotificationDelivery when clicking Send Test Notification", async () => {
@@ -376,12 +384,9 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
     await waitFor(() => expect(native.getNotificationPermissionStatus).toHaveBeenCalled());
 
-    const soundSelect = screen.queryByLabelText(/sound/i);
-    if (soundSelect && soundSelect.tagName === "SELECT") {
-      fireEvent.change(soundSelect, { target: { value: "custom" } });
-    }
+    await selectRadixOption("Notification Sound", /custom audio file/i);
 
-    const pickButton = screen.getByRole("button", { name: /choose|\bbrowse\b|pick|custom/i });
+    const pickButton = await screen.findByRole("button", { name: /choose|\bbrowse\b|pick|custom/i });
     fireEvent.click(pickButton);
 
     await waitFor(() => expect(native.pickNotificationAudio).toHaveBeenCalled());
@@ -400,22 +405,18 @@ describe("SettingsDialog", () => {
     expect(screen.queryByText("Density")).not.toBeInTheDocument();
   });
 
-  it("navigates to Appearance section, renders controls, and persists changes to localStorage", () => {
+  it("navigates to Appearance section, renders controls, and persists changes to localStorage", async () => {
     const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
 
     expect(screen.getByRole("region", { name: "Appearance" })).toBeInTheDocument();
-    const themeSelect = screen.getByLabelText("Theme mode") as HTMLSelectElement;
-    const accentSelect = screen.getByLabelText("Accent color") as HTMLSelectElement;
-    const densitySelect = screen.getByLabelText("Interface density") as HTMLSelectElement;
+    expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/charcoal/i);
+    expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/slate/i);
+    expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/compact/i);
 
-    expect(themeSelect.value).toBe("charcoal");
-    expect(accentSelect.value).toBe("default");
-    expect(densitySelect.value).toBe("compact");
-
-    fireEvent.change(themeSelect, { target: { value: "dark" } });
-    fireEvent.change(accentSelect, { target: { value: "emerald" } });
-    fireEvent.change(densitySelect, { target: { value: "comfortable" } });
+    await selectRadixOption("Theme mode", /dark/i);
+    await selectRadixOption("Accent color", /emerald/i);
+    await selectRadixOption("Interface density", /comfortable/i);
 
     const stored = JSON.parse(localStorage.getItem("ferryx.settings.appearance")!);
     expect(stored).toEqual({
@@ -427,32 +428,29 @@ describe("SettingsDialog", () => {
     unmount();
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
-    expect((screen.getByLabelText("Theme mode") as HTMLSelectElement).value).toBe("dark");
-    expect((screen.getByLabelText("Accent color") as HTMLSelectElement).value).toBe("emerald");
-    expect((screen.getByLabelText("Interface density") as HTMLSelectElement).value).toBe("comfortable");
+    expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/dark/i);
+    expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/emerald/i);
+    expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/comfortable/i);
 
     fireEvent.click(screen.getByRole("button", { name: "Reset to defaults" }));
-    expect((screen.getByLabelText("Theme mode") as HTMLSelectElement).value).toBe("charcoal");
-    expect((screen.getByLabelText("Accent color") as HTMLSelectElement).value).toBe("default");
-    expect((screen.getByLabelText("Interface density") as HTMLSelectElement).value).toBe("compact");
+    expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/charcoal/i);
+    expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/slate/i);
+    expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/compact/i);
     expect(localStorage.getItem("ferryx.settings.appearance")).toBeNull();
   });
 
-  it("navigates to Browser section, changes search engine and zoom, and persists to localStorage", () => {
+  it("navigates to Browser section, changes search engine and zoom, and persists to localStorage", async () => {
     const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Browser" }));
 
     expect(screen.getByRole("region", { name: "Browser" })).toBeInTheDocument();
-    const searchSelect = screen.getByLabelText("Default search engine") as HTMLSelectElement;
-    const zoomSelect = screen.getByLabelText("Default zoom level") as HTMLSelectElement;
-    const restoreToggle = screen.getByLabelText("Restore tabs on launch") as HTMLInputElement;
+    expect(screen.getByRole("combobox", { name: "Default search engine" })).toHaveTextContent(/duckduckgo/i);
+    expect(screen.getByRole("combobox", { name: "Default zoom level" })).toHaveTextContent(/100%/i);
+    const restoreToggle = screen.getByRole("switch", { name: "Restore tabs on launch" });
+    expect(restoreToggle).not.toBeChecked();
 
-    expect(searchSelect.value).toBe("duckduckgo");
-    expect(zoomSelect.value).toBe("100");
-    expect(restoreToggle.checked).toBe(false);
-
-    fireEvent.change(searchSelect, { target: { value: "google" } });
-    fireEvent.change(zoomSelect, { target: { value: "125" } });
+    await selectRadixOption("Default search engine", /google/i);
+    await selectRadixOption("Default zoom level", /125%/i);
     fireEvent.click(restoreToggle);
 
     const stored = JSON.parse(localStorage.getItem("ferryx.settings.browser")!);
@@ -465,14 +463,14 @@ describe("SettingsDialog", () => {
     unmount();
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Browser" }));
-    expect((screen.getByLabelText("Default search engine") as HTMLSelectElement).value).toBe("google");
-    expect((screen.getByLabelText("Default zoom level") as HTMLSelectElement).value).toBe("125");
-    expect((screen.getByLabelText("Restore tabs on launch") as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("combobox", { name: "Default search engine" })).toHaveTextContent(/google/i);
+    expect(screen.getByRole("combobox", { name: "Default zoom level" })).toHaveTextContent(/125%/i);
+    expect(screen.getByRole("switch", { name: "Restore tabs on launch" })).toBeChecked();
 
     fireEvent.click(screen.getByRole("button", { name: "Reset to defaults" }));
-    expect((screen.getByLabelText("Default search engine") as HTMLSelectElement).value).toBe("duckduckgo");
-    expect((screen.getByLabelText("Default zoom level") as HTMLSelectElement).value).toBe("100");
-    expect((screen.getByLabelText("Restore tabs on launch") as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByRole("combobox", { name: "Default search engine" })).toHaveTextContent(/duckduckgo/i);
+    expect(screen.getByRole("combobox", { name: "Default zoom level" })).toHaveTextContent(/100%/i);
+    expect(screen.getByRole("switch", { name: "Restore tabs on launch" })).not.toBeChecked();
     expect(localStorage.getItem("ferryx.settings.browser")).toBeNull();
   });
 
@@ -504,8 +502,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() => expect(browserNative.listBrowsers).toHaveBeenCalled());
 
-    const zoomSelect = screen.getByLabelText("Default zoom level") as HTMLSelectElement;
-    fireEvent.change(zoomSelect, { target: { value: "125" } });
+    await selectRadixOption("Default zoom level", /125%/i);
 
     await waitFor(() => {
       expect(browserNative.setBrowserZoom).toHaveBeenCalledWith("b-1", 1.25);
@@ -530,10 +527,10 @@ describe("SettingsDialog", () => {
     expect(stored.defaultAgentId).toBe("claude");
 
     // Toggle enabled checkbox
-    const claudeToggle = screen.getByLabelText("Enable Claude") as HTMLInputElement;
-    expect(claudeToggle.checked).toBe(true);
+    const claudeToggle = screen.getByRole("switch", { name: "Enable Claude" });
+    expect(claudeToggle).toBeChecked();
     fireEvent.click(claudeToggle);
-    expect(claudeToggle.checked).toBe(false);
+    expect(claudeToggle).not.toBeChecked();
 
     stored = JSON.parse(localStorage.getItem("ferryx.agents.v1")!);
     expect(stored.overrides.claude.enabled).toBe(false);
@@ -559,7 +556,7 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
   });
 
-  it("persists Appearance through the appearanceSettings API across remount", () => {
+  it("persists Appearance through the appearanceSettings API across remount", async () => {
     const events: unknown[] = [];
     const listener = (event: Event) => {
       events.push((event as CustomEvent).detail);
@@ -570,9 +567,9 @@ describe("SettingsDialog", () => {
       const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
       fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
 
-      fireEvent.change(screen.getByLabelText("Theme mode"), { target: { value: "light" } });
-      fireEvent.change(screen.getByLabelText("Accent color"), { target: { value: "blue" } });
-      fireEvent.change(screen.getByLabelText("Interface density"), { target: { value: "comfortable" } });
+      await selectRadixOption("Theme mode", /light/i);
+      await selectRadixOption("Accent color", /ocean blue/i);
+      await selectRadixOption("Interface density", /comfortable/i);
 
       expect(loadAppearanceSettings()).toEqual({
         theme: "light",
@@ -588,9 +585,9 @@ describe("SettingsDialog", () => {
       unmount();
       render(<SettingsDialog open onClose={vi.fn()} />);
       fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
-      expect((screen.getByLabelText("Theme mode") as HTMLSelectElement).value).toBe("light");
-      expect((screen.getByLabelText("Accent color") as HTMLSelectElement).value).toBe("blue");
-      expect((screen.getByLabelText("Interface density") as HTMLSelectElement).value).toBe("comfortable");
+      expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/light/i);
+      expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/ocean blue/i);
+      expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/comfortable/i);
     } finally {
       window.removeEventListener(APPEARANCE_SETTINGS_EVENT, listener);
     }
@@ -607,7 +604,8 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
     await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
 
-    fireEvent.click(screen.getByRole("button", { name: "Disabled" }));
+    const remoteToggle = screen.getByRole("switch", { name: "Remote Access" });
+    fireEvent.click(remoteToggle);
 
     const pinButton = await screen.findByTestId("remote-pairing-code");
     expect(pinButton.tagName).toBe("BUTTON");

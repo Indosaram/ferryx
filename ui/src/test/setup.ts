@@ -20,6 +20,22 @@ if (!globalThis.PointerEvent) {
   }
 }
 
+// Radix UI JSDOM stubs
+if (typeof Element !== "undefined") {
+  if (!Element.prototype.hasPointerCapture) {
+    Element.prototype.hasPointerCapture = () => false;
+  }
+  if (!Element.prototype.setPointerCapture) {
+    Element.prototype.setPointerCapture = () => {};
+  }
+  if (!Element.prototype.releasePointerCapture) {
+    Element.prototype.releasePointerCapture = () => {};
+  }
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = () => {};
+  }
+}
+
 // jsdom does not currently expose DragEvent. Testing Library falls back to a plain Event in
 // that case, which silently drops MouseEvent coordinates such as clientX/clientY. Use the
 // MouseEvent constructor as the closest available browser primitive so drag/drop tests exercise

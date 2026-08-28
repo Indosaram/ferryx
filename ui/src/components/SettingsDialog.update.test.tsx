@@ -117,7 +117,8 @@ describe("Settings > General software update control", () => {
     expect(installAndRelaunch).not.toHaveClass("bg-primary");
 
     const progress = await screen.findByRole("progressbar");
-    expect(progress).toHaveAttribute("aria-valuenow", "42");
+    expect(progress).toBeInTheDocument();
+    expect(progress.firstElementChild).toHaveStyle({ transform: "translateX(-58%)" });
   });
 
   it("keeps Install and Relaunch as primary action when downloaded and relaunches on click", async () => {

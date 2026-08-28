@@ -13,31 +13,29 @@ import {
   useBrowserSettings,
   type BrowserProfile,
   type BrowserSettingsState,
-} from "../lib/browserSettings";
-import { clearBrowserHistory } from "../lib/browserHistory";
+} from "../../lib/browserSettings";
+import { clearBrowserHistory } from "../../lib/browserHistory";
 import {
   focusBrowser,
   importBrowserCookies,
   listBrowsers,
   setBrowserZoom,
-} from "../lib/browserTauri";
-import type { BrowserSessionSummary } from "../lib/types";
-import { SettingRow, SettingsHeading } from "./ui/SettingsPrimitives";
+} from "../../lib/browserTauri";
+import type { BrowserSessionSummary } from "../../lib/types";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
+import { Switch } from "../ui/switch";
+import { SettingRow, SettingsHeading } from "./primitives";
 
-function Toggle({ checked, onChange, label, id }: { checked: boolean; onChange: (checked: boolean) => void; label: string; id?: string }) {
-  return (
-    <input
-      id={id}
-      type="checkbox"
-      aria-label={label}
-      checked={checked}
-      onChange={(event) => onChange(event.target.checked)}
-      className="size-4 accent-foreground"
-    />
-  );
-}
-
-export function BrowserSettingsPanel() {
+export function BrowserSection() {
   const { settings, updateSettings, resetSettings } = useBrowserSettings();
   const [homeDraft, setHomeDraft] = useState(settings.homePage);
   const [homeError, setHomeError] = useState<string | null>(null);
@@ -145,25 +143,27 @@ export function BrowserSettingsPanel() {
       <h2 id="settings-browser-heading" className="sr-only">Browser</h2>
       <div className="mb-5 flex items-center justify-between border-b border-border pb-3">
         <h3 className="text-[12px] font-semibold">Web & Navigation</h3>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() => {
             const next = resetSettings();
             setHomeDraft(next.homePage);
             setHomeError(null);
             void Promise.all(activeBrowsers.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100))).catch(() => undefined);
           }}
-          className="flex h-7 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
         >
           <RotateCcw className="size-3" />
           Reset to defaults
-        </button>
+        </Button>
       </div>
       <div className="border-b border-border">
         <SettingRow label="Default Home Page" description="New browser tabs open this URL. Leave it blank to open a blank tab.">
           <div className="w-[330px]">
             <div className="flex gap-1.5">
-              <input
+              <Input
                 value={homeDraft}
                 onChange={(event) => setHomeDraft(event.target.value)}
                 onKeyDown={(event) => {
@@ -171,51 +171,81 @@ export function BrowserSettingsPanel() {
                 }}
                 placeholder="https://example.com or blank"
                 aria-label="Default Home Page"
-                className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs outline-none focus:border-ring"
+                className="h-8 min-w-0 flex-1 text-xs"
               />
-              <button type="button" onClick={saveHomePage} className="h-8 rounded-md border border-border px-3 text-[11px] hover:bg-accent">Save</button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={saveHomePage}
+                className="h-8 px-3 text-[11px]"
+              >
+                Save
+              </Button>
             </div>
             {homeError ? <div className="mt-1 text-[10px] text-destructive">{homeError}</div> : null}
           </div>
         </SettingRow>
 
         <SettingRow label="Default Search Engine" description="Used by both the address bar and new-tab search input.">
-          <select
-            id="browser-search-engine"
-            aria-label="Default search engine"
+          <Select
             value={settings.searchEngine}
-            onChange={(event) => void update({ searchEngine: event.target.value as BrowserSettingsState["searchEngine"] })}
-            className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none transition-colors focus:border-ring"
+            onValueChange={(value) => void update({ searchEngine: value as BrowserSettingsState["searchEngine"] })}
           >
-            <option value="google">Google</option>
-            <option value="bing">Bing</option>
-            <option value="duckduckgo">DuckDuckGo</option>
-            <option value="brave">Brave Search</option>
-          </select>
+            <SelectTrigger
+              id="browser-search-engine"
+              aria-label="Default search engine"
+              className="h-8 w-[180px] text-xs"
+            >
+              <SelectValue placeholder="Default search engine" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="google">Google</SelectItem>
+              <SelectItem value="bing">Bing</SelectItem>
+              <SelectItem value="duckduckgo">DuckDuckGo</SelectItem>
+              <SelectItem value="brave">Brave Search</SelectItem>
+            </SelectContent>
+          </Select>
         </SettingRow>
 
         <SettingRow label="Default Zoom" description="Applied to new, restored, and currently open built-in browser tabs.">
-          <select
-            id="browser-default-zoom"
-            aria-label="Default zoom level"
-            value={settings.defaultZoom}
-            onChange={(event) => void update({ defaultZoom: Number(event.target.value) })}
-            className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none transition-colors focus:border-ring"
+          <Select
+            value={settings.defaultZoom.toString()}
+            onValueChange={(value) => void update({ defaultZoom: Number(value) })}
           >
-            {BROWSER_ZOOM_LEVELS.map((level) => <option key={level} value={level}>{level}%</option>)}
-          </select>
+            <SelectTrigger
+              id="browser-default-zoom"
+              aria-label="Default zoom level"
+              className="h-8 w-[180px] text-xs"
+            >
+              <SelectValue placeholder="Default zoom level" />
+            </SelectTrigger>
+            <SelectContent>
+              {BROWSER_ZOOM_LEVELS.map((level) => (
+                <SelectItem key={level} value={level.toString()}>
+                  {level}%
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </SettingRow>
 
         <SettingRow label="Restore browser tabs on launch" description="Persist built-in browser tabs as part of the workspace session.">
-          <Toggle id="browser-restore-tabs" label="Restore tabs on launch" checked={settings.restoreTabsOnLaunch} onChange={(value) => void update({ restoreTabsOnLaunch: value })} />
+          <Switch
+            id="browser-restore-tabs"
+            aria-label="Restore tabs on launch"
+            checked={settings.restoreTabsOnLaunch}
+            onCheckedChange={(checked) => void update({ restoreTabsOnLaunch: checked })}
+          />
         </SettingRow>
         <SettingRow label="Remember browsing history" description="Keep up to 100 recently visited built-in browser pages across Ferryx restarts.">
-          <Toggle
-            label="Remember browsing history"
+          <Switch
+            id="browser-remember-history"
+            aria-label="Remember browsing history"
             checked={settings.rememberBrowsingHistory}
-            onChange={(value) => {
-              if (!value) clearBrowserHistory();
-              void update({ rememberBrowsingHistory: value });
+            onCheckedChange={(checked) => {
+              if (!checked) clearBrowserHistory();
+              void update({ rememberBrowsingHistory: checked });
             }}
           />
         </SettingRow>
@@ -224,16 +254,36 @@ export function BrowserSettingsPanel() {
       <h3 className="mt-7 border-b border-border pb-2 text-[12px] font-semibold">Link Routing</h3>
       <div className="border-b border-border">
         <SettingRow label="Open links in built-in browser" description="HTTP(S) links opened inside Ferryx use a built-in browser tab by default.">
-          <Toggle label="Open links in built-in browser" checked={settings.openLinksInBuiltInBrowser} onChange={(value) => void update({ openLinksInBuiltInBrowser: value })} />
+          <Switch
+            id="browser-open-links-builtin"
+            aria-label="Open links in built-in browser"
+            checked={settings.openLinksInBuiltInBrowser}
+            onCheckedChange={(checked) => void update({ openLinksInBuiltInBrowser: checked })}
+          />
         </SettingRow>
         <SettingRow label="Hold Shift to open in your web browser" description="Shift-click bypasses the built-in browser and opens the system default web browser.">
-          <Toggle label="Hold Shift to open in your web browser" checked={settings.shiftOpensSystemBrowser} onChange={(value) => void update({ shiftOpensSystemBrowser: value })} />
+          <Switch
+            id="browser-shift-opens-system"
+            aria-label="Hold Shift to open in your web browser"
+            checked={settings.shiftOpensSystemBrowser}
+            onCheckedChange={(checked) => void update({ shiftOpensSystemBrowser: checked })}
+          />
         </SettingRow>
         <SettingRow label="Show terminal link actions" description="Clicking a terminal URL shows explicit built-in and system-browser actions. Turn off for immediate default routing.">
-          <Toggle label="Show terminal link actions" checked={settings.showTerminalLinkActions} onChange={(value) => void update({ showTerminalLinkActions: value })} />
+          <Switch
+            id="browser-show-terminal-actions"
+            aria-label="Show terminal link actions"
+            checked={settings.showTerminalLinkActions}
+            onCheckedChange={(checked) => void update({ showTerminalLinkActions: checked })}
+          />
         </SettingRow>
         <SettingRow label="Localhost Worktree Labels" description="Append the source worktree/branch to localhost and 127.0.0.1 browser tab labels.">
-          <Toggle label="Localhost Worktree Labels" checked={settings.localhostWorktreeLabels} onChange={(value) => void update({ localhostWorktreeLabels: value })} />
+          <Switch
+            id="browser-localhost-worktree-labels"
+            aria-label="Localhost Worktree Labels"
+            checked={settings.localhostWorktreeLabels}
+            onCheckedChange={(checked) => void update({ localhostWorktreeLabels: checked })}
+          />
         </SettingRow>
       </div>
 
@@ -248,7 +298,7 @@ export function BrowserSettingsPanel() {
         </div>
         {namedProfilesSupported ? (
           <div className="flex items-center gap-1.5">
-            <input
+            <Input
               value={profileDraft}
               onChange={(event) => setProfileDraft(event.target.value)}
               onKeyDown={(event) => {
@@ -256,11 +306,17 @@ export function BrowserSettingsPanel() {
               }}
               aria-label="New browser profile name"
               placeholder="Profile name"
-              className="h-8 w-36 rounded-md border border-input bg-background px-2 text-xs outline-none focus:border-ring"
+              className="h-8 w-36 text-xs"
             />
-            <button type="button" onClick={addProfile} className="flex h-8 items-center gap-1 rounded-md border border-border px-2 text-[11px] hover:bg-accent">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={addProfile}
+              className="h-8 gap-1 px-2 text-[11px]"
+            >
               <Plus className="size-3" /> Add Profile
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
@@ -288,27 +344,39 @@ export function BrowserSettingsPanel() {
                 {importStatus[profile.id] ? <div className="mt-0.5 px-1 text-[10px] text-muted-foreground">{importStatus[profile.id]}</div> : null}
               </div>
               {isDefault ? (
-                <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium">Default</span>
+                <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[10px] font-medium">Default</Badge>
               ) : (
-                <button type="button" onClick={() => void update({ defaultProfileId: profile.id })} className="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent">Make Default</button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void update({ defaultProfileId: profile.id })}
+                  className="h-7 px-2 text-[11px]"
+                >
+                  Make Default
+                </Button>
               )}
-              <button
+              <Button
                 type="button"
+                variant="outline"
+                size="sm"
                 onClick={() => void importCookies(profile.id)}
-                className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[11px] hover:bg-accent"
+                className="h-7 gap-1 px-2 text-[11px]"
               >
                 <FolderOpen className="size-3" /> Import Cookies
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon"
                 disabled={isBuiltIn}
                 aria-label={`Delete profile ${profile.name}`}
                 onClick={() => deleteProfile(profile.id)}
                 title={isBuiltIn ? "Built-in profiles cannot be deleted" : "Delete profile"}
-                className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+                className="h-7 w-7 text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <Trash2 className="size-3.5" />
-              </button>
+              </Button>
             </div>
           );
         })}
@@ -319,17 +387,31 @@ export function BrowserSettingsPanel() {
         <div className="divide-y divide-border">
           {activeBrowsers.length === 0 ? (
             <div className="py-4 text-center text-xs text-muted-foreground">No active browser tabs open.</div>
-          ) : activeBrowsers.map((browser) => (
-            <div key={browser.browserId} className="flex items-center gap-3 py-2.5">
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-xs font-medium">{browser.title || browser.url || browser.browserId}</div>
-                <div className="truncate font-mono text-[9px] text-muted-foreground">{browser.url} · profile:{browser.profileId}</div>
+          ) : (
+            activeBrowsers.map((browser) => (
+              <div key={browser.browserId} className="flex items-center gap-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium">{browser.title || browser.url || browser.browserId}</div>
+                  <div className="truncate font-mono text-[9px] text-muted-foreground">{browser.url} · profile:{browser.profileId}</div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Focus browser tab ${browser.title || browser.browserId}`}
+                  onClick={() => void focusBrowser(browser.browserId)}
+                  className="h-7 px-2 text-[11px]"
+                >
+                  Focus
+                </Button>
               </div>
-              <button type="button" onClick={() => void focusBrowser(browser.browserId)} className="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent">Focus</button>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </div>
     </section>
   );
 }
+
+export { BrowserSection as BrowserSettings, BrowserSection as BrowserSettingsPanel };
+export default BrowserSection;

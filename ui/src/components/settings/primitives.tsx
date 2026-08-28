@@ -1,3 +1,5 @@
+// Settings layout primitives. Compose with shadcn controls from ../ui/*.
+
 import type { ReactNode } from "react";
 
 export function SettingsHeading({
