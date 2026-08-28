@@ -84,6 +84,51 @@ async fn test_resize() {
 }
 
 #[tokio::test]
+async fn resize_is_observed_by_the_child_shell() {
+    let manager = PtyManager::new();
+    let cmd = CommandBuilder::new("/bin/sh");
+    let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("failed to spawn");
+
+    manager
+        .resize(&session_id, 120, 40)
+        .expect("failed to resize");
+
+    manager
+        .write_input(&session_id, b"stty size\n")
+        .expect("failed to write input");
+
+    let mut accumulated = Vec::new();
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    while tokio::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Some(chunk)) => {
+                accumulated.extend_from_slice(&chunk);
+                let text = String::from_utf8_lossy(&accumulated);
+                if text.contains("40 120") {
+                    found = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    let output_text = String::from_utf8_lossy(&accumulated);
+    assert!(
+        found,
+        "Expected child shell to report '40 120', got: {output_text}"
+    );
+
+    manager
+        .close_session(&session_id)
+        .await
+        .expect("close failed");
+}
+
+#[tokio::test]
 async fn test_kill() {
     let manager = PtyManager::new();
     let cmd = CommandBuilder::new("/bin/sh");
