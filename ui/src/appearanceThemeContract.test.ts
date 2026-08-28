@@ -1,9 +1,21 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 function readSource(relativeUrl: string) {
   return readFileSync(new URL(relativeUrl, import.meta.url), "utf8");
+}
+
+// The settings surface is a shell (SettingsDialog.tsx) plus standalone section
+// modules under components/settings — the theme contract must cover all of them.
+function readSettingsSources() {
+  const settingsDir = join(process.cwd(), "src", "components", "settings");
+  const sectionFiles = readdirSync(settingsDir).filter((file) => file.endsWith(".tsx"));
+  return [
+    readSource("./components/SettingsDialog.tsx"),
+    ...sectionFiles.map((file) => readSource(`./components/settings/${file}`)),
+  ].join("\n");
 }
 
 describe("appearance theme color contract", () => {
@@ -40,14 +52,17 @@ describe("appearance theme color contract", () => {
   });
 
   it("uses semantic surfaces for QR pairing controls", () => {
-    const source = readSource("./components/SettingsDialog.tsx");
+    const source = readSettingsSources();
 
-    expect(source).toContain("border border-border bg-card");
+    expect(source).toContain("bg-card");
+    expect(source).toContain("bg-background");
     expect(source).not.toContain("bg-neutral-900 border border-neutral-800");
+    expect(source).not.toMatch(/bg-\[#/);
+    expect(source).not.toMatch(/border-\[#/);
   });
 
   it("uses semantic status tokens for theme-sensitive badges and browser tabs", () => {
-    const settings = readSource("./components/SettingsDialog.tsx");
+    const settings = readSettingsSources();
     const tabs = readSource("./components/tab-dnd/SortableTab.tsx");
 
     expect(settings).toContain("text-status-success");
