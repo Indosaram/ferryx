@@ -131,3 +131,33 @@ bash scripts/terminal-render-probe.sh
 even one written hours earlier by a previous bundle. Check the file's mtime
 against the current time before treating that verdict as a regression; a trace
 containing a single capture/sent pair is a dead trace, not a broken input path.
+
+## Final rebuilt-release verification
+
+The rebuilt macOS release app was relaunched after the bundle timestamp and the
+probe was run in a real native terminal pane. Screenshot evidence:
+
+`/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/clipboard-2026-08-29-075220-674D7BB7.png`
+
+Inspection confirms every required observation:
+
+- faint text is visibly dimmer than normal text;
+- underline is below the glyphs;
+- strikethrough crosses the glyphs;
+- overline is above the glyphs;
+- the concealed payload between the visible prefix and suffix is absent;
+- the 200-column wrap stressor returns to a clean prompt without stale cells on
+  the right side.
+
+Typing was then rechecked against the relaunched daemon (PID 30199) with the
+deterministic headless verifier. Its throwaway PTY ring advanced from sequence 8
+to 54 after a 34-byte input burst (`+46`), and the probe session was closed.
+
+Final checks after the release-app proof:
+
+- `cargo test --lib`: **366 passed, 0 failed**;
+- native-terminal language-server diagnostics: **0 errors**;
+- renderer contract: **22 passed**;
+- surface-host contract: **16 passed**;
+- IPC hardening contract: **7 passed**;
+- serialized daemon persistence contract: **9 passed**.
