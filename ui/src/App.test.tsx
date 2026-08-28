@@ -1947,7 +1947,7 @@ describe("App project workspace flow", () => {
       { name: "claude", available: true },
       { name: "aider", available: true },
     ]);
-    saveAgentSettings({ version: 1, defaultAgentId: "aider", overrides: {} });
+    saveAgentSettings({ version: 1, defaultAgentId: "aider", overrides: {}, custom: [] });
 
     render(<App />);
 
@@ -2429,15 +2429,31 @@ describe("App project workspace flow", () => {
         worktreeSlug: "feature-branch",
         worktreeLabel: "orca/orca-lite/feature-branch",
         backendSessionId: "backend-pty-3b",
-        activeTabId: "tab-3",
-        tabId: "tab-3",
+        activeTabId: "tab-3::leaf-right",
+        tabId: "tab-3::leaf-right",
+        // Every terminal pane is listed, each carrying its own worktree, so the remote can
+        // select across worktrees without the desktop having to focus them first.
         tabs: [
-          { id: "tab-2", label: "feature" },
-          { id: "tab-3", label: "split-term" },
+          { id: "tab-1", label: "main", worktreeLabel: "main" },
+          { id: "tab-2", label: "feature", worktreeSlug: "feature-branch", worktreeLabel: "orca/orca-lite/feature-branch" },
+          { id: "tab-3::leaf-left", label: "split-term (1)", worktreeLabel: "main" },
+          {
+            id: "tab-3::leaf-right",
+            label: "split-term (2)",
+            worktreeSlug: "feature-branch",
+            worktreeLabel: "orca/orca-lite/feature-branch",
+          },
         ],
         terminalTabs: [
-          { id: "tab-2", label: "feature" },
-          { id: "tab-3", label: "split-term" },
+          { id: "tab-1", label: "main", worktreeLabel: "main" },
+          { id: "tab-2", label: "feature", worktreeSlug: "feature-branch", worktreeLabel: "orca/orca-lite/feature-branch" },
+          { id: "tab-3::leaf-left", label: "split-term (1)", worktreeLabel: "main" },
+          {
+            id: "tab-3::leaf-right",
+            label: "split-term (2)",
+            worktreeSlug: "feature-branch",
+            worktreeLabel: "orca/orca-lite/feature-branch",
+          },
         ],
       });
 
@@ -2446,7 +2462,7 @@ describe("App project workspace flow", () => {
       expect(serialized).not.toContain("/repo/");
     });
 
-    it("publishes only same-worktree terminal tabs with safe labels", async () => {
+    it("publishes terminal tabs from every worktree with safe labels", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const result = deriveFocusedTerminal("orca-lite", {
         activeWorktreePath: "/repo/main",
@@ -2472,11 +2488,19 @@ describe("App project workspace flow", () => {
       } as any);
 
       expect(result?.terminalTabs).toEqual([
-        { id: "tab-active", label: "Editor" },
-        { id: "tab-sibling", label: "Terminal" },
+        { id: "tab-active", label: "Editor", worktreeLabel: "main" },
+        { id: "tab-sibling", label: "Terminal", worktreeLabel: "main" },
+        {
+          id: "tab-other-worktree",
+          label: "Other worktree",
+          worktreeSlug: "feature",
+          worktreeLabel: "orca/orca-lite/feature",
+        },
       ]);
       expect(JSON.stringify(result)).not.toContain("/Users/alice/private");
-      expect(JSON.stringify(result)).not.toContain("tab-other-worktree");
+      expect(JSON.stringify(result)).not.toContain("/repo/");
+      // Browser tabs stay private even though every terminal pane is listed.
+      expect(JSON.stringify(result)).not.toContain("browser-tab");
     });
 
     it("publishes the primary worktree with no managed slug", async () => {
@@ -2496,6 +2520,136 @@ describe("App project workspace flow", () => {
 
       expect(result?.worktreeSlug).toBeNull();
       expect(result?.worktreeLabel).toBe("main");
+    });
+
+    it("activates the exact pane when a remote selection names a leaf-addressed entry", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+
+      render(<App />);
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+      expect(native.remoteSelectionHandler).toBeTypeOf("function");
+
+      workspace.activateTab.mockClear();
+      workspace.focusPane.mockClear();
+
+      // Give tab-1 a second pane in the active worktree so it has a leaf-addressed entry.
+      const previousTabLayout = workspace.storeState.layout.layoutsByTabId["tab-1"];
+      workspace.storeState.layout.layoutsByTabId["tab-1"] = {
+        root: {
+          type: "split" as const,
+          direction: "horizontal" as const,
+          first: { type: "leaf" as const, leafId: "leaf-1" },
+          second: { type: "leaf" as const, leafId: "leaf-1b" },
+          ratio: 0.5,
+        },
+        activeLeafId: "leaf-1",
+        expandedLeafId: null,
+        sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-1b": "sess-1b" },
+      } as any;
+      const mutableSessions = workspace.storeState.sessions as Record<string, unknown>;
+      mutableSessions["sess-1b"] = { id: "sess-1b", cwd: "/repo/main" };
+
+      try {
+        act(() => {
+          native.remoteSelectionHandler!({
+            workspaceId: "orca-lite",
+            worktreeSlug: "main",
+            tabId: "tab-1::leaf-1b",
+          });
+        });
+
+        // The pane the remote named must be focused, not just its owning tab.
+        await waitFor(() => expect(workspace.focusPane).toHaveBeenCalledWith("tab-1", "leaf-1b"));
+        expect(workspace.activateTab).toHaveBeenCalledWith("tab-1");
+      } finally {
+        workspace.storeState.layout.layoutsByTabId["tab-1"] = previousTabLayout;
+        delete mutableSessions["sess-1b"];
+      }
+    });
+
+    it("exposes every split pane of a tab as its own remote entry addressed by leaf", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const splitState: any = {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "tab-1",
+          tabs: [{ id: "tab-1", kind: "terminal", label: "main", sessionId: "sess-a" }],
+          layoutsByTabId: {
+            "tab-1": {
+              root: {
+                type: "split",
+                direction: "horizontal",
+                first: { type: "leaf", leafId: "leaf-a" },
+                second: { type: "leaf", leafId: "leaf-b" },
+                ratio: 0.5,
+              },
+              activeLeafId: "leaf-b",
+              expandedLeafId: null,
+              sessionIdsByLeafId: { "leaf-a": "sess-a", "leaf-b": "sess-b" },
+            },
+          },
+        },
+        sessions: {
+          "sess-a": { id: "sess-a", backendSessionId: "pty-a", cwd: "/repo/main" },
+          "sess-b": { id: "sess-b", backendSessionId: "pty-b", cwd: "/repo/main" },
+        },
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+        activityBySessionId: {
+          "sess-a": { state: "working", title: "Gemini", isAgent: true, agentType: "gemini" },
+          "sess-b": { state: "waiting", title: "Claude", isAgent: true, agentType: "claude" },
+        },
+      };
+
+      const result = deriveFocusedTerminal("orca-lite", splitState);
+
+      // Both panes of the single tab must be individually selectable from remote.
+      expect(result?.terminalTabs).toHaveLength(2);
+      expect(result?.terminalTabs?.[0]).toEqual({
+        id: "tab-1::leaf-a",
+        label: "main (1)",
+        activityState: "working",
+        agentType: "gemini",
+        worktreeLabel: "main",
+      });
+      expect(result?.terminalTabs?.[1]).toEqual({
+        id: "tab-1::leaf-b",
+        label: "main (2)",
+        activityState: "waiting",
+        agentType: "claude",
+        worktreeLabel: "main",
+      });
+      // The focused entry is the active leaf, and the published session is that leaf's PTY.
+      expect(result?.tabId).toBe("tab-1::leaf-b");
+      expect(result?.activeTabId).toBe("tab-1::leaf-b");
+      expect(result?.backendSessionId).toBe("pty-b");
+    });
+
+    it("keeps a single-pane tab addressed by its plain tab id", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const singleState: any = {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "tab-1",
+          tabs: [{ id: "tab-1", kind: "terminal", label: "main", sessionId: "sess-a" }],
+          layoutsByTabId: {
+            "tab-1": {
+              root: { type: "leaf", leafId: "leaf-a" },
+              activeLeafId: "leaf-a",
+              expandedLeafId: null,
+              sessionIdsByLeafId: { "leaf-a": "sess-a" },
+            },
+          },
+        },
+        sessions: { "sess-a": { id: "sess-a", backendSessionId: "pty-a", cwd: "/repo/main" } },
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+        activityBySessionId: {},
+      };
+
+      const result = deriveFocusedTerminal("orca-lite", singleState);
+      expect(result?.terminalTabs).toEqual([{ id: "tab-1", label: "main", worktreeLabel: "main" }]);
+      expect(result?.tabId).toBe("tab-1");
     });
 
     it("derives per-tab activityState and agentType when present in activityBySessionId", async () => {
@@ -2535,9 +2689,9 @@ describe("App project workspace flow", () => {
 
       const result = deriveFocusedTerminal("orca-lite", sampleState);
       expect(result?.terminalTabs).toEqual([
-        { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude" },
-        { id: "tab-2", label: "feature", activityState: "working", agentType: "codex" },
-        { id: "tab-3", label: "plain" },
+        { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude", worktreeLabel: "main" },
+        { id: "tab-2", label: "feature", activityState: "working", agentType: "codex", worktreeLabel: "main" },
+        { id: "tab-3", label: "plain", worktreeLabel: "main" },
       ]);
       expect(result?.tabs).toEqual(result?.terminalTabs);
       expect(result?.terminalTabs?.[2]?.activityState).toBeUndefined();
@@ -2546,7 +2700,7 @@ describe("App project workspace flow", () => {
       expect(result?.terminalTabs?.[2] ? "agentType" in result.terminalTabs[2] : true).toBe(false);
     });
 
-    it("clears active terminal (returns null) when active tab is a browser tab", async () => {
+    it("keeps publishing the terminal inventory with an empty focus when a browser tab is active", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {
         activeWorktreePath: "/repo/main",
@@ -2565,6 +2719,26 @@ describe("App project workspace flow", () => {
       };
 
       const result = deriveFocusedTerminal("orca-lite", sampleState);
+      // The remote list must survive a browser tab being focused - only the mirrored terminal clears.
+      expect(result?.terminalTabs).toEqual([{ id: "tab-1", label: "main", worktreeLabel: "main" }]);
+      expect(result?.activeTabId).toBeNull();
+      expect(result?.tabId).toBeNull();
+      expect(result?.backendSessionId).toBeNull();
+    });
+
+    it("returns null only when the desktop has no terminal tab at all", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const result = deriveFocusedTerminal("orca-lite", {
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "browser-tab-1",
+          tabs: [{ id: "browser-tab-1", label: "Web Preview", kind: "browser", browserId: "b-1" }],
+          layoutsByTabId: {},
+        },
+        sessions: {},
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+      } as any);
+
       expect(result).toBeNull();
     });
 
@@ -2614,11 +2788,19 @@ describe("App project workspace flow", () => {
         backendSessionId: "pty-focused-live",
         activeTabId: "tab-1",
         tabId: "tab-1",
+        // Tabs without a resolvable session are still listed - the remote shows the whole desktop
+        // inventory, not just the panes sharing the focused worktree.
         tabs: [
-          { id: "tab-1", label: "main" },
+          { id: "tab-1", label: "main", worktreeLabel: "main" },
+          { id: "tab-2", label: "feature" },
+          { id: "tab-3", label: "bugfix" },
+          { id: "tab-4", label: "docs" },
         ],
         terminalTabs: [
-          { id: "tab-1", label: "main" },
+          { id: "tab-1", label: "main", worktreeLabel: "main" },
+          { id: "tab-2", label: "feature" },
+          { id: "tab-3", label: "bugfix" },
+          { id: "tab-4", label: "docs" },
         ],
       });
       // Absolute path must not leak
@@ -2708,14 +2890,14 @@ describe("App project workspace flow", () => {
         activeTabId: "tab-1",
         tabId: "tab-1",
         tabs: [
-          { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude" },
-          { id: "tab-2", label: "feature", activityState: "working", agentType: "codex" },
-          { id: "tab-3", label: "docs" },
+          { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude", worktreeLabel: "main" },
+          { id: "tab-2", label: "feature", activityState: "working", agentType: "codex", worktreeLabel: "main" },
+          { id: "tab-3", label: "docs", worktreeLabel: "main" },
         ],
         terminalTabs: [
-          { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude" },
-          { id: "tab-2", label: "feature", activityState: "working", agentType: "codex" },
-          { id: "tab-3", label: "docs" },
+          { id: "tab-1", label: "main", activityState: "waiting", agentType: "claude", worktreeLabel: "main" },
+          { id: "tab-2", label: "feature", activityState: "working", agentType: "codex", worktreeLabel: "main" },
+          { id: "tab-3", label: "docs", worktreeLabel: "main" },
         ],
       });
       expect(lastCall?.terminalTabs?.[0]?.activityState).toBe("waiting");
@@ -2974,6 +3156,57 @@ describe("App project workspace flow", () => {
       expect(workspace.ensureTabForWorktree).not.toHaveBeenCalledWith(
         expect.objectContaining({ path: "/repo/feature" }),
       );
+    });
+
+    it("activates the exact pane after a queued cross-project selection names a leaf entry", async () => {
+      localStorage.setItem(
+        PROJECTS_STORAGE_KEY,
+        JSON.stringify([
+          { workspaceId: "project-1", repoRoot: "/repo/p1" },
+          { workspaceId: "project-2", repoRoot: "/repo/p2" },
+        ]),
+      );
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "project-1");
+
+      render(<App />);
+      await waitFor(() => expect(native.onRemoteSelectionRequested).toHaveBeenCalled());
+
+      workspace.activateTab.mockClear();
+      workspace.focusPane.mockClear();
+
+      const previousTabLayout = workspace.storeState.layout.layoutsByTabId["tab-1"];
+      workspace.storeState.layout.layoutsByTabId["tab-1"] = {
+        root: {
+          type: "split" as const,
+          direction: "horizontal" as const,
+          first: { type: "leaf" as const, leafId: "leaf-1" },
+          second: { type: "leaf" as const, leafId: "leaf-1b" },
+          ratio: 0.5,
+        },
+        activeLeafId: "leaf-1",
+        expandedLeafId: null,
+        sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-1b": "sess-1b" },
+      } as any;
+      const mutableSessions = workspace.storeState.sessions as Record<string, unknown>;
+      mutableSessions["sess-1b"] = { id: "sess-1b", cwd: "/repo/main" };
+
+      try {
+        // The selection targets another project, so it drains through the queued-slug
+        // effect rather than the direct handler path.
+        act(() => {
+          native.remoteSelectionHandler!({
+            workspaceId: "project-2",
+            worktreeSlug: "main",
+            tabId: "tab-1::leaf-1b",
+          });
+        });
+
+        await waitFor(() => expect(workspace.focusPane).toHaveBeenCalledWith("tab-1", "leaf-1b"));
+        expect(workspace.activateTab).toHaveBeenCalledWith("tab-1");
+      } finally {
+        workspace.storeState.layout.layoutsByTabId["tab-1"] = previousTabLayout;
+        delete mutableSessions["sess-1b"];
+      }
     });
   });
 

@@ -1,8 +1,14 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+const switchDebugMock = vi.hoisted(() => vi.fn());
+vi.mock("../lib/switchDebug", () => ({
+  switchDebug: switchDebugMock,
+}));
+
 import type { Worktree, WorktreeChangedPayload } from "../lib/types";
 import { useWorkspaceRuntime, type WorkspaceRuntimeServices } from "./workspaceRuntime";
+import { useWorkspaceStore } from "./workspaceStore";
 
 const worktree: Worktree = {
   path: "/repo/main",
@@ -15,8 +21,9 @@ const worktree: Worktree = {
 };
 
 function createServices() {
+  let sessionNumber = 0;
   let worktreeChangedHandler: ((payload: WorktreeChangedPayload) => void) | null = null;
-  const services: WorkspaceRuntimeServices = {
+  const services = {
     ensureTerminalEvents: vi.fn(async () => undefined),
     listWorktrees: vi.fn(async () => [worktree]),
     onWorktreeChanged: vi.fn(async (handler) => {
@@ -24,6 +31,10 @@ function createServices() {
       return () => undefined;
     }),
     isTauriRuntime: vi.fn(() => true),
+    spawnTerminal: vi.fn(async () => `backend-${++sessionNumber}`),
+    closeTerminal: vi.fn(async () => undefined),
+    waitForTerminalExit: vi.fn(async () => undefined),
+    getTerminalCwd: vi.fn(async () => worktree.path),
   };
   return {
     services,
@@ -260,5 +271,122 @@ describe("useWorkspaceRuntime", () => {
     const syncedPaths = syncWorktrees.mock.calls.map((call) => call[0].at(0)?.path);
     expect(syncedPaths).toContain("/repo/fresh-a");
     expect(syncedPaths).not.toContain("/repo/stale-a");
+  });
+
+  it("extracts error message cleanly instead of logging [object Object]", async () => {
+    const { services } = createServices();
+    const structuredError = {
+      code: "WORKSPACE_NOT_FOUND",
+      message: "Workspace ws-err not found on backend",
+      details: {},
+    };
+    services.listWorktrees = vi.fn(async () => {
+      throw structuredError;
+    });
+
+    const { result, unmount } = renderHook(() =>
+      useWorkspaceRuntime({
+        workspaceId: "ws-err",
+        activeWorktreePath: null,
+        syncWorktrees: vi.fn(async () => undefined),
+        ensureTabForWorktree: vi.fn(async () => "tab-1"),
+        services,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.runtimeError).toEqual(structuredError);
+    });
+
+    expect(switchDebugMock).toHaveBeenCalledWith("workspace.runtime.error", {
+      workspaceId: "ws-err",
+      error: "Workspace ws-err not found on backend",
+      code: "WORKSPACE_NOT_FOUND",
+    });
+
+    unmount();
+  });
+
+  it("with 4 tabs active and user on tab 4, a refresh cycle does NOT change activeTabId", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => {
+      const store = useWorkspaceStore({ initialWorktrees: [worktree], services });
+      const runtime = useWorkspaceRuntime({
+        workspaceId: "default",
+        activeWorktreePath: store.state.activeWorktreePath,
+        syncWorktrees: store.syncWorktrees,
+        ensureTabForWorktree: store.ensureTabForWorktree,
+        services,
+      });
+      return { store, runtime };
+    });
+
+    let tab4Id = "";
+    await act(async () => {
+      await result.current.store.openTab(worktree, "tab 1");
+      await result.current.store.openTab(worktree, "tab 2");
+      await result.current.store.openTab(worktree, "tab 3");
+      const tab4 = await result.current.store.openTab(worktree, "tab 4");
+      tab4Id = tab4 ?? "";
+    });
+
+    expect(result.current.store.state.layout.tabs).toHaveLength(4);
+    expect(result.current.store.state.layout.activeTabId).toBe(tab4Id);
+
+    await act(async () => {
+      await result.current.runtime.refreshWorktrees();
+    });
+
+    expect(result.current.store.state.layout.tabs).toHaveLength(4);
+    expect(result.current.store.state.layout.activeTabId).toBe(tab4Id);
+  });
+
+  it("missing preferred-worktree tab still gets created (existence semantics preserved)", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => {
+      const store = useWorkspaceStore({ initialWorktrees: [worktree], services });
+      const runtime = useWorkspaceRuntime({
+        workspaceId: "default",
+        activeWorktreePath: store.state.activeWorktreePath,
+        syncWorktrees: store.syncWorktrees,
+        ensureTabForWorktree: store.ensureTabForWorktree,
+        services,
+      });
+      return { store, runtime };
+    });
+
+    expect(result.current.store.state.layout.tabs).toHaveLength(0);
+
+    await act(async () => {
+      await result.current.runtime.refreshWorktrees();
+    });
+
+    expect(result.current.store.state.layout.tabs).toHaveLength(1);
+    expect(result.current.store.state.layout.tabs[0].label).toBe("main");
+  });
+
+  it("an ime-anchor store update does not enqueue a worktree refresh", async () => {
+    const { services } = createServices();
+    const { rerender } = renderHook(
+      (_props: { imeAnchor: { x: number; y: number } }) =>
+        useWorkspaceRuntime({
+          workspaceId: "default",
+          activeWorktreePath: "/repo/main",
+          syncWorktrees: vi.fn(async () => undefined),
+          ensureTabForWorktree: vi.fn(async () => "tab-1"),
+          services,
+        }),
+      { initialProps: { imeAnchor: { x: 10, y: 20 } } },
+    );
+
+    await waitFor(() => expect(services.listWorktrees).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      rerender({ imeAnchor: { x: 15, y: 20 } });
+      rerender({ imeAnchor: { x: 20, y: 20 } });
+      rerender({ imeAnchor: { x: 25, y: 20 } });
+    });
+
+    expect(services.listWorktrees).toHaveBeenCalledTimes(1);
   });
 });

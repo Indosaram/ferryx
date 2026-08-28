@@ -287,4 +287,35 @@ describe("WorktreeList actions", () => {
     expect(idleDot?.className).toContain("bg-status-idle");
     expect(idleDot?.className).not.toContain("#00bc7d");
   });
+
+  it("uses theme token for inactive worktree labels and preserves dark-pill contrast for active labels", () => {
+    const { rerender } = render(
+      <WorktreeList
+        worktrees={[worktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const inactiveLabel = screen.getByText("feature");
+    expect(inactiveLabel.className).toContain("text-worktree-sidebar-foreground");
+    expect(inactiveLabel.className).not.toContain("text-[#fafafa]");
+
+    rerender(
+      <WorktreeList
+        worktrees={[worktree]}
+        activePath={worktree.path}
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const activeLabel = screen.getByText("feature");
+    expect(activeLabel.className).toContain("text-[#fafafa]");
+  });
 });

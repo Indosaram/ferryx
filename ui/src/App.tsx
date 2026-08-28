@@ -19,8 +19,8 @@ import type { TerminalActivityState } from "./lib/activity";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
 import {
-  AGENT_CANDIDATES,
   AGENTS_SETTINGS_CHANGED_EVENT,
+  detectionTargets,
   getLaunchableAgents,
   loadAgentSettings,
   mergeDetections,
@@ -64,7 +64,6 @@ import {
   worktreeIdentity,
   type DirtyState,
   type StructuredIpcError,
-  type TerminalTab,
   type WorkspaceTab,
   type Worktree,
 } from "./lib/types";
@@ -230,16 +229,21 @@ export function deriveFocusedTerminal(
     : undefined;
   const activeTabId =
     focusedGroup?.activeTabId ?? state.layout.activeTabId ?? state.layout.tabs[0]?.id ?? null;
-  if (!activeTabId) return null;
 
-  const activeTab = state.layout.tabs.find((tab) => tab.id === activeTabId);
-  if (!activeTab || activeTab.kind === "browser") return null;
+  // The remote lists every terminal pane regardless of desktop focus, so a browser tab or an
+  // absent focus only empties the focus fields below - it never hides the inventory.
+  const focusedCandidate = activeTabId
+    ? state.layout.tabs.find((tab) => tab.id === activeTabId)
+    : undefined;
+  const focusedTab =
+    focusedCandidate && focusedCandidate.kind !== "browser" ? focusedCandidate : null;
 
-  const tabLayout = state.layout.layoutsByTabId?.[activeTab.id];
+  const tabLayout = focusedTab ? state.layout.layoutsByTabId?.[focusedTab.id] : undefined;
   const activeLeafId =
     tabLayout?.activeLeafId ?? (tabLayout?.root ? collectLeafIds(tabLayout.root)[0] : null);
-  const localSessionId =
-    (activeLeafId && tabLayout?.sessionIdsByLeafId?.[activeLeafId]) || activeTab.sessionId;
+  const localSessionId = focusedTab
+    ? (activeLeafId && tabLayout?.sessionIdsByLeafId?.[activeLeafId]) || focusedTab.sessionId
+    : null;
   const session = localSessionId ? state.sessions[localSessionId] : undefined;
 
   const sessionWorktreePath = session?.worktreePath ?? session?.cwd;
@@ -251,35 +255,74 @@ export function deriveFocusedTerminal(
   const worktreeSlug = ident?.slug ?? null;
   const worktreeLabel = foundWorktree?.branch
     ? foundWorktree.branch.replace(/^refs\/heads\//, "")
-    : activeTab.label;
+    : (focusedTab?.label ?? null);
 
-  const terminalTabs = state.layout.tabs
-    .filter((tab): tab is TerminalTab => {
-      if (tab.kind === "browser") return false;
-      if (tab.id === activeTab.id) return true;
-      const tabSession = state.sessions[tab.sessionId];
-      const tabWorktreePath = tabSession?.worktreePath ?? tabSession?.cwd;
-      return tabWorktreePath === foundWorktree?.path;
-    })
-    .map((tab) => {
-      const activity = state.activityBySessionId?.[tab.sessionId];
+  const terminalTabs = state.layout.tabs.flatMap((tab) => {
+    if (tab.kind === "browser") return [];
+    const layout = state.layout.layoutsByTabId?.[tab.id];
+    const leafIds = layout?.root ? collectLeafIds(layout.root) : [];
+    const paneSessionIds = leafIds.length > 0
+      ? leafIds.map((leafId) => ({ leafId, sessionId: layout?.sessionIdsByLeafId?.[leafId] ?? "" }))
+      : [{ leafId: null, sessionId: tab.sessionId }];
+    const multiPane = paneSessionIds.length > 1;
+
+    return paneSessionIds.map(({ leafId, sessionId }, index) => {
+      const paneSession = sessionId ? state.sessions[sessionId] : undefined;
+      const panePath = paneSession?.worktreePath ?? paneSession?.cwd;
+      // Each pane carries its own worktree so the remote can select across worktrees instead of
+      // guessing from whichever context is currently mirrored.
+      const paneWorktree = panePath ? state.worktrees.find((wt) => wt.path === panePath) : undefined;
+      const paneSlug = (paneWorktree ? worktreeIdentity(paneWorktree) : null)?.slug ?? null;
+      const paneLabel = paneWorktree?.branch
+        ? paneWorktree.branch.replace(/^refs\/heads\//, "")
+        : null;
+
+      const activity = sessionId ? state.activityBySessionId?.[sessionId] : undefined;
+      const baseLabel = remoteTabLabel(tab.label);
       return {
-        id: tab.id,
-        label: remoteTabLabel(tab.label),
+        id: remotePaneId(tab.id, multiPane ? leafId : null),
+        label: multiPane ? `${baseLabel} (${index + 1})` : baseLabel,
         ...(activity?.state ? { activityState: activity.state } : {}),
         ...(activity?.agentType ? { agentType: activity.agentType } : {}),
+        ...(paneSlug ? { worktreeSlug: paneSlug } : {}),
+        ...(paneLabel ? { worktreeLabel: paneLabel } : {}),
       };
     });
+  });
+
+  if (terminalTabs.length === 0) return null;
+
+  const focusedLayout = focusedTab ? state.layout.layoutsByTabId?.[focusedTab.id] : undefined;
+  const focusedLeafIds = focusedLayout?.root ? collectLeafIds(focusedLayout.root) : [];
+  const focusedEntryId = focusedTab
+    ? remotePaneId(focusedTab.id, focusedLeafIds.length > 1 ? activeLeafId : null)
+    : null;
 
   return {
     workspaceId,
     worktreeSlug: worktreeSlug ?? null,
     worktreeLabel: worktreeLabel ?? null,
     backendSessionId: session?.backendSessionId ?? null,
-    activeTabId: activeTab.id,
-    tabId: activeTab.id,
+    activeTabId: focusedEntryId,
+    tabId: focusedEntryId,
     tabs: terminalTabs,
     terminalTabs,
+  };
+}
+
+/** Remote entries address a pane, not just a tab, so a split tab exposes each PTY separately. */
+const REMOTE_PANE_SEPARATOR = "::";
+
+export function remotePaneId(tabId: string, leafId: string | null): string {
+  return leafId ? `${tabId}${REMOTE_PANE_SEPARATOR}${leafId}` : tabId;
+}
+
+export function parseRemotePaneId(entryId: string): { tabId: string; leafId: string | null } {
+  const index = entryId.indexOf(REMOTE_PANE_SEPARATOR);
+  if (index < 0) return { tabId: entryId, leafId: null };
+  return {
+    tabId: entryId.slice(0, index),
+    leafId: entryId.slice(index + REMOTE_PANE_SEPARATOR.length) || null,
   };
 }
 
@@ -291,12 +334,19 @@ function remoteTabLabel(label: string): string {
 function isTerminalTabInWorktree(
   state: WorkspaceState,
   worktree: Worktree,
-  tabId: string | null,
+  entryId: string | null,
 ): boolean {
-  if (!tabId) return true;
+  if (!entryId) return true;
+  const { tabId, leafId } = parseRemotePaneId(entryId);
   const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
   if (!tab || tab.kind === "browser") return false;
-  const session = state.sessions[tab.sessionId];
+  // A leaf-addressed entry names one pane of a split tab, so the worktree check must
+  // follow that pane's own PTY instead of the tab's primary session.
+  const sessionId = leafId
+    ? state.layout.layoutsByTabId?.[tabId]?.sessionIdsByLeafId?.[leafId]
+    : tab.sessionId;
+  if (!sessionId) return false;
+  const session = state.sessions[sessionId];
   return (session?.worktreePath ?? session?.cwd) === worktree.path;
 }
 
@@ -350,7 +400,7 @@ function WorkspaceApp({
     async function runDetection() {
       if (!isTauriRuntime()) return;
       try {
-        const results = await detectAgents([...AGENT_CANDIDATES]);
+        const results = await detectAgents(detectionTargets(agentSettings));
         if (!cancelled) setAgentDetections(results);
       } catch (error) {
         console.warn("Failed to detect agents:", error);
@@ -360,7 +410,7 @@ function WorkspaceApp({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [agentSettings]);
 
   useEffect(() => {
     const handleSettingsChange = () => {
@@ -906,6 +956,15 @@ function WorkspaceApp({
     [activateTab, ensureTabForWorktree, reportRuntimeError],
   );
 
+  const activateRemoteEntry = useCallback(
+    (entryId: string) => {
+      const { tabId, leafId } = parseRemotePaneId(entryId);
+      activateTab(tabId);
+      if (leafId) focusPane(tabId, leafId);
+    },
+    [activateTab, focusPane],
+  );
+
   useEffect(() => {
     if (!pendingRemoteSlug) return;
     // The slug was queued for one project; after a switch elsewhere it must not
@@ -920,24 +979,24 @@ function WorkspaceApp({
          state.worktrees.find((wt) => wt.path === activeProject.repoRoot) ??
          state.worktrees[0]);
     if (!target) return;
-    const requestedTabId = pendingRemoteSlug.tabId ?? null;
+    const requestedEntryId = pendingRemoteSlug.tabId ?? null;
     setPendingRemoteSlug(null);
-    if (!isTerminalTabInWorktree(state, target, requestedTabId)) return;
+    if (!isTerminalTabInWorktree(state, target, requestedEntryId)) return;
     void Promise.resolve(ensureTabForWorktree(target))
       .then(() => {
-        if (requestedTabId) {
-          activateTab(requestedTabId);
+        if (requestedEntryId) {
+          activateRemoteEntry(requestedEntryId);
         }
       })
       .catch(reportRuntimeError);
-  }, [activeProject.repoRoot, activeProject.workspaceId, activateTab, ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
+  }, [activeProject.repoRoot, activeProject.workspaceId, activateRemoteEntry, ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
 
   const handleRemoteSelectionRequested = useCallback(
     (payload: RemoteSelectionRequestedPayload) => {
       if (!payload || !payload.workspaceId) return;
       const targetProject = projectsRef.current.find((p) => p.workspaceId === payload.workspaceId);
       const isCurrentProject = activeProjectRef.current.workspaceId === payload.workspaceId;
-      const requestedTabId = payload.tabId ?? payload.activeTabId ?? null;
+      const requestedEntryId = payload.tabId ?? payload.activeTabId ?? null;
 
       if (isCurrentProject) {
         const targetWorktree = payload.worktreeSlug
@@ -947,16 +1006,16 @@ function WorkspaceApp({
              stateRef.current.worktrees[0]);
 
         if (targetWorktree) {
-          if (!isTerminalTabInWorktree(stateRef.current, targetWorktree, requestedTabId)) return;
+          if (!isTerminalTabInWorktree(stateRef.current, targetWorktree, requestedEntryId)) return;
           if (targetWorktree.path === stateRef.current.activeWorktreePath) {
-            if (requestedTabId) {
-              activateTab(requestedTabId);
+            if (requestedEntryId) {
+              activateRemoteEntry(requestedEntryId);
             }
           } else {
             void Promise.resolve(ensureTabForWorktree(targetWorktree))
               .then(() => {
-                if (requestedTabId) {
-                  activateTab(requestedTabId);
+                if (requestedEntryId) {
+                  activateRemoteEntry(requestedEntryId);
                 }
               })
               .catch(reportRuntimeError);
@@ -967,11 +1026,11 @@ function WorkspaceApp({
         setPendingRemoteSlug({
           workspaceId: targetProject.workspaceId,
           slug: payload.worktreeSlug ?? null,
-          tabId: requestedTabId,
+          tabId: requestedEntryId,
         });
       }
     },
-    [activateTab, ensureTabForWorktree, handleSelectProject, reportRuntimeError],
+    [activateRemoteEntry, ensureTabForWorktree, handleSelectProject, reportRuntimeError],
   );
 
   useEffect(() => {

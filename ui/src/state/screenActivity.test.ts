@@ -95,15 +95,30 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
     expect(activity?.source).toBe("screen");
   });
 
-  it("3. does not misclassify a session based on screen detection manifestId alone", () => {
-    const state = workspaceReducer(stateWithSession("tab-a"), screenAction("working", "rule_working", "gemini"));
+  it("3. sets agent identity for supported screen detection manifestId (e.g. gemini, omo, codex, claude, opencode)", () => {
+    for (const agentType of ["gemini", "omo", "codex", "claude", "opencode"] as const) {
+      const state = workspaceReducer(stateWithSession("tab-a"), screenAction("working", "rule_working", agentType));
 
-    expect(state.activityBySessionId?.["session-a"]).toMatchObject({
-      isAgent: false,
-      source: "screen",
-      state: "working",
-    });
-    expect(state.activityBySessionId?.["session-a"]?.agentType).toBeUndefined();
+      expect(state.activityBySessionId?.["session-a"]).toMatchObject({
+        isAgent: true,
+        agentType,
+        source: "screen",
+        state: "working",
+      });
+    }
+  });
+
+  it("3b. unknown or unsupported screen detection manifestId does not mint an agent brand", () => {
+    for (const unknownManifest of ["unsupported-tool", "bash", "custom_script"]) {
+      const state = workspaceReducer(stateWithSession("tab-a"), screenAction("working", "rule_working", unknownManifest));
+
+      expect(state.activityBySessionId?.["session-a"]).toMatchObject({
+        isAgent: false,
+        source: "screen",
+        state: "working",
+      });
+      expect(state.activityBySessionId?.["session-a"]?.agentType).toBeUndefined();
+    }
   });
 
   it("4. idle after working maps to done and marks a NON-VISIBLE tab + its worktree unread", () => {
@@ -183,20 +198,20 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
     expect(state.activityBySessionId?.["session-a"]?.agentType).toBeUndefined();
   });
 
-  it("keeps screen activity while clearing its stale agent identity on a shell title", () => {
+  it("keeps screen activity and its authoritative screen brand when receiving a shell title while active", () => {
     let state = stateWithSession("tab-a");
-    state = workspaceReducer(state, screenAction("working", "spinner_working", "codex"));
-    state = workspaceReducer(state, titleAction("\u280b codex: running tests"));
-    expect(state.activityBySessionId?.["session-a"]?.agentType).toBe("codex");
+    state = workspaceReducer(state, screenAction("working", "spinner_working", "omo"));
+    expect(state.activityBySessionId?.["session-a"]?.agentType).toBe("omo");
+    expect(state.activityBySessionId?.["session-a"]?.isAgent).toBe(true);
 
     state = workspaceReducer(state, titleAction("zsh"));
 
     expect(state.activityBySessionId?.["session-a"]).toMatchObject({
       state: "working",
       source: "screen",
-      isAgent: false,
+      isAgent: true,
+      agentType: "omo",
     });
-    expect(state.activityBySessionId?.["session-a"]?.agentType).toBeUndefined();
   });
 
   it("8. a completion on the tab the user is watching shows no attention dot", () => {

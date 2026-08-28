@@ -7,6 +7,7 @@ import {
   type TerminalActivity,
   type TerminalActivityState,
 } from "../lib/activity";
+import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
@@ -31,6 +32,10 @@ import { collectLeafIds, type PaneDirection } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
+
+type WorkspaceTerminalActivity = TerminalActivity & {
+  agentSource?: "screen" | "title";
+};
 
 export type WorkspaceState = {
   workspaceId?: string;
@@ -492,10 +497,22 @@ export function useWorkspaceStore({
         sessionCount: Object.keys(snapshot.sessions).length,
       });
       if (snapshot.activeWorktreePath === worktree.path) {
+        const hasValidActiveTab = Boolean(
+          snapshot.layout.activeTabId &&
+            snapshot.layout.tabs.some((tab) => tab.id === snapshot.layout.activeTabId),
+        );
         const activeTab = snapshot.layout.tabs.find(
           (tab) => tab.kind !== "browser" && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
         ) ?? snapshot.layout.tabs[0];
         if (activeTab) {
+          if (hasValidActiveTab) {
+            switchDebug("worktree.ensure.skipped", {
+              workspaceId,
+              worktreePath: worktree.path,
+              activeTabId: snapshot.layout.activeTabId,
+            });
+            return snapshot.layout.activeTabId;
+          }
           switchDebug("worktree.ensure.active-tab", {
             workspaceId,
             worktreePath: worktree.path,
@@ -1627,32 +1644,43 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         return state;
       }
 
-      const agentType = previous?.agentType;
-      const isAgent = previous?.isAgent ?? false;
+      const normalizedManifestId = action.manifestId?.trim().toLowerCase();
+      const isSupportedManifest = Boolean(normalizedManifestId && resolveAgentLogo(normalizedManifestId));
+      const prevActivity = previous as WorkspaceTerminalActivity | undefined;
+      const agentType = isSupportedManifest ? normalizedManifestId : prevActivity?.agentType;
+      const isAgent = isSupportedManifest ? true : (prevActivity?.isAgent ?? false);
+      const agentSource = isSupportedManifest ? "screen" : prevActivity?.agentSource;
 
-      const activity: TerminalActivity = {
+      const activity: WorkspaceTerminalActivity = {
         state: mappedState,
         title: previous?.title ?? "",
         isAgent,
         agentType,
         source: "screen",
+        agentSource,
       };
       return applySessionActivity(state, action.tabId, action.sessionId, activity);
     }
     case "SESSION_TITLE_ACTIVITY": {
       const previous = state.activityBySessionId?.[action.sessionId];
+      const prevActivity = previous as WorkspaceTerminalActivity | undefined;
       const isScreenSource = previous?.source === "screen";
+      const isScreenAgent = isScreenSource && prevActivity?.agentSource === "screen";
 
       if (isBareAgentTitle(action.title)) {
         if (isScreenSource) {
           const parsed = parseAgentTitle(action.title);
           const normalizedTitle = normalizeTerminalTitle(action.title);
-          const activity: TerminalActivity = {
+          const isAgent = parsed?.isAgent ? true : (isScreenAgent ? (previous.isAgent ?? false) : false);
+          const agentType = parsed?.isAgent ? parsed.agentType : (isScreenAgent ? previous.agentType : undefined);
+          const agentSource = parsed?.isAgent ? "title" : (isScreenAgent ? "screen" : undefined);
+          const activity: WorkspaceTerminalActivity = {
             state: previous.state,
             title: formatTabLabelFromTitle(action.title, normalizedTitle),
-            isAgent: parsed?.isAgent ?? false,
-            agentType: parsed?.isAgent ? parsed.agentType : undefined,
+            isAgent,
+            agentType,
             source: "screen",
+            agentSource,
           };
           return applySessionActivity(state, action.tabId, action.sessionId, activity);
         }
@@ -1683,15 +1711,29 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
 
       const normalizedTitle = normalizeTerminalTitle(action.title);
-      const isAgent = parsed?.isAgent ?? false;
-      const agentType = parsed?.isAgent ? parsed.agentType : undefined;
+      const isAgent = parsed?.isAgent
+        ? true
+        : isScreenAgent && inFlight
+          ? (previous?.isAgent ?? false)
+          : false;
+      const agentType = parsed?.isAgent
+        ? parsed.agentType
+        : isScreenAgent && inFlight
+          ? previous?.agentType
+          : undefined;
+      const agentSource = parsed?.isAgent
+        ? "title"
+        : isScreenAgent && inFlight
+          ? "screen"
+          : undefined;
 
-      const activity: TerminalActivity = {
+      const activity: WorkspaceTerminalActivity = {
         state: isScreenSource ? previous.state : (classified ?? previous!.state),
         title: formatTabLabelFromTitle(action.title, normalizedTitle),
         isAgent,
         agentType,
         source: isScreenSource ? "screen" : (previous?.source ?? "title"),
+        agentSource,
       };
       return applySessionActivity(state, action.tabId, action.sessionId, activity);
     }

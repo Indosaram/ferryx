@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   DEFAULT_WORKSPACE_ID,
+  isStructuredIpcError,
   isTauriRuntime,
   listWorktrees,
   onWorktreeChanged,
@@ -50,6 +51,41 @@ const PREVIEW_WORKTREE: Worktree = {
   prunable: null,
 };
 
+function extractErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (isStructuredIpcError(error)) return error.message;
+  if (error && typeof error === "object") {
+    if ("message" in error && typeof (error as { message?: unknown }).message === "string") {
+      return (error as { message: string }).message;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
+}
+
+function sanitizeDebugDetails(details: Record<string, unknown>): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (typeof value === "string") {
+      sanitized[key] = value.length > 500 ? `${value.slice(0, 500)}...` : value;
+    } else {
+      try {
+        JSON.stringify(value);
+        sanitized[key] = value;
+      } catch {
+        const str = String(value);
+        sanitized[key] = str.length > 500 ? `${str.slice(0, 500)}...` : str;
+      }
+    }
+  }
+  return sanitized;
+}
+
 export function useWorkspaceRuntime({
   workspaceId = DEFAULT_WORKSPACE_ID,
   activeWorktreePath,
@@ -69,17 +105,29 @@ export function useWorkspaceRuntime({
   currentWorkspaceIdRef.current = workspaceId;
   activeWorktreePathRef.current = activeWorktreePath;
 
+  const syncWorktreesRef = useRef(syncWorktrees);
+  syncWorktreesRef.current = syncWorktrees;
+  const ensureTabForWorktreeRef = useRef(ensureTabForWorktree);
+  ensureTabForWorktreeRef.current = ensureTabForWorktree;
+  const servicesRef = useRef(services);
+  servicesRef.current = services;
+
   const reportRuntimeError = useCallback((error: unknown) => {
+    const ipcError = toIpcError(error);
+    const sanitizedDetails = sanitizeDebugDetails(ipcError.details ?? {});
     switchDebug("workspace.runtime.error", {
       workspaceId: currentWorkspaceIdRef.current,
-      error: String(error),
+      error: extractErrorMessage(error),
+      code: ipcError.code,
+      ...sanitizedDetails,
     });
-    setRuntimeError(toIpcError(error));
+    setRuntimeError(ipcError);
   }, []);
+  const reportRuntimeErrorRef = useRef(reportRuntimeError);
+  reportRuntimeErrorRef.current = reportRuntimeError;
 
   // Callers may build this per render; depending on the object identity would
   // re-run the initialize effect (listener re-registration + refresh) forever.
-  const plainRootPath = plainRootWorktree?.path ?? null;
   const plainRootRef = useRef(plainRootWorktree);
   plainRootRef.current = plainRootWorktree;
 
@@ -108,7 +156,7 @@ export function useWorkspaceRuntime({
             allowCreate: options?.allowCreate ?? true,
             activeWorktreePath: activeWorktreePathRef.current,
           });
-          const listed = await services.listWorktrees(workspaceId);
+          const listed = await servicesRef.current.listWorktrees(workspaceId);
           switchDebug("worktree.refresh.listed", {
             workspaceId,
             generation,
@@ -122,7 +170,7 @@ export function useWorkspaceRuntime({
             const plainRoot = plainRootRef.current;
             if (plainRoot) {
               worktrees = [plainRoot];
-            } else if (!services.isTauriRuntime()) {
+            } else if (!servicesRef.current.isTauriRuntime()) {
               worktrees = [PREVIEW_WORKTREE];
             }
           }
@@ -131,7 +179,7 @@ export function useWorkspaceRuntime({
             generation,
             worktreeCount: worktrees.length,
           });
-          await syncWorktrees(worktrees);
+          await syncWorktreesRef.current(worktrees);
           switchDebug("worktree.refresh.sync.complete", {
             workspaceId,
             generation,
@@ -147,9 +195,9 @@ export function useWorkspaceRuntime({
               allowCreate: options?.allowCreate ?? true,
             });
             if (options && options.allowCreate !== undefined) {
-              await ensureTabForWorktree(preferred, options);
+              await ensureTabForWorktreeRef.current(preferred, options);
             } else {
-              await ensureTabForWorktree(preferred);
+              await ensureTabForWorktreeRef.current(preferred);
             }
           }
           switchDebug("worktree.refresh.complete", {
@@ -159,7 +207,7 @@ export function useWorkspaceRuntime({
           });
           setRuntimeError(null);
         } catch (error) {
-          reportRuntimeError(error);
+          reportRuntimeErrorRef.current(error);
         }
       })().finally(() => {
         if (refreshInFlightRef.current?.promise === refreshPromise) {
@@ -170,8 +218,11 @@ export function useWorkspaceRuntime({
       refreshInFlightRef.current = { workspaceId, promise: refreshPromise };
       return refreshPromise;
     },
-    [ensureTabForWorktree, plainRootPath, reportRuntimeError, services, syncWorktrees, workspaceId],
+    [workspaceId],
   );
+
+  const refreshWorktreesRef = useRef(refreshWorktrees);
+  refreshWorktreesRef.current = refreshWorktrees;
 
   useEffect(() => {
     if (registeredWorkspaceId !== undefined && registeredWorkspaceId !== workspaceId) {
@@ -187,26 +238,26 @@ export function useWorkspaceRuntime({
 
     const initialize = async () => {
       switchDebug("workspace.runtime.initialize.start", { workspaceId });
-      await services.ensureTerminalEvents();
+      await servicesRef.current.ensureTerminalEvents();
       if (disposed) return;
-      unlistenWorktreeChanged = await services.onWorktreeChanged(() => {
+      unlistenWorktreeChanged = await servicesRef.current.onWorktreeChanged(() => {
         switchDebug("worktree.changed.event", { workspaceId });
-        void refreshWorktrees({ allowCreate: false });
+        void refreshWorktreesRef.current({ allowCreate: false });
       });
       if (disposed) {
         unlistenWorktreeChanged();
         return;
       }
-      await refreshWorktrees();
+      await refreshWorktreesRef.current();
       switchDebug("workspace.runtime.initialize.complete", { workspaceId });
     };
 
     const handleFocus = () => {
-      void refreshWorktrees({ allowCreate: false });
+      void refreshWorktreesRef.current({ allowCreate: false });
     };
 
     window.addEventListener("focus", handleFocus);
-    void initialize().catch(reportRuntimeError);
+    void initialize().catch((err) => reportRuntimeErrorRef.current(err));
 
     return () => {
       disposed = true;
@@ -214,7 +265,7 @@ export function useWorkspaceRuntime({
       window.removeEventListener("focus", handleFocus);
       unlistenWorktreeChanged?.();
     };
-  }, [refreshWorktrees, registeredWorkspaceId, reportRuntimeError, services, workspaceId]);
+  }, [registeredWorkspaceId, workspaceId]);
 
   return { runtimeError, refreshWorktrees, reportRuntimeError };
 }

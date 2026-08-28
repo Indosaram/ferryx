@@ -82,7 +82,12 @@ export const WorktreeRow = memo(function WorktreeRow({
             >
               {indicator ? <StatusDot state={indicator} /> : <span className="size-2 shrink-0 rounded-full bg-status-idle" />}
             </span>
-            <span className="truncate text-[12px] font-semibold leading-tight text-[#fafafa]">
+            <span
+              className={cn(
+                "truncate text-[12px] font-semibold leading-tight",
+                active ? "text-[#fafafa]" : "text-worktree-sidebar-foreground",
+              )}
+            >
               {displayName}
             </span>
             {primary ? (
