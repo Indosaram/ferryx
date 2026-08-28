@@ -1,8 +1,9 @@
 use crate::browser::{BrowserError, BrowserFindResult};
 
 pub fn browser_find_script(query: &str, backwards: bool) -> Result<String, BrowserError> {
-    let query = serde_json::to_string(query)
-        .map_err(|error| BrowserError::FindFailed(format!("failed to encode find query: {error}")))?;
+    let query = serde_json::to_string(query).map_err(|error| {
+        BrowserError::FindFailed(format!("failed to encode find query: {error}"))
+    })?;
     Ok(format!(
         r#"(() => {{
   const query = {query};
@@ -26,8 +27,9 @@ pub fn browser_find_script(query: &str, backwards: bool) -> Result<String, Brows
 }
 
 pub fn parse_browser_find_callback(result: &str) -> Result<BrowserFindResult, BrowserError> {
-    let payload: String = serde_json::from_str(result)
-        .map_err(|error| BrowserError::FindFailed(format!("invalid find callback result: {error}")))?;
+    let payload: String = serde_json::from_str(result).map_err(|error| {
+        BrowserError::FindFailed(format!("invalid find callback result: {error}"))
+    })?;
     serde_json::from_str(&payload)
         .map_err(|error| BrowserError::FindFailed(format!("invalid find response: {error}")))
 }

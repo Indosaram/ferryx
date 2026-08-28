@@ -1,14 +1,14 @@
 use crate::browser::{
     browser_find_script, cookie_from_imported, download_url_to_path, parse_browser_find_callback,
-    parse_browser_guest_action, parse_cookie_file, BrowserAutomationAction, BrowserAutomationElement,
-    BrowserAutomationRequest, BrowserAutomationSnapshot,
+    parse_browser_guest_action, parse_cookie_file, BrowserAutomationAction,
+    BrowserAutomationElement, BrowserAutomationRequest, BrowserAutomationSnapshot,
     BrowserAutomationTarget, BrowserDownloadRequestedPayload, BrowserError, BrowserFindResult,
     BrowserGuestAction, BrowserManager, BrowserOpenRequestedPayload, BrowserProfileId,
-    BrowserSessionSummary, BrowserShortcutRequestedPayload, BrowserState, BrowserStateChangedPayload,
-    CreateBrowserRequest, ImportBrowserCookiesRequest, ImportBrowserCookiesResult, LogicalRect,
+    BrowserSessionSummary, BrowserShortcutRequestedPayload, BrowserState,
+    BrowserStateChangedPayload, CreateBrowserRequest, ImportBrowserCookiesRequest,
+    ImportBrowserCookiesResult, LogicalRect, BROWSER_CLEAR_FIND_SCRIPT,
     BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_GUEST_BRIDGE_SCRIPT, BROWSER_OPEN_REQUESTED_EVENT,
     BROWSER_SHORTCUT_REQUESTED_EVENT,
-    BROWSER_CLEAR_FIND_SCRIPT,
 };
 use crate::ipc::error::IpcError;
 #[cfg(target_os = "macos")]
@@ -849,7 +849,11 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
     }
 
     #[cfg(target_os = "macos")]
-    if request.profile.as_ref().is_some_and(BrowserProfileId::is_named) {
+    if request
+        .profile
+        .as_ref()
+        .is_some_and(BrowserProfileId::is_named)
+    {
         return Err(BrowserError::UnsupportedProfile(
             "named persistent browser profiles are unavailable on macOS WebKit".into(),
         )
@@ -857,11 +861,13 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
     }
     let state = manager.register_session(request.clone())?;
 
-
     #[cfg(not(target_os = "macos"))]
     let profile_data_dir = match request.profile.as_ref() {
         Some(BrowserProfileId::Named(profile_id)) => {
-            let root = app.path().app_data_dir().map_err(|error| BrowserError::CreateFailed(error.to_string()))?;
+            let root = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| BrowserError::CreateFailed(error.to_string()))?;
             let data_dir = root.join("browser-profiles").join(profile_id);
             tokio::fs::create_dir_all(&data_dir)
                 .await
@@ -903,42 +909,40 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                 .user_agent(crate::browser::default_desktop_user_agent())
                 .incognito(incognito)
                 .initialization_script(BROWSER_GUEST_BRIDGE_SCRIPT)
-                .on_navigation(move |target| {
-                    match parse_browser_guest_action(target) {
-                        Some(BrowserGuestAction::Open(target_url)) => {
-                            let _ = bridge_app.emit(
-                                BROWSER_OPEN_REQUESTED_EVENT,
-                                BrowserOpenRequestedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                    target_url,
-                                    profile_id: bridge_profile_id.clone(),
-                                    worktree_path: bridge_worktree_path.clone(),
-                                },
-                            );
-                            false
-                        }
-                        Some(BrowserGuestAction::Download(target_url)) => {
-                            let _ = bridge_app.emit(
-                                BROWSER_DOWNLOAD_REQUESTED_EVENT,
-                                BrowserDownloadRequestedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                    target_url,
-                                },
-                            );
-                            false
-                        }
-                        Some(BrowserGuestAction::Shortcut(action)) => {
-                            let _ = bridge_app.emit(
-                                BROWSER_SHORTCUT_REQUESTED_EVENT,
-                                BrowserShortcutRequestedPayload {
-                                    browser_id: bridge_browser_id.clone(),
-                                    action,
-                                },
-                            );
-                            false
-                        }
-                        None => true,
+                .on_navigation(move |target| match parse_browser_guest_action(target) {
+                    Some(BrowserGuestAction::Open(target_url)) => {
+                        let _ = bridge_app.emit(
+                            BROWSER_OPEN_REQUESTED_EVENT,
+                            BrowserOpenRequestedPayload {
+                                browser_id: bridge_browser_id.clone(),
+                                target_url,
+                                profile_id: bridge_profile_id.clone(),
+                                worktree_path: bridge_worktree_path.clone(),
+                            },
+                        );
+                        false
                     }
+                    Some(BrowserGuestAction::Download(target_url)) => {
+                        let _ = bridge_app.emit(
+                            BROWSER_DOWNLOAD_REQUESTED_EVENT,
+                            BrowserDownloadRequestedPayload {
+                                browser_id: bridge_browser_id.clone(),
+                                target_url,
+                            },
+                        );
+                        false
+                    }
+                    Some(BrowserGuestAction::Shortcut(action)) => {
+                        let _ = bridge_app.emit(
+                            BROWSER_SHORTCUT_REQUESTED_EVENT,
+                            BrowserShortcutRequestedPayload {
+                                browser_id: bridge_browser_id.clone(),
+                                action,
+                            },
+                        );
+                        false
+                    }
+                    None => true,
                 })
                 .on_page_load(move |webview, payload| {
                     let loading = matches!(payload.event(), PageLoadEvent::Started);
@@ -949,7 +953,12 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                             .as_ref()
                             .is_some_and(|state| state.url != "about:blank");
                     let error = (!loading && fallback_to_blank).then(|| {
-                        format!("Failed to load {}", current_state.as_ref().map_or("page", |state| state.url.as_str()))
+                        format!(
+                            "Failed to load {}",
+                            current_state
+                                .as_ref()
+                                .map_or("page", |state| state.url.as_str())
+                        )
                     });
                     let navigation_url = (!fallback_to_blank).then_some(page_url);
                     update_webview_state(
@@ -973,7 +982,6 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                         None,
                     );
                 });
-
 
             #[cfg(not(target_os = "macos"))]
             let builder = if let Some(data_dir) = profile_data_dir {
@@ -1320,7 +1328,6 @@ pub async fn cmd_browser_get_state(
     let state = manager.get_state(&browser_id)?;
     Ok(state)
 }
-
 
 #[tauri::command]
 pub async fn cmd_browser_find<R: tauri::Runtime>(

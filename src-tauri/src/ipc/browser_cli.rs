@@ -34,8 +34,87 @@ pub enum BrowserCliResponse {
     },
 }
 
+#[cfg(unix)]
 pub fn browser_cli_socket_path() -> PathBuf {
     crate::daemon::server::get_runtime_dir().join("browser.sock")
+}
+
+#[cfg(not(unix))]
+pub fn browser_cli_socket_path() -> PathBuf {
+    crate::daemon::server::get_runtime_dir().join("browser.port")
+}
+
+pub fn write_port_file(path: &Path, port: u16) -> Result<(), BrowserError> {
+    if let Some(parent) = path.parent() {
+        let file_stem = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("browser_port");
+        let temp_path = parent.join(format!(".{file_stem}.tmp.{}", std::process::id()));
+        fs::write(&temp_path, port.to_string()).map_err(|error| {
+            BrowserError::Internal(format!("Failed to write port file: {error}"))
+        })?;
+
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || meta.is_dir() {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(BrowserError::Internal(format!(
+                        "Path {} is a directory or symlink, refusing to overwrite",
+                        path.display()
+                    )));
+                }
+                if let Err(error) = fs::remove_file(path) {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(BrowserError::Internal(format!(
+                        "Failed to replace existing port file {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = fs::remove_file(&temp_path);
+                return Err(BrowserError::Internal(format!(
+                    "Failed to inspect existing port file {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+
+        if let Err(error) = fs::rename(&temp_path, path) {
+            let _ = fs::remove_file(&temp_path);
+            fs::write(path, port.to_string()).map_err(|write_err| {
+                BrowserError::Internal(format!(
+                    "Failed to persist port file: {write_err} (rename error: {error})"
+                ))
+            })?;
+        }
+    } else {
+        fs::write(path, port.to_string()).map_err(|error| {
+            BrowserError::Internal(format!("Failed to write port file: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+pub fn read_port_from_file(path: &Path) -> Result<u16, BrowserError> {
+    let content = fs::read_to_string(path).map_err(|error| {
+        BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+    })?;
+    let port: u16 = content.trim().parse().map_err(|error| {
+        BrowserError::CliUnavailable(format!(
+            "Invalid browser CLI port in {}: {error}",
+            path.display()
+        ))
+    })?;
+    if port == 0 {
+        return Err(BrowserError::CliUnavailable(format!(
+            "Invalid browser CLI port in {}: port cannot be 0",
+            path.display()
+        )));
+    }
+    Ok(port)
 }
 
 #[cfg(unix)]
@@ -104,23 +183,71 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
 
 #[cfg(not(unix))]
 pub fn start_browser_cli_server<R: tauri::Runtime>(
-    _app: AppHandle<R>,
-    _manager: Arc<BrowserManager>,
-) -> Result<(), BrowserError> {
-    Err(BrowserError::PlatformUnsupported(
-        "browser CLI transport requires a platform-specific local socket".into(),
-    ))
-}
-
-#[cfg(unix)]
-async fn handle_connection<R: tauri::Runtime>(
-    stream: tokio::net::UnixStream,
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
 ) -> Result<(), BrowserError> {
+    start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
+}
+
+#[cfg(not(unix))]
+fn start_browser_cli_server_at_path<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: Arc<BrowserManager>,
+    port_path: &Path,
+) -> Result<(), BrowserError> {
+    use std::net::TcpListener;
+
+    let runtime_dir = port_path
+        .parent()
+        .ok_or_else(|| BrowserError::Internal("browser CLI socket path has no parent".into()))?;
+    fs::create_dir_all(&runtime_dir).map_err(|error| BrowserError::Internal(error.to_string()))?;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|error| BrowserError::Internal(format!("Failed to bind TCP listener: {error}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| BrowserError::Internal(format!("Failed to get local port: {error}")))?
+        .port();
+
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| BrowserError::Internal(error.to_string()))?;
+
+    write_port_file(port_path, port)?;
+
+    tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::from_std(listener) {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!("Failed to register browser CLI TCP listener with Tokio: {error}");
+                return;
+            }
+        };
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let app = app.clone();
+            let manager = Arc::clone(&manager);
+            tauri::async_runtime::spawn(async move {
+                let _ = handle_connection(stream, app, manager).await;
+            });
+        }
+    });
+    Ok(())
+}
+
+async fn handle_connection<S, R: tauri::Runtime>(
+    stream: S,
+    app: AppHandle<R>,
+    manager: Arc<BrowserManager>,
+) -> Result<(), BrowserError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     let response = match reader.read_line(&mut line).await {
@@ -139,6 +266,10 @@ async fn handle_connection<R: tauri::Runtime>(
     response.push('\n');
     writer
         .write_all(response.as_bytes())
+        .await
+        .map_err(|error| BrowserError::Internal(error.to_string()))?;
+    writer
+        .flush()
         .await
         .map_err(|error| BrowserError::Internal(error.to_string()))
 }
@@ -173,24 +304,21 @@ async fn execute_request<R: tauri::Runtime>(
     }
 }
 
-#[cfg(unix)]
-pub async fn send_browser_cli_request(
+async fn send_over_stream<S>(
+    stream: S,
     request: BrowserCliRequest,
-) -> Result<BrowserCliResponse, BrowserError> {
+) -> Result<BrowserCliResponse, BrowserError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
 
-    let stream = UnixStream::connect(browser_cli_socket_path())
-        .await
-        .map_err(|error| {
-            BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
-        })?;
-    let (reader, mut writer) = stream.into_split();
-    let mut request = serde_json::to_string(&request)
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut request_json = serde_json::to_string(&request)
         .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-    request.push('\n');
+    request_json.push('\n');
     writer
-        .write_all(request.as_bytes())
+        .write_all(request_json.as_bytes())
         .await
         .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
     writer
@@ -206,13 +334,47 @@ pub async fn send_browser_cli_request(
         .map_err(|error| BrowserError::AutomationFailed(error.to_string()))
 }
 
+#[cfg(unix)]
+pub async fn send_browser_cli_request(
+    request: BrowserCliRequest,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path(request, &browser_cli_socket_path()).await
+}
+
+#[cfg(unix)]
+async fn send_browser_cli_request_at_path(
+    request: BrowserCliRequest,
+    socket_path: &Path,
+) -> Result<BrowserCliResponse, BrowserError> {
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(socket_path).await.map_err(|error| {
+        BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+    })?;
+    send_over_stream(stream, request).await
+}
+
 #[cfg(not(unix))]
 pub async fn send_browser_cli_request(
-    _request: BrowserCliRequest,
+    request: BrowserCliRequest,
 ) -> Result<BrowserCliResponse, BrowserError> {
-    Err(BrowserError::PlatformUnsupported(
-        "browser CLI transport requires a platform-specific local socket".into(),
-    ))
+    send_browser_cli_request_at_path(request, &browser_cli_socket_path()).await
+}
+
+#[cfg(not(unix))]
+async fn send_browser_cli_request_at_path(
+    request: BrowserCliRequest,
+    port_path: &Path,
+) -> Result<BrowserCliResponse, BrowserError> {
+    use tokio::net::TcpStream;
+
+    let port = read_port_from_file(port_path)?;
+    let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .map_err(|error| {
+            BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+        })?;
+    send_over_stream(stream, request).await
 }
 
 #[cfg(test)]
@@ -245,6 +407,119 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: BrowserCliResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, resp);
+    }
+
+    #[test]
+    fn test_read_and_write_port_file_round_trip() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("browser.port");
+        write_port_file(&port_path, 43210).expect("write port file");
+        let read_port = read_port_from_file(&port_path).expect("read port file");
+        assert_eq!(read_port, 43210);
+    }
+
+    #[test]
+    fn test_write_port_file_replaces_existing_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("browser.port");
+        write_port_file(&port_path, 11111).expect("write initial port file");
+        assert_eq!(read_port_from_file(&port_path).expect("read port"), 11111);
+
+        write_port_file(&port_path, 22222).expect("overwrite port file");
+        assert_eq!(
+            read_port_from_file(&port_path).expect("read updated port"),
+            22222
+        );
+    }
+
+    #[test]
+    fn test_read_port_from_file_missing_returns_unavailable() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("nonexistent.port");
+        let result = read_port_from_file(&port_path);
+        assert!(matches!(result, Err(BrowserError::CliUnavailable(_))));
+    }
+
+    #[test]
+    fn test_read_port_from_file_malformed_returns_unavailable() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("invalid.port");
+
+        fs::write(&port_path, "not-a-port\n").expect("write malformed");
+        assert!(matches!(
+            read_port_from_file(&port_path),
+            Err(BrowserError::CliUnavailable(_))
+        ));
+
+        fs::write(&port_path, "0\n").expect("write port 0");
+        assert!(matches!(
+            read_port_from_file(&port_path),
+            Err(BrowserError::CliUnavailable(_))
+        ));
+
+        fs::write(&port_path, "70000\n").expect("write out-of-range port");
+        assert!(matches!(
+            read_port_from_file(&port_path),
+            Err(BrowserError::CliUnavailable(_))
+        ));
+
+        fs::write(&port_path, "   \n").expect("write empty/whitespace");
+        assert!(matches!(
+            read_port_from_file(&port_path),
+            Err(BrowserError::CliUnavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_send_over_stream_round_trip() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+
+        let manager = Arc::new(BrowserManager::new());
+        let registered_session = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: Some("workspace-duplex".to_string()),
+                worktree_path: Some("/worktree/alpha".to_string()),
+                url: "https://ferryx.dev".to_string(),
+                profile: Some(BrowserProfileId::Default),
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let app_handle = app.handle().clone();
+        let manager_clone = Arc::clone(&manager);
+        let server_task = tokio::spawn(async move {
+            handle_connection(server_stream, app_handle, manager_clone).await
+        });
+
+        let response = send_over_stream(client_stream, BrowserCliRequest::List)
+            .await
+            .expect("send request over stream");
+
+        let server_result = server_task.await.expect("server task completed");
+        assert!(server_result.is_ok());
+
+        let expected_summary = BrowserSessionSummary {
+            browser_id: registered_session.browser_id,
+            webview_label: registered_session.webview_label,
+            workspace_id: Some("workspace-duplex".to_string()),
+            profile_id: BrowserProfileId::Default,
+            url: registered_session.url,
+            title: None,
+            visible: true,
+        };
+
+        assert_eq!(
+            response,
+            BrowserCliResponse::List {
+                sessions: vec![expected_summary],
+            }
+        );
     }
 
     #[cfg(unix)]
@@ -364,5 +639,117 @@ mod tests {
                 sessions: Vec::new()
             },
         );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn browser_cli_server_starts_without_tokio_reactor() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("browser.port");
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+
+        start_browser_cli_server_at_path(
+            app.handle().clone(),
+            Arc::new(BrowserManager::new()),
+            &port_path,
+        )
+        .expect("browser CLI startup succeeds without Tokio reactor");
+
+        assert!(port_path.exists());
+        let port = read_port_from_file(&port_path).expect("read port from file");
+        assert!(port > 0);
+
+        let mut client =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to browser CLI port");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set response timeout");
+        client
+            .write_all(b"{\"command\":\"list\"}\n")
+            .expect("write list request");
+        let mut response = String::new();
+        BufReader::new(client)
+            .read_line(&mut response)
+            .expect("read browser CLI list response");
+        assert_eq!(
+            serde_json::from_str::<BrowserCliResponse>(response.trim())
+                .expect("parse browser CLI list response"),
+            BrowserCliResponse::List {
+                sessions: Vec::new()
+            },
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn test_browser_cli_list_round_trip_tcp() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+
+        let manager = Arc::new(BrowserManager::new());
+        let registered_session = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: Some("workspace-tcp".to_string()),
+                worktree_path: Some("/worktree/alpha".to_string()),
+                url: "https://ferryx.dev".to_string(),
+                profile: Some(BrowserProfileId::Default),
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("browser.port");
+
+        start_browser_cli_server_at_path(app.handle().clone(), Arc::clone(&manager), &port_path)
+            .expect("start browser CLI server");
+
+        let response = send_browser_cli_request_at_path(BrowserCliRequest::List, &port_path)
+            .await
+            .expect("send browser CLI list request");
+
+        let expected_summary = BrowserSessionSummary {
+            browser_id: registered_session.browser_id,
+            webview_label: registered_session.webview_label,
+            workspace_id: Some("workspace-tcp".to_string()),
+            profile_id: BrowserProfileId::Default,
+            url: registered_session.url,
+            title: None,
+            visible: true,
+        };
+
+        assert_eq!(
+            response,
+            BrowserCliResponse::List {
+                sessions: vec![expected_summary],
+            }
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn test_browser_cli_send_request_stale_port_fails() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let port_path = temp_dir.path().join("stale.port");
+
+        // Bind to get an unused port and immediately close it
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let closed_port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        write_port_file(&port_path, closed_port).expect("write stale port file");
+
+        let result = send_browser_cli_request_at_path(BrowserCliRequest::List, &port_path).await;
+        assert!(matches!(result, Err(BrowserError::CliUnavailable(_))));
     }
 }

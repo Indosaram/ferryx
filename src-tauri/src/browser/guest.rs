@@ -111,16 +111,21 @@ mod tests {
 
     #[test]
     fn parses_bridge_actions_and_ignores_normal_navigation() {
-        let open = Url::parse("https://open.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Foauth").unwrap();
+        let open = Url::parse("https://open.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Foauth")
+            .unwrap();
         assert_eq!(
             parse_browser_guest_action(&open),
             Some(BrowserGuestAction::Open("https://example.com/oauth".into()))
         );
 
-        let download = Url::parse("https://download.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Ffile.pdf").unwrap();
+        let download =
+            Url::parse("https://download.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Ffile.pdf")
+                .unwrap();
         assert_eq!(
             parse_browser_guest_action(&download),
-            Some(BrowserGuestAction::Download("https://example.com/file.pdf".into()))
+            Some(BrowserGuestAction::Download(
+                "https://example.com/file.pdf".into()
+            ))
         );
 
         let shortcut = Url::parse("https://shortcut.ferryx.invalid/?action=find").unwrap();

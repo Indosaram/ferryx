@@ -61,7 +61,9 @@ fn push_history_url(session: &mut ManagedBrowserSession, url: &str) {
         return;
     }
 
-    session.history.truncate(session.history_index.saturating_add(1));
+    session
+        .history
+        .truncate(session.history_index.saturating_add(1));
     session.history.push(url.to_string());
     session.history_index = session.history.len().saturating_sub(1);
     sync_history_flags(session);
@@ -237,7 +239,6 @@ impl BrowserManager {
         sync_history_flags(s);
         Ok(browser_state(s))
     }
-
 
     pub fn cancel_history_navigation(
         &self,

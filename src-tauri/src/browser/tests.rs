@@ -418,7 +418,10 @@ fn named_profile_ids_round_trip_as_strings() {
     assert_eq!(profile, BrowserProfileId::Named("work-account".into()));
     assert_eq!(profile.as_str(), "work-account");
     assert_eq!(serde_json::to_string(&profile).unwrap(), "\"work-account\"");
-    assert_eq!(serde_json::from_str::<BrowserProfileId>("\"work-account\"").unwrap(), profile);
+    assert_eq!(
+        serde_json::from_str::<BrowserProfileId>("\"work-account\"").unwrap(),
+        profile
+    );
     assert!(BrowserProfileId::from_id("../unsafe").is_none());
 }
 
@@ -460,8 +463,12 @@ fn history_stack_truncates_forward_entries_after_new_navigation() {
         })
         .expect("register browser");
 
-    manager.update_url(&state.browser_id, "https://example.com/two").unwrap();
-    manager.update_url(&state.browser_id, "https://example.com/three").unwrap();
+    manager
+        .update_url(&state.browser_id, "https://example.com/two")
+        .unwrap();
+    manager
+        .update_url(&state.browser_id, "https://example.com/three")
+        .unwrap();
 
     let back = manager
         .begin_history_navigation(&state.browser_id, false)
