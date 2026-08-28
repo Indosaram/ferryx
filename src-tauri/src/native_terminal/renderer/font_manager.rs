@@ -265,6 +265,36 @@ impl FontManager {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            let family = self.font_family.clone();
+            crate::native_terminal::renderer::directwrite_raster::rasterize_to_alpha_buffer(
+                &family,
+                text,
+                &mut buffer,
+                width,
+                height,
+                effective_font_size,
+                bold,
+                italic,
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let family = self.font_family.clone();
+            crate::native_terminal::renderer::freetype_raster::rasterize_to_alpha_buffer(
+                &family,
+                text,
+                &mut buffer,
+                width,
+                height,
+                effective_font_size,
+                bold,
+                italic,
+            );
+        }
+
         RasterizedGlyph::Alpha(buffer)
     }
 

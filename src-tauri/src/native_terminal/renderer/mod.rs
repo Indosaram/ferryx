@@ -4,7 +4,11 @@ pub mod atlas;
 pub mod color_glyph;
 pub mod coretext_font;
 pub mod coretext_raster;
+#[cfg(target_os = "windows")]
+pub mod directwrite_raster;
 pub mod font_manager;
+#[cfg(target_os = "linux")]
+pub mod freetype_raster;
 pub mod gpu_context;
 pub mod instances;
 pub mod pass;
