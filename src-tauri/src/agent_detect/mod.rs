@@ -485,7 +485,9 @@ all = [
             title: "copilot".to_string(),
         };
         assert_eq!(
-            engine.detect(&copilot_blocked_selection, None).map(|d| d.state),
+            engine
+                .detect(&copilot_blocked_selection, None)
+                .map(|d| d.state),
             Some(AgentActivity::Blocked)
         );
 
@@ -500,7 +502,9 @@ all = [
             title: "copilot".to_string(),
         };
         assert_eq!(
-            engine.detect(&copilot_blocked_numeric, None).map(|d| d.state),
+            engine
+                .detect(&copilot_blocked_numeric, None)
+                .map(|d| d.state),
             Some(AgentActivity::Blocked)
         );
 
@@ -536,9 +540,7 @@ all = [
 
         // --- GROK ---
         let grok_working = ScreenInput {
-            rows: vec![
-                "⠧ Waiting on subagent… 2.8s   13s ⇣29.7k [stop]".to_string(),
-            ],
+            rows: vec!["⠧ Waiting on subagent… 2.8s   13s ⇣29.7k [stop]".to_string()],
             title: "⠧ grok".to_string(),
         };
         assert_eq!(
@@ -573,9 +575,7 @@ all = [
 
         // --- KIMI ---
         let kimi_working = ScreenInput {
-            rows: vec![
-                "⠋ thinking...".to_string(),
-            ],
+            rows: vec!["⠋ thinking...".to_string()],
             title: "kimi".to_string(),
         };
         assert_eq!(
@@ -612,7 +612,8 @@ all = [
         };
         let kimi_welcome_det = engine.detect(&kimi_welcome, None);
         assert!(
-            kimi_welcome_det.is_none() || kimi_welcome_det.as_ref().map(|d| d.state) == Some(AgentActivity::Idle),
+            kimi_welcome_det.is_none()
+                || kimi_welcome_det.as_ref().map(|d| d.state) == Some(AgentActivity::Idle),
             "kimi welcome screen must produce None or Idle, got: {kimi_welcome_det:?}"
         );
         assert_ne!(

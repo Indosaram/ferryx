@@ -141,7 +141,16 @@ fn probe_plain_ls_la_output_returns_none() {
         "drwxr-xr-x   8 indo staff   256 Aug 27 07:30 src",
         "$ ",
     ];
-    for title in ["", "zsh", "bash", "antigravity", "cline", "copilot", "cursor", "kimi"] {
+    for title in [
+        "",
+        "zsh",
+        "bash",
+        "antigravity",
+        "cline",
+        "copilot",
+        "cursor",
+        "kimi",
+    ] {
         assert_eq!(
             detect(&rows, title, None),
             None,
