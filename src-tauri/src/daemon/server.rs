@@ -1,7 +1,7 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 use crate::daemon::protocol::{
-    AgentStateReport, DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails,
-    DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
+    AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse,
+    DaemonSessionDetails, DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
@@ -320,6 +320,29 @@ pub fn agent_state_socket_path() -> String {
     get_agent_state_socket_path().to_string_lossy().into_owned()
 }
 
+pub(crate) fn normalize_process_cwd(path: &Path) -> PathBuf {
+    let Some(path_str) = path.to_str() else {
+        return path.to_path_buf();
+    };
+
+    if let Some(rest) = path_str.strip_prefix(r"\\?\") {
+        if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(r"UNC\") {
+            return PathBuf::from(format!(r"\\{}", &rest[4..]));
+        }
+
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/')
+        {
+            return PathBuf::from(rest);
+        }
+    }
+
+    path.to_path_buf()
+}
+
 pub struct DaemonServer {
     terminal_service: Arc<TerminalService>,
     workspace_registry: WorkspaceRegistry,
@@ -330,6 +353,7 @@ pub struct DaemonServer {
     spawn_lock: tokio::sync::Mutex<()>,
     session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
     agent_state_tx: broadcast::Sender<(String, String, Option<String>)>,
+    remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
 }
 
 impl Default for DaemonServer {
@@ -378,10 +402,23 @@ impl DaemonServer {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(1);
 
+        // The gateway runs inside this process, so desktop-directed events must
+        // be relayed to the GUI over the socket; without this sink they are
+        // dropped and remote-issued selections never reach the desktop.
+        let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
+        let sink_tx = remote_event_tx.clone();
+        remote_state.set_desktop_event_sink(Arc::new(move |event, payload| {
+            let _ = sink_tx.send(DaemonRemoteEvent {
+                event: event.to_string(),
+                payload,
+            });
+        }));
+
         Self {
             terminal_service,
             workspace_registry,
             remote_state,
+            remote_event_tx,
             remote_server_handle: Arc::new(Mutex::new(None)),
             agent_state_tx: broadcast::channel(64).0,
             epoch,
@@ -749,7 +786,7 @@ impl DaemonServer {
                         DaemonResponse::RemoteRevokeDeviceOk
                     } else {
                         DaemonResponse::Error {
-                            message: format!("Device '{device_id}' not found or already revoked"),
+                            message: format!("Device '{device_id}' not found"),
                         }
                     }
                 }
@@ -760,6 +797,34 @@ impl DaemonServer {
                 Ok(DaemonRequest::RemoteGetActiveSelection) => {
                     let selection = self.remote_state.active_selection.read().clone();
                     DaemonResponse::RemoteGetActiveSelectionOk { selection }
+                }
+                Ok(DaemonRequest::SubscribeRemoteEvents) => {
+                    let mut events = self.remote_event_tx.subscribe();
+                    let mut resp_json =
+                        serde_json::to_string(&DaemonResponse::SubscribeRemoteEventsOk).unwrap();
+                    resp_json.push('\n');
+                    if write_half.write_all(resp_json.as_bytes()).await.is_err()
+                        || write_half.flush().await.is_err()
+                    {
+                        return;
+                    }
+                    loop {
+                        match events.recv().await {
+                            Ok(event) => {
+                                let Ok(mut line) = serde_json::to_string(&event) else {
+                                    continue;
+                                };
+                                line.push('\n');
+                                if write_half.write_all(line.as_bytes()).await.is_err()
+                                    || write_half.flush().await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => return,
+                        }
+                    }
                 }
                 Ok(DaemonRequest::Shutdown) => {
                     std::process::exit(0);
@@ -937,7 +1002,7 @@ impl DaemonServer {
 
         let mut cmd = CommandBuilder::new_default_prog();
         cmd.env("PROMPT_EOL_MARK", "");
-        cmd.cwd(&resolved_cwd);
+        cmd.cwd(normalize_process_cwd(&resolved_cwd));
 
         let (session_id, _) = self
             .terminal_service
@@ -1439,6 +1504,125 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"keep");
     }
 
+    /// End-to-end proof of the path a phone tap actually travels: HTTP POST on
+    /// the real gateway (hosted by this daemon) -> desktop event sink -> the
+    /// GUI's subscribed socket connection. Before the sink existed this event
+    /// was dropped inside the daemon and the desktop never switched.
+    #[tokio::test]
+    async fn test_remote_select_request_reaches_a_subscribed_desktop_client() {
+        use crate::remote::auth::DevicePermission;
+        use crate::remote::server::start_remote_server;
+        use crate::remote::state::{RemoteGatewayConfig, RemoteNetworkMode};
+
+        let server = Arc::new(DaemonServer::new());
+        *server.remote_state.config.write() = RemoteGatewayConfig {
+            mode: RemoteNetworkMode::LocalNetwork,
+            port: 0,
+            allow_control: true,
+        };
+        let (handle, addr) = start_remote_server(Arc::clone(&server.remote_state))
+            .await
+            .expect("start remote gateway");
+
+        // The GUI subscribes over the daemon socket, exactly like lib.rs does.
+        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+
+        let (read_half, mut write_half) = client_stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        let mut json = serde_json::to_string(&DaemonRequest::SubscribeRemoteEvents).unwrap();
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await.unwrap();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<DaemonResponse>(line.trim()).unwrap(),
+            DaemonResponse::SubscribeRemoteEventsOk
+        ));
+
+        // Drive the real HTTP endpoint the phone calls, with a paired control
+        // device, instead of poking the sink directly.
+        let repo = tempfile::tempdir().expect("tempdir");
+        server
+            .handle_register_workspace("ws", &repo.path().to_string_lossy())
+            .expect("register workspace");
+
+        let code = server
+            .remote_state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
+        let token = server
+            .remote_state
+            .auth_manager
+            .exchange_pairing_code(&code, "Phone")
+            .expect("pair control device")
+            .0;
+        // No tabId: tab availability is validated against the desktop's last
+        // published selection, which is empty in a fresh daemon.
+        let body = serde_json::json!({ "workspaceId": "ws" }).to_string();
+        let request = format!(
+            "POST /api/v1/workspace/select?token={token} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut http = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        http.write_all(request.as_bytes()).await.expect("send");
+
+        // The GUI must observe the request that arrived over HTTP. Bounded so a
+        // regression fails the test instead of hanging the suite.
+        line.clear();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("desktop event must arrive")
+        .expect("read event line");
+        assert!(read > 0, "subscription closed before delivering the event");
+        let event: DaemonRemoteEvent = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(event.event, "remote_selection_requested");
+        assert_eq!(event.payload["workspaceId"], "ws");
+
+        handle.stop();
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_remote_events_streams_desktop_directed_events() {
+        let server = Arc::new(DaemonServer::new());
+        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+        let server_clone = Arc::clone(&server);
+        tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+
+        let (read_half, mut write_half) = client_stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        let mut json = serde_json::to_string(&DaemonRequest::SubscribeRemoteEvents).unwrap();
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await.unwrap();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<DaemonResponse>(line.trim()).unwrap(),
+            DaemonResponse::SubscribeRemoteEventsOk
+        ));
+
+        server.remote_state.emit_desktop_event(
+            "remote_selection_requested",
+            serde_json::json!({ "workspaceId": "ws", "tabId": "tab:a::leaf:b" }),
+        );
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let event: DaemonRemoteEvent = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(event.event, "remote_selection_requested");
+        assert_eq!(event.payload["tabId"], "tab:a::leaf:b");
+    }
+
     #[tokio::test]
     async fn test_daemon_remote_gateway_lifecycle_and_commands() {
         let server = Arc::new(DaemonServer::new());
@@ -1815,5 +1999,58 @@ mod tests {
                 "must reject {rejected:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_normalize_process_cwd_windows_verbatim_paths() {
+        use super::normalize_process_cwd;
+        use std::path::{Path, PathBuf};
+
+        // Verbatim drive paths should have \\?\ stripped for process cwd
+        assert_eq!(
+            normalize_process_cwd(Path::new(r"\\?\C:\Windows\System32")),
+            PathBuf::from(r"C:\Windows\System32")
+        );
+        assert_eq!(
+            normalize_process_cwd(Path::new(r"\\?\c:\Users\test\project")),
+            PathBuf::from(r"c:\Users\test\project")
+        );
+        assert_eq!(
+            normalize_process_cwd(Path::new(r"\\?\D:")),
+            PathBuf::from(r"D:")
+        );
+        // Verbatim UNC paths \\?\UNC\server\share -> \\server\share
+        assert_eq!(
+            normalize_process_cwd(Path::new(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+        assert_eq!(
+            normalize_process_cwd(Path::new(r"\\?\unc\server\share")),
+            PathBuf::from(r"\\server\share")
+        );
+        // Non-verbatim UNC, Windows drive, Unix, and relative paths should remain unchanged
+        assert_eq!(
+            normalize_process_cwd(Path::new(r"\\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+        assert_eq!(
+            normalize_process_cwd(Path::new(r"C:\Windows\System32")),
+            PathBuf::from(r"C:\Windows\System32")
+        );
+        assert_eq!(
+            normalize_process_cwd(Path::new("/Users/test/project")),
+            PathBuf::from("/Users/test/project")
+        );
+        assert_eq!(
+            normalize_process_cwd(Path::new("relative/path")),
+            PathBuf::from("relative/path")
+        );
+        // Non-drive verbatim path preserved
+        assert_eq!(
+            normalize_process_cwd(Path::new(
+                r"\\?\Volume{b75e2c83-0000-0000-0000-602200000000}\"
+            )),
+            PathBuf::from(r"\\?\Volume{b75e2c83-0000-0000-0000-602200000000}\")
+        );
     }
 }

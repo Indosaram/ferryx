@@ -1,6 +1,6 @@
 use crate::daemon::protocol::{
-    DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
-    DAEMON_PROTOCOL_VERSION,
+    DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+    DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
 };
 use crate::daemon::server::{get_socket_path, validate_runtime_socket_path};
 use crate::ipc::{IpcError, IpcErrorCode};
@@ -103,6 +103,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::ListSessions
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::LoadSession
+            | DaemonRequest::RemoteSetActiveSelection { .. }
     )
 }
 
@@ -129,6 +130,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteRevokeDevice { .. } => "remoteRevokeDevice",
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
+        DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::Shutdown => "shutdown",
     }
 }
@@ -560,6 +562,96 @@ impl DaemonClient {
                 "Unexpected daemon response",
             )),
         }
+    }
+
+    /// Streams desktop-directed remote events (the gateway lives in the daemon,
+    /// so this is the only path a remote-issued request has to reach the GUI).
+    /// The returned receiver closes when the daemon goes away.
+    pub async fn subscribe_remote_events(
+        &self,
+    ) -> Result<mpsc::Receiver<DaemonRemoteEvent>, IpcError> {
+        let stream = self.connect_or_spawn().await?;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        for req in [
+            DaemonRequest::Handshake {
+                version: DAEMON_PROTOCOL_VERSION,
+            },
+            DaemonRequest::SubscribeRemoteEvents,
+        ] {
+            let mut json = serde_json::to_string(&req).map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::ParseError,
+                    format!("Remote event subscription serialization failed: {e}"),
+                )
+            })?;
+            json.push('\n');
+            write_half.write_all(json.as_bytes()).await.map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Remote event subscription write failed: {e}"),
+                )
+            })?;
+            write_half.flush().await.map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Remote event subscription flush failed: {e}"),
+                )
+            })?;
+
+            let mut line = String::new();
+            let bytes_read = reader.read_line(&mut line).await.map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Remote event subscription read failed: {e}"),
+                )
+            })?;
+            if bytes_read == 0 {
+                return Err(IpcError::new(
+                    IpcErrorCode::IoError,
+                    "Remote event subscription failed: daemon disconnected",
+                ));
+            }
+            let resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::ParseError,
+                    format!("Remote event subscription parse failed: {e}"),
+                )
+            })?;
+            match resp {
+                DaemonResponse::HandshakeOk { version, .. }
+                    if version == DAEMON_PROTOCOL_VERSION => {}
+                DaemonResponse::SubscribeRemoteEventsOk => {}
+                DaemonResponse::Error { message } => {
+                    return Err(IpcError::new(IpcErrorCode::InternalError, message));
+                }
+                other => {
+                    return Err(IpcError::new(
+                        IpcErrorCode::InternalError,
+                        format!("Unexpected daemon response for remote events: {other:?}"),
+                    ));
+                }
+            }
+        }
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            while let Ok(n) = reader.read_line(&mut line).await {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(event) = serde_json::from_str::<DaemonRemoteEvent>(line.trim()) {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                line.clear();
+            }
+        });
+
+        Ok(rx)
     }
 
     pub async fn attach(
@@ -1703,5 +1795,20 @@ mod tests {
             Some("daemonSocketTrustValidation")
         );
         assert!(error.message.contains("owned by UID"));
+    }
+
+    #[test]
+    fn test_remote_set_active_selection_is_retry_safe() {
+        let req = DaemonRequest::RemoteSetActiveSelection {
+            selection: Some(RemoteActiveDesktopSelection {
+                workspace_id: Some("ws".into()),
+                worktree_slug: None,
+                worktree_label: None,
+                session_id: None,
+                tab_id: None,
+                terminal_tabs: Vec::new(),
+            }),
+        };
+        assert!(request_is_retry_safe(&req));
     }
 }

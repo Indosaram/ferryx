@@ -136,6 +136,10 @@ pub enum DaemonRequest {
         selection: Option<RemoteActiveDesktopSelection>,
     },
     RemoteGetActiveSelection,
+    /// Turns this connection into a one-way stream of desktop-directed remote
+    /// events. Without it the gateway (which lives in the daemon) has no way to
+    /// reach the GUI, so remote-issued selections are silently dropped.
+    SubscribeRemoteEvents,
     Shutdown,
 }
 
@@ -207,10 +211,19 @@ pub enum DaemonResponse {
     RemoteGetActiveSelectionOk {
         selection: Option<RemoteActiveDesktopSelection>,
     },
+    SubscribeRemoteEventsOk,
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,
     },
+}
+
+/// One desktop-directed remote event, streamed after `SubscribeRemoteEventsOk`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonRemoteEvent {
+    pub event: String,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

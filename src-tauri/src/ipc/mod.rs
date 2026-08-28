@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod browser;
 pub mod browser_cli;
 pub mod cli_install;
@@ -30,6 +31,7 @@ mod blocking_contract_tests;
 #[cfg(all(test, unix))]
 mod tests;
 
+pub use agents::*;
 pub use browser::*;
 pub use cli_install::*;
 pub use debug::*;

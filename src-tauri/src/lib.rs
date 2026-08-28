@@ -227,8 +227,37 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     Ok(())
 }
 
+/// Relays desktop-directed remote gateway events from the daemon (which owns the
+/// gateway) into Tauri events the frontend already listens for. Without this the
+/// remote client's selection requests never reach the desktop.
+fn start_remote_event_bridge<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    daemon_client: Arc<DaemonClient>,
+) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match daemon_client.subscribe_remote_events().await {
+                Ok(mut events) => {
+                    while let Some(event) = events.recv().await {
+                        if let Err(error) = app.emit(event.event.as_str(), event.payload) {
+                            tracing::debug!("Failed to relay remote event: {error}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!("Remote event subscription unavailable: {error}");
+                }
+            }
+            // The daemon restarts independently of the GUI; resubscribe instead
+            // of leaving remote selections permanently unroutable.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
+}
+
 pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     let daemon_client = Arc::new(DaemonClient::new());
+    let bridge_daemon_client = Arc::clone(&daemon_client);
     let remote_manager = Arc::new(ipc::remote::RemoteGatewayManager::from_daemon(Arc::clone(
         &daemon_client,
     )));
@@ -260,6 +289,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle().clone(),
                 Arc::clone(&browser_cli_manager),
             )?;
+            start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
@@ -335,6 +365,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_session_clear,
         cmd_cli_launcher_status,
         cmd_cli_launcher_install,
+        cmd_agents_detect,
         cmd_browser_create,
         cmd_browser_navigate,
         cmd_browser_go_back,
