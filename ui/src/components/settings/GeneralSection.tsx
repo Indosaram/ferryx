@@ -76,12 +76,16 @@ export function SoftwareUpdateCard() {
   const isActionable = isAvailable || isDownloaded;
   const percent = Math.round((status.downloadProgress ?? 0) * 100);
 
+  let statusClassName = "text-foreground";
+  if (isDownloaded) statusClassName = "flex items-center gap-1.5 font-medium text-status-success";
+  if (status.state === "error") statusClassName = "text-destructive";
+
   const handleInstallAndRelaunch = () => {
     if (isAvailable) {
       void downloadAndInstallUpdate();
-    } else if (isDownloaded) {
-      void relaunchApp();
+      return;
     }
+    if (isDownloaded) void relaunchApp();
   };
 
   return (
@@ -96,13 +100,7 @@ export function SoftwareUpdateCard() {
       <p
         data-testid="settings-update-status"
         aria-live="polite"
-        className={`mt-2 text-[12px] leading-5 ${
-          isDownloaded
-            ? "flex items-center gap-1.5 font-medium text-status-success"
-            : status.state === "error"
-              ? "text-destructive"
-              : "text-foreground"
-        }`}
+        className={`mt-2 text-[12px] leading-5 ${statusClassName}`}
       >
         {isDownloaded ? <CheckCircle2 className="size-3.5 shrink-0" /> : null}
         <span>{updateStatusMessage(status)}</span>
@@ -158,8 +156,7 @@ export function CliLauncherCard() {
   const refreshStatus = useCallback(async () => {
     try {
       setError(null);
-      const s = await getCliLauncherStatus();
-      setStatus(s);
+      setStatus(await getCliLauncherStatus());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to retrieve CLI launcher status");
     } finally {
@@ -175,8 +172,7 @@ export function CliLauncherCard() {
     setInstalling(true);
     setError(null);
     try {
-      const s = await installCliLauncher();
-      setStatus(s);
+      setStatus(await installCliLauncher());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to install CLI launcher");
     } finally {
@@ -220,9 +216,10 @@ export function CliLauncherCard() {
         </div>
 
         <div className="flex items-center gap-2">
-          {status?.isSupported === false ? (
+          {status?.isSupported === false && (
             <span className="text-xs text-muted-foreground">Available in the Ferryx desktop app on Unix-like systems.</span>
-          ) : status?.isInstalled ? (
+          )}
+          {status?.isSupported !== false && (status?.isInstalled ? (
             <Badge variant="outline" className="inline-flex items-center gap-1 border-transparent px-0 text-xs font-medium text-status-success shadow-none">
               <CheckCircle2 className="size-3.5" />
               Installed
@@ -248,7 +245,7 @@ export function CliLauncherCard() {
                 </>
               )}
             </Button>
-          )}
+          ))}
         </div>
       </div>
     </Card>

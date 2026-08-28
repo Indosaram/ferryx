@@ -62,7 +62,6 @@ export function TerminalSection({
           </Label>
           <Input
             id="terminal-font-family"
-            aria-label="Font family"
             value={fontFamily}
             onChange={(event) => onFontFamily(event.target.value)}
             className="h-8 text-xs"
@@ -81,7 +80,6 @@ export function TerminalSection({
             </Label>
             <Input
               id="terminal-font-size"
-              aria-label="Font size"
               type="number"
               min={10}
               max={24}
@@ -99,7 +97,6 @@ export function TerminalSection({
             </Label>
             <Input
               id="terminal-scrollback"
-              aria-label="Scrollback"
               type="number"
               min={1000}
               max={100000}
@@ -124,7 +121,6 @@ export function TerminalSection({
           </div>
           <Switch
             id="terminal-macos-option-as-alt"
-            aria-label="macOS Option as Alt"
             checked={macosOptionAsAlt}
             onCheckedChange={onOptionAsAlt}
           />

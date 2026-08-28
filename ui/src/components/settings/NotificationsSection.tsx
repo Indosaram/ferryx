@@ -111,6 +111,16 @@ export function NotificationsSection() {
   const isDenied = auth === "denied";
   const isNotDetermined = auth === "not-determined" || auth === "unknown";
 
+  let permissionBadgeClass =
+    "border-status-warning/20 bg-status-warning/10 text-status-warning";
+  if (isAuthorized) {
+    permissionBadgeClass =
+      "border-status-success/20 bg-status-success/10 text-status-success";
+  } else if (isDenied) {
+    permissionBadgeClass =
+      "border-destructive/20 bg-destructive/10 text-destructive";
+  }
+
   return (
     <section aria-labelledby="settings-notifications-heading">
       <SettingsHeading
@@ -122,7 +132,6 @@ export function NotificationsSection() {
         Notifications
       </h2>
 
-      {/* Permission Status */}
       <Card className="mb-6 rounded-lg border border-border bg-card p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -131,13 +140,7 @@ export function NotificationsSection() {
             </span>
             <Badge
               variant="outline"
-              className={`gap-1 px-2 py-0.5 text-xs font-medium ${
-                isAuthorized
-                  ? "border-status-success/20 bg-status-success/10 text-status-success"
-                  : isDenied
-                    ? "border-destructive/20 bg-destructive/10 text-destructive"
-                    : "border-status-warning/20 bg-status-warning/10 text-status-warning"
-              }`}
+              className={`gap-1 px-2 py-0.5 text-xs font-medium ${permissionBadgeClass}`}
             >
               {isAuthorized ? <CheckCircle2 className="size-3" /> : null}
               {isDenied ? <AlertTriangle className="size-3" /> : null}
@@ -176,7 +179,7 @@ export function NotificationsSection() {
           type="button"
           variant="outline"
           size="sm"
-          onClick={() => resetSettings()}
+          onClick={resetSettings}
           className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
           title="Reset to defaults"
         >

@@ -91,7 +91,8 @@ export function WorkspaceSection({
                     >
                       Active
                     </Button>
-                  ) : onSelectProject ? (
+                  ) : null}
+                  {!isActive && onSelectProject ? (
                     <Button
                       type="button"
                       variant="outline"

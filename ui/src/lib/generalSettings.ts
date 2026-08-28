@@ -16,16 +16,14 @@ export const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
 
 export const GENERAL_SETTINGS_EVENT = "ferryx:general-settings";
 
-function hasConfirmCloseTab(value: unknown): value is { confirmCloseTab?: unknown } {
-  return typeof value === "object" && value !== null;
-}
-
 function normalizeGeneralSettings(value: unknown): GeneralSettings {
+  const source = typeof value === "object" && value !== null
+    ? value as { confirmCloseTab?: unknown }
+    : {};
   return {
-    confirmCloseTab:
-      hasConfirmCloseTab(value) && typeof value.confirmCloseTab === "boolean"
-        ? value.confirmCloseTab
-        : DEFAULT_GENERAL_SETTINGS.confirmCloseTab,
+    confirmCloseTab: typeof source.confirmCloseTab === "boolean"
+      ? source.confirmCloseTab
+      : DEFAULT_GENERAL_SETTINGS.confirmCloseTab,
   };
 }
 

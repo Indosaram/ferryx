@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Cookie, FolderOpen, Globe, Plus, RotateCcw, Trash2 } from "lucide-react";
 
@@ -43,20 +43,12 @@ export function BrowserSection() {
   const [importStatus, setImportStatus] = useState<Record<string, string>>({});
   const [activeBrowsers, setActiveBrowsers] = useState<BrowserSessionSummary[]>([]);
   const namedProfilesSupported = browserNamedProfilesSupported();
-  const visibleProfiles = useMemo(() => supportedBrowserProfiles(settings), [settings]);
+  const visibleProfiles = supportedBrowserProfiles(settings);
 
   useEffect(() => setHomeDraft(settings.homePage), [settings.homePage]);
 
-  const refreshBrowsers = async () => {
-    try {
-      setActiveBrowsers(await listBrowsers());
-    } catch {
-      setActiveBrowsers([]);
-    }
-  };
-
   useEffect(() => {
-    void refreshBrowsers();
+    void listBrowsers().then(setActiveBrowsers, () => setActiveBrowsers([]));
   }, []);
 
   const update = async (patch: Partial<BrowserSettingsState>) => {

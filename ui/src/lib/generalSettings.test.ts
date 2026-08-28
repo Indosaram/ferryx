@@ -22,6 +22,14 @@ describe("generalSettings", () => {
     expect(settings.confirmCloseTab).toBe(false);
   });
 
+  it("normalizes malformed persisted settings", () => {
+    localStorage.setItem(GENERAL_SETTINGS_STORAGE_KEY, JSON.stringify({ confirmCloseTab: "true" }));
+    expect(loadGeneralSettings()).toEqual(DEFAULT_GENERAL_SETTINGS);
+
+    localStorage.setItem(GENERAL_SETTINGS_STORAGE_KEY, "null");
+    expect(loadGeneralSettings()).toEqual(DEFAULT_GENERAL_SETTINGS);
+  });
+
   it("saves and persists general settings update", () => {
     let observed: unknown = null;
     const listener = (event: Event) => {

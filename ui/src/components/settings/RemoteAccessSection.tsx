@@ -54,22 +54,18 @@ export function RemoteAccessSection() {
   useEffect(() => () => clearCopyTimer(), [clearCopyTimer]);
 
   const refreshStatus = useCallback(async (): Promise<RemoteGatewayStatus | null> => {
-    try {
-      const [s, devList, ts] = await Promise.all([
-        getRemoteStatus().catch(() => null),
-        listRemoteDevices().catch(() => []),
-        getTailscaleStatus().catch(() => null),
-      ]);
-      if (s) {
-        statusRef.current = s;
-        setStatus(s);
-      }
-      setDevices(devList);
-      setTailscaleStatus(ts);
-      return s;
-    } catch {
-      return null;
+    const [s, devList, ts] = await Promise.all([
+      getRemoteStatus().catch(() => null),
+      listRemoteDevices().catch(() => []),
+      getTailscaleStatus().catch(() => null),
+    ]);
+    if (s) {
+      statusRef.current = s;
+      setStatus(s);
     }
+    setDevices(devList);
+    setTailscaleStatus(ts);
+    return s;
   }, []);
 
   const generatePairing = useCallback(async (currentStatus?: RemoteGatewayStatus | null) => {
@@ -80,11 +76,10 @@ export function RemoteAccessSection() {
       const res = await createPairingCode("control");
       setPairingCode(res.code);
 
-      // Determine host for QR URL: Tailscale domain preferred, fallback to local IP, then localhost
       const port = s?.port ?? 43821;
       let host = s?.localIp ? `${s.localIp}:${port}` : `localhost:${port}`;
       let proto = "http";
-      if (s?.tailscale?.running && s?.tailscale?.selfDns) {
+      if (s?.tailscale.running && s.tailscale.selfDns) {
         host = s.tailscale.selfDns;
         proto = "https";
       }
@@ -105,6 +100,12 @@ export function RemoteAccessSection() {
       setIsGeneratingQr(false);
     }
   }, []);
+
+  const handleGeneratePairing = () => {
+    clearCopyTimer();
+    setPinCopied(false);
+    void generatePairing();
+  };
 
   useEffect(() => {
     let active = true;
@@ -139,7 +140,7 @@ export function RemoteAccessSection() {
         await generatePairing(s);
       }
     } catch {
-      // ignore
+      // Keep the last known status when gateway IPC fails.
     } finally {
       setLoading(false);
     }
@@ -151,13 +152,13 @@ export function RemoteAccessSection() {
       setConfirmRevokeId(null);
       await refreshStatus();
     } catch {
-      // ignore
+      // Keep confirmation open so the user can retry.
     }
   };
 
   const port = status?.port ?? 43821;
   const localUrl = status?.localIp ? `http://${status.localIp}:${port}` : `http://localhost:${port}`;
-  const tailscaleUrl = status?.tailscale?.running && status?.tailscale?.selfDns ? `https://${status.tailscale.selfDns}` : null;
+  const tailscaleUrl = status?.tailscale.running && status.tailscale.selfDns ? `https://${status.tailscale.selfDns}` : null;
 
   return (
     <section aria-labelledby="settings-remote-heading" aria-label="Remote Access">
@@ -195,11 +196,13 @@ export function RemoteAccessSection() {
                 <CheckCircle2 className="size-3.5" />
                 Running {tailscaleStatus.tailnetName ? `(${tailscaleStatus.tailnetName})` : ""}
               </span>
-            ) : tailscaleStatus?.installed ? (
+            ) : null}
+            {!tailscaleStatus?.running && tailscaleStatus?.installed ? (
               <span className="text-status-warning font-medium">Installed (Disconnected)</span>
-            ) : (
+            ) : null}
+            {!tailscaleStatus?.running && !tailscaleStatus?.installed ? (
               <span className="text-muted-foreground">Not installed</span>
-            )}
+            ) : null}
             {tailscaleStatus?.selfDns ? (
               <div className="font-mono text-[10px] text-muted-foreground">{tailscaleStatus.selfDns}</div>
             ) : null}
@@ -215,44 +218,39 @@ export function RemoteAccessSection() {
               <Card className="flex flex-col items-center gap-2 rounded-lg border border-border bg-card p-3 shadow-none">
                 {qrDataUrl ? (
                   <img src={qrDataUrl} alt="Pairing QR Code" className="h-[160px] w-[160px] rounded" />
-                ) : isGeneratingQr ? (
+                ) : null}
+                {!qrDataUrl && isGeneratingQr ? (
                   <div className="flex h-[160px] w-[160px] items-center justify-center text-xs text-muted-foreground">
                     Generating...
                   </div>
-                ) : qrError ? (
+                ) : null}
+                {!qrDataUrl && !isGeneratingQr && qrError ? (
                   <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 p-2 text-center text-xs text-destructive">
                     <span>{qrError}</span>
                     <Button
                       type="button"
                       variant="destructive"
                       size="sm"
-                      onClick={() => {
-                        clearCopyTimer();
-                        setPinCopied(false);
-                        void generatePairing();
-                      }}
+                      onClick={handleGeneratePairing}
                       className="h-7 bg-destructive/10 px-2.5 text-[11px] font-medium text-destructive hover:bg-destructive/20"
                     >
                       Retry
                     </Button>
                   </div>
-                ) : (
+                ) : null}
+                {!qrDataUrl && !isGeneratingQr && !qrError ? (
                   <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 text-xs text-muted-foreground">
                     <Button
                       type="button"
                       variant="default"
                       size="sm"
-                      onClick={() => {
-                        clearCopyTimer();
-                        setPinCopied(false);
-                        void generatePairing();
-                      }}
+                      onClick={handleGeneratePairing}
                       className="h-7 px-2.5 text-[11px] font-medium shadow-sm"
                     >
                       Generate QR Code
                     </Button>
                   </div>
-                )}
+                ) : null}
                 {pairingCode ? (
                   <div className="flex w-full items-center justify-between px-1">
                     <Button
@@ -274,26 +272,19 @@ export function RemoteAccessSection() {
                       variant="link"
                       size="sm"
                       disabled={isGeneratingQr}
-                      onClick={() => {
-                        clearCopyTimer();
-                        setPinCopied(false);
-                        void generatePairing();
-                      }}
+                      onClick={handleGeneratePairing}
                       className="h-auto p-0 text-[10px] text-muted-foreground underline hover:text-foreground disabled:opacity-50"
                     >
                       {isGeneratingQr ? "Generating..." : "New Code"}
                     </Button>
                   </div>
-                ) : !isGeneratingQr && !qrError ? (
+                ) : null}
+                {!pairingCode && !isGeneratingQr && !qrError ? (
                   <Button
                     type="button"
                     variant="link"
                     size="sm"
-                    onClick={() => {
-                      clearCopyTimer();
-                      setPinCopied(false);
-                      void generatePairing();
-                    }}
+                    onClick={handleGeneratePairing}
                     className="h-auto p-0 text-[10px] text-muted-foreground underline hover:text-foreground"
                   >
                     Generate Code
@@ -363,7 +354,7 @@ export function RemoteAccessSection() {
                     {dev.lastSeenAt ? `Last active ${new Date(dev.lastSeenAt).toLocaleString()}` : `Device ID: ${dev.id}`}
                   </div>
                 </div>
-                {!dev.revoked ? (
+                {!dev.revoked && (
                   confirmRevokeId === dev.id ? (
                     <div className="flex items-center gap-1.5">
                       <Button
@@ -399,7 +390,7 @@ export function RemoteAccessSection() {
                       Revoke
                     </Button>
                   )
-                ) : null}
+                )}
               </div>
             ))
           )}

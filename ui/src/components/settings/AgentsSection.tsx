@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Bot, Check, ChevronDown, RotateCw } from "lucide-react";
 
 import {
@@ -6,6 +6,7 @@ import {
   loadAgentSettings,
   mergeDetections,
   saveAgentSettings,
+  type AgentOverride,
   type AgentSettings,
 } from "../../lib/agentsSettings";
 import { detectAgents, type AgentDetection } from "../../lib/tauri";
@@ -28,7 +29,7 @@ export function AgentsSection() {
       const results = await detectAgents([...AGENT_CANDIDATES]);
       setDetections(results);
     } catch {
-      // ignore
+      // Keep the last successful detection results when refresh fails.
     } finally {
       setRefreshing(false);
     }
@@ -38,28 +39,16 @@ export function AgentsSection() {
     void runDetection();
   }, [runDetection]);
 
-  const resolvedAgents = useMemo(
-    () => mergeDetections(settings, detections),
-    [settings, detections],
-  );
+  const resolvedAgents = mergeDetections(settings, detections);
+  const availableAgents = resolvedAgents.filter((agent) => agent.available);
 
-  const availableAgents = useMemo(
-    () => resolvedAgents.filter((a) => a.available),
-    [resolvedAgents],
-  );
-
-  const updateOverride = (
-    name: string,
-    patch: Partial<{ enabled: boolean; command: string; args: string }>,
-  ) => {
+  const updateOverride = (name: string, patch: AgentOverride) => {
     setSettings((prev) => {
-      const currentOverride = prev.overrides[name] ?? {};
-      const nextOverride = { ...currentOverride, ...patch };
       const nextSettings: AgentSettings = {
         ...prev,
         overrides: {
           ...prev.overrides,
-          [name]: nextOverride,
+          [name]: { ...prev.overrides[name], ...patch },
         },
       };
       saveAgentSettings(nextSettings);
@@ -76,10 +65,6 @@ export function AgentsSection() {
       saveAgentSettings(nextSettings);
       return nextSettings;
     });
-  };
-
-  const toggleExpand = (name: string) => {
-    setExpandedAgents((prev) => ({ ...prev, [name]: !prev[name] }));
   };
 
   return (
@@ -194,7 +179,12 @@ export function AgentsSection() {
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => toggleExpand(agent.name)}
+                        onClick={() =>
+                          setExpandedAgents((prev) => ({
+                            ...prev,
+                            [agent.name]: !prev[agent.name],
+                          }))
+                        }
                         aria-label={`Toggle ${displayName} configuration`}
                         className="no-drag flex items-center gap-1.5 text-left text-xs font-medium text-foreground hover:text-primary transition-colors"
                       >

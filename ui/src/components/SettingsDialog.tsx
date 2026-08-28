@@ -73,13 +73,14 @@ function SettingsDialogBody({
     settings.fontFamilySource === "local" ||
     settings.macosOptionAsAltSource === "local" ||
     settings.fontSizeSource === "local";
-  const terminalSource = hasLocalTerminalOverride
-    ? "Local override"
-    : nativePreferences.source === "ghostty" && nativePreferences.status === "imported"
-      ? "Ghostty · Imported"
-      : nativePreferences.status === "malformed"
-        ? "Ghostty · Malformed · Safe defaults"
-        : "Built-in defaults";
+  let terminalSource = "Built-in defaults";
+  if (hasLocalTerminalOverride) {
+    terminalSource = "Local override";
+  } else if (nativePreferences.source === "ghostty" && nativePreferences.status === "imported") {
+    terminalSource = "Ghostty · Imported";
+  } else if (nativePreferences.status === "malformed") {
+    terminalSource = "Ghostty · Malformed · Safe defaults";
+  }
 
   return (
     <div
