@@ -60,6 +60,20 @@ pub struct GhosttyMouseEncoderImpl {
 }
 pub type GhosttyMouseEncoder = *mut GhosttyMouseEncoderImpl;
 
+/// Opaque foreign selection gesture handle.
+#[repr(C)]
+pub struct GhosttySelectionGestureImpl {
+    _private: [u8; 0],
+}
+pub type GhosttySelectionGesture = *mut GhosttySelectionGestureImpl;
+
+/// Opaque foreign selection gesture event handle.
+#[repr(C)]
+pub struct GhosttySelectionGestureEventImpl {
+    _private: [u8; 0],
+}
+pub type GhosttySelectionGestureEvent = *mut GhosttySelectionGestureEventImpl;
+
 /// Allocator interface for custom allocation strategies.
 #[repr(C)]
 pub struct GhosttyAllocator {
@@ -329,6 +343,34 @@ pub struct GhosttyMousePosition {
     pub x: f32,
     pub y: f32,
 }
+
+/// Surface-space position in pixels matching `include/ghostty/vt/types.h`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct GhosttySurfacePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Selection gesture display geometry matching `include/ghostty/vt/selection.h`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct GhosttySelectionGestureGeometry {
+    pub columns: u32,
+    pub cell_width: u32,
+    pub padding_left: u32,
+    pub screen_height: u32,
+}
+
+// GhosttySelectionGestureEventType constants matching `ghostty/vt/selection.h`.
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS: c_int = 0;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE: c_int = 1;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG: c_int = 2;
+
+// GhosttySelectionGestureEventOption constants matching `ghostty/vt/selection.h`.
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF: c_int = 0;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION: c_int = 1;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY: c_int = 8;
 
 /// Mouse encoder geometry matching `ghostty/vt/mouse/encoder.h`.
 #[repr(C)]

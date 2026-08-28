@@ -6,9 +6,10 @@ use super::types::{
     GhosttyAllocator, GhosttyCell, GhosttyGridRef, GhosttyKeyEncoder, GhosttyKeyEvent,
     GhosttyMouseEncoder, GhosttyMouseEvent, GhosttyMousePosition, GhosttyPoint,
     GhosttyPointCoordinate, GhosttyRenderState, GhosttyRenderStateRowCells,
-    GhosttyRenderStateRowIterator, GhosttySelection, GhosttyTerminal,
-    GhosttyTerminalScrollViewport, GhosttyTerminalSelectLineOptions,
-    GhosttyTerminalSelectWordOptions, GhosttyTerminalSelectionFormatOptions,
+    GhosttyRenderStateRowIterator, GhosttySelection, GhosttySelectionGesture,
+    GhosttySelectionGestureEvent, GhosttyTerminal, GhosttyTerminalScrollViewport,
+    GhosttyTerminalSelectLineOptions, GhosttyTerminalSelectWordOptions,
+    GhosttyTerminalSelectionFormatOptions,
 };
 
 extern "C" {
@@ -205,5 +206,36 @@ extern "C" {
         out_buf: *mut u8,
         out_buf_size: usize,
         out_len: *mut usize,
+    ) -> c_int;
+
+    // Selection gesture
+    pub fn ghostty_selection_gesture_new(
+        allocator: *const GhosttyAllocator,
+        out_gesture: *mut GhosttySelectionGesture,
+    ) -> c_int;
+    pub fn ghostty_selection_gesture_free(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+    );
+    pub fn ghostty_selection_gesture_reset(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+    );
+    pub fn ghostty_selection_gesture_event_new(
+        allocator: *const GhosttyAllocator,
+        out_event: *mut GhosttySelectionGestureEvent,
+        r#type: c_int,
+    ) -> c_int;
+    pub fn ghostty_selection_gesture_event_free(event: GhosttySelectionGestureEvent);
+    pub fn ghostty_selection_gesture_event_set(
+        event: GhosttySelectionGestureEvent,
+        option: c_int,
+        value: *const c_void,
+    ) -> c_int;
+    pub fn ghostty_selection_gesture_event(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+        event: GhosttySelectionGestureEvent,
+        out_selection: *mut GhosttySelection,
     ) -> c_int;
 }

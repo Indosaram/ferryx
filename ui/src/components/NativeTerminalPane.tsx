@@ -7,6 +7,7 @@ import {
   attachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
   presentNativeTerminalLifecycle,
+  reattachNativeTerminalLifecycle,
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
 import { isStructuredIpcError, onNativeTerminalScrollbar } from "../lib/tauri";
@@ -32,6 +33,17 @@ interface GeometryState {
   scaleFactor: number;
 }
 
+function isGeometryEqual(a: GeometryState | null, b: GeometryState | null): boolean {
+  if (!a || !b) return false;
+  return (
+    a.bounds.x === b.bounds.x &&
+    a.bounds.y === b.bounds.y &&
+    a.bounds.width === b.bounds.width &&
+    a.bounds.height === b.bounds.height &&
+    a.scaleFactor === b.scaleFactor
+  );
+}
+
 interface NativeTerminalReceipt {
   readonly cursorCol: number;
   readonly cursorRow: number;
@@ -55,6 +67,15 @@ interface ScrollbarMetrics {
 interface ScrollbarDrag {
   readonly pointerId: number;
   readonly grabOffsetPx: number;
+}
+
+interface TerminalPointerDrag {
+  readonly pointerId: number;
+}
+
+interface NativeCellSize {
+  readonly width: number;
+  readonly height: number;
 }
 
 interface NativeKeyInput {
@@ -83,7 +104,9 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_send_input"
   | "cmd_native_terminal_scroll"
   | "cmd_native_terminal_scrollbar"
-  | "cmd_native_terminal_copy_selection";
+  | "cmd_native_terminal_copy_selection"
+  | "cmd_native_terminal_paste"
+  | "cmd_native_terminal_mouse";
 
 const ignoredBrowserKeys = new Set([
   "Alt",
@@ -95,10 +118,59 @@ const ignoredBrowserKeys = new Set([
   "Shift",
 ]);
 
-function shouldForwardKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
+/// The subset of a keyboard event both key paths need. The focus-sink textarea receives React
+/// synthetic events and the document-level capture fallback receives native ones; normalizing to
+/// this shape keeps ONE definition of "which keys go to the PTY" instead of two that can diverge.
+type ForwardableKeyEvent = {
+  defaultPrevented: boolean;
+  isComposing: boolean;
+  key: string;
+  code: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  getModifierState: (key: "CapsLock" | "NumLock") => boolean;
+};
+
+function toForwardableKeyEvent(
+  event: KeyboardEvent<HTMLTextAreaElement> | globalThis.KeyboardEvent,
+): ForwardableKeyEvent {
+  const isComposing =
+    "nativeEvent" in event ? event.nativeEvent.isComposing : event.isComposing;
+  return {
+    defaultPrevented: event.defaultPrevented,
+    isComposing,
+    key: event.key,
+    code: event.code,
+    ctrlKey: event.ctrlKey,
+    altKey: event.altKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    getModifierState: (key: "CapsLock" | "NumLock") => event.getModifierState(key),
+  };
+}
+
+/// Clipboard chords are handled by the browser / the textarea's own copy-paste handlers and must
+/// never be forwarded to the PTY. Plain Ctrl+C is NOT one of these - it is SIGINT.
+function isClipboardShortcut(event: ForwardableKeyEvent): boolean {
+  const key = event.key.toLowerCase();
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key === "v") {
+    return true;
+  }
+  if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === "c") {
+    return true;
+  }
+  if (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && key === "c") {
+    return true;
+  }
+  return false;
+}
+
+function shouldForwardKey(event: ForwardableKeyEvent): boolean {
   if (
     event.defaultPrevented ||
-    event.nativeEvent.isComposing ||
+    event.isComposing ||
     event.key === "Dead" ||
     event.key === "Process" ||
     ignoredBrowserKeys.has(event.key)
@@ -114,7 +186,7 @@ function shouldForwardKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
   );
 }
 
-function physicalKeyForAltChord(event: KeyboardEvent<HTMLTextAreaElement>): string {
+function physicalKeyForAltChord(event: ForwardableKeyEvent): string {
   if (!event.altKey || event.key.length !== 1) {
     return event.key;
   }
@@ -146,6 +218,16 @@ function reportNativeTerminalIpcFailure(command: NativeTerminalIpcCommand, error
  */
 function isDetachedSurfaceError(error: unknown): boolean {
   return isStructuredIpcError(error) && error.code === "SESSION_NOT_FOUND";
+}
+
+function isEditableElement(el: Element | null): boolean {
+  if (!el || el === document.body) return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  if (el.getAttribute("contenteditable") === "true" || (el as HTMLElement).isContentEditable) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -191,6 +273,12 @@ export function nativeScrollbarThumb(metrics: ScrollbarMetrics | null): {
   };
 }
 
+const sessionInputRecoveries = new Map<string, Promise<void>>();
+
+export function resetNativeTerminalPaneForTest(): void {
+  sessionInputRecoveries.clear();
+}
+
 export function NativeTerminalPane({
   sessionId,
   session,
@@ -203,7 +291,9 @@ export function NativeTerminalPane({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   const scrollbarDragRef = useRef<ScrollbarDrag | null>(null);
+  const pointerDragRef = useRef<TerminalPointerDrag | null>(null);
   const scaleFactorRef = useRef(1);
+  const cellSizeRef = useRef<NativeCellSize | null>(null);
   const contextVisible = useNativeTerminalVisibility();
   const visible = contextVisible;
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
@@ -221,6 +311,10 @@ export function NativeTerminalPane({
     }
 
     const scaleFactor = scaleFactorRef.current;
+    cellSizeRef.current = {
+      width: receipt.cellWidthPx,
+      height: receipt.cellHeightPx,
+    };
     setImeAnchor({
       left: (receipt.cursorCol * receipt.cellWidthPx) / scaleFactor,
       top: (receipt.cursorRow * receipt.cellHeightPx) / scaleFactor,
@@ -266,20 +360,132 @@ export function NativeTerminalPane({
       });
   };
 
+  const measureGeometry = useCallback((): GeometryState | null => {
+    const element = viewportRef.current;
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    const scaleFactor =
+      typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
+        ? window.devicePixelRatio
+        : 1;
+
+    const physicalWidth = Math.round(rect.width * scaleFactor);
+    const physicalHeight = Math.round(rect.height * scaleFactor);
+    if (physicalWidth < 1 || physicalHeight < 1) {
+      return null;
+    }
+
+    return {
+      bounds: {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      },
+      scaleFactor,
+    };
+  }, []);
+
+  const performAttach = useCallback((targetId: string, force = false): Promise<void> => {
+    const initialGeometry = measureGeometry();
+    if (initialGeometry) {
+      scaleFactorRef.current = initialGeometry.scaleFactor;
+    }
+
+    switchDebug("terminal.surface.attach.start", {
+      localSessionId: sessionId,
+      backendSessionId: targetId,
+      bounds: initialGeometry?.bounds,
+      scaleFactor: initialGeometry?.scaleFactor,
+      force,
+    });
+    const attachOp = force ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
+    return attachOp(targetId, () =>
+      invoke("cmd_native_terminal_attach", {
+        sessionId: targetId,
+        ...(initialGeometry
+          ? {
+              bounds: initialGeometry.bounds,
+              scaleFactor: initialGeometry.scaleFactor,
+            }
+          : {}),
+      }),
+    );
+  }, [measureGeometry, sessionId]);
+
+  const restoreFocusIfLost = useCallback(() => {
+    if (!visible) return;
+    const active = typeof document !== "undefined" ? document.activeElement : null;
+    if (!active || active === document.body || !isEditableElement(active)) {
+      inputRef.current?.focus();
+    }
+  }, [visible]);
+
   const sendInput = useCallback((input: NativeTerminalInput) => {
     if (!visible || !isTauri() || !targetSessionId) {
+      switchDebug("terminal.surface.input.dropped", {
+        backendSessionId: targetSessionId,
+        visible,
+        hasTarget: Boolean(targetSessionId),
+      });
       return;
     }
 
-    void invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
-      sessionId: targetSessionId,
-      input,
-    })
-      .then(updateImeAnchor)
-      .catch((error: unknown) => {
-        reportNativeTerminalIpcFailure("cmd_native_terminal_send_input", error);
-      });
-  }, [targetSessionId, visible]);
+    const currentSessionId = targetSessionId;
+
+    const executeInput = async (isRetry = false): Promise<void> => {
+      try {
+        const receipt = await invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
+          sessionId: currentSessionId,
+          input,
+        });
+        updateImeAnchor(receipt);
+        switchDebug("terminal.surface.input.sent", {
+          backendSessionId: currentSessionId,
+          hasKeyEvent: "keyEvent" in input && Boolean(input.keyEvent),
+          textLength: "text" in input ? (input.text?.length ?? 0) : 0,
+        });
+        setError(null);
+      } catch (error: unknown) {
+        if (!isRetry) {
+          switchDebug("terminal.surface.input.error.recovering", {
+            backendSessionId: currentSessionId,
+            error: String(error),
+          });
+
+          let recovery = sessionInputRecoveries.get(currentSessionId);
+          if (!recovery) {
+            recovery = performAttach(currentSessionId, true).finally(() => {
+              sessionInputRecoveries.delete(currentSessionId);
+            });
+            sessionInputRecoveries.set(currentSessionId, recovery);
+          }
+
+          try {
+            await recovery;
+            restoreFocusIfLost();
+            await executeInput(true);
+          } catch (recoveryError: unknown) {
+            switchDebug("terminal.surface.input.recover.failed", {
+              backendSessionId: currentSessionId,
+              error: String(recoveryError),
+            });
+            reportNativeTerminalIpcFailure("cmd_native_terminal_send_input", recoveryError);
+            setError("Failed to send terminal input");
+          }
+        } else {
+          switchDebug("terminal.surface.input.retry.failed", {
+            backendSessionId: currentSessionId,
+            error: String(error),
+          });
+          reportNativeTerminalIpcFailure("cmd_native_terminal_send_input", error);
+          setError("Failed to send terminal input");
+        }
+      }
+    };
+
+    void executeInput(false);
+  }, [performAttach, targetSessionId, visible]);
 
   const handleCopy = useCallback(() => {
     if (!visible || !isTauri() || !targetSessionId) return;
@@ -296,19 +502,90 @@ export function NativeTerminalPane({
       });
   }, [targetSessionId, visible]);
 
-  const handlePaste = useCallback(() => {
-    if (!visible || !isTauri() || !targetSessionId) return;
-    if (typeof navigator !== "undefined" && navigator.clipboard?.readText) {
-      void navigator.clipboard
-        .readText()
-        .then((text) => {
-          if (text) {
-            sendInput({ text });
-          }
-        })
-        .catch(() => undefined);
-    }
-  }, [sendInput, targetSessionId, visible]);
+  const sendPaste = useCallback(
+    (text: string) => {
+      if (!visible || !isTauri() || !targetSessionId) {
+        return;
+      }
+
+      void invoke<NativeTerminalReceipt>("cmd_native_terminal_paste", {
+        sessionId: targetSessionId,
+        text,
+      })
+        .then(updateImeAnchor)
+        .catch((error: unknown) => {
+          reportNativeTerminalIpcFailure("cmd_native_terminal_paste", error);
+        });
+    },
+    [targetSessionId, visible],
+  );
+
+  const sendImagePasteShortcut = useCallback(() => {
+    sendInput({
+      keyEvent: {
+        key: "v",
+        action: "Press",
+        modifiers: {
+          shift: false,
+          ctrl: true,
+          alt: false,
+          superKey: false,
+          capsLock: false,
+          numLock: false,
+        },
+        utf8: null,
+      },
+    });
+  }, [sendInput]);
+
+  const sendMouse = useCallback((
+    event: PointerEvent | React.PointerEvent<HTMLDivElement>,
+    action: "Press" | "Motion" | "Release",
+    button: "Left" | null,
+  ) => {
+    const viewport = viewportRef.current;
+    if (!visible || !isTauri() || !targetSessionId || !viewport) return;
+
+    const rect = viewport.getBoundingClientRect();
+    const scaleFactor = scaleFactorRef.current;
+    const cellSize = cellSizeRef.current;
+    if (!cellSize) return;
+    void invoke<{ readonly receipt?: NativeTerminalReceipt }>("cmd_native_terminal_mouse", {
+      sessionId: targetSessionId,
+      event: {
+        action,
+        button,
+        position: {
+          x: (event.clientX - rect.left) * scaleFactor,
+          y: (event.clientY - rect.top) * scaleFactor,
+        },
+        modifiers: {
+          shift: event.shiftKey,
+          ctrl: event.ctrlKey,
+          alt: event.altKey,
+          superKey: event.metaKey,
+          capsLock: event.getModifierState("CapsLock"),
+          numLock: event.getModifierState("NumLock"),
+        },
+        size: {
+          screenWidth: Math.round(rect.width * scaleFactor),
+          screenHeight: Math.round(rect.height * scaleFactor),
+          cellWidth: cellSize.width,
+          cellHeight: cellSize.height,
+          paddingTop: 0,
+          paddingBottom: 0,
+          paddingRight: 0,
+          paddingLeft: 0,
+        },
+      },
+    })
+      .then((receipt: { readonly receipt?: NativeTerminalReceipt } | undefined) => {
+        updateImeAnchor(receipt?.receipt);
+      })
+      .catch((error: unknown) => {
+        reportNativeTerminalIpcFailure("cmd_native_terminal_mouse", error);
+      });
+  }, [targetSessionId, visible]);
 
   const scrollToTrackPosition = useCallback((clientY: number, grabOffsetPx: number) => {
     const track = scrollbarTrackRef.current;
@@ -365,14 +642,24 @@ export function NativeTerminalPane({
   useEffect(() => {
     const move = (event: PointerEvent) => {
       const drag = scrollbarDragRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      scrollToTrackPosition(event.clientY, drag.grabOffsetPx);
+      if (drag?.pointerId === event.pointerId) {
+        scrollToTrackPosition(event.clientY, drag.grabOffsetPx);
+        return;
+      }
+      if (pointerDragRef.current?.pointerId === event.pointerId) {
+        sendMouse(event, "Motion", null);
+      }
     };
     const finish = (event: PointerEvent) => {
-      if (scrollbarDragRef.current?.pointerId !== event.pointerId) return;
-      scrollbarDragRef.current = null;
-      document.body.style.cursor = "";
-      refreshScrollbar();
+      if (scrollbarDragRef.current?.pointerId === event.pointerId) {
+        scrollbarDragRef.current = null;
+        document.body.style.cursor = "";
+        refreshScrollbar();
+      }
+      if (pointerDragRef.current?.pointerId === event.pointerId) {
+        pointerDragRef.current = null;
+        sendMouse(event, "Release", null);
+      }
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
@@ -383,7 +670,76 @@ export function NativeTerminalPane({
       window.removeEventListener("pointercancel", finish);
       document.body.style.cursor = "";
     };
-  }, [refreshScrollbar, scrollToTrackPosition]);
+  }, [refreshScrollbar, scrollToTrackPosition, sendMouse]);
+
+  useEffect(() => {
+    if (!visible || !targetSessionId) return;
+
+    const handleCaptureKeyDown = (event: globalThis.KeyboardEvent) => {
+      const activeEl = typeof document !== "undefined" ? document.activeElement : null;
+      const targetEl = event.target as Element | null;
+      const activeElement = `${activeEl?.tagName ?? ""}/${activeEl?.getAttribute("data-testid") ?? ""}`;
+      switchDebug("terminal.surface.input.capture", {
+        key: typeof event.key === "string" ? event.key.slice(0, 120) : String(event.key).slice(0, 120),
+        defaultPrevented: event.defaultPrevented,
+        composing: Boolean(event.isComposing),
+        activeElement: activeElement.slice(0, 120),
+        targetSessionId,
+      });
+
+      if (
+        targetEl !== inputRef.current &&
+        !event.defaultPrevented &&
+        !event.isComposing &&
+        event.key.length === 1 &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey &&
+        (!activeEl || activeEl === document.body || !isEditableElement(activeEl))
+      ) {
+        event.preventDefault();
+        inputRef.current?.focus();
+        sendInput({ text: event.key });
+        return;
+      }
+
+      // Branch (b): everything the focus sink's own onKeyDown would forward as a key event -
+      // Enter, Backspace, Tab, arrows, and Ctrl/Alt/Meta chords. Without this the fallback only
+      // carried bare printable characters, so with the sink unfocused (activeElement === BODY,
+      // which is the common case) Enter/Backspace/Ctrl+C were silently swallowed: sendInput was
+      // never called, so not even input.dropped was traced.
+      const forwardable = toForwardableKeyEvent(event);
+      if (
+        targetEl !== inputRef.current &&
+        !isClipboardShortcut(forwardable) &&
+        shouldForwardKey(forwardable) &&
+        (!activeEl || activeEl === document.body || !isEditableElement(activeEl))
+      ) {
+        event.preventDefault();
+        inputRef.current?.focus();
+        sendInput({
+          keyEvent: {
+            key: physicalKeyForAltChord(forwardable),
+            action: "Press",
+            modifiers: {
+              shift: forwardable.shiftKey,
+              ctrl: forwardable.ctrlKey,
+              alt: forwardable.altKey,
+              superKey: forwardable.metaKey,
+              capsLock: forwardable.getModifierState("CapsLock"),
+              numLock: forwardable.getModifierState("NumLock"),
+            },
+            utf8: null,
+          },
+        });
+      }
+    };
+
+    document.addEventListener("keydown", handleCaptureKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", handleCaptureKeyDown, true);
+    };
+  }, [sendInput, targetSessionId, visible]);
 
 
   useEffect(() => {
@@ -404,41 +760,6 @@ export function NativeTerminalPane({
     let lastGeometry: GeometryState | null = null;
     let inFlight = false;
     let pendingGeometry: GeometryState | null = null;
-
-    const measureGeometry = (): GeometryState | null => {
-      const rect = element.getBoundingClientRect();
-      const scaleFactor =
-        typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
-          ? window.devicePixelRatio
-          : 1;
-
-      const physicalWidth = Math.round(rect.width * scaleFactor);
-      const physicalHeight = Math.round(rect.height * scaleFactor);
-      if (physicalWidth < 1 || physicalHeight < 1) {
-        return null;
-      }
-
-      return {
-        bounds: {
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-        },
-        scaleFactor,
-      };
-    };
-
-    const isGeometryEqual = (a: GeometryState | null, b: GeometryState | null): boolean => {
-      if (!a || !b) return false;
-      return (
-        a.bounds.x === b.bounds.x &&
-        a.bounds.y === b.bounds.y &&
-        a.bounds.width === b.bounds.width &&
-        a.bounds.height === b.bounds.height &&
-        a.scaleFactor === b.scaleFactor
-      );
-    };
 
     const dispatchBounds = (nextGeometry: GeometryState) => {
       if (!isSubscribed) return;
@@ -548,60 +869,65 @@ export function NativeTerminalPane({
       dispatchBounds(currentGeometry);
     };
 
-    const initialGeometry = measureGeometry();
-    if (initialGeometry) {
-      scaleFactorRef.current = initialGeometry.scaleFactor;
-    }
+    const maxRetries = 5;
+    // A transient attach failure normally self-heals inside the first two fast retries
+    // (250ms + 500ms). Painting the banner on the first failure makes a successful self-heal
+    // flash an alarming error, so hold it until the failure has survived those fast retries
+    // (~750ms) or every retry is exhausted.
+    const bannerRetryThreshold = 2;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    switchDebug("terminal.surface.attach.start", {
-      localSessionId: sessionId,
-      backendSessionId: targetSessionId,
-      bounds: initialGeometry?.bounds,
-      scaleFactor: initialGeometry?.scaleFactor,
-    });
-    void attachNativeTerminalLifecycle(targetSessionId, () =>
-      invoke("cmd_native_terminal_attach", {
-        sessionId: targetSessionId,
-        ...(initialGeometry
-          ? {
-              bounds: initialGeometry.bounds,
-              scaleFactor: initialGeometry.scaleFactor,
-            }
-          : {}),
-      }),
-    )
-      .then(() => {
+    const attemptAttach = async (retryCount = 0): Promise<void> => {
+      try {
+        await performAttach(targetSessionId, retryCount > 0);
+        if (!isSubscribed) return;
         switchDebug("terminal.surface.attach.complete", {
           localSessionId: sessionId,
           backendSessionId: targetSessionId,
           subscribed: isSubscribed,
+          retryCount,
         });
-        if (!isSubscribed) return;
         setError(null);
         refreshScrollbar();
         reportBounds();
-        inputRef.current?.focus();
+        restoreFocusIfLost();
 
-        if (typeof ResizeObserver !== "undefined") {
+        if (typeof ResizeObserver !== "undefined" && !observer) {
           observer = new ResizeObserver(() => {
             reportBounds();
           });
           observer.observe(element);
         }
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
+        if (!isSubscribed) return;
         switchDebug("terminal.surface.attach.error", {
           localSessionId: sessionId,
           backendSessionId: targetSessionId,
           error: String(error),
+          retryCount,
         });
         reportNativeTerminalIpcFailure("cmd_native_terminal_attach", error);
-        if (isSubscribed) {
+        const willRetry = retryCount < maxRetries;
+        if (!willRetry || retryCount >= bannerRetryThreshold) {
           setError("Failed to attach native terminal");
         }
-      });
+        if (willRetry) {
+          const delay = Math.min(4000, 250 * Math.pow(2, retryCount));
+          retryTimer = setTimeout(() => {
+            if (isSubscribed) {
+              void attemptAttach(retryCount + 1);
+            }
+          }, delay);
+        }
+      }
+    };
+
+    void attemptAttach(0);
 
     return () => {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
       switchDebug("terminal.surface.detach.scheduled", {
         localSessionId: sessionId,
         backendSessionId: targetSessionId,
@@ -617,11 +943,13 @@ export function NativeTerminalPane({
           sessionId: targetSessionId,
         }),
       )
-        .then(() => {
-          switchDebug("terminal.surface.detach.complete", {
-            localSessionId: sessionId,
-            backendSessionId: targetSessionId,
-          });
+        .then((detached) => {
+          if (detached) {
+            switchDebug("terminal.surface.detach.complete", {
+              localSessionId: sessionId,
+              backendSessionId: targetSessionId,
+            });
+          }
         })
         .catch((error: unknown) => {
           switchDebug("terminal.surface.detach.error", {
@@ -632,7 +960,7 @@ export function NativeTerminalPane({
           reportNativeTerminalIpcFailure("cmd_native_terminal_detach", error);
         });
     };
-  }, [refreshScrollbar, sessionId, targetSessionId, visible]);
+  }, [measureGeometry, performAttach, refreshScrollbar, sessionId, targetSessionId, visible]);
 
   const thumb = nativeScrollbarThumb(scrollbar);
 
@@ -649,8 +977,11 @@ export function NativeTerminalPane({
       }}
       onPointerDown={(event) => {
         if (!visible) return;
-        event.preventDefault();
         inputRef.current?.focus();
+        if (event.button === 0) {
+          pointerDragRef.current = { pointerId: event.pointerId };
+          sendMouse(event, "Press", "Left");
+        }
       }}
       onWheel={(event) => {
         if (!visible || !isTauri() || !targetSessionId) return;
@@ -697,7 +1028,9 @@ export function NativeTerminalPane({
             event.preventDefault();
             const text = event.clipboardData?.getData("text");
             if (text) {
-              sendInput({ text });
+              sendPaste(text);
+            } else {
+              sendImagePasteShortcut();
             }
           }}
           onCopy={(event) => {
@@ -709,15 +1042,12 @@ export function NativeTerminalPane({
               return;
             }
 
-            // Paste shortcut: Cmd+V on Mac or Ctrl+V
             if (
               (event.ctrlKey || event.metaKey) &&
               !event.altKey &&
               !event.shiftKey &&
               event.key.toLowerCase() === "v"
             ) {
-              event.preventDefault();
-              handlePaste();
               return;
             }
 
@@ -746,14 +1076,15 @@ export function NativeTerminalPane({
               return;
             }
 
-            if (!shouldForwardKey(event)) {
+            const forwardable = toForwardableKeyEvent(event);
+            if (!shouldForwardKey(forwardable)) {
               return;
             }
 
             event.preventDefault();
             sendInput({
               keyEvent: {
-                key: physicalKeyForAltChord(event),
+                key: physicalKeyForAltChord(forwardable),
                 action: "Press",
                 modifiers: {
                   shift: event.shiftKey,

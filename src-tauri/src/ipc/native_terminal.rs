@@ -307,6 +307,15 @@ pub fn encode_attached_native_mouse(
     state.with_session_terminal(session_id, |term| term.encode_mouse(event))
 }
 
+pub fn select_attached_native_terminal_with_mouse(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    event: &MouseEvent,
+) -> Result<(), NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
+    state.with_session_terminal(session_id, |term| term.handle_mouse_gesture(event))
+}
+
 /// Scroll visible viewport for an attached native session.
 pub fn scroll_attached_native_terminal(
     state: &NativeTerminalSurfaceHostState,
@@ -591,17 +600,24 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
     session_id: String,
     event: MouseEvent,
 ) -> Result<NativeTerminalMouseReceipt, IpcError> {
-    let bytes = match encode_attached_native_mouse(state.inner(), &session_id, &event) {
-        Ok(bytes) => bytes,
-        Err(err) => return Err(IpcError::internal(err.to_string())),
-    };
-    if !bytes.is_empty() {
-        if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
-            return Err(err);
-        }
-    }
     let tracking =
         mouse_tracking_enabled_for_attached_session(state.inner(), &session_id).unwrap_or(false);
+
+    if tracking {
+        let bytes = match encode_attached_native_mouse(state.inner(), &session_id, &event) {
+            Ok(bytes) => bytes,
+            Err(err) => return Err(IpcError::internal(err.to_string())),
+        };
+        if !bytes.is_empty() {
+            if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
+                return Err(err);
+            }
+        }
+    } else if let Err(err) =
+        select_attached_native_terminal_with_mouse(state.inner(), &session_id, &event)
+    {
+        return Err(IpcError::internal(err.to_string()));
+    }
 
     let receipt = if let Some(window) = app.get_webview_window("main") {
         let state_inner = state.inner().clone();
@@ -611,9 +627,19 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
         if window
             .run_on_main_thread(move || {
                 let res = state_inner
-                    .get_receipt(&surface_window, &session_id_clone)
-                    .map(|r| into_ipc_receipt(session_id_clone, r))
-                    .ok();
+                    .session_logical_bounds(&session_id_clone)
+                    .and_then(|bounds| {
+                        state_inner
+                            .render(
+                                &surface_window,
+                                NativeTerminalBoundsRequest {
+                                    session_id: session_id_clone.clone(),
+                                    bounds,
+                                },
+                            )
+                            .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
+                            .ok()
+                    });
                 let _ = sender.send(res);
             })
             .is_ok()

@@ -1131,7 +1131,7 @@ impl NativeTerminalSurfaceHost {
 
     fn render_snapshot<R: Runtime>(
         &mut self,
-        _window: &WebviewWindow<R>,
+        window: &WebviewWindow<R>,
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
         selection: Option<&super::renderer::SelectionSnapshot>,
@@ -1203,6 +1203,7 @@ impl NativeTerminalSurfaceHost {
         )?;
         frame.present();
         self.target.reveal_after_present();
+        self.target.restore_first_responder(window);
         Ok(NativeTerminalSurfaceReceipt::from_snapshot(
             layout,
             snapshot,

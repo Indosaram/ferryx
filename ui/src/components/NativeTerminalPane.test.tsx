@@ -120,41 +120,65 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     vi.unstubAllGlobals();
   });
 
-  it("displays an accessible error banner when attach IPC fails and clears it on retry", async () => {
+  it("suppresses the attach error banner across fast retries, surfaces it once the failure persists, and clears it on retry", async () => {
+    vi.useFakeTimers();
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const session = createSession("term-session-1");
+    try {
+      const session = createSession("term-session-1");
 
-    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_attach") {
-        throw new Error("failed to attach native terminal surface at /Users/secret/path/project");
-      }
-      return undefined;
-    });
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_attach") {
+          throw new Error("failed to attach native terminal surface at /Users/secret/path/project");
+        }
+        return undefined;
+      });
 
-    const { findByRole, queryByRole, rerender } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+      const { queryByRole, rerender } = render(
+        <NativeTerminalPane sessionId="term-session-1" session={session} />,
+      );
 
-    const alert = await findByRole("alert");
-    expect(alert).toBeInTheDocument();
-    expect(alert).toHaveTextContent("Failed to attach native terminal");
-    expect(alert).not.toHaveTextContent("/Users/secret/path/project");
-    expect(consoleSpy).toHaveBeenCalledWith("Native terminal IPC command failed", {
-      command: "cmd_native_terminal_attach",
-      error: expect.any(Error),
-    });
-
-    // When attach succeeds on next mount / session change
-    tauriCoreMocks.invoke.mockImplementation(async () => undefined);
-    rerender(
-      <NativeTerminalPane sessionId="term-session-2" session={createSession("term-session-2")} />,
-    );
-
-    await waitFor(() => {
+      // Attempt 1 fails. The failure is reported to the IPC failure channel immediately, but the
+      // banner stays hidden because a fast retry is already pending.
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(consoleSpy).toHaveBeenCalledWith("Native terminal IPC command failed", {
+        command: "cmd_native_terminal_attach",
+        error: expect.any(Error),
+      });
       expect(queryByRole("alert")).not.toBeInTheDocument();
-    });
 
-    consoleSpy.mockRestore();
+      // Backoff 1 (250ms) -> attempt 2 fails: still inside the fast-retry window, still silent.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(queryByRole("alert")).not.toBeInTheDocument();
+
+      // Backoff 2 (500ms) -> attempt 3 fails: the failure has outlived the fast retries, so the
+      // accessible banner surfaces, with the raw filesystem path redacted.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      const alert = queryByRole("alert");
+      expect(alert).toBeInTheDocument();
+      expect(alert).toHaveTextContent("Failed to attach native terminal");
+      expect(alert).not.toHaveTextContent("/Users/secret/path/project");
+
+      // When attach succeeds on next mount / session change
+      tauriCoreMocks.invoke.mockImplementation(async () => undefined);
+      rerender(
+        <NativeTerminalPane sessionId="term-session-2" session={createSession("term-session-2")} />,
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(queryByRole("alert")).not.toBeInTheDocument();
+    } finally {
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("displays an accessible error banner when bounds IPC fails and does not show detach errors on unmount", async () => {
@@ -925,23 +949,115 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
-  it("retains focus on the hidden textarea and prevents default when the pane receives pointer activation", () => {
+  it("forwards a primary pointer press for native selection without cancelling the gesture", async () => {
+    tauriCoreMocks.invoke.mockResolvedValue({
+      cols: 80,
+      rows: 24,
+      rebuiltRows: 1,
+      reusedRows: 23,
+      cursorCol: 3,
+      cursorRow: 2,
+      cellWidthPx: 10,
+      cellHeightPx: 20,
+    });
     const session = createSession("term-session-1");
     const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
 
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     expect(textarea).toBeInTheDocument();
     expect(textarea.tagName).toBe("TEXTAREA");
+    await waitFor(() => {
+      expect(textarea.style.width).toBe("10px");
+      expect(textarea.style.height).toBe("20px");
+    });
 
     const container = getByTestId("native-terminal-pane");
-    const pointerEvent = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+    tauriCoreMocks.invoke.mockClear();
+    const pointerEvent = new MouseEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      clientX: 24,
+      clientY: 36,
+    });
 
     act(() => {
       container.dispatchEvent(pointerEvent);
     });
 
-    expect(pointerEvent.defaultPrevented).toBe(true);
+    expect(pointerEvent.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(textarea);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_mouse", {
+      sessionId: "term-session-1",
+      event: expect.objectContaining({ action: "Press", button: "Left" }),
+    });
+  });
+
+  it("forwards drag motion and release for native selection without cancelling pointer events", async () => {
+    tauriCoreMocks.invoke.mockResolvedValue({
+      cols: 80,
+      rows: 24,
+      rebuiltRows: 1,
+      reusedRows: 23,
+      cursorCol: 3,
+      cursorRow: 2,
+      cellWidthPx: 10,
+      cellHeightPx: 20,
+    });
+    const session = createSession("term-session-1");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(textarea.style.width).toBe("10px");
+      expect(textarea.style.height).toBe("20px");
+    });
+    const container = getByTestId("native-terminal-pane");
+    tauriCoreMocks.invoke.mockClear();
+
+    const press = new MouseEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      clientX: 24,
+      clientY: 36,
+    });
+    Object.defineProperty(press, "pointerId", { value: 7 });
+    const move = new MouseEvent("pointermove", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 72,
+      clientY: 54,
+    });
+    Object.defineProperty(move, "pointerId", { value: 7 });
+    const release = new MouseEvent("pointerup", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 72,
+      clientY: 54,
+    });
+    Object.defineProperty(release, "pointerId", { value: 7 });
+
+    act(() => {
+      container.dispatchEvent(press);
+      document.dispatchEvent(move);
+      document.dispatchEvent(release);
+    });
+
+    expect(press.defaultPrevented).toBe(false);
+    expect(move.defaultPrevented).toBe(false);
+    expect(release.defaultPrevented).toBe(false);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_mouse", {
+      sessionId: "term-session-1",
+      event: expect.objectContaining({
+        action: "Motion",
+        button: null,
+        size: expect.objectContaining({ cellWidth: 10, cellHeight: 20 }),
+      }),
+    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_mouse", {
+      sessionId: "term-session-1",
+      event: expect.objectContaining({ action: "Release", button: null }),
+    });
   });
 
   it("sends typed native focus and blur intent through IPC", () => {
@@ -976,7 +1092,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
     tauriCoreMocks.invoke.mockClear();
-    tauriCoreMocks.invoke.mockRejectedValueOnce(error);
+    tauriCoreMocks.invoke.mockRejectedValue(error);
 
     try {
       act(() => {
@@ -990,6 +1106,88 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           error,
         });
       });
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it("self-heals detached session on send_input error by re-attaching and retrying input once", async () => {
+    const session = createSession("term-session-self-heal");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-self-heal" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", expect.anything());
+    });
+
+    tauriCoreMocks.invoke.mockClear();
+
+    let sendInputAttempts = 0;
+    let attachCount = 0;
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        sendInputAttempts++;
+        if (sendInputAttempts === 1) {
+          throw new Error("NoValue");
+        }
+        return { cursorCol: 5, cursorRow: 10, cellWidthPx: 8, cellHeightPx: 16 };
+      }
+      if (cmd === "cmd_native_terminal_attach") {
+        attachCount++;
+        return undefined;
+      }
+      return undefined;
+    });
+
+    act(() => {
+      textarea.value = "x";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await waitFor(() => {
+      expect(sendInputAttempts).toBe(2);
+      expect(attachCount).toBe(1);
+    });
+  });
+
+  it("does not loop infinitely when input retry repeatedly fails", async () => {
+    const session = createSession("term-session-retry-fail");
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { getByTestId, findByRole } = render(
+      <NativeTerminalPane sessionId="term-session-retry-fail" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", expect.anything());
+    });
+
+    tauriCoreMocks.invoke.mockClear();
+
+    let sendInputAttempts = 0;
+    let attachCount = 0;
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        sendInputAttempts++;
+        throw new Error("PermanentDetachedError");
+      }
+      if (cmd === "cmd_native_terminal_attach") {
+        attachCount++;
+        return undefined;
+      }
+      return undefined;
+    });
+
+    try {
+      act(() => {
+        textarea.value = "z";
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const alert = await findByRole("alert");
+      expect(alert).toHaveTextContent("Failed to send terminal input");
+      expect(sendInputAttempts).toBe(2);
+      expect(attachCount).toBe(1);
     } finally {
       consoleErrorSpy.mockRestore();
     }
@@ -1202,15 +1400,35 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
-  it("reads navigator.clipboard on platform paste shortcuts and sends input via IPC", async () => {
+  it("sends DOM text paste as one bracketed paste IPC payload", () => {
     const session = createSession("term-session-1");
-    const readTextSpy = vi.fn().mockResolvedValue("pasted text from clipboard");
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { readText: readTextSpy, writeText: vi.fn() },
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "pasted text from clipboard" },
+    });
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
     });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+      sessionId: "term-session-1",
+      text: "pasted text from clipboard",
+    });
+  });
+
+  it("leaves Cmd+V un-cancelled so the DOM paste event handles clipboard data", () => {
+    const session = createSession("term-session-dom-paste");
+    const read = vi.fn();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { read, readText: vi.fn(), writeText: vi.fn() },
+    });
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-dom-paste" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink");
     tauriCoreMocks.invoke.mockClear();
 
@@ -1220,20 +1438,109 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       bubbles: true,
       cancelable: true,
     });
+
     act(() => {
       textarea.dispatchEvent(pasteShortcut);
     });
 
-    expect(pasteShortcut.defaultPrevented).toBe(true);
-    expect(readTextSpy).toHaveBeenCalled();
+    expect(pasteShortcut.defaultPrevented).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_paste",
+      expect.anything(),
+    );
+  });
 
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-        sessionId: "term-session-1",
-        input: { text: "pasted text from clipboard" },
-      });
+  it("forwards a DOM image paste through the agent's Ctrl+V shortcut", () => {
+    const session = createSession("term-session-image-dom");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-image-dom" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      sessionId: "term-session-image-dom",
+      input: {
+        keyEvent: {
+          key: "v",
+          action: "Press",
+          modifiers: {
+            shift: false,
+            ctrl: true,
+            alt: false,
+            superKey: false,
+            capsLock: false,
+            numLock: false,
+          },
+          utf8: null,
+        },
+      },
     });
   });
+
+  it("forwards a fixture PNG paste at the DOM paste seam through the agent's Ctrl+V shortcut", () => {
+    const session = createSession("term-session-fixture-png");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-fixture-png" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const pngBytes = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+      0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+      0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+      0x42, 0x60, 0x82,
+    ]);
+    const file = new File([pngBytes], "c2-image-fixture.png", { type: "image/png" });
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: {
+        types: ["Files", "image/png"],
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        getData: (type: string) => (type === "text" || type === "text/plain" ? "" : ""),
+      },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      sessionId: "term-session-fixture-png",
+      input: {
+        keyEvent: {
+          key: "v",
+          action: "Press",
+          modifiers: {
+            shift: false,
+            ctrl: true,
+            alt: false,
+            superKey: false,
+            capsLock: false,
+            numLock: false,
+          },
+          utf8: null,
+        },
+      },
+    });
+  });
+
 
   it("handles onWheel scrolling by issuing native scroll IPC command", async () => {
     const session = createSession("term-session-1");
@@ -1765,6 +2072,228 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       expect.objectContaining({
         sessionId: frontendId,
       }),
+    );
+  });
+
+  it("retries mount attach on rejection with exponential backoff and attaches on eventual success", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createSession("retry-mount-session");
+      let attachCount = 0;
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_native_terminal_attach") {
+          attachCount++;
+          if (attachCount < 3) {
+            throw new Error("mount attach failed");
+          }
+          return undefined;
+        }
+        return undefined;
+      });
+
+      const { queryByRole } = render(
+        <NativeTerminalPane sessionId="retry-mount-session" session={session} />,
+      );
+
+      // Initial attempt (attempt 1)
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(attachCount).toBe(1);
+
+      // Backoff 1: 250ms -> attempt 2
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(attachCount).toBe(2);
+
+      // Backoff 2: 500ms -> attempt 3 (succeeds)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      expect(attachCount).toBe(3);
+
+      // Verify no further retries once attached
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(attachCount).toBe(3);
+      expect(queryByRole("alert")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("redirects printable keydown fallback when activeElement is document.body", async () => {
+    const session = createSession("term-session-capture-fallback");
+    render(<NativeTerminalPane sessionId="term-session-capture-fallback" session={session} />);
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "a",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-capture-fallback",
+        input: { text: "a" },
+      });
+    });
+  });
+
+  it("forwards Enter through the keydown fallback when activeElement is document.body", async () => {
+    const session = createSession("term-session-fallback-enter");
+    render(<NativeTerminalPane sessionId="term-session-fallback-enter" session={session} />);
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+
+    await waitFor(() => {
+      const sent = tauriCoreMocks.invoke.mock.calls.some(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_send_input" &&
+          (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key === "Enter",
+      );
+      expect(sent).toBe(true);
+    });
+  });
+
+  it("forwards Ctrl+C through the keydown fallback when activeElement is document.body", async () => {
+    const session = createSession("term-session-fallback-ctrlc");
+    render(<NativeTerminalPane sessionId="term-session-fallback-ctrlc" session={session} />);
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "c",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      const sent = tauriCoreMocks.invoke.mock.calls.some(([cmd, args]) => {
+        const keyEvent = (args as { input?: { keyEvent?: { key?: string; modifiers?: { ctrl?: boolean } } } })
+          ?.input?.keyEvent;
+        return (
+          cmd === "cmd_native_terminal_send_input" &&
+          keyEvent?.key === "c" &&
+          keyEvent?.modifiers?.ctrl === true
+        );
+      });
+      expect(sent).toBe(true);
+    });
+  });
+
+  it("delivers a fallback Enter to exactly one pane when two split panes are mounted", async () => {
+    const left = createSession("split-pane-left");
+    const right = createSession("split-pane-right");
+    render(
+      <>
+        <NativeTerminalPane sessionId="split-pane-left" session={left} />
+        <NativeTerminalPane sessionId="split-pane-right" session={right} />
+      </>,
+    );
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+
+    await waitFor(() => {
+      const sends = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_native_terminal_send_input",
+      );
+      expect(sends.length).toBeGreaterThan(0);
+    });
+
+    // preventDefault() by the first capture listener must suppress every sibling pane, otherwise
+    // one Enter would be delivered to every visible split pane at once.
+    const sends = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_send_input",
+    );
+    expect(sends).toHaveLength(1);
+  });
+
+  it("routes a keystroke to the swapped-in session after a workspace switch, never the outgoing one", async () => {
+    const outgoing = createSession("switch-session-outgoing");
+    const { rerender } = render(
+      <NativeTerminalPane sessionId="switch-session-outgoing" session={outgoing} />,
+    );
+    await waitFor(() => {
+      const attached = tauriCoreMocks.invoke.mock.calls.some(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_attach" &&
+          JSON.stringify(args ?? {}).includes("switch-session-outgoing"),
+      );
+      expect(attached).toBe(true);
+    });
+
+    const incoming = createSession("switch-session-incoming");
+    rerender(<NativeTerminalPane sessionId="switch-session-incoming" session={incoming} />);
+    await waitFor(() => {
+      const attached = tauriCoreMocks.invoke.mock.calls.some(
+        ([cmd, args]) =>
+          cmd === "cmd_native_terminal_attach" &&
+          JSON.stringify(args ?? {}).includes("switch-session-incoming"),
+      );
+      expect(attached).toBe(true);
+    });
+
+    tauriCoreMocks.invoke.mockClear();
+    (document.activeElement as HTMLElement)?.blur?.();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "x", bubbles: true, cancelable: true }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "switch-session-incoming",
+        input: { text: "x" },
+      });
+    });
+
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.objectContaining({ sessionId: "switch-session-outgoing" }),
     );
   });
 });

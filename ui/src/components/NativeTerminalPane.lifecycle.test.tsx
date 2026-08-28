@@ -295,4 +295,41 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
       ]);
     });
   });
+
+  it("skips stale detachment when remount occurs while detachment is in flight and remains attached", async () => {
+    const view = render(<NativeTerminalPane session={session("backend-stale-race")} />);
+
+    await waitFor(() => {
+      expect(lifecycleCalls()).toEqual([["cmd_native_terminal_attach", "backend-stale-race"]]);
+    });
+
+    let resolveSlowDetach: (() => void) | undefined;
+    const slowDetach = new Promise<void>((resolve) => {
+      resolveSlowDetach = resolve;
+    });
+
+    let detachInvoked = false;
+    tauriCoreMocks.invoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "cmd_native_terminal_detach" && args?.sessionId === "backend-stale-race") {
+        detachInvoked = true;
+        await slowDetach;
+      }
+      return undefined;
+    });
+
+    // Unmount triggers cleanup
+    view.unmount();
+
+    // Remount reusing same backendSessionId
+    render(<NativeTerminalPane session={session("backend-stale-race")} />);
+
+    // Resolve stale detach promise last
+    resolveSlowDetach?.();
+    await Promise.resolve();
+
+    await waitFor(() => {
+      expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_detach")).toEqual([]);
+      expect(detachInvoked).toBe(false);
+    });
+  });
 });

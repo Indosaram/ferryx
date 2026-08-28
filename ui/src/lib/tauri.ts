@@ -395,11 +395,33 @@ export function isStructuredIpcError(error: unknown): error is StructuredIpcErro
   );
 }
 
+function safeStringify(value: unknown): string {
+  let raw: string;
+  try {
+    if (typeof value === "string") {
+      raw = value;
+    } else if (value instanceof Error) {
+      raw = value.stack || value.message || String(value);
+    } else {
+      raw = JSON.stringify(value) ?? String(value);
+    }
+  } catch {
+    raw = String(value);
+  }
+  return raw.length > 500 ? `${raw.slice(0, 500)}...` : raw;
+}
+
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(command, args);
   } catch (error) {
-    throw toIpcError(error);
+    const ipcError = toIpcError(error);
+    ipcError.details = {
+      ...ipcError.details,
+      command,
+      raw: safeStringify(error),
+    };
+    throw ipcError;
   }
 }
 
@@ -407,6 +429,7 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
 export type AgentDetection = {
   name: string;
   available: boolean;
+  path?: string;
 };
 
 export async function detectAgents(names: string[]): Promise<AgentDetection[]> {
@@ -555,6 +578,8 @@ export type RemoteTerminalTabInfo = {
   label: string;
   activityState?: "working" | "waiting" | "done";
   agentType?: string;
+  worktreeSlug?: string;
+  worktreeLabel?: string;
 };
 
 export type FocusedTerminalPayload = {
@@ -571,15 +596,14 @@ export type FocusedTerminalPayload = {
 export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {
   if (!isTauri()) return;
   const terminalTabs = payload?.terminalTabs ?? payload?.tabs ?? [];
+  const tabId = payload?.tabId ?? payload?.activeTabId ?? null;
   return invokeCommand<void>("cmd_remote_set_active_selection", {
     request: {
       workspaceId: payload?.workspaceId ?? null,
       worktreeSlug: payload?.worktreeSlug ?? null,
       worktreeLabel: payload?.worktreeLabel ?? null,
       sessionId: payload?.backendSessionId ?? null,
-      tabId: payload?.tabId ?? payload?.activeTabId ?? null,
-      activeTabId: payload?.activeTabId ?? payload?.tabId ?? null,
-      tabs: terminalTabs,
+      tabId,
       terminalTabs,
     },
   });

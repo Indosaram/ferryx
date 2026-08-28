@@ -637,3 +637,70 @@ async fn option_as_alt_disabled_strips_the_alt_modifier_from_encoded_keys() {
         assert_eq!(with_alt, without_alt);
     }
 }
+
+#[tokio::test]
+async fn production_input_boundary_encodes_ctrl_v_image_paste_shortcut_to_pty_byte_0x16() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "native-c2-ctrl-v";
+    let (_tx, attachment) = create_attachment(session_id);
+    state
+        .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+        .expect("attach native daemon stream state");
+
+    // Exact IPC payload produced by NativeTerminalPane on DOM image paste
+    let ctrl_v_press: NativeTerminalInput = serde_json::from_str(
+        r#"{
+        "keyEvent": {
+            "key": "v",
+            "action": "Press",
+            "modifiers": {
+                "shift": false,
+                "ctrl": true,
+                "alt": false,
+                "superKey": false,
+                "capsLock": false,
+                "numLock": false
+            },
+            "utf8": null
+        }
+    }"#,
+    )
+    .expect("deserialize ctrl+v key event");
+
+    let encoded_press = encode_attached_native_input(&state, session_id, &ctrl_v_press)
+        .expect("encode attached ctrl+v input");
+
+    // 0x16 is ASCII SYN (decimal 22 / Ctrl+V) expected by terminal CLI applications like Claude Code
+    assert_eq!(
+        encoded_press,
+        vec![0x16],
+        "Ctrl+V press must encode to exactly one 0x16 byte ready for PTY delivery"
+    );
+
+    let ctrl_v_release: NativeTerminalInput = serde_json::from_str(
+        r#"{
+        "keyEvent": {
+            "key": "v",
+            "action": "Release",
+            "modifiers": {
+                "shift": false,
+                "ctrl": true,
+                "alt": false,
+                "superKey": false,
+                "capsLock": false,
+                "numLock": false
+            },
+            "utf8": null
+        }
+    }"#,
+    )
+    .expect("deserialize ctrl+v release event");
+
+    let encoded_release = encode_attached_native_input(&state, session_id, &ctrl_v_release)
+        .expect("encode attached ctrl+v release");
+
+    assert!(
+        encoded_release.is_empty(),
+        "key release must not emit duplicate bytes to the PTY"
+    );
+}

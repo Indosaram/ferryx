@@ -78,4 +78,35 @@ describe("nativeTerminalLifecycle sibling pane ownership", () => {
 
     expect(detached).toEqual(["pane-gone"]);
   });
+
+  it("skips slow detach queued in lifecycle queue when session re-attaches before detach runs", async () => {
+    const detached: string[] = [];
+    let resolveSlowAttach: (() => void) | undefined;
+    const slowAttach = new Promise<void>((resolve) => {
+      resolveSlowAttach = resolve;
+    });
+
+    // Fresh attach in flight
+    void attachNativeTerminalLifecycle("pane-slow", async () => {
+      await slowAttach;
+    });
+
+    // Pane unmounts: queues detach
+    void detachNativeTerminalLifecycle("pane-slow", async () => {
+      detached.push("pane-slow");
+    });
+
+    // Let microtask queue execute detachment into lifecycle tail
+    await Promise.resolve();
+
+    // Pane remounts: attaches again (reused / bumped generation)
+    void attachNativeTerminalLifecycle("pane-slow", async () => undefined);
+
+    // Initial attach now finishes
+    resolveSlowAttach?.();
+    await settle();
+
+    // Detach operation must have been skipped because generation changed
+    expect(detached).toEqual([]);
+  });
 });

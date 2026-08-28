@@ -9,6 +9,7 @@ use super::color::ColorRgb;
 use super::cursor::CursorState;
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
+use super::guards::SelectionGestureGuard;
 use super::key::KeyEvent;
 use super::key_encoder::{encode_key_event, encode_key_event_with_option_as_alt};
 use super::lifecycle::{create_native_terminal, teardown_native_terminal};
@@ -24,7 +25,8 @@ use super::render_pass::capture_render_snapshot;
 use super::scroll::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
 use super::search::search_grid;
 use super::selection::{
-    clear_selection, select_all, select_line_at, select_word_at, selection_range, selection_text,
+    apply_mouse_gesture, clear_selection, create_selection_gesture, reset_selection_gesture,
+    select_all, select_line_at, select_word_at, selection_range, selection_text,
 };
 use super::snapshot::RenderSnapshot;
 use super::sys::ffi::{
@@ -43,6 +45,7 @@ use super::sys::types::{
 pub struct NativeTerminal {
     handle: NonNull<GhosttyTerminalImpl>,
     context: Box<TerminalContext>,
+    gesture: SelectionGestureGuard,
 }
 
 // SAFETY: Category: Thread Transfer Safety.
@@ -52,6 +55,7 @@ unsafe impl Send for NativeTerminal {}
 
 impl Drop for NativeTerminal {
     fn drop(&mut self) {
+        self.gesture.free_with_terminal(self.handle.as_ptr());
         teardown_native_terminal(self.handle);
     }
 }
@@ -60,7 +64,23 @@ impl NativeTerminal {
     /// Creates a new native virtual terminal with the specified cell dimensions.
     pub fn new(cols: u16, rows: u16) -> Result<Self, NativeTerminalError> {
         let (handle, context) = create_native_terminal(cols, rows)?;
-        Ok(Self { handle, context })
+        let gesture = match create_selection_gesture() {
+            Ok(g) => g,
+            Err(e) => {
+                teardown_native_terminal(handle);
+                return Err(e);
+            }
+        };
+        Ok(Self {
+            handle,
+            context,
+            gesture,
+        })
+    }
+
+    /// Handles a selection gesture mouse event (press, drag, release) when mouse tracking is disabled.
+    pub fn handle_mouse_gesture(&mut self, event: &MouseEvent) -> Result<(), NativeTerminalError> {
+        apply_mouse_gesture(self.handle, &self.gesture, event)
     }
 
     fn set_color_option(
@@ -128,6 +148,7 @@ impl TerminalEngine for NativeTerminal {
         unsafe {
             ghostty_terminal_reset(self.handle.as_ptr());
         }
+        reset_selection_gesture(&self.gesture, self.handle);
     }
 
     fn dimensions(&self) -> Result<(u16, u16), NativeTerminalError> {
@@ -334,6 +355,9 @@ impl TerminalEngine for NativeTerminal {
 mod tests {
     use super::NativeTerminal;
     use crate::native_terminal::engine::TerminalEngine;
+    use crate::native_terminal::{
+        MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize,
+    };
 
     #[test]
     fn native_terminal_ffi_probe_osc_2_reports_title_change_and_value() {
@@ -384,6 +408,48 @@ mod tests {
             terminal.take_bell_count(),
             0,
             "bell observation was not drained"
+        );
+    }
+
+    #[test]
+    fn native_terminal_pointer_drag_installs_a_text_selection() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"select this terminal text")
+            .expect("write selectable terminal text");
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y: 10.0 },
+            modifiers: Default::default(),
+            size: Some(size),
+        };
+
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 0.0))
+            .expect("start selection drag");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Motion, 60.0))
+            .expect("extend selection drag");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 60.0))
+            .expect("finish selection drag");
+
+        assert_eq!(
+            terminal
+                .selection_text()
+                .expect("read selected terminal text"),
+            Some("select".to_string()),
         );
     }
 }

@@ -222,7 +222,10 @@ describe("Tauri IPC wrapper contract", () => {
     ).rejects.toEqual({
       code: "UNKNOWN",
       message: "Unknown IPC error",
-      details: {},
+      details: {
+        command: "cmd_worktree_create",
+        raw: "backend exploded",
+      },
     });
   });
 
@@ -297,11 +300,16 @@ describe("Tauri IPC wrapper contract", () => {
         worktreeLabel: "main",
         sessionId: "pty-1",
         tabId: "tab-1",
-        activeTabId: "tab-1",
-        tabs: [{ id: "tab-1", label: "main" }],
         terminalTabs: [{ id: "tab-1", label: "main" }],
       },
     });
+
+    // Assert the serialized request contains tabId exactly once without serde alias conflicts
+    const serialized = JSON.stringify(core.invoke.mock.calls[0][1].request);
+    const tabIdMatches = serialized.match(/"tabId":/g) ?? [];
+    expect(tabIdMatches).toHaveLength(1);
+    expect(serialized).not.toContain('"activeTabId":');
+    expect(serialized).not.toContain('"tabs":');
 
     // Clear active selection (null payload)
     await publishFocusedTerminal(null);
@@ -312,8 +320,6 @@ describe("Tauri IPC wrapper contract", () => {
         worktreeLabel: null,
         sessionId: null,
         tabId: null,
-        activeTabId: null,
-        tabs: [],
         terminalTabs: [],
       },
     });
@@ -341,11 +347,6 @@ describe("Tauri IPC wrapper contract", () => {
         worktreeLabel: "main",
         sessionId: "pty-1",
         tabId: "tab-1",
-        activeTabId: "tab-1",
-        tabs: [
-          { id: "tab-1", label: "main", activityState: "working", agentType: "claude" },
-          { id: "tab-2", label: "feature", activityState: "waiting", agentType: "codex" },
-        ],
         terminalTabs: [
           { id: "tab-1", label: "main", activityState: "working", agentType: "claude" },
           { id: "tab-2", label: "feature", activityState: "waiting", agentType: "codex" },

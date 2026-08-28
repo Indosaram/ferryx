@@ -86,6 +86,12 @@ impl PlatformCompositorTarget {
         self.inner.reveal();
     }
 
+    /// Restores the hosting WKWebView as the window's first responder on macOS.
+    pub fn restore_first_responder<R: Runtime>(&self, _window: &WebviewWindow<R>) {
+        #[cfg(target_os = "macos")]
+        self.inner.restore_webview_first_responder(_window);
+    }
+
     /// Returns the raw-window-handle target for wgpu surface creation.
     pub fn surface_target(&self) -> Arc<NativeChildViewHandle> {
         self.inner.surface_target()

@@ -33,6 +33,16 @@ use tauri::{Runtime, WebviewWindow};
 use crate::native_terminal::composition::{
     CompositorTargetKind, LogicalBounds, PlatformCompositorDescriptor,
 };
+
+static LOGGED_FIRST_RESPONDER_ERROR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn log_first_responder_error_once(msg: &str) {
+    if !LOGGED_FIRST_RESPONDER_ERROR.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!("Native terminal first responder error: {msg}");
+    }
+}
+
 use crate::native_terminal::error::NativeTerminalError;
 
 define_class!(
@@ -240,6 +250,46 @@ impl MacosCompositorTarget {
                     view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)));
                 }
             });
+        }
+    }
+
+    pub fn restore_webview_first_responder<R: Runtime>(&self, window: &WebviewWindow<R>) {
+        let view_ptr = self.view_ptr.as_ptr() as usize;
+        let window_clone = window.clone();
+        let restore = move || unsafe {
+            let view = &*(view_ptr as *const FerryxNativeTerminalView);
+            let Some(ns_window) = view.window() else {
+                log_first_responder_error_once("child view has no window");
+                return;
+            };
+
+            let raw_webview_view = match window_clone.ns_view() {
+                Ok(ptr) if !ptr.is_null() => ptr,
+                Ok(_) => {
+                    log_first_responder_error_once("webview NSView pointer is null");
+                    return;
+                }
+                Err(err) => {
+                    log_first_responder_error_once(&format!("failed to get webview NSView: {err}"));
+                    return;
+                }
+            };
+
+            let webview_view = match Retained::retain(raw_webview_view as *mut NSView) {
+                Some(view) => view,
+                None => {
+                    log_first_responder_error_once("failed to retain webview NSView");
+                    return;
+                }
+            };
+
+            let _ = ns_window.makeFirstResponder(Some(&webview_view));
+        };
+
+        if let Some(_mtm) = MainThreadMarker::new() {
+            restore();
+        } else {
+            dispatch2::DispatchQueue::main().exec_async(restore);
         }
     }
 
