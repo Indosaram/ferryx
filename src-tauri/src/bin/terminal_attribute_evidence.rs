@@ -5,12 +5,25 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ferryx_lib::native_terminal::{
-    CellSnapshot, CursorSnapshot, CursorVisualStyle, NativeTerminalRenderer, OffscreenFrame,
-    RenderSnapshot, RendererConfig,
+    CellSnapshot, CursorSnapshot, CursorVisualStyle, NativeTerminal, NativeTerminalRenderer,
+    OffscreenFrame, RenderSnapshot, RendererConfig, TerminalEngine,
 };
+
+fn live_path_for(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("evidence");
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        parent.join(format!("{stem}-live.{ext}"))
+    } else {
+        parent.join(format!("{stem}-live.png"))
+    }
+}
 
 fn build_attribute_snapshot() -> RenderSnapshot {
     let cols = 60u16;
@@ -95,12 +108,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut renderer = NativeTerminalRenderer::new(config)?;
     let frame: OffscreenFrame = renderer.render_snapshot(&snapshot, None)?;
-
     frame.save_png(&abs_path)?;
 
     println!("Wrote attribute evidence PNG to: {}", abs_path.display());
     println!("Width: {} px", frame.width_px);
     println!("Height: {} px", frame.height_px);
+
+    // Live terminal escape sequence probe
+    let live_path = live_path_for(&abs_path);
+    let mut terminal = NativeTerminal::new(80, 24)?;
+    terminal.feed(b"\x1b[2mFAINT\x1b[0m NORMAL \x1b[1mBOLD\x1b[0m \x1b[4mUNDER\x1b[0m \x1b[9mSTRIKE\x1b[0m \x1b[53mOVER\x1b[0m \x1b[8mHIDDEN\x1b[0m\r\n")?;
+    let live_snapshot = terminal.render_snapshot()?;
+
+    let live_frame: OffscreenFrame = renderer.render_snapshot(&live_snapshot, None)?;
+    live_frame.save_png(&live_path)?;
+
+    println!("Wrote live attribute evidence PNG to: {}", live_path.display());
+    println!("Width: {} px", live_frame.width_px);
+    println!("Height: {} px", live_frame.height_px);
 
     Ok(())
 }
