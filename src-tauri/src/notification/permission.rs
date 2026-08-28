@@ -54,11 +54,11 @@ impl NotificationPermissionProvider for DesktopFallbackPermissionProvider {
 
 #[cfg(target_os = "macos")]
 pub mod macos {
+    use super::super::model::NotificationContent;
     use super::*;
     use block2::RcBlock;
-    use objc2_foundation::{NSBundle, NSError};
-    use super::super::model::NotificationContent;
     use objc2_foundation::NSString;
+    use objc2_foundation::{NSBundle, NSError};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
         UNNotificationRequest, UNNotificationSetting, UNNotificationSettings,

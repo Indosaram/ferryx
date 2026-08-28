@@ -2,7 +2,10 @@
 
 ## 판정
 
-공개 릴리스 파이프라인과 Tauri updater 배포 계약은 검증 완료했다. 남은 유일한 게이트는 **이전 버전으로 설치된 실제 macOS 앱에서 사용자가 `Install and Relaunch`를 실행하는 수동 E2E**다. 이 문서는 그 수동 결과를 아직 성공으로 주장하지 않는다.
+공개 릴리스 파이프라인과 Tauri updater 배포 계약은 검증 완료했다. 이후 실제 `/Applications` 설치본의
+`.10 → .11` 인앱 업데이트, 재시작, multi-project catalog 복구, terminal daemon 생존까지 확인했으므로
+공개 updater E2E는 완료됐다. 아래 `.9` 기록은 최초 public-release 증적이며, 최신 실제 설치 결과는 문서
+마지막의 `.11 실제 설치 E2E`를 따른다.
 
 ## 대상 릴리스
 
@@ -69,14 +72,60 @@ Developer ID Application: Indo Yoon (5DUM8WPB4C)
 2. 날짜 기반 version(`2026.826.9`)이 WiX MSI의 major-version 제한을 넘는 문제를 해결하기 위해 updater release의 Windows bundle을 NSIS로 제한했다. 별도 MSIX job은 유지한다.
 3. Tauri v2가 실제로 생성하는 `-setup.exe`와 `.AppImage` updater artifact를 `latest.json` 생성기가 인식하지 못하던 문제를 수정했다. 이 때문에 macOS만 광고하던 manifest가 네 updater target을 모두 광고하게 됐다.
 
-## 남은 수동 E2E
+## .11 실제 설치 E2E 및 catalog recovery 검증 (2026-08-28)
 
-데스크톱 조작은 자동화하지 않는다. 사용자가 **`2026.826.9`보다 오래된 설치형 Ferryx 앱**에서 아래를 수행해야 한다.
+### 실제 발견과 후속 hotfix
 
-1. **Settings → General → Software Update**를 연다.
-2. 현재 설치 version과 실행 중인 agent가 업데이트/relaunch 중에도 백그라운드에서 유지된다는 설명을 확인한다.
-3. **Check for Updates**를 눌러 `2026.826.9` 발견을 확인한다.
-4. **Install and Relaunch**를 누른다.
-5. 재시작 후 업데이트 화면이 `2026.826.9`를 보고하는지, 기존 agent/session이 유지되는지 확인한다.
+공개 `.9 → .10` 설치 E2E는 다운로드, 설치, 재시작, daemon 생존에는 성공했지만 Finder/`/Applications`
+기동에서 WebView localStorage catalog가 하나뿐이고 process startup root가 그 project와 다르면 native
+`session_state.json`의 나머지 workspace를 Sidebar에 복구하지 못했다.
 
-결과(성공/실패 및 보이는 오류)를 이 문서의 후속 증적으로 기록해야 한다.
+`v2026.08.26.11`은 공개 `.10`을 부모로 한 독립 3-file hotfix다.
+
+| 변경 | 내용 |
+| --- | --- |
+| `ui/src/App.tsx` | 저장된 단일 project가 multi-project native session에 포함되면 startup root와 달라도 catalog를 복구한다. |
+| `ui/src/App.test.tsx` | 저장 project와 Finder/`/Applications` startup project가 다른 실제 회귀를 red로 재현한 뒤 green으로 고정했다. |
+| `docs/AUTO_UPDATE_RELAUNCH_RECOVERY_2026-08-27.md` | 실제 실패, 원인, 후속 복구 기준을 기록한다. |
+
+격리된 `.10 + hotfix` source의 검증 결과:
+
+```text
+bun test src/App.test.tsx src/lib/updater.test.ts src/components/SettingsDialog.update.test.tsx
+Test Files 3 passed (3)
+Tests 90 passed (90)
+
+bun run build
+tsc && vite build
+```
+
+### 공개 `.11` artifact 감사
+
+| 항목 | 결과 |
+| --- | --- |
+| 공개 릴리스 | [`v2026.08.26.11`](https://github.com/Indosaram/ferryx/releases/tag/v2026.08.26.11) |
+| 태그 대상 | `5040a5bca034494ec00ba3298d2f6afa5be71478` |
+| GitHub Actions | [`33133248892`](https://github.com/Indosaram/ferryx/actions/runs/33133248892) — 전체 성공 |
+| stable manifest | `releases/latest/download/latest.json`이 `2026.826.11` 제공 |
+| manifest/sidecar | macOS, Windows NSIS, Linux의 manifest signature가 각 공개 `.sig`와 일치 |
+| cryptographic verification | 모든 updater payload가 configured updater public key로 Blake2b/Ed25519 검증 통과 |
+| checksum | 세 updater payload가 공개 `SHA256SUMS.txt`와 일치 |
+| macOS trust | updater archive layout, `codesign --verify --deep --strict`, stapler, Gatekeeper 통과 |
+
+### 승인된 실제 desktop `.10 → .11` E2E
+
+데스크톱 제어 승인 후 `/Applications/Ferryx.app`의 설치된 `2026.826.10`을 실제 Settings 표면으로
+`2026.826.11`로 업데이트했다.
+
+1. Settings가 `Version 2026.826.11 is available.`와 활성화된 **Install and Relaunch**를 표시했다.
+2. 다운로드 progress가 UI에 표시되고 두 update control이 비활성화됐다.
+3. 기존 `.10` GUI PID가 종료됐다.
+4. `/Applications/Ferryx.app` bundle이 `2026.826.11`로 교체되고 새 `.11` GUI PID가 기동됐다.
+5. 재시작 후 Settings가 `Current version 2026.826.11` 및 `Ferryx is up to date.`를 표시했다.
+6. 이전에 하나만 보이던 Sidebar가 native session의 `maho-workspace`, `superwiki-mail-otp`, `orca-lite`를
+   원래 project와 함께 복구했다.
+7. 실제 terminal pane 세 개가 재시작 뒤에도 표시됐다. 업데이트 전부터 실행 중인 headless daemon PID도
+   업데이트 전후 동일하게 생존했고, native session에는 5개 workspace와 20개 terminal session이 유지됐다.
+
+판정: **공개 signed payload의 실제 설치, relaunch, 최신 version 판정, multi-project/worktree catalog
+recovery, terminal/agent daemon survival을 모두 확인했다.**
