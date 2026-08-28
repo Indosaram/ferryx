@@ -87,6 +87,17 @@ Both gaps are now pinned by tests rather than by inspection:
   pins the contract that a grid resize propagates the identical `(cols, rows)`
   to the PTY.
 
+## Blink is decoded but deliberately not animated
+
+`blink` (SGR 5) is decoded and folded into the row hash like every other
+attribute, but no renderer code consumes it, so blinking cells draw as ordinary
+text. That is intentional, not an oversight of the same kind as the underline
+bug: animating it needs a timer-driven repaint loop the render-on-demand surface
+host does not have, it would burn CPU and battery on an idle terminal, and
+blinking text is discouraged for accessibility. The field carries a comment
+saying so, because a decoded-yet-unconsumed attribute is precisely what made the
+underline defect easy to miss.
+
 ## Verification performed
 
 - `cargo test --lib`: **365 passed, 0 failed** (baseline before this work: 353).

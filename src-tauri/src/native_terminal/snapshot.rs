@@ -56,6 +56,14 @@ pub struct CellSnapshot {
     /// Faint / dim text decoration (SGR 2).
     pub faint: bool,
     /// Blinking text decoration (SGR 5).
+    ///
+    /// Decoded and carried through the row hash, but deliberately not animated:
+    /// blinking would require a timer-driven repaint loop that the render-on-
+    /// demand surface host does not have, and blinking text is discouraged for
+    /// accessibility. Blinking cells therefore render as ordinary text. Do not
+    /// mistake this for the bug where `underline` was hashed yet drawn nowhere
+    /// (see docs/NATIVE_TERMINAL_RENDERING_FIXES_2026-08-29.md); the other
+    /// attributes here are all consumed by the instance builder.
     pub blink: bool,
     /// Invisible / concealed text decoration (SGR 8).
     pub invisible: bool,
