@@ -28,10 +28,28 @@ export const SUPPORTED_AGENT_LOGOS = {
 
 export const SUPPORTED_AGENT_TYPES = Object.keys(SUPPORTED_AGENT_LOGOS) as readonly string[];
 
+// CLI binary names that differ from the agent type their logo is registered under.
+export const AGENT_LOGO_ALIASES: Record<string, keyof typeof SUPPORTED_AGENT_LOGOS> = {
+  "cursor-agent": "cursor",
+};
+
 export function resolveAgentLogo(agentType?: string | null): string | null {
   if (!agentType) return null;
   const normalized = agentType.trim().toLowerCase();
   return SUPPORTED_AGENT_LOGOS[normalized as keyof typeof SUPPORTED_AGENT_LOGOS] ?? null;
+}
+
+export function resolveAgentLogoByCommandName(name?: string | null): string | null {
+  if (!name) return null;
+  const normalized = name.trim().toLowerCase();
+  const aliased = AGENT_LOGO_ALIASES[normalized];
+  return aliased ? SUPPORTED_AGENT_LOGOS[aliased] : resolveAgentLogo(normalized);
+}
+
+export function isMonochromeAgentLogoByCommandName(name?: string | null): boolean {
+  if (!name) return false;
+  const normalized = name.trim().toLowerCase();
+  return isMonochromeAgentLogo(AGENT_LOGO_ALIASES[normalized] ?? normalized);
 }
 
 export function isMonochromeAgentLogo(agentType?: string | null): boolean {
