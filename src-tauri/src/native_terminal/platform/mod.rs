@@ -9,6 +9,9 @@ pub mod windows;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+#[cfg(target_os = "linux")]
+mod wayland_child;
+
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub mod fallback;
 
@@ -79,10 +82,10 @@ impl PlatformCompositorTarget {
 
     /// Reveals the compositor target after a frame has been presented successfully.
     ///
-    /// macOS creates its child view hidden so WindowServer never composites an
-    /// unconfigured Metal layer. Other platforms do not yet expose child views.
+    /// Every child-view platform creates its surface hidden so the compositor never shows
+    /// an unconfigured swapchain.
     pub fn reveal_after_present(&self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.inner.reveal();
     }
 
