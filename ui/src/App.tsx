@@ -9,6 +9,7 @@ import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { IconButton } from "./components/ui/IconButton";
+import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, type BrowserShortcutAction } from "./lib/browserTauri";
@@ -163,6 +164,7 @@ function canonicalizeProjectBootstrap(stored: ProjectBootstrap, startup: Registe
 }
 
 export function App() {
+  useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
   const [bootstrap, setBootstrap] = useState<ProjectBootstrap | null>(() =>
     isNativeRuntime ? null : loadProjectBootstrap(),
@@ -1480,16 +1482,7 @@ function WorkspaceApp({
       ) : null}
       {isSettingsOpen ? (
         <Suspense fallback={null}>
-          <SettingsDialog
-            open
-            onClose={handleCloseSettings}
-            projects={projects}
-            activeProjectId={activeProject.workspaceId}
-            activeWorktree={activeWorktree}
-            onSelectProject={handleSelectProject}
-            onAddProject={handleOpenAddProject}
-            onAddWorktree={handleOpenCreateWorktree}
-          />
+          <SettingsDialog open onClose={handleCloseSettings} />
         </Suspense>
       ) : null}
       {isAddProjectOpen ? (

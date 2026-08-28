@@ -416,21 +416,12 @@ export async function detectAgents(names: string[]): Promise<AgentDetection[]> {
 
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale";
 
-export type TailscaleStatus = {
-  installed: boolean;
-  running: boolean;
-  tailnetName: string | null;
-  selfDns: string | null;
-  serveActive: boolean;
-};
-
 export type RemoteGatewayStatus = {
   enabled: boolean;
   mode: RemoteNetworkMode;
   port: number;
   boundAddress: string | null;
   localIp: string | null;
-  tailscale: TailscaleStatus;
 };
 
 export type DeviceInfo = {
@@ -455,13 +446,6 @@ export async function getRemoteStatus(): Promise<RemoteGatewayStatus> {
       port: 43821,
       boundAddress: null,
       localIp: null,
-      tailscale: {
-        installed: false,
-        running: false,
-        tailnetName: null,
-        selfDns: null,
-        serveActive: false,
-      },
     };
   }
   return invokeCommand<RemoteGatewayStatus>("cmd_remote_status");
@@ -492,19 +476,6 @@ export async function revokeRemoteDevice(deviceId: string): Promise<boolean> {
   return invokeCommand<boolean>("cmd_remote_device_revoke", { deviceId });
 }
 
-export async function getTailscaleStatus(): Promise<TailscaleStatus> {
-  if (!isTauri()) {
-    return {
-      installed: false,
-      running: false,
-      tailnetName: null,
-      selfDns: null,
-      serveActive: false,
-    };
-  }
-  return invokeCommand<TailscaleStatus>("cmd_tailscale_status");
-}
-
 
 export async function dispatchNotification(req: import('./types').DispatchNotificationArgs): Promise<import('./types').DispatchNotificationResult> {
   return invokeCommand<import('./types').DispatchNotificationResult>('cmd_notification_dispatch', { req });
@@ -532,10 +503,15 @@ export async function playNotificationSound(args: {
   volume?: number;
   force?: boolean;
 }): Promise<import('./types').PlaySoundResult> {
+  // The backend player resolves a file path. The built-in "system" sound rides the
+  // OS banner and "none" is muted, so without a custom file there is nothing to play
+  // and invoking would only fail the required `path` argument.
+  if (!args.customSoundPath) {
+    return { played: false };
+  }
   return invokeCommand<import('./types').PlaySoundResult>('cmd_notification_play_sound', {
-    soundId: args.soundId,
-    customSoundPath: args.customSoundPath ?? null,
-    volume: args.volume ?? 1.0,
+    path: args.customSoundPath,
+    volume: Math.round((args.volume ?? 1) * 100),
     force: args.force ?? false,
   });
 }

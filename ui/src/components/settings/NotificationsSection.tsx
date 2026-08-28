@@ -7,6 +7,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 
+import { Alert, AlertDescription } from "../ui/alert";
 import { useNotificationSettings } from "../../lib/notificationSettings";
 import {
   getNotificationPermissionStatus,
@@ -30,12 +31,43 @@ import {
 } from "../ui/select";
 import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
-import { SettingRow, SettingsHeading } from "./primitives";
+import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
+
+type TestResult = { tone: "success" | "warning" | "error"; message: string };
+
+function describeProbeOutcome(outcome: string | undefined): TestResult {
+  switch (outcome) {
+    case "submitted":
+      return {
+        tone: "success",
+        message:
+          "Test notification sent. If no banner appeared, Focus or Do Not Disturb is suppressing it.",
+      };
+    case "permission-required":
+      return {
+        tone: "warning",
+        message:
+          "Notification permission has not been granted, so nothing was delivered. Allow notifications to receive alerts.",
+      };
+    case "blocked-by-system":
+      return {
+        tone: "warning",
+        message: "Notifications are blocked by system settings, so nothing was delivered.",
+      };
+    case "unsupported":
+      return { tone: "error", message: "This system does not support notifications." };
+    case "failed":
+      return { tone: "error", message: "The system rejected the notification." };
+    default:
+      return { tone: "warning", message: "Notification delivery could not be confirmed." };
+  }
+}
 
 export function NotificationsSection() {
   const { settings, updateSettings, resetSettings } = useNotificationSettings();
   const [permissionStatus, setPermissionStatus] = useState<NotificationPermissionStatus | null>(null);
   const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
 
   const refreshPermission = useCallback(async () => {
     try {
@@ -96,17 +128,27 @@ export function NotificationsSection() {
 
   const handleTestNotification = async () => {
     setIsTesting(true);
+    setTestResult(null);
     try {
-      await probeNotificationDelivery(true);
-      await handlePreviewSound();
+      const result = await probeNotificationDelivery(true);
+      setTestResult(describeProbeOutcome(result?.outcome));
+      // "system" delivers the OS default sound with the banner and "none" is muted;
+      // only an explicit custom file goes through the audio player.
+      if (settings.customSoundId === "custom" && settings.customSoundPath) {
+        await handlePreviewSound();
+      }
     } catch (err) {
-      console.error("Failed to send test notification:", err);
+      setTestResult({
+        tone: "error",
+        message: err instanceof Error ? err.message : "Failed to send test notification.",
+      });
     } finally {
       setIsTesting(false);
     }
   };
 
   const auth = permissionStatus?.authorization ?? "unknown";
+
   const isAuthorized = auth === "authorized" || auth === "provisional";
   const isDenied = auth === "denied";
   const isNotDetermined = auth === "not-determined" || auth === "unknown";
@@ -135,12 +177,12 @@ export function NotificationsSection() {
       <Card className="mb-6 rounded-lg border border-border bg-card p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-muted-foreground">
+            <span className="text-[12px] font-medium text-muted-foreground">
               OS Permission Status:
             </span>
             <Badge
               variant="outline"
-              className={`gap-1 px-2 py-0.5 text-xs font-medium ${permissionBadgeClass}`}
+              className={`gap-1 px-2 py-0.5 text-[11px] font-medium ${permissionBadgeClass}`}
             >
               {isAuthorized ? <CheckCircle2 className="size-3" /> : null}
               {isDenied ? <AlertTriangle className="size-3" /> : null}
@@ -153,7 +195,7 @@ export function NotificationsSection() {
               variant="link"
               size="sm"
               onClick={handleRequestPermission}
-              className="h-auto p-0 text-xs text-primary hover:underline"
+              className="h-auto p-0 text-[11px] text-primary hover:underline"
             >
               Request Permission
             </Button>
@@ -164,7 +206,7 @@ export function NotificationsSection() {
               variant="link"
               size="sm"
               onClick={handleOpenSettings}
-              className="flex h-auto items-center gap-1 p-0 text-xs text-muted-foreground hover:text-foreground hover:underline"
+              className="flex h-auto items-center gap-1 p-0 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
             >
               Open System Settings
               <ExternalLink className="size-3" />
@@ -173,22 +215,23 @@ export function NotificationsSection() {
         </div>
       </Card>
 
-      <div className="mb-5 flex items-center justify-between border-b border-border pb-3">
-        <h3 className="text-[12px] font-semibold">Alerts & Sounds</h3>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={resetSettings}
-          className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
-          title="Reset to defaults"
-        >
-          <RotateCcw className="size-3" />
-          Reset to defaults
-        </Button>
-      </div>
-
-      <div className="border-y border-border">
+      <SettingsGroup
+        title="Alerts & Sounds"
+        action={
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={resetSettings}
+            className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Reset to defaults"
+          >
+            <RotateCcw className="size-3" />
+            Reset to defaults
+          </Button>
+        }
+      >
+        <div className="border-b border-border">
         <SettingRow
           label="Enable Notifications"
           description="Master toggle for all desktop notifications and audio cues."
@@ -240,7 +283,7 @@ export function NotificationsSection() {
             >
               <SelectTrigger
                 aria-label="Notification Sound"
-                className="h-8 w-[180px] text-xs"
+                className="h-8 w-[180px] text-[11px]"
               >
                 <SelectValue placeholder="Notification sound" />
               </SelectTrigger>
@@ -263,6 +306,7 @@ export function NotificationsSection() {
                   size="sm"
                   aria-label="Browse custom audio file"
                   onClick={handlePickAudio}
+                  disabled={!settings.enabled}
                   className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
                   Browse...
@@ -272,12 +316,17 @@ export function NotificationsSection() {
                   variant="outline"
                   size="sm"
                   onClick={handlePreviewSound}
-                  disabled={!settings.customSoundPath}
+                  disabled={!settings.enabled || !settings.customSoundPath}
                   className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
                   Preview
                 </Button>
               </div>
+            ) : null}
+            {settings.customSoundId === "custom" && !settings.customSoundPath ? (
+              <span role="alert" className="text-[11px] text-status-warning">
+                Choose an audio file to enable the custom sound.
+              </span>
             ) : null}
           </div>
         </SettingRow>
@@ -301,7 +350,7 @@ export function NotificationsSection() {
               }}
               className="w-32"
             />
-            <span className="w-8 text-xs text-muted-foreground">
+            <span className="w-8 text-[11px] text-muted-foreground">
               {Math.round(settings.customSoundVolume * 100)}%
             </span>
           </div>
@@ -314,14 +363,27 @@ export function NotificationsSection() {
           <Button
             type="button"
             onClick={handleTestNotification}
-            disabled={isTesting}
+            disabled={!settings.enabled || isTesting}
             size="sm"
             className="no-drag h-7 shrink-0 gap-1.5 px-2.5 text-[11px] font-medium shadow-sm transition-colors"
           >
             {isTesting ? "Sending..." : "Send Test Notification"}
           </Button>
         </SettingRow>
+
+        {testResult ? (
+          <Alert
+            role="alert"
+            variant={testResult.tone === "error" ? "destructive" : "default"}
+            className="mt-2"
+          >
+            <AlertDescription className="text-[11px] leading-normal">
+              {testResult.message}
+            </AlertDescription>
+          </Alert>
+        ) : null}
       </div>
+      </SettingsGroup>
     </section>
   );
 }

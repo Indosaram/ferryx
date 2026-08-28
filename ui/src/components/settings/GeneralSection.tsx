@@ -195,21 +195,21 @@ export function CliLauncherCard() {
       {error ? (
         <Alert
           variant="destructive"
-          className="mt-3 flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5 text-xs text-destructive [&>svg]:static [&>svg~*]:pl-0"
+          className="mt-3 flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5 text-[11px] text-destructive [&>svg]:static [&>svg~*]:pl-0"
         >
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-          <AlertDescription className="text-xs leading-normal">{error}</AlertDescription>
+          <AlertDescription className="text-[11px] leading-normal">{error}</AlertDescription>
         </Alert>
       ) : null}
 
       <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="space-y-0.5 text-xs">
+        <div className="space-y-0.5 text-[11px]">
           <div className="text-muted-foreground">
             Launcher location:{" "}
             <code className="font-mono text-foreground">{status?.launcherPath ?? "~/.local/bin/ferryx"}</code>
           </div>
           {status?.currentTarget ? (
-            <div className="truncate font-mono text-[10px] text-muted-foreground">
+            <div className="truncate font-mono text-[11px] text-muted-foreground">
               Target: {status.currentTarget}
             </div>
           ) : null}
@@ -217,10 +217,10 @@ export function CliLauncherCard() {
 
         <div className="flex items-center gap-2">
           {status?.isSupported === false && (
-            <span className="text-xs text-muted-foreground">Available in the Ferryx desktop app on Unix-like systems.</span>
+            <span className="text-[11px] text-muted-foreground">Available in the Ferryx desktop app on Unix-like systems.</span>
           )}
           {status?.isSupported !== false && (status?.isInstalled ? (
-            <Badge variant="outline" className="inline-flex items-center gap-1 border-transparent px-0 text-xs font-medium text-status-success shadow-none">
+            <Badge variant="outline" className="inline-flex items-center gap-1 border-transparent px-0 text-[11px] font-medium text-status-success shadow-none">
               <CheckCircle2 className="size-3.5" />
               Installed
             </Badge>

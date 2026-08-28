@@ -1,3 +1,8 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { createElement } from "react";
+
+import { act, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -6,6 +11,7 @@ import {
   loadAppearanceSettings,
   resetAppearanceSettings,
   saveAppearanceSettings,
+  useApplyAppearanceSettings,
 } from "./appearanceSettings";
 import {
   loadBrowserSettings,
@@ -38,6 +44,37 @@ describe("settings runtime contracts", () => {
 
     resetAppearanceSettings();
     expect(loadAppearanceSettings()).toMatchObject({ theme: "charcoal", accentColor: "default", density: "compact" });
+  });
+
+  it("applies live appearance updates when useApplyAppearanceSettings is mounted", () => {
+    function AppearanceWatcher() {
+      useApplyAppearanceSettings();
+      return null;
+    }
+    const { unmount } = render(createElement(AppearanceWatcher));
+
+    act(() => {
+      saveAppearanceSettings({ theme: "light", accentColor: "emerald", density: "comfortable" });
+    });
+
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.accent).toBe("emerald");
+    expect(document.documentElement.dataset.density).toBe("comfortable");
+    expect(document.documentElement.style.colorScheme).toBe("light");
+
+    unmount();
+  });
+
+  it("wires useApplyAppearanceSettings into the App root component", () => {
+    const appSource = readFileSync(resolve(__dirname, "../App.tsx"), "utf8");
+    expect(appSource).toMatch(/useApplyAppearanceSettings\(\)/);
+  });
+
+  it("does not perform DOM text patching or arbitrary div scans in settingsRuntimeBridge", () => {
+    const bridgeSource = readFileSync(resolve(__dirname, "./settingsRuntimeBridge.ts"), "utf8");
+    expect(bridgeSource).not.toContain(".textContent =");
+    expect(bridgeSource).not.toContain('querySelectorAll("div")');
+    expect(bridgeSource).not.toContain('querySelectorAll("h2")');
   });
 
   it("reapplies persisted appearance through the runtime bridge after remount", () => {
@@ -103,20 +140,33 @@ describe("settings runtime contracts", () => {
       );
     });
 
-    it("updates appearance when settings controls dispatch change events", async () => {
+    it("re-applies system appearance when OS color scheme flips", () => {
+      saveAppearanceSettings({ theme: "system" });
+      let mediaCallback: (() => void) | undefined;
+      const matchMediaMock = vi.fn().mockImplementation((query: string) => ({
+        matches: true,
+        media: query,
+        addEventListener: (_event: string, cb: () => void) => {
+          mediaCallback = cb;
+        },
+        removeEventListener: vi.fn(),
+      }));
+      vi.stubGlobal("matchMedia", matchMediaMock);
+
       installSettingsRuntimeBridge();
-      saveAppearanceSettings({ density: "compact" });
+      expect(document.documentElement.dataset.theme).toBe("light");
 
-      const input = document.createElement("select");
-      input.id = "appearance-density";
-      document.body.appendChild(input);
+      matchMediaMock.mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
 
-      saveAppearanceSettings({ density: "comfortable" });
-      input.dispatchEvent(new Event("change", { bubbles: true }));
+      mediaCallback?.();
+      expect(document.documentElement.dataset.theme).toBe("dark");
 
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(document.documentElement.dataset.density).toBe("comfortable");
-      input.remove();
+      vi.unstubAllGlobals();
     });
   });
 });

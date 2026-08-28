@@ -7,7 +7,6 @@ use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
 };
-use crate::remote::tailscale::{check_tailscale_status, SystemCommandRunner, TailscaleStatus};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -102,7 +101,6 @@ pub struct RemoteGatewayStatusResponse {
     pub port: u16,
     pub bound_address: Option<String>,
     pub local_ip: Option<String>,
-    pub tailscale: TailscaleStatus,
     pub restart_policy: RemoteRestartPolicy,
 }
 
@@ -125,7 +123,6 @@ pub struct CreatePairingCodeResponse {
 pub async fn cmd_remote_status(
     manager: State<'_, Arc<RemoteGatewayManager>>,
 ) -> Result<RemoteGatewayStatusResponse, IpcError> {
-    let tailscale = check_tailscale_status(&SystemCommandRunner);
     let local_ip = get_local_ip();
 
     match &manager.inner {
@@ -137,7 +134,6 @@ pub async fn cmd_remote_status(
                 port: status.port,
                 bound_address: status.bound_address,
                 local_ip,
-                tailscale,
                 restart_policy: RemoteRestartPolicy::RestoreListener,
             })
         }
@@ -151,7 +147,6 @@ pub async fn cmd_remote_status(
                 port: config.port,
                 bound_address,
                 local_ip,
-                tailscale,
                 restart_policy: config.restart_policy(),
             })
         }
@@ -401,11 +396,6 @@ pub async fn cmd_remote_get_active_selection(
         RemoteGatewayManagerInner::Daemon(client) => client.remote_get_active_selection().await,
         RemoteGatewayManagerInner::State { state, .. } => Ok(state.active_selection()),
     }
-}
-
-#[tauri::command]
-pub async fn cmd_tailscale_status() -> Result<TailscaleStatus, IpcError> {
-    Ok(check_tailscale_status(&SystemCommandRunner))
 }
 
 fn get_local_ip() -> Option<String> {

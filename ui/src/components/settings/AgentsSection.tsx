@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Bot, Check, ChevronDown, RotateCw } from "lucide-react";
+import { AlertTriangle, Bot, Check, ChevronDown, RotateCw } from "lucide-react";
 
 import {
   AGENT_CANDIDATES,
@@ -10,6 +10,7 @@ import {
   type AgentSettings,
 } from "../../lib/agentsSettings";
 import { detectAgents, type AgentDetection } from "../../lib/tauri";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -21,15 +22,18 @@ export function AgentsSection() {
   const [settings, setSettings] = useState<AgentSettings>(loadAgentSettings);
   const [detections, setDetections] = useState<AgentDetection[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [detectionError, setDetectionError] = useState<string | null>(null);
   const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
 
   const runDetection = useCallback(async () => {
     setRefreshing(true);
+    setDetectionError(null);
     try {
       const results = await detectAgents([...AGENT_CANDIDATES]);
       setDetections(results);
-    } catch {
+    } catch (err) {
       // Keep the last successful detection results when refresh fails.
+      setDetectionError(err instanceof Error ? err.message : "Failed to detect installed agents");
     } finally {
       setRefreshing(false);
     }
@@ -144,10 +148,10 @@ export function AgentsSection() {
       <div className="mt-8">
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <h3 className="text-[12px] font-semibold text-foreground">Installed</h3>
+            <h3 className="text-[13px] font-semibold text-foreground">Installed</h3>
             <Badge
               variant="secondary"
-              className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+              className="rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
             >
               {availableAgents.length} detected
             </Badge>
@@ -164,6 +168,16 @@ export function AgentsSection() {
             Refresh
           </Button>
         </div>
+
+        {detectionError ? (
+          <Alert
+            variant="destructive"
+            className="mb-3 flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5 text-[11px] text-destructive [&>svg]:static [&>svg~*]:pl-0"
+          >
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            <AlertDescription className="text-[11px] leading-normal">{detectionError}</AlertDescription>
+          </Alert>
+        ) : null}
 
         <div className="divide-y divide-border border-y border-border">
           {resolvedAgents.map((agent) => {
@@ -186,7 +200,7 @@ export function AgentsSection() {
                           }))
                         }
                         aria-label={`Toggle ${displayName} configuration`}
-                        className="no-drag flex items-center gap-1.5 text-left text-xs font-medium text-foreground hover:text-primary transition-colors"
+                        className="no-drag flex items-center gap-1.5 text-left text-[13px] font-medium text-foreground hover:text-primary transition-colors"
                       >
                         <ChevronDown
                           className={`size-3.5 text-muted-foreground transition-transform ${
@@ -198,14 +212,14 @@ export function AgentsSection() {
                       {agent.available ? (
                         <Badge
                           variant="outline"
-                          className="border-transparent bg-status-success/10 px-1.5 py-0.5 text-[10px] font-medium text-status-success shadow-none"
+                          className="border-transparent bg-status-success/10 px-1.5 py-0.5 text-[11px] font-medium text-status-success shadow-none"
                         >
                           Detected
                         </Badge>
                       ) : (
                         <Badge
                           variant="secondary"
-                          className="border-transparent bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-none"
+                          className="border-transparent bg-muted/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground shadow-none"
                         >
                           Not detected
                         </Badge>
@@ -233,7 +247,7 @@ export function AgentsSection() {
                         }
                       />
                       <span
-                        className={`text-xs ${
+                        className={`text-[11px] ${
                           agent.available ? "text-foreground" : "text-muted-foreground opacity-60"
                         }`}
                       >
@@ -261,7 +275,7 @@ export function AgentsSection() {
                         onBlur={(e) =>
                           updateOverride(agent.name, { command: e.target.value })
                         }
-                        className="h-8 w-full font-mono text-xs"
+                        className="h-8 w-full font-mono text-[11px]"
                       />
                     </div>
                     <div>
@@ -280,7 +294,7 @@ export function AgentsSection() {
                         onBlur={(e) =>
                           updateOverride(agent.name, { args: e.target.value })
                         }
-                        className="h-8 w-full font-mono text-xs"
+                        className="h-8 w-full font-mono text-[11px]"
                       />
                     </div>
                   </div>

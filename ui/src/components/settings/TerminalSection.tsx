@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { RotateCcw, TerminalSquare } from "lucide-react";
 
 import { Button } from "../ui/button";
@@ -10,16 +11,48 @@ import type { TerminalSectionProps } from "./types";
 export function TerminalSection({
   fontFamily,
   fontSize,
-  scrollback,
   macosOptionAsAlt,
   source,
   sourcePath,
   onFontFamily,
   onFontSize,
-  onScrollback,
   onOptionAsAlt,
   onUseImported,
 }: TerminalSectionProps) {
+  const [familyDraft, setFamilyDraft] = useState(fontFamily);
+  const [sizeDraft, setSizeDraft] = useState(String(fontSize));
+
+  useEffect(() => {
+    setFamilyDraft(fontFamily);
+  }, [fontFamily]);
+
+  useEffect(() => {
+    setSizeDraft(String(fontSize));
+  }, [fontSize]);
+
+  const commitFamily = () => {
+    if (familyDraft.trim() === "") {
+      setFamilyDraft(fontFamily);
+      return;
+    }
+    onFontFamily(familyDraft);
+  };
+
+  const handleFontSizeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setSizeDraft(event.target.value);
+  };
+
+  const commitFontSize = () => {
+    const parsed = Number(sizeDraft);
+    if (sizeDraft.trim() === "" || !Number.isFinite(parsed)) {
+      setSizeDraft(String(fontSize));
+      return;
+    }
+    onFontSize(parsed);
+  };
+
+
+
   return (
     <section aria-labelledby="settings-terminal-heading">
       <SettingsHeading
@@ -32,10 +65,10 @@ export function TerminalSection({
       </h2>
       <div className="mb-5 flex items-start justify-between gap-5 border-y border-border py-3">
         <div className="min-w-0">
-          <div className="text-[12px] font-semibold">Effective preferences</div>
+          <div className="text-[13px] font-semibold">Effective preferences</div>
           <div className="mt-1 text-[11px] text-muted-foreground">{source}</div>
           {sourcePath ? (
-            <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground/65">
+            <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground/65">
               {sourcePath}
             </div>
           ) : null}
@@ -62,50 +95,40 @@ export function TerminalSection({
           </Label>
           <Input
             id="terminal-font-family"
-            value={fontFamily}
-            onChange={(event) => onFontFamily(event.target.value)}
-            className="h-8 text-xs"
+            value={familyDraft}
+            onChange={(event) => setFamilyDraft(event.target.value)}
+            onBlur={commitFamily}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                commitFamily();
+              }
+            }}
+            className="h-8 text-[11px]"
           />
-          <p className="mt-1 text-[10px] text-muted-foreground">
+          <p className="mt-1 text-[11px] text-muted-foreground">
             Leave the local override reset to follow Ghostty.
           </p>
         </div>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Label
-              htmlFor="terminal-font-size"
-              className="mb-1.5 block text-[11px] font-medium"
-            >
-              Font size
-            </Label>
-            <Input
-              id="terminal-font-size"
-              type="number"
-              min={10}
-              max={24}
-              value={fontSize}
-              onChange={(event) => onFontSize(Number(event.target.value))}
-              className="h-8 text-xs"
-            />
-          </div>
-          <div>
-            <Label
-              htmlFor="terminal-scrollback"
-              className="mb-1.5 block text-[11px] font-medium"
-            >
-              Scrollback
-            </Label>
-            <Input
-              id="terminal-scrollback"
-              type="number"
-              min={1000}
-              max={100000}
-              step={1000}
-              value={scrollback}
-              onChange={(event) => onScrollback(Number(event.target.value))}
-              className="h-8 text-xs"
-            />
-          </div>
+        <div>
+          <Label
+            htmlFor="terminal-font-size"
+            className="mb-1.5 block text-[11px] font-medium"
+          >
+            Font size
+          </Label>
+          <Input
+            id="terminal-font-size"
+            type="number"
+            min={10}
+            max={24}
+            value={sizeDraft}
+            onChange={handleFontSizeChange}
+            onBlur={commitFontSize}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commitFontSize();
+            }}
+            className="h-8 text-[11px]"
+          />
         </div>
         <div className="flex items-center justify-between gap-4 border-y border-border py-3 text-[11px]">
           <div>
@@ -115,7 +138,7 @@ export function TerminalSection({
             >
               macOS Option as Alt
             </Label>
-            <div className="mt-0.5 text-[10px] text-muted-foreground">
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
               Maps the Option key to terminal Meta/Alt behavior.
             </div>
           </div>

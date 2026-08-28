@@ -313,7 +313,6 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_device_revoke,
         cmd_remote_set_active_selection,
         cmd_remote_get_active_selection,
-        cmd_tailscale_status,
         cmd_project_initial,
         cmd_project_register,
         cmd_project_branches,

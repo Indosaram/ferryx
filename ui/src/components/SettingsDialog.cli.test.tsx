@@ -32,7 +32,6 @@ vi.mock("../lib/tauri", () => ({
   getCliLauncherStatus,
   getNotificationPermissionStatus: vi.fn(),
   getRemoteStatus: vi.fn(),
-  getTailscaleStatus: vi.fn(),
   installCliLauncher,
   listRemoteDevices: vi.fn(),
   openNotificationSystemSettings: vi.fn(),

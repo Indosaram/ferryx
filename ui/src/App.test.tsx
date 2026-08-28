@@ -244,9 +244,9 @@ vi.mock("./components/CommandPalette", () => ({
     open ? <div data-testid="command-palette" /> : null,
 }));
 vi.mock("./components/SettingsDialog", () => ({
-  SettingsDialog: ({ open, onClose, projects, activeProjectId, activeWorktree, onSelectProject, onAddProject, onAddWorktree }: any) =>
+  SettingsDialog: ({ open, onClose }: any) =>
     open ? (
-      <div data-testid="settings-dialog" data-projects={JSON.stringify(projects)} data-active-project-id={activeProjectId} data-active-worktree={activeWorktree?.path ?? ""} data-has-select-project={String(Boolean(onSelectProject))} data-has-add-project={String(Boolean(onAddProject))} data-has-add-worktree={String(Boolean(onAddWorktree))}>
+      <div data-testid="settings-dialog">
         <button onClick={onClose}>Close settings</button>
       </div>
     ) : null,
@@ -2043,24 +2043,6 @@ describe("App project workspace flow", () => {
     const lastSaved = native.saveSession.mock.lastCall?.[0];
     expect(lastSaved?.workspaces).toHaveProperty("alpha");
     expect(lastSaved?.workspaces).toHaveProperty("beta");
-  });
-
-  it("passes live workspace state and project callbacks to SettingsDialog", async () => {
-    const projects = [
-      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
-      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
-    ];
-    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
-    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "beta");
-    render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    const dialog = await screen.findByTestId("settings-dialog");
-    expect(dialog.dataset.projects).toBe(JSON.stringify(projects));
-    expect(dialog.dataset.activeProjectId).toBe("beta");
-    expect(dialog.dataset.activeWorktree).toBe("/repo/main");
-    expect(dialog.dataset.hasSelectProject).toBe("true");
-    expect(dialog.dataset.hasAddProject).toBe("true");
-    expect(dialog.dataset.hasAddWorktree).toBe("true");
   });
 
   it("conditionally mounts SettingsDialog and CommandPalette only when open", () => {

@@ -1,20 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, Radio, Trash2 } from "lucide-react";
+import { AlertTriangle, Radio, Trash2 } from "lucide-react";
 
 import {
   createPairingCode,
   disableRemoteGateway,
   enableRemoteGateway,
   getRemoteStatus,
-  getTailscaleStatus,
   listRemoteDevices,
   revokeRemoteDevice,
   type DeviceInfo,
   type RemoteGatewayStatus,
-  type TailscaleStatus,
 } from "../../lib/tauri";
 
 import { SettingRow, SettingsHeading } from "./primitives";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
@@ -25,12 +24,12 @@ export function RemoteAccessSection() {
   const statusRef = useRef<RemoteGatewayStatus | null>(null);
   statusRef.current = status;
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  const [tailscaleStatus, setTailscaleStatus] = useState<TailscaleStatus | null>(null);
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [isGeneratingQr, setIsGeneratingQr] = useState(false);
   const [qrError, setQrError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [pinCopied, setPinCopied] = useState(false);
@@ -54,17 +53,15 @@ export function RemoteAccessSection() {
   useEffect(() => () => clearCopyTimer(), [clearCopyTimer]);
 
   const refreshStatus = useCallback(async (): Promise<RemoteGatewayStatus | null> => {
-    const [s, devList, ts] = await Promise.all([
+    const [s, devList] = await Promise.all([
       getRemoteStatus().catch(() => null),
       listRemoteDevices().catch(() => []),
-      getTailscaleStatus().catch(() => null),
     ]);
     if (s) {
       statusRef.current = s;
       setStatus(s);
     }
     setDevices(devList);
-    setTailscaleStatus(ts);
     return s;
   }, []);
 
@@ -77,14 +74,9 @@ export function RemoteAccessSection() {
       setPairingCode(res.code);
 
       const port = s?.port ?? 43821;
-      let host = s?.localIp ? `${s.localIp}:${port}` : `localhost:${port}`;
-      let proto = "http";
-      if (s?.tailscale.running && s.tailscale.selfDns) {
-        host = s.tailscale.selfDns;
-        proto = "https";
-      }
+      const host = s?.localIp ? `${s.localIp}:${port}` : `localhost:${port}`;
 
-      const connectUrl = `${proto}://${host}/#pair=${res.code}`;
+      const connectUrl = `http://${host}/#pair=${res.code}`;
       const QRCode = (await import("qrcode")).default;
       const dataUrl = await QRCode.toDataURL(connectUrl, {
         width: 180,
@@ -102,26 +94,19 @@ export function RemoteAccessSection() {
   }, []);
 
   const handleGeneratePairing = () => {
+    setActionError(null);
     clearCopyTimer();
     setPinCopied(false);
     void generatePairing();
   };
 
   useEffect(() => {
-    let active = true;
-    void (async () => {
-      const s = await refreshStatus();
-      if (active && s?.enabled) {
-        void generatePairing(s);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [refreshStatus, generatePairing]);
+    void refreshStatus();
+  }, [refreshStatus]);
 
   const handleToggle = async (enabled: boolean) => {
     setLoading(true);
+    setActionError(null);
     try {
       if (!enabled) {
         const s = await disableRemoteGateway();
@@ -137,28 +122,27 @@ export function RemoteAccessSection() {
         statusRef.current = s;
         setStatus(s);
         await refreshStatus();
-        await generatePairing(s);
       }
-    } catch {
-      // Keep the last known status when gateway IPC fails.
+    } catch (error: unknown) {
+      setActionError(error instanceof Error ? error.message : "Failed to update remote access");
     } finally {
       setLoading(false);
     }
   };
 
   const handleRevoke = async (deviceId: string) => {
+    setActionError(null);
     try {
       await revokeRemoteDevice(deviceId);
       setConfirmRevokeId(null);
       await refreshStatus();
-    } catch {
-      // Keep confirmation open so the user can retry.
+    } catch (error: unknown) {
+      setActionError(error instanceof Error ? error.message : "Failed to revoke device");
     }
   };
 
   const port = status?.port ?? 43821;
   const localUrl = status?.localIp ? `http://${status.localIp}:${port}` : `http://localhost:${port}`;
-  const tailscaleUrl = status?.tailscale.running && status.tailscale.selfDns ? `https://${status.tailscale.selfDns}` : null;
 
   return (
     <section aria-labelledby="settings-remote-heading" aria-label="Remote Access">
@@ -170,10 +154,19 @@ export function RemoteAccessSection() {
       <h2 id="settings-remote-heading" className="sr-only">
         Remote Access
       </h2>
+      {actionError ? (
+        <Alert
+          variant="destructive"
+          className="mb-4 flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5 text-[11px] text-destructive [&>svg]:static [&>svg~*]:pl-0"
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <AlertDescription className="text-[11px] leading-normal">{actionError}</AlertDescription>
+        </Alert>
+      ) : null}
       <div className="border-y border-border">
         <SettingRow
           label="Remote Access"
-          description="Enable access to live terminal sessions over your local network and Tailscale."
+          description="Enable access to live terminal sessions over your local network."
         >
           <div className="flex items-center gap-2">
             <Switch
@@ -183,29 +176,6 @@ export function RemoteAccessSection() {
               disabled={loading}
               onCheckedChange={(checked) => void handleToggle(checked)}
             />
-          </div>
-        </SettingRow>
-
-        <SettingRow
-          label="Tailscale Status"
-          description="Mesh network status for secure peer-to-peer remote terminal connections."
-        >
-          <div className="text-right text-xs">
-            {tailscaleStatus?.running ? (
-              <span className="inline-flex items-center gap-1 font-medium text-status-success">
-                <CheckCircle2 className="size-3.5" />
-                Running {tailscaleStatus.tailnetName ? `(${tailscaleStatus.tailnetName})` : ""}
-              </span>
-            ) : null}
-            {!tailscaleStatus?.running && tailscaleStatus?.installed ? (
-              <span className="text-status-warning font-medium">Installed (Disconnected)</span>
-            ) : null}
-            {!tailscaleStatus?.running && !tailscaleStatus?.installed ? (
-              <span className="text-muted-foreground">Not installed</span>
-            ) : null}
-            {tailscaleStatus?.selfDns ? (
-              <div className="font-mono text-[10px] text-muted-foreground">{tailscaleStatus.selfDns}</div>
-            ) : null}
           </div>
         </SettingRow>
 
@@ -220,12 +190,12 @@ export function RemoteAccessSection() {
                   <img src={qrDataUrl} alt="Pairing QR Code" className="h-[160px] w-[160px] rounded" />
                 ) : null}
                 {!qrDataUrl && isGeneratingQr ? (
-                  <div className="flex h-[160px] w-[160px] items-center justify-center text-xs text-muted-foreground">
+                  <div className="flex h-[160px] w-[160px] items-center justify-center text-[11px] text-muted-foreground">
                     Generating...
                   </div>
                 ) : null}
                 {!qrDataUrl && !isGeneratingQr && qrError ? (
-                  <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 p-2 text-center text-xs text-destructive">
+                  <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 p-2 text-center text-[11px] text-destructive">
                     <span>{qrError}</span>
                     <Button
                       type="button"
@@ -239,7 +209,7 @@ export function RemoteAccessSection() {
                   </div>
                 ) : null}
                 {!qrDataUrl && !isGeneratingQr && !qrError ? (
-                  <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 text-[11px] text-muted-foreground">
                     <Button
                       type="button"
                       variant="default"
@@ -263,7 +233,7 @@ export function RemoteAccessSection() {
                         void navigator.clipboard.writeText(pairingCode);
                         showCopied(setPinCopied);
                       }}
-                      className="h-auto p-0 font-mono text-xs font-semibold text-status-success hover:bg-transparent hover:underline"
+                      className="h-auto p-0 font-mono text-[11px] font-semibold text-status-success hover:bg-transparent hover:underline"
                     >
                       {pinCopied ? "Copied" : `PIN: ${pairingCode}`}
                     </Button>
@@ -273,7 +243,7 @@ export function RemoteAccessSection() {
                       size="sm"
                       disabled={isGeneratingQr}
                       onClick={handleGeneratePairing}
-                      className="h-auto p-0 text-[10px] text-muted-foreground underline hover:text-foreground disabled:opacity-50"
+                      className="h-auto p-0 text-[11px] text-muted-foreground underline hover:text-foreground disabled:opacity-50"
                     >
                       {isGeneratingQr ? "Generating..." : "New Code"}
                     </Button>
@@ -285,7 +255,7 @@ export function RemoteAccessSection() {
                     variant="link"
                     size="sm"
                     onClick={handleGeneratePairing}
-                    className="h-auto p-0 text-[10px] text-muted-foreground underline hover:text-foreground"
+                    className="h-auto p-0 text-[11px] text-muted-foreground underline hover:text-foreground"
                   >
                     Generate Code
                   </Button>
@@ -308,16 +278,11 @@ export function RemoteAccessSection() {
                       void navigator.clipboard.writeText(localUrl);
                       showCopied(setCopied);
                     }}
-                    className="h-auto rounded bg-muted px-1.5 py-0.5 text-[10px] hover:bg-muted/80"
+                    className="h-auto rounded bg-muted px-1.5 py-0.5 text-[11px] hover:bg-muted/80"
                   >
                     {copied ? "Copied" : "Copy"}
                   </Button>
                 </div>
-                {tailscaleUrl && (
-                  <div className="font-mono text-[10px] text-muted-foreground">
-                    Tailscale: {tailscaleUrl}
-                  </div>
-                )}
               </div>
             </SettingRow>
           </>
@@ -328,35 +293,26 @@ export function RemoteAccessSection() {
         <h3 className="text-[12px] font-semibold">Paired Devices</h3>
         <Card className="divide-y divide-border rounded-lg border border-border bg-card shadow-none">
           {devices.length === 0 ? (
-            <div className="p-4 text-center text-xs text-muted-foreground">No paired devices.</div>
+            <div className="p-4 text-center text-[12px] text-muted-foreground">No paired devices.</div>
           ) : (
             devices.map((dev) => (
               <div key={dev.id} className="flex items-center justify-between gap-4 p-3">
                 <div className="min-w-0 space-y-0.5">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-foreground">{dev.name || dev.id}</span>
+                    <span className="text-[13px] font-medium text-foreground">{dev.name || dev.id}</span>
                     <Badge
                       variant="secondary"
-                      className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground shadow-none"
+                      className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] uppercase text-muted-foreground shadow-none"
                     >
                       {dev.permission}
                     </Badge>
-                    {dev.revoked ? (
-                      <Badge
-                        variant="destructive"
-                        className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] text-destructive shadow-none"
-                      >
-                        Revoked
-                      </Badge>
-                    ) : null}
                   </div>
-                  <div className="text-[10px] text-muted-foreground">
+                  <div className="text-[11px] text-muted-foreground">
                     {dev.lastSeenAt ? `Last active ${new Date(dev.lastSeenAt).toLocaleString()}` : `Device ID: ${dev.id}`}
                   </div>
                 </div>
-                {!dev.revoked && (
-                  confirmRevokeId === dev.id ? (
-                    <div className="flex items-center gap-1.5">
+                {confirmRevokeId === dev.id ? (
+                  <div className="flex items-center gap-1.5">
                       <Button
                         type="button"
                         variant="destructive"
@@ -376,20 +332,19 @@ export function RemoteAccessSection() {
                       >
                         Cancel
                       </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      aria-label={`Revoke device ${dev.name || dev.id}`}
-                      onClick={() => setConfirmRevokeId(dev.id)}
-                      className="inline-flex h-7 items-center gap-1 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-destructive"
-                    >
-                      <Trash2 className="size-3" />
-                      Revoke
-                    </Button>
-                  )
+                  </div>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label={`Revoke device ${dev.name || dev.id}`}
+                    onClick={() => setConfirmRevokeId(dev.id)}
+                    className="inline-flex h-7 items-center gap-1 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-destructive"
+                  >
+                    <Trash2 className="size-3" />
+                    Revoke
+                  </Button>
                 )}
               </div>
             ))

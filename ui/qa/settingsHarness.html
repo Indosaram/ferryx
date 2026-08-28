@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" class="dark" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Settings Dialog QA Harness</title>
+    <script>
+      // Early synchronous Tauri stubs
+      window.isTauri = true;
+      window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {
+        invoke: async () => ({}),
+        transformCallback: (cb) => { return 1; },
+        unregisterCallback: () => {},
+        convertFileSrc: (s) => s,
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = window.__TAURI_EVENT_PLUGIN_INTERNALS__ || {
+        unregisterListener: () => {},
+      };
+    </script>
+  </head>
+  <body class="bg-background text-foreground antialiased selection:bg-accent selection:text-foreground">
+    <div id="root"></div>
+    <script type="module" src="./settingsHarness.tsx"></script>
+  </body>
+</html>

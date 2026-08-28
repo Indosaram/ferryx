@@ -6,49 +6,6 @@ use crate::worktree::WorktreeIdentity;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-struct MockTailscaleRunner {
-    installed: bool,
-    running: bool,
-    self_dns: Option<String>,
-}
-
-impl CommandRunner for MockTailscaleRunner {
-    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
-        if program != "tailscale" {
-            return Err("not tailscale".into());
-        }
-        if !self.installed {
-            return Err("command not found".into());
-        }
-        if args.contains(&"status") {
-            let json = serde_json::json!({
-                "BackendState": if self.running { "Running" } else { "Stopped" },
-                "CurrentTailnet": { "Name": "test-tailnet" },
-                "Self": { "DNSName": self.self_dns.as_deref().unwrap_or("my-mac.test.ts.net.") }
-            });
-            Ok(json.to_string())
-        } else if args.contains(&"serve") {
-            Ok(r#"{"TCP":{"43821":{"HTTPS":true}}}"#.into())
-        } else {
-            Ok("".into())
-        }
-    }
-}
-
-#[test]
-fn test_tailscale_status_parsing() {
-    let runner = MockTailscaleRunner {
-        installed: true,
-        running: true,
-        self_dns: Some("my-mac.tailnet.ts.net.".into()),
-    };
-    let status = check_tailscale_status(&runner);
-    assert!(status.installed);
-    assert!(status.running);
-    assert_eq!(status.self_dns, Some("my-mac.tailnet.ts.net".into()));
-    assert_eq!(status.tailnet_name, Some("test-tailnet".into()));
-}
-
 #[test]
 fn test_auth_manager_pairing_and_revocation() {
     let auth = AuthManager::new();

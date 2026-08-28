@@ -37,12 +37,12 @@ export function ShortcutsSection({ isMac }: ShortcutsSectionProps) {
         <div className="relative flex items-center">
           <Search className="pointer-events-none absolute left-2.5 size-3.5 text-muted-foreground z-10" />
           <Input
-            type="text"
+            type="search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search shortcuts (e.g. tab, split, zoom, workspace)..."
             aria-label="Search keyboard shortcuts"
-            className="h-8 bg-background pl-8 pr-3 text-xs"
+            className="h-8 bg-background pl-8 pr-3 text-[11px]"
           />
         </div>
         <div className="flex flex-wrap gap-1">
@@ -78,17 +78,17 @@ export function ShortcutsSection({ isMac }: ShortcutsSectionProps) {
                 className="flex min-h-10 items-center justify-between gap-4 border-b border-border px-1 last:border-b-0"
               >
                 <div className="min-w-0 py-2">
-                  <div className="truncate text-[12px] font-medium text-foreground">{shortcut.title}</div>
-                  <div className="text-[10px] text-muted-foreground">{shortcut.group}</div>
+                  <div className="truncate text-[13px] font-medium text-foreground">{shortcut.title}</div>
+                  <div className="text-[11px] text-muted-foreground">{shortcut.group}</div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <kbd className="rounded border border-border bg-muted/70 px-1.5 py-0.5 font-mono text-[10px] text-foreground">
+                  <kbd className="rounded border border-border bg-muted/70 px-1.5 py-0.5 font-mono text-[11px] text-foreground">
                     {shortcutLabel(shortcut.id, isMac)}
                   </kbd>
                   {aliases.map((alias) => (
                     <kbd
                       key={alias}
-                      className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                      className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
                     >
                       {alias}
                     </kbd>
@@ -98,7 +98,7 @@ export function ShortcutsSection({ isMac }: ShortcutsSectionProps) {
             );
           })
         ) : (
-          <div className="py-8 text-center text-xs text-muted-foreground">
+          <div className="py-8 text-center text-[12px] text-muted-foreground">
             No keyboard shortcuts matching &quot;{searchQuery}&quot;.
           </div>
         )}

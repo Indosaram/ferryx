@@ -28,7 +28,6 @@ const native = vi.hoisted(() => ({
   pickNotificationAudio: vi.fn(),
   listRemoteDevices: vi.fn(),
   revokeRemoteDevice: vi.fn(),
-  getTailscaleStatus: vi.fn(),
   detectAgents: vi.fn(),
   getRemoteStatus: vi.fn(),
   enableRemoteGateway: vi.fn(),
@@ -71,7 +70,6 @@ vi.mock(import("../lib/tauri"), async (importOriginal) => {
     pickNotificationAudio: native.pickNotificationAudio,
     listRemoteDevices: native.listRemoteDevices,
     revokeRemoteDevice: native.revokeRemoteDevice,
-    getTailscaleStatus: native.getTailscaleStatus,
     detectAgents: native.detectAgents,
     getRemoteStatus: native.getRemoteStatus,
     enableRemoteGateway: native.enableRemoteGateway,
@@ -157,27 +155,12 @@ beforeEach(() => {
   ]);
   native.revokeRemoteDevice.mockReset();
   native.revokeRemoteDevice.mockResolvedValue(true);
-  native.getTailscaleStatus.mockReset();
-  native.getTailscaleStatus.mockResolvedValue({
-    installed: true,
-    running: true,
-    tailnetName: "orca-mesh",
-    selfDns: "orca-host.tailscale.net",
-    serveActive: true,
-  });
   const disabledRemoteStatus = {
     enabled: false,
     mode: "off" as const,
     port: 43821,
     boundAddress: null,
     localIp: null,
-    tailscale: {
-      installed: true,
-      running: true,
-      tailnetName: "orca-mesh",
-      selfDns: "orca-host.tailscale.net",
-      serveActive: true,
-    },
   };
   native.getRemoteStatus.mockReset();
   native.getRemoteStatus.mockResolvedValue(disabledRemoteStatus);
@@ -238,7 +221,6 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("button", { name: "Appearance" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Terminal" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Keyboard Shortcuts" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Workspace" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Browser" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Notifications" })).toBeInTheDocument();
   });
@@ -296,14 +278,16 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
     await waitFor(() => expect(native.getTerminalPreferences).toHaveBeenCalled());
 
-    fireEvent.change(screen.getByLabelText("Font family"), { target: { value: "JetBrains Mono" } });
-    fireEvent.change(screen.getByLabelText("Font size"), { target: { value: "17" } });
-    fireEvent.change(screen.getByLabelText("Scrollback"), { target: { value: "30000" } });
+    const fontFamilyInput = screen.getByLabelText("Font family");
+    fireEvent.change(fontFamilyInput, { target: { value: "JetBrains Mono" } });
+    fireEvent.blur(fontFamilyInput);
+    const fontSizeInput = screen.getByLabelText("Font size");
+    fireEvent.change(fontSizeInput, { target: { value: "17" } });
+    fireEvent.blur(fontSizeInput);
 
     expect(JSON.parse(localStorage.getItem(TERMINAL_SETTINGS_STORAGE_KEY)!)).toMatchObject({
       fontFamily: "JetBrains Mono",
       fontSize: 17,
-      scrollback: 30_000,
     });
     expect(screen.getByText("Local override")).toBeInTheDocument();
   });
@@ -313,7 +297,9 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
     await waitFor(() => expect(native.getTerminalPreferences).toHaveBeenCalled());
 
-    fireEvent.change(screen.getByLabelText("Font size"), { target: { value: "18" } });
+    const sizeInput = screen.getByLabelText("Font size");
+    fireEvent.change(sizeInput, { target: { value: "18" } });
+    fireEvent.blur(sizeInput);
 
     expect(screen.getByText("Local override")).toBeInTheDocument();
 
@@ -474,16 +460,14 @@ describe("SettingsDialog", () => {
     expect(localStorage.getItem("ferryx.settings.browser")).toBeNull();
   });
 
-  it("navigates to Remote Access section, renders paired devices and Tailscale status, and revokes device on confirmation", async () => {
+  it("navigates to Remote Access section, renders paired devices, and revokes device on confirmation", async () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
 
     await waitFor(() => expect(native.listRemoteDevices).toHaveBeenCalled());
-    await waitFor(() => expect(native.getTailscaleStatus).toHaveBeenCalled());
 
     expect(screen.getByText("iPhone 15 Pro")).toBeInTheDocument();
     expect(screen.getByText("Pixel 8")).toBeInTheDocument();
-    expect(screen.getByText(/orca-mesh/i)).toBeInTheDocument();
 
     const revokeBtn = screen.getByRole("button", { name: "Revoke device iPhone 15 Pro" });
     fireEvent.click(revokeBtn);
@@ -520,8 +504,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("button", { name: "Toggle Opencode configuration" })).toBeInTheDocument();
 
     // Default agent selection
-    const claudeDefaultBtn = screen.getByRole("button", { name: "Claude" });
-    fireEvent.click(claudeDefaultBtn);
+    await selectRadixOption("Default Agent", "Claude");
 
     let stored = JSON.parse(localStorage.getItem("ferryx.agents.v1")!);
     expect(stored.defaultAgentId).toBe("claude");
@@ -550,7 +533,9 @@ describe("SettingsDialog", () => {
     expect(stored.overrides.claude.command).toBe("claude-custom");
     expect(stored.overrides.claude.args).toBe("--dangerously-skip-permissions");
 
-    // Refresh button
+    // Refresh button. The preceding override edits retrigger detection, and the
+    // button stays disabled while that run is in flight.
+    await waitFor(() => expect(screen.getByRole("button", { name: /Refresh/i })).toBeEnabled());
     native.detectAgents.mockClear();
     fireEvent.click(screen.getByRole("button", { name: /Refresh/i }));
     await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
@@ -607,6 +592,9 @@ describe("SettingsDialog", () => {
     const remoteToggle = screen.getByRole("switch", { name: "Remote Access" });
     fireEvent.click(remoteToggle);
 
+    const generateBtn = await screen.findByRole("button", { name: "Generate QR Code" });
+    fireEvent.click(generateBtn);
+
     const pinButton = await screen.findByTestId("remote-pairing-code");
     expect(pinButton.tagName).toBe("BUTTON");
     expect(pinButton).toHaveTextContent("482916");
@@ -633,13 +621,6 @@ describe("SettingsDialog", () => {
       port: 43821,
       boundAddress: "0.0.0.0:43821",
       localIp: "192.168.1.50",
-      tailscale: {
-        installed: true,
-        running: true,
-        tailnetName: "orca-mesh",
-        selfDns: "orca-host.tailscale.net",
-        serveActive: true,
-      },
     };
     native.getRemoteStatus.mockResolvedValue(activeRemoteStatus);
     native.listRemoteDevices.mockResolvedValue([
@@ -661,6 +642,8 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
 
     await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
+    const generateBtn = await screen.findByRole("button", { name: "Generate QR Code" });
+    fireEvent.click(generateBtn);
     await waitFor(() => expect(native.createPairingCode).toHaveBeenCalledTimes(1));
 
     const pinButton = await screen.findByTestId("remote-pairing-code");
@@ -688,13 +671,6 @@ describe("SettingsDialog", () => {
       port: 43821,
       boundAddress: "0.0.0.0:43821",
       localIp: "192.168.1.50",
-      tailscale: {
-        installed: false,
-        running: false,
-        tailnetName: null,
-        selfDns: null,
-        serveActive: false,
-      },
     };
     native.getRemoteStatus.mockResolvedValue(activeRemoteStatus);
     native.createPairingCode.mockRejectedValueOnce(new Error("Pairing creation failed on daemon"));
@@ -703,6 +679,8 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
 
     await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
+    const generateBtn = await screen.findByRole("button", { name: "Generate QR Code" });
+    fireEvent.click(generateBtn);
     expect(await screen.findByText(/Pairing creation failed on daemon/i)).toBeInTheDocument();
     expect(screen.queryByText("Generating...")).not.toBeInTheDocument();
 
@@ -723,10 +701,15 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Agents" }));
     await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
 
-    expect(screen.getByRole("group", { name: "Default Agent" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Auto" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "None" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Claude" })).toBeInTheDocument();
+    const defaultAgentTrigger = screen.getByRole("combobox", { name: "Default Agent" });
+    expect(defaultAgentTrigger).toHaveTextContent("Auto");
+
+    fireEvent.pointerDown(defaultAgentTrigger, { pointerId: 1, button: 0 });
+    fireEvent.click(defaultAgentTrigger);
+    expect(await screen.findByRole("option", { name: "Auto" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "None" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Claude" })).toBeInTheDocument();
+    fireEvent.keyDown(defaultAgentTrigger, { key: "Escape" });
 
     const agents = screen.getByRole("region", { name: "Agents" });
     expect(agents).toHaveTextContent(/New Tab/i);
@@ -747,6 +730,14 @@ describe("SettingsDialog", () => {
     expect(screen.queryByRole("button", { name: "Quick Commands" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Quick Commands" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Enable quick commands")).not.toBeInTheDocument();
+  });
+
+  it("does not offer a Workspace section, which the sidebar already owns", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+
+    const nav = screen.getByTestId("settings-nav");
+    expect(within(nav).queryByRole("button", { name: "Workspace" })).toBeNull();
+    expect(screen.queryByText("Registered Projects")).toBeNull();
   });
 
   it("renders a non-empty General overview that does not duplicate Appearance controls", () => {

@@ -20,6 +20,33 @@ export function SettingsHeading({
   );
 }
 
+export function SettingsGroup({
+  title,
+  action,
+  description,
+  children,
+}: {
+  title: string;
+  action?: ReactNode;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="mb-6">
+      <div className="mb-4 flex items-center justify-between border-b border-border pb-3">
+        <div>
+          <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
+          {description ? (
+            <p className="mt-0.5 text-[11px] text-muted-foreground">{description}</p>
+          ) : null}
+        </div>
+        {action ? <div className="flex items-center gap-2">{action}</div> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 export function SettingRow({
   label,
   title,
@@ -35,7 +62,7 @@ export function SettingRow({
   return (
     <div className="flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0">
       <div className="space-y-0.5 max-w-[480px]">
-        <div className="text-xs font-medium text-foreground">{heading}</div>
+        <div className="text-[13px] font-medium text-foreground">{heading}</div>
         {description ? <p className="text-[11px] text-muted-foreground">{description}</p> : null}
       </div>
       <div className="shrink-0">{children}</div>

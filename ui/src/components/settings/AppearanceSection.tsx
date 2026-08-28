@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select";
-import { SettingRow, SettingsHeading } from "./primitives";
+import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
 
 export function AppearanceSection() {
   const { settings, updateSettings, resetSettings } = useAppearanceSettings();
@@ -27,105 +27,107 @@ export function AppearanceSection() {
       <h2 id="settings-appearance-heading" className="sr-only">
         Appearance
       </h2>
-      <div className="mb-5 flex items-center justify-between border-b border-border pb-3">
-        <h3 className="text-[12px] font-semibold">Display & Styling</h3>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={resetSettings}
-          className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
-        >
-          <RotateCcw className="size-3" />
-          Reset to defaults
-        </Button>
-      </div>
-
-      <div className="border-y border-border">
-        <SettingRow
-          label="Theme mode"
-          description="Select the base color theme for the desktop interface."
-        >
-          <Select
-            value={settings.theme}
-            onValueChange={(val) =>
-              updateSettings({
-                theme: val as AppearanceSettingsState["theme"],
-              })
-            }
+      <SettingsGroup
+        title="Display & Styling"
+        action={
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={resetSettings}
+            className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
           >
-            <SelectTrigger
-              id="appearance-theme-mode"
-              aria-label="Theme mode"
-              className="h-8 w-[180px] text-xs"
-            >
-              <SelectValue placeholder="Theme mode" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="charcoal">Charcoal (Default)</SelectItem>
-              <SelectItem value="dark">Dark</SelectItem>
-              <SelectItem value="light">Light</SelectItem>
-              <SelectItem value="system">System</SelectItem>
-            </SelectContent>
-          </Select>
-        </SettingRow>
-
-        <SettingRow
-          label="Accent color"
-          description="Accent highlight color used for active badges, selection rings, and indicators."
-        >
-          <Select
-            value={settings.accentColor}
-            onValueChange={(val) =>
-              updateSettings({
-                accentColor: val as AppearanceSettingsState["accentColor"],
-              })
-            }
+            <RotateCcw className="size-3" />
+            Reset to defaults
+          </Button>
+        }
+      >
+        <div className="border-b border-border">
+          <SettingRow
+            label="Theme mode"
+            description="Select the base color theme for the desktop interface."
           >
-            <SelectTrigger
-              id="appearance-accent-color"
-              aria-label="Accent color"
-              className="h-8 w-[180px] text-xs"
+            <Select
+              value={settings.theme}
+              onValueChange={(val) =>
+                updateSettings({
+                  theme: val as AppearanceSettingsState["theme"],
+                })
+              }
             >
-              <SelectValue placeholder="Accent color" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="default">Slate (Default)</SelectItem>
-              <SelectItem value="blue">Ocean Blue</SelectItem>
-              <SelectItem value="emerald">Emerald</SelectItem>
-              <SelectItem value="purple">Violet</SelectItem>
-              <SelectItem value="amber">Amber</SelectItem>
-              <SelectItem value="rose">Rose</SelectItem>
-            </SelectContent>
-          </Select>
-        </SettingRow>
+              <SelectTrigger
+                id="appearance-theme-mode"
+                aria-label="Theme mode"
+                className="h-8 w-[180px] text-[11px]"
+              >
+                <SelectValue placeholder="Theme mode" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="charcoal">Charcoal (Default)</SelectItem>
+                <SelectItem value="dark">Dark</SelectItem>
+                <SelectItem value="light">Light</SelectItem>
+                <SelectItem value="system">System</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
 
-        <SettingRow
-          label="Interface density"
-          description="Adjust spacing and padding across tabs, sidebars, and dialog chrome."
-        >
-          <Select
-            value={settings.density}
-            onValueChange={(val) =>
-              updateSettings({
-                density: val as AppearanceSettingsState["density"],
-              })
-            }
+          <SettingRow
+            label="Accent color"
+            description="Accent highlight color used for active badges, selection rings, and indicators."
           >
-            <SelectTrigger
-              id="appearance-density"
-              aria-label="Interface density"
-              className="h-8 w-[180px] text-xs"
+            <Select
+              value={settings.accentColor}
+              onValueChange={(val) =>
+                updateSettings({
+                  accentColor: val as AppearanceSettingsState["accentColor"],
+                })
+              }
             >
-              <SelectValue placeholder="Interface density" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="compact">Compact (Default)</SelectItem>
-              <SelectItem value="comfortable">Comfortable</SelectItem>
-            </SelectContent>
-          </Select>
-        </SettingRow>
-      </div>
+              <SelectTrigger
+                id="appearance-accent-color"
+                aria-label="Accent color"
+                className="h-8 w-[180px] text-[11px]"
+              >
+                <SelectValue placeholder="Accent color" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Slate (Default)</SelectItem>
+                <SelectItem value="blue">Ocean Blue</SelectItem>
+                <SelectItem value="emerald">Emerald</SelectItem>
+                <SelectItem value="purple">Violet</SelectItem>
+                <SelectItem value="amber">Amber</SelectItem>
+                <SelectItem value="rose">Rose</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+
+          <SettingRow
+            label="Interface density"
+            description="Adjust spacing and padding across tabs, sidebars, and dialog chrome."
+          >
+            <Select
+              value={settings.density}
+              onValueChange={(val) =>
+                updateSettings({
+                  density: val as AppearanceSettingsState["density"],
+                })
+              }
+            >
+              <SelectTrigger
+                id="appearance-density"
+                aria-label="Interface density"
+                className="h-8 w-[180px] text-[11px]"
+              >
+                <SelectValue placeholder="Interface density" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="compact">Compact (Default)</SelectItem>
+                <SelectItem value="comfortable">Comfortable</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+        </div>
+      </SettingsGroup>
     </section>
   );
 }
