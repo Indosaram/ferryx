@@ -1,5 +1,9 @@
 # Live Typing-Dead Diagnosis: Concurrent Agent HMR Wedge (2026-08-28 20:25 KST)
 
+> **READ `docs/NATIVE_TERMINAL_FIRST_RESPONDER_POSTMORTEM_2026-08-29.md` FIRST** — it is the
+> curated postmortem. This file is the raw investigation log; the title's HMR attribution
+> turned out to explain only the trace freezes, not the input death (see FINAL VERDICT below).
+
 **Scope:** diagnosis only — no code was written or changed for this incident.
 
 ## Symptom
@@ -42,6 +46,47 @@ The daemon, PTY sessions, and the (already fixed) input pipeline were all innoce
 Before walking the input stack, check: (1) `git reflog` freshness and advancing ui/src
 mtimes for a live concurrent session; (2) whether trace gaps align with that session's
 git ops. If yes, the cause is environmental churn, not a code defect.
+
+---
+
+# FINAL VERDICT (2026-08-28 23:5x, instrumented live reproduction) — supersedes the HMR attribution above
+
+The user challenged the HMR conclusion ("진짜 이거 맞음?") and asked for instrumented
+verification. The HMR story above explained only the dev-app TRACE-FREEZE timeline. Reproducing
+typing-dead in the RELEASE build — no vite, no HMR, no agent churn — exposed the real,
+HMR-independent input killer.
+
+## Reproduction (release bundle, one GUI + one daemon)
+1. User opens a terminal tab (23:48:21 `fce6267e`, 23:51:35 `facf4a41`) and types:
+   **zero** `input.capture`, **zero** `input.sent`, ring endSequences frozen (7, 8).
+2. User clicks into the terminal and types again at 23:56:02: exactly ONE key
+   (`ㅁ`, activeElement `BODY/`) → capture + sent → daemon ring 8→11 → the char echoes
+   (screenshot). Every subsequent keypress: nothing. **"한글자만 쳐짐" — one character per click.**
+3. Trace-history corroboration: no multi-char typing burst exists anywhere in
+   `/tmp/ferryx-switch-debug.jsonl`; every successful capture in the whole day (19:22,
+   19:59, 21:08) is 1-3 isolated keys — the one-per-click signature was present all along.
+
+## Root cause (code-confirmed mechanism)
+`SurfaceHost::render_snapshot` (`surface_host.rs:1206`) calls
+`restore_first_responder(window)` after **every** `frame.present()`.
+`platform/macos.rs::restore_webview_first_responder` then unconditionally calls
+`ns_window.makeFirstResponder(WKWebView NSView)` (the outer container view).
+The fatal loop: click → inner key-handling view becomes first responder → key 1 reaches
+the DOM and is sent → PTY echo triggers a repaint → the present calls `makeFirstResponder`
+on the container → **first responder is stolen from the inner view** → every following
+keypress never reaches the DOM → dead until the next click. Once the container holds first
+responder, later restore calls are measured no-ops, so the dead state persists indefinitely
+(this morning's offscreen AppKit probe missed all of it because its window was never key).
+
+## Fix (implemented 2026-08-29 00:0x)
+`macos.rs::restore_webview_first_responder` now reads `ns_window.firstResponder()` and
+returns early when it is an `NSView` equal to or a descendant of the webview NSView — the
+guard this morning's invalid probe got us to retire. `cargo check`, 353 `cargo test --lib`,
+and UI `tsc` all green. Temporary DOM-side instrumentation (`ui/src/lib/liveInputDiag.ts`
++ its import in `ui/src/main.tsx`) removed in the same pass. Remaining: live verification
+in a rebuilt app — click once into the terminal, type a sustained burst, expect every key
+to land in the daemon ring (`scripts/verify-terminal-typing.mjs`). Requires rebuilding and
+relaunching the app; the running release build still carries the bug.
 
 ---
 
@@ -106,3 +151,60 @@ false as stated. But the load-bearing refutation is the duration confound above,
 I sampled the reload-heavy window, found reloads, and declared causation — without ever
 checking the quiet windows where the same effect appears. The refutation cost one query
 over data I already had. Test the null window BEFORE naming a cause.
+
+---
+
+# RETRACTION OF THE RETRACTION (21:11 KST) — THE ORIGINAL VERDICT WAS RIGHT
+
+I refuted the HMR-storm theory above. **That refutation was wrong.** Direct observation
+falsifies it. Recording the full reversal rather than quietly deleting my error.
+
+## The observation that settles it
+The user typed on request at ~21:09-21:11. Result: **`capture = 0`** — keys never reached the
+document. In the same window the page reloaded **7 times in ~105 seconds**:
+
+```
+21:09:25  0.7s     21:10:08  0.9s     21:11:14  0.9s
+21:09:34  0.8s     21:10:24 14.3s
+21:09:58  9.7s     21:10:45 26.7s
+```
+
+## The decisive contrast — same app, same session, ~1 minute apart
+| time | page state | key input |
+|---|---|---|
+| 21:08:15 | run `a6dd67d4`, **839 s old and stable** | Cmd+`,` **captured** |
+| 21:09-21:11 | **7 reloads in 105 s** | typed, **capture = 0** |
+
+A key was captured while the page was stable, and keys vanished while it was thrashing.
+
+## Cause, matched 1:1
+`git reflog`: **five commits landed in the same second at 21:10:35**, another (`f986b2b`) at
+**21:11:14** — and a page reload is stamped at **21:11:14**, the same second. Eight `ui/src`
+and `src-tauri/src` files were rewritten within three minutes by the concurrent session.
+Vite full-reloads on each; a reloading document has no capture listener, so keystrokes are
+discarded.
+
+## Why my refutation failed
+I argued from aggregate trace statistics (482 runs shorter than 5 s all showing `capture=0`)
+that `capture=0` means "nobody typed". The statistic was true; the inference was not.
+**"Typing attempts were not recorded" does not entail "typing was not broken."** Absence of
+capture events is exactly what BOTH hypotheses predict, so the aggregate could never
+discriminate between them — I treated non-discriminating data as evidence for one side.
+The only thing that could decide it was a keystroke made *during* a storm window, which is
+what the user then supplied. One directed observation beat 611 runs of passive data.
+
+## Standing conclusion
+- The concurrent-agent HMR reload storm **does** kill typing in the dev app. Original verdict
+  restored.
+- Independently true: the branch-(b) capture-fallback fix is loaded in the running app
+  (verified via the Vite-served module: `toForwardableKeyEvent`, `isClipboardShortcut`,
+  `shouldForwardKey`, `physicalKeyForAltChord` all present) and is unrelated to this failure.
+  During a reload there is no listener at all for any fix to run in.
+- Remedy: stop the concurrent session, or test on a release build that does not use Vite HMR.
+
+## Method lesson (corrected)
+My earlier lesson said "test the null window before naming a cause". The deeper error was
+different: I let a non-discriminating aggregate overturn a mechanism, and I demanded a
+captured RED while simultaneously arguing from data that structurally could not contain one.
+When a statistic is equally consistent with both hypotheses, it is not evidence — go get the
+one directed observation that separates them.
