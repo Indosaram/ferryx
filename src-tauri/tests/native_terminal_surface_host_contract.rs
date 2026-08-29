@@ -1117,3 +1117,117 @@ async fn native_terminal_legacy_attach_without_geometry_replays_at_default_80_co
         row0_str.len()
     );
 }
+
+#[tokio::test]
+async fn native_terminal_hit_test_maps_exact_split_coordinates_with_half_open_boundaries() {
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_left = "split-session-left";
+    let session_right = "split-session-right";
+
+    let (_tx_l, rx_l) = tokio::sync::mpsc::channel(16);
+    let (_tx_r, rx_r) = tokio::sync::mpsc::channel(16);
+
+    for (session_id, rx) in [(session_left, rx_l), (session_right, rx_r)] {
+        state
+            .attach_daemon_attachment::<tauri::Wry>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.to_string(),
+                    epoch: 1,
+                    start_sequence: None,
+                    end_sequence: None,
+                    gap: None,
+                    history: Vec::new(),
+                    messages: rx,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+            )
+            .expect("attach split session");
+    }
+
+    let metrics = CellMetrics {
+        width_px: 10,
+        height_px: 20,
+    };
+    let bounds_left = LogicalBounds {
+        x: 0.0,
+        y: 0.0,
+        width: 400.0,
+        height: 600.0,
+        scale_factor: 2.0,
+    };
+    let bounds_right = LogicalBounds {
+        x: 400.0,
+        y: 0.0,
+        width: 400.0,
+        height: 600.0,
+        scale_factor: 2.0,
+    };
+
+    state
+        .prepare_session_layout(
+            NativeTerminalBoundsRequest {
+                session_id: session_left.to_string(),
+                bounds: bounds_left,
+            },
+            metrics,
+        )
+        .expect("layout left");
+    state
+        .prepare_session_layout(
+            NativeTerminalBoundsRequest {
+                session_id: session_right.to_string(),
+                bounds: bounds_right,
+            },
+            metrics,
+        )
+        .expect("layout right");
+
+    // Inside left pane
+    assert_eq!(
+        state.session_at_logical_point(100.0, 300.0).as_deref(),
+        Some(session_left)
+    );
+    // Left pane origin
+    assert_eq!(
+        state.session_at_logical_point(0.0, 0.0).as_deref(),
+        Some(session_left)
+    );
+    // Just inside left pane right boundary
+    assert_eq!(
+        state.session_at_logical_point(399.99, 300.0).as_deref(),
+        Some(session_left)
+    );
+
+    // EXACT divider boundary x = 400.0: must map to right pane, NEVER left pane (half-open [400, 800))
+    assert_eq!(
+        state.session_at_logical_point(400.0, 300.0).as_deref(),
+        Some(session_right)
+    );
+    // Inside right pane
+    assert_eq!(
+        state.session_at_logical_point(500.0, 300.0).as_deref(),
+        Some(session_right)
+    );
+    // Just inside right pane bottom-right corner
+    assert_eq!(
+        state.session_at_logical_point(799.99, 599.99).as_deref(),
+        Some(session_right)
+    );
+
+    // Outside bounds (right of right pane)
+    assert_eq!(state.session_at_logical_point(800.0, 300.0), None);
+    // Outside bounds (below both panes)
+    assert_eq!(state.session_at_logical_point(200.0, 600.0), None);
+    // Outside bounds (negative coordinates)
+    assert_eq!(state.session_at_logical_point(-1.0, 100.0), None);
+
+    // Detach left pane: points in left pane must no longer hit test, right pane remains active
+    state.detach_session(session_left);
+    assert_eq!(state.session_at_logical_point(100.0, 300.0), None);
+    assert_eq!(
+        state.session_at_logical_point(500.0, 300.0).as_deref(),
+        Some(session_right)
+    );
+}

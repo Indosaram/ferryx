@@ -11,6 +11,7 @@ const tauriCoreMocks = vi.hoisted(() => ({
 }));
 
 const nativeTerminalEventMocks = vi.hoisted(() => ({
+  focusListeners: [] as Array<(sessionId: string) => void>,
   scrollbarListener: null as ((payload: { sessionId: string; total: number; offset: number; len: number }) => void) | null,
   onNativeTerminalScrollbar: vi.fn(async (handler: (payload: {
     sessionId: string;
@@ -21,6 +22,14 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
     nativeTerminalEventMocks.scrollbarListener = handler;
     return () => undefined;
   }),
+  onNativeTerminalFocus: vi.fn(async (handler: (sessionId: string) => void) => {
+    nativeTerminalEventMocks.focusListeners.push(handler);
+    return () => {
+      nativeTerminalEventMocks.focusListeners = nativeTerminalEventMocks.focusListeners.filter(
+        (candidate) => candidate !== handler,
+      );
+    };
+  }),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -30,6 +39,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
+  onNativeTerminalFocus: nativeTerminalEventMocks.onNativeTerminalFocus,
   onNativeTerminalScrollbar: nativeTerminalEventMocks.onNativeTerminalScrollbar,
 }));
 
@@ -108,6 +118,8 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
+    nativeTerminalEventMocks.focusListeners = [];
+    nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
     nativeTerminalEventMocks.scrollbarListener = null;
     nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
     resizeRecords.length = 0;
@@ -262,6 +274,8 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
+    nativeTerminalEventMocks.focusListeners = [];
+    nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
     nativeTerminalEventMocks.scrollbarListener = null;
     nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
 
@@ -2296,4 +2310,93 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       expect.objectContaining({ sessionId: "switch-session-outgoing" }),
     );
   });
+
+  it("preserves native mouse-up focus after WebKit mouse-down handling moves focus to BODY", async () => {
+    let deferredFocus: FrameRequestCallback | undefined;
+    const requestFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        deferredFocus = callback;
+        return 1;
+      });
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    const leftSession = createSession("native-focus-left", "daemon-native-focus-left");
+    const rightSession = createSession("native-focus-right", "daemon-native-focus-right");
+    const { getAllByTestId } = render(
+      <>
+        <NativeTerminalPane sessionId="native-focus-left" session={leftSession} />
+        <NativeTerminalPane sessionId="native-focus-right" session={rightSession} />
+      </>,
+    );
+    const [leftSink, rightSink] = getAllByTestId("native-terminal-focus-sink");
+
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.focusListeners).toHaveLength(2);
+    });
+    leftSink.focus();
+    expect(document.activeElement).toBe(leftSink);
+
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.focusListeners) {
+        listener("daemon-native-focus-right");
+      }
+      rightSink.blur();
+    });
+
+    expect(document.activeElement).toBe(document.body);
+    act(() => {
+      deferredFocus?.(performance.now());
+    });
+    expect(document.activeElement).toBe(rightSink);
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
+  });
+
+  it("lets immediate Hangul input start composition after a native pane switch", async () => {
+    const session = createSession("native-ime-switch", "daemon-native-ime-switch");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="native-ime-switch" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.focusListeners).toHaveLength(1);
+    });
+
+    act(() => {
+      sink.blur();
+      for (const listener of nativeTerminalEventMocks.focusListeners) {
+        listener("daemon-native-ime-switch");
+      }
+    });
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "\u3131",
+          code: "KeyR",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    expect(document.activeElement).toBe(sink);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.anything(),
+    );
+
+    act(() => {
+      fireEvent.compositionStart(sink);
+      sink.value = "\uac00";
+      fireEvent.compositionEnd(sink, { data: "\uac00" });
+    });
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      sessionId: "daemon-native-ime-switch",
+      input: { text: "\uac00" },
+    });
+  });
+
 });

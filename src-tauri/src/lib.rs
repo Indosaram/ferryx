@@ -13,7 +13,9 @@ pub mod dag;
 
 use crate::daemon::DaemonClient;
 #[cfg(feature = "native-terminal")]
-use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
+use crate::native_terminal::surface_host::{
+    NativeTerminalSurfaceHostState, NATIVE_TERMINAL_FOCUS_EVENT,
+};
 use ipc::*;
 use notification::audio::NotificationAudioPlayer;
 use std::sync::Arc;
@@ -228,6 +230,54 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     Ok(())
 }
 
+#[cfg(all(target_os = "macos", feature = "native-terminal"))]
+fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+) -> tauri::Result<()> {
+    use block2::RcBlock;
+    use objc2_app_kit::{NSEvent, NSEventMask, NSWindow};
+    use std::ptr::NonNull;
+
+    let app_handle = app.handle().clone();
+    let surface_host = app
+        .state::<NativeTerminalSurfaceHostState>()
+        .inner()
+        .clone();
+    let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
+        let event = unsafe { event_ptr.as_ref() };
+        if let Some(window) = app_handle.get_webview_window("main") {
+            if let Ok(raw_window) = window.ns_window() {
+                if !raw_window.is_null() {
+                    let ns_window = unsafe { &*(raw_window as *const NSWindow) };
+                    if event.windowNumber() == ns_window.windowNumber() {
+                        if let Some(content_view) = ns_window.contentView() {
+                            let location = event.locationInWindow();
+                            let content_height = content_view.bounds().size.height;
+                            let logical_x = location.x;
+                            let logical_y = content_height - location.y;
+                            if let Some(session_id) =
+                                surface_host.session_at_logical_point(logical_x, logical_y)
+                            {
+                                let _ = window.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        event_ptr.as_ptr()
+    });
+
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
+    };
+    if let Some(monitor) = monitor {
+        std::mem::forget(monitor);
+    }
+
+    Ok(())
+}
+
 /// Relays desktop-directed remote gateway events from the daemon (which owns the
 /// gateway) into Tauri events the frontend already listens for. Without this the
 /// remote client's selection requests never reach the desktop.
@@ -299,6 +349,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             install_app_menu(app)?;
             #[cfg(target_os = "macos")]
             install_macos_key_monitor(app)?;
+            #[cfg(all(target_os = "macos", feature = "native-terminal"))]
+            install_macos_terminal_focus_monitor(app)?;
             ipc::browser_cli::start_browser_cli_server(
                 app.handle().clone(),
                 Arc::clone(&browser_cli_manager),

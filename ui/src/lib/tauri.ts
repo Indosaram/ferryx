@@ -349,6 +349,13 @@ export async function onNativeTerminalScrollbar(
   return listen<NativeTerminalScrollbarPayload>("native_terminal_scrollbar", (event) => handler(event.payload));
 }
 
+export async function onNativeTerminalFocus(
+  handler: (sessionId: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<string>("native_terminal_focus", (event) => handler(event.payload));
+}
+
 export async function onNewTerminalTabMenu(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<void>("menu_new_terminal_tab", () => handler());

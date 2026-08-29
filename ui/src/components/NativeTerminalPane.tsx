@@ -10,7 +10,11 @@ import {
   reattachNativeTerminalLifecycle,
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
-import { isStructuredIpcError, onNativeTerminalScrollbar } from "../lib/tauri";
+import {
+  isStructuredIpcError,
+  onNativeTerminalFocus,
+  onNativeTerminalScrollbar,
+} from "../lib/tauri";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
 
@@ -697,6 +701,10 @@ export function NativeTerminalPane({
         !event.metaKey &&
         (!activeEl || activeEl === document.body || !isEditableElement(activeEl))
       ) {
+        if (event.key.charCodeAt(0) > 0x7f) {
+          inputRef.current?.focus();
+          return;
+        }
         event.preventDefault();
         inputRef.current?.focus();
         sendInput({ text: event.key });
@@ -740,6 +748,33 @@ export function NativeTerminalPane({
       document.removeEventListener("keydown", handleCaptureKeyDown, true);
     };
   }, [sendInput, targetSessionId, visible]);
+
+  useEffect(() => {
+    if (!visible || !targetSessionId || !isTauri()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let focusFrame: number | undefined;
+    void onNativeTerminalFocus((sessionId) => {
+      if (disposed || sessionId !== targetSessionId) return;
+      inputRef.current?.focus();
+      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+      focusFrame = requestAnimationFrame(() => {
+        focusFrame = undefined;
+        if (disposed) return;
+        inputRef.current?.focus();
+      });
+    }).then((listener) => {
+      if (disposed) listener();
+      else unlisten = listener;
+    });
+
+    return () => {
+      disposed = true;
+      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+      unlisten?.();
+    };
+  }, [targetSessionId, visible]);
 
 
   useEffect(() => {

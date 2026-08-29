@@ -31,6 +31,13 @@ pub const NATIVE_TERMINAL_AGENT_STATE_EVENT: &str = "native_terminal_agent_state
 /// source must never overwrite it.
 pub const AGENT_EXTENSION_MANIFEST_ID: &str = "ferryx-extension";
 pub const NATIVE_TERMINAL_SCROLLBAR_EVENT: &str = "native_terminal_scrollbar";
+pub const NATIVE_TERMINAL_FOCUS_EVENT: &str = "native_terminal_focus";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalFocusPayload {
+    pub session_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -381,6 +388,23 @@ impl NativeTerminalSurfaceHostState {
             .lock()
             .get(session_id)
             .and_then(|session| session.logical_bounds)
+    }
+
+    /// Maps DOM logical coordinates against attached session viewports.
+    /// Uses half-open bounds `left <= x < right` and `top <= y < bottom` so split
+    /// boundaries deterministically map to exactly one pane.
+    pub fn session_at_logical_point(&self, lx: f64, ly: f64) -> Option<String> {
+        let sessions = self.sessions.lock();
+        sessions.iter().find_map(|(id, session)| {
+            if session.surface_attached {
+                if let Some(bounds) = session.logical_bounds {
+                    if bounds.contains(lx, ly) {
+                        return Some(id.clone());
+                    }
+                }
+            }
+            None
+        })
     }
 
     pub fn with_session_terminal<T>(
