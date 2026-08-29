@@ -9,6 +9,7 @@ pub mod remote;
 pub mod session;
 pub mod terminal;
 pub mod worktree;
+pub mod dag;
 
 use crate::daemon::DaemonClient;
 #[cfg(feature = "native-terminal")]
