@@ -17,19 +17,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "ferryx"
 path = "src/main.rs"
 
-[[bin]]
+[[example]]
 name = "native_terminal_renderer_poc"
-path = "src/bin/native_terminal_renderer_poc.rs"
 required-features = ["native-terminal"]
 
-[[bin]]
+[[example]]
 name = "terminal_selection_evidence"
-path = "src/bin/terminal_selection_evidence.rs"
 required-features = ["native-terminal"]
 
-[[bin]]
+[[example]]
 name = "terminal_attribute_evidence"
-path = "src/bin/terminal_attribute_evidence.rs"
 required-features = ["native-terminal"]
 
 [build-dependencies]
