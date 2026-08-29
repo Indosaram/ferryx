@@ -119,6 +119,8 @@ const workspace = {
 vi.mock("./lib/tauri", () => ({
   DEFAULT_WORKSPACE_ID: "default",
   DEFAULT_TERMINAL_FONT_STACK: "monospace",
+  listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  watchDagProject: vi.fn(() => Promise.resolve([])),
   getTerminalPreferences: () => Promise.resolve({}),
   createWorktree: native.createWorktree,
   getWorktreeStatus: native.getWorktreeStatus,

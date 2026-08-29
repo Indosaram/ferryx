@@ -5,6 +5,7 @@ import type { TerminalActivity } from "./activity";
 import { loadBrowserSettings, resolveSupportedBrowserProfileId, supportedBrowserProfiles } from "./browserSettings";
 import {
   createBrowserPaneContent,
+  createDagPaneContent,
   createTerminalPaneContent,
   worktreeIdentity,
   type BrowserPaneState,
@@ -109,6 +110,12 @@ export function serializeWorkspaceState(
               profileId: rawBrowser.profileId,
               worktreePath: rawBrowser.worktreePath,
               worktreeLabel: rawBrowser.worktreeLabel,
+            });
+            sessionIdsByLeafId[leafId] = "";
+          } else if (content.kind === "dag") {
+            const rawDag = content.dag ?? content;
+            contentsByLeafId[leafId] = createDagPaneContent({
+              runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
           } else {
@@ -520,6 +527,12 @@ export function deserializeWorkspaceState(
               profileId,
               worktreePath: rawBrowser.worktreePath,
               worktreeLabel: rawBrowser.worktreeLabel,
+            });
+            sessionIdsByLeafId[leafId] = "";
+          } else if (rawContent.kind === "dag") {
+            const rawDag = rawContent.dag ?? rawContent;
+            contentsByLeafId[leafId] = createDagPaneContent({
+              runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
           } else {
