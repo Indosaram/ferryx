@@ -5,6 +5,13 @@
 //        (the echoed command bytes came back through ConPTY).
 //
 // Requires a running daemon: ferryx.exe --daemon  (prints FERRYX_DAEMON_READY)
+//
+// Windows launcher tips (maho-win verified 2026-08-29):
+// - Linking can leave target\debug\ferryx.exe intermittently removed by AV
+//   heuristics; if launch fails with "file not found", copy the exe to a new
+//   name (e.g. ferryx-run.exe) and run that.
+// - Delete stale %LOCALAPPDATA%\Ferryx\runtime\daemon.lock before starting;
+//   a stale lock makes the new daemon exit instantly.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
