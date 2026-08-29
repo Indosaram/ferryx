@@ -1,0 +1,14 @@
+Windows headless daemon E2E on maho-win (2026-08-29)
+Script: script/qa/win-daemon-e2e.mjs (bun)
+Daemon: ferryx.exe --daemon (FERRYX_DAEMON_READY)
+Port: %LOCALAPPDATA%\Ferryx\runtime\daemon.port
+
+handshake: {"type":"handshakeOk","version":2,"pid":12432,"epoch":1788024130572}
+registerWorkspace: {"type":"registerWorkspaceOk"}
+spawn: {"type":"spawnOk","sessionId":"eaa93323-c649-44ad-b1f5-aebf6e131a38"}
+describe before: {"type":"describeSessionOk","session":{"sessionId":"eaa93323-...","workspaceId":"e2e-ws","worktree":null,"cwd":"\\\\?\\C:\\Users\\sook\\ferryx-winbuild\\orca-lite","cols":80,"rows":24,"running":true,"startSequence":null,"endSequence":null}}
+write: {"type":"writeOk"}
+  payload: base64("echo ferryx-e2e\r")
+describe after: {"type":"describeSessionOk","session":{"sessionId":"eaa93323-...","workspaceId":"e2e-ws","worktree":null,"cwd":"\\\\?\\C:\\Users\\sook\\ferryx-winbuild\\orca-lite","cols":80,"rows":24,"running":true,"startSequence":1,"endSequence":9}}
+endSequence: 0 -> 9
+E2E PASS: typed bytes reached ConPTY and echo advanced the ring (0 -> 9)
