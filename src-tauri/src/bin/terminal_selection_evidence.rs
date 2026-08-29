@@ -98,6 +98,19 @@ fn compute_sha256(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn current_utc_timestamp() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+    )
+}
+
 mod hex {
     pub fn encode(data: impl AsRef<[u8]>) -> String {
         data.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
@@ -262,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metadata = SelectionScenarioMetadata {
         scenario_id: "c3-pointer-drag-selection".to_string(),
         title: "C3: Primary Pointer Drag Native Terminal Selection Evidence".to_string(),
-        timestamp_utc: "2026-08-28T10:25:00Z".to_string(),
+        timestamp_utc: current_utc_timestamp(),
         terminal_geometry: GeometryMetadata {
             cols,
             rows,
@@ -393,4 +406,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== C3 Evidence Generation Complete (PASS) ===");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_utc_timestamp;
+
+    #[test]
+    fn evidence_timestamp_is_generated_at_runtime_in_utc_rfc3339_shape() {
+        let timestamp = current_utc_timestamp();
+
+        assert_eq!(timestamp.len(), 20);
+        assert_eq!(&timestamp[4..5], "-");
+        assert_eq!(&timestamp[7..8], "-");
+        assert_eq!(&timestamp[10..11], "T");
+        assert_eq!(&timestamp[13..14], ":");
+        assert_eq!(&timestamp[16..17], ":");
+        assert!(timestamp.ends_with('Z'));
+        assert_ne!(timestamp, "2026-08-28T10:25:00Z");
+    }
 }

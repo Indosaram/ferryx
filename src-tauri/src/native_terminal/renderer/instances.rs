@@ -85,12 +85,26 @@ pub fn build_row_instances(
         let cell = row_cells.and_then(|r| r.get(col as usize));
         let (px_x, px_y) = (col as f32 * cell_w, row as f32 * cell_h);
 
-        let mut bg_color = cell.and_then(|c| c.bg).map_or(config.theme.background, |c| {
-            [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, 1.0]
-        });
-        let mut fg_color = cell.and_then(|c| c.fg).map_or(config.theme.foreground, |c| {
-            [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, 1.0]
-        });
+        let mut bg_color = cell
+            .and_then(|c| c.bg)
+            .map_or(config.theme.background, |c| {
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    1.0,
+                ]
+            });
+        let mut fg_color = cell
+            .and_then(|c| c.fg)
+            .map_or(config.theme.foreground, |c| {
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    1.0,
+                ]
+            });
 
         if cell.map_or(false, |c| c.inverse) {
             std::mem::swap(&mut bg_color, &mut fg_color);
@@ -148,7 +162,12 @@ pub fn build_row_instances(
             }
             if c.strikethrough {
                 bg_instances.push(RectInstance {
-                    rect: [px_x, px_y + (cell_h * 0.5 - line_h * 0.5).round(), cell_w, line_h],
+                    rect: [
+                        px_x,
+                        px_y + (cell_h * 0.5 - line_h * 0.5).round(),
+                        cell_w,
+                        line_h,
+                    ],
                     color: fg_color,
                 });
             }
@@ -218,7 +237,10 @@ fn append_cursor_decorations(
                 [px_x, px_y, line_t, cell_h],
                 [px_x + cell_w - line_t, px_y, line_t, cell_h],
             ] {
-                bg_instances.push(RectInstance { rect, color: cursor_color });
+                bg_instances.push(RectInstance {
+                    rect,
+                    color: cursor_color,
+                });
             }
         }
         CursorVisualStyle::Block => {}
@@ -251,15 +273,40 @@ mod tests {
         };
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
-        let base = CellSnapshot { text: "A".into(), wide: CellWide::Narrow, ..Default::default() };
-        let (bg_plain, _) = build_row_instances(0, &single_cell_scenario(base.clone()), None, &config, &mut atlas, &gpu.queue);
+        let base = CellSnapshot {
+            text: "A".into(),
+            wide: CellWide::Narrow,
+            ..Default::default()
+        };
+        let (bg_plain, _) = build_row_instances(
+            0,
+            &single_cell_scenario(base.clone()),
+            None,
+            &config,
+            &mut atlas,
+            &gpu.queue,
+        );
         let mut under = base;
         under.underline = true;
-        let (bg_under, _) = build_row_instances(0, &single_cell_scenario(under), None, &config, &mut atlas, &gpu.queue);
-        assert_eq!(bg_under.len(), bg_plain.len() + 1, "underlined cell produces one more RectInstance");
+        let (bg_under, _) = build_row_instances(
+            0,
+            &single_cell_scenario(under),
+            None,
+            &config,
+            &mut atlas,
+            &gpu.queue,
+        );
+        assert_eq!(
+            bg_under.len(),
+            bg_plain.len() + 1,
+            "underlined cell produces one more RectInstance"
+        );
         let deco_y = bg_under.last().unwrap().rect[1];
         let cell_h = config.cell_height_px as f32;
-        assert!(deco_y >= cell_h * 0.7 && deco_y < cell_h, "underline sits in lower part of cell: {deco_y}");
+        assert!(
+            deco_y >= cell_h * 0.7 && deco_y < cell_h,
+            "underline sits in lower part of cell: {deco_y}"
+        );
     }
 
     #[test]
@@ -270,14 +317,28 @@ mod tests {
         };
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
-        let mut strike = CellSnapshot { text: "A".into(), wide: CellWide::Narrow, ..Default::default() };
+        let mut strike = CellSnapshot {
+            text: "A".into(),
+            wide: CellWide::Narrow,
+            ..Default::default()
+        };
         strike.strikethrough = true;
-        let (bg_strike, _) = build_row_instances(0, &single_cell_scenario(strike), None, &config, &mut atlas, &gpu.queue);
+        let (bg_strike, _) = build_row_instances(
+            0,
+            &single_cell_scenario(strike),
+            None,
+            &config,
+            &mut atlas,
+            &gpu.queue,
+        );
         assert!(bg_strike.len() >= 2, "strikethrough produces rect");
         let deco_y = bg_strike.last().unwrap().rect[1];
         let cell_h = config.cell_height_px as f32;
         let mid_y = cell_h * 0.5;
-        assert!((deco_y - mid_y).abs() <= cell_h * 0.2, "strikethrough sits near vertical middle: {deco_y}");
+        assert!(
+            (deco_y - mid_y).abs() <= cell_h * 0.2,
+            "strikethrough sits near vertical middle: {deco_y}"
+        );
     }
 
     #[test]
@@ -288,13 +349,27 @@ mod tests {
         };
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
-        let mut over = CellSnapshot { text: "A".into(), wide: CellWide::Narrow, ..Default::default() };
+        let mut over = CellSnapshot {
+            text: "A".into(),
+            wide: CellWide::Narrow,
+            ..Default::default()
+        };
         over.overline = true;
-        let (bg_over, _) = build_row_instances(0, &single_cell_scenario(over), None, &config, &mut atlas, &gpu.queue);
+        let (bg_over, _) = build_row_instances(
+            0,
+            &single_cell_scenario(over),
+            None,
+            &config,
+            &mut atlas,
+            &gpu.queue,
+        );
         assert!(bg_over.len() >= 2, "overline produces rect");
         let deco_y = bg_over.last().unwrap().rect[1];
         let cell_h = config.cell_height_px as f32;
-        assert!(deco_y >= 0.0 && deco_y <= cell_h * 0.15, "overline sits at cell top: {deco_y}");
+        assert!(
+            deco_y >= 0.0 && deco_y <= cell_h * 0.15,
+            "overline sits at cell top: {deco_y}"
+        );
     }
 
     #[test]
@@ -305,11 +380,26 @@ mod tests {
         };
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
-        let mut invis = CellSnapshot { text: "A".into(), wide: CellWide::Narrow, ..Default::default() };
+        let mut invis = CellSnapshot {
+            text: "A".into(),
+            wide: CellWide::Narrow,
+            ..Default::default()
+        };
         invis.invisible = true;
-        let (bg_invis, glyph_invis) = build_row_instances(0, &single_cell_scenario(invis), None, &config, &mut atlas, &gpu.queue);
+        let (bg_invis, glyph_invis) = build_row_instances(
+            0,
+            &single_cell_scenario(invis),
+            None,
+            &config,
+            &mut atlas,
+            &gpu.queue,
+        );
         assert_eq!(bg_invis.len(), 1, "invisible cell keeps background rect");
-        assert_eq!(glyph_invis.len(), 0, "invisible cell produces zero GlyphInstances");
+        assert_eq!(
+            glyph_invis.len(),
+            0,
+            "invisible cell produces zero GlyphInstances"
+        );
     }
 
     #[test]
@@ -323,39 +413,76 @@ mod tests {
         let normal = CellSnapshot {
             text: "A".into(),
             wide: CellWide::Narrow,
-            fg: Some(ColorRgb { r: 200, g: 200, b: 200 }),
+            fg: Some(ColorRgb {
+                r: 200,
+                g: 200,
+                b: 200,
+            }),
             bg: Some(ColorRgb { r: 0, g: 0, b: 0 }),
             ..Default::default()
         };
-        let (_, glyph_normal) = build_row_instances(0, &single_cell_scenario(normal.clone()), None, &config, &mut atlas, &gpu.queue);
+        let (_, glyph_normal) = build_row_instances(
+            0,
+            &single_cell_scenario(normal.clone()),
+            None,
+            &config,
+            &mut atlas,
+            &gpu.queue,
+        );
         let mut faint = normal;
         faint.faint = true;
-        let (_, glyph_faint) = build_row_instances(0, &single_cell_scenario(faint), None, &config, &mut atlas, &gpu.queue);
+        let (_, glyph_faint) = build_row_instances(
+            0,
+            &single_cell_scenario(faint),
+            None,
+            &config,
+            &mut atlas,
+            &gpu.queue,
+        );
         assert_eq!(glyph_normal.len(), 1);
         assert_eq!(glyph_faint.len(), 1);
-        assert_ne!(glyph_faint[0].color, glyph_normal[0].color, "faint glyph color differs");
+        assert_ne!(
+            glyph_faint[0].color, glyph_normal[0].color,
+            "faint glyph color differs"
+        );
     }
 
     #[test]
     fn test_row_hash_invalidates_on_attribute_changes() {
         let config = RendererConfig::default();
-        let base = CellSnapshot { text: "A".into(), wide: CellWide::Narrow, ..Default::default() };
+        let base = CellSnapshot {
+            text: "A".into(),
+            wide: CellWide::Narrow,
+            ..Default::default()
+        };
         let h_base = compute_row_hash(0, &single_cell_scenario(base.clone()), None, &config);
 
         let mut faint = base.clone();
         faint.faint = true;
-        assert_ne!(h_base, compute_row_hash(0, &single_cell_scenario(faint), None, &config));
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(faint), None, &config)
+        );
 
         let mut invis = base.clone();
         invis.invisible = true;
-        assert_ne!(h_base, compute_row_hash(0, &single_cell_scenario(invis), None, &config));
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(invis), None, &config)
+        );
 
         let mut strike = base.clone();
         strike.strikethrough = true;
-        assert_ne!(h_base, compute_row_hash(0, &single_cell_scenario(strike), None, &config));
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(strike), None, &config)
+        );
 
         let mut over = base;
         over.overline = true;
-        assert_ne!(h_base, compute_row_hash(0, &single_cell_scenario(over), None, &config));
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(over), None, &config)
+        );
     }
 }

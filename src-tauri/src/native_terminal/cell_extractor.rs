@@ -233,9 +233,15 @@ mod tests {
     fn test_extract_cell_snapshot_strikethrough_roundtrip() {
         let (cell_a, cell_b) = snapshot_cells(b"\x1b[9mA\x1b[29mB");
         assert_eq!(cell_a.text, "A");
-        assert!(cell_a.strikethrough, "expected cell_a.strikethrough == true");
+        assert!(
+            cell_a.strikethrough,
+            "expected cell_a.strikethrough == true"
+        );
         assert_eq!(cell_b.text, "B");
-        assert!(!cell_b.strikethrough, "expected cell_b.strikethrough == false");
+        assert!(
+            !cell_b.strikethrough,
+            "expected cell_b.strikethrough == false"
+        );
     }
 
     #[test]

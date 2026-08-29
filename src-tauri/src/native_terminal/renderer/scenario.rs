@@ -108,4 +108,3 @@ pub fn single_cell_scenario(cell: CellSnapshot) -> RenderSnapshot {
         grid: vec![vec![cell]],
     }
 }
-

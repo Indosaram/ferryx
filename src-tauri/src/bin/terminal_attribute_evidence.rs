@@ -123,7 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live_frame: OffscreenFrame = renderer.render_snapshot(&live_snapshot, None)?;
     live_frame.save_png(&live_path)?;
 
-    println!("Wrote live attribute evidence PNG to: {}", live_path.display());
+    println!(
+        "Wrote live attribute evidence PNG to: {}",
+        live_path.display()
+    );
     println!("Width: {} px", live_frame.width_px);
     println!("Height: {} px", live_frame.height_px);
 
