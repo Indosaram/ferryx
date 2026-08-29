@@ -61,6 +61,7 @@ import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
+  createDagPaneContent,
   worktreeIdentity,
   type DirtyState,
   type StructuredIpcError,
@@ -68,7 +69,7 @@ import {
   type Worktree,
 } from "./lib/types";
 import { checkForUpdate, registerWindowCloseGuard } from "./lib/updater";
-import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { collectLeafIds, findFirstLeafId, type PaneDirection } from "./state/paneTree";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
@@ -1290,6 +1291,24 @@ function WorkspaceApp({
     [createBrowserTab, reportRuntimeError],
   );
 
+  const handleNewDagPane = useCallback(() => {
+    const snapshot = stateRef.current;
+    const focusedGroup = snapshot.layout.focusedGroupId
+      ? snapshot.layout.tabGroups?.[snapshot.layout.focusedGroupId]
+      : undefined;
+    const activeTabId =
+      focusedGroup?.activeTabId ?? snapshot.layout.activeTabId ?? snapshot.layout.tabs[0]?.id ?? null;
+    const focusedTab = activeTabId
+      ? snapshot.layout.tabs.find((tab) => tab.id === activeTabId)
+      : undefined;
+    if (!focusedTab || focusedTab.kind === "browser") return;
+    const tabLayout = snapshot.layout.layoutsByTabId?.[focusedTab.id];
+    if (!tabLayout) return;
+    const leafId = tabLayout.activeLeafId ?? findFirstLeafId(tabLayout.root);
+    if (!leafId) return;
+    void splitPane(focusedTab.id, leafId, "horizontal", { content: createDagPaneContent() });
+  }, [splitPane]);
+
 
   const handleDuplicateBrowserTab = useCallback(
     (tabId: string, profileId?: string) => {
@@ -1507,6 +1526,7 @@ function WorkspaceApp({
             onToggleTabPin={setTabPinned}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
+            onNewDag={handleNewDagPane}
             onOpenSettings={handleOpenSettings}
             agents={launchableAgents}
             onLaunchAgent={handleLaunchAgent}

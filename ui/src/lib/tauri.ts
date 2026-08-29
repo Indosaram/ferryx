@@ -1,4 +1,4 @@
-import type { DagRunSnapshot } from "./dagTypes";
+import type { DagRunSnapshot, DagRunSummary } from "./dagTypes";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -654,3 +654,14 @@ export async function listenDagRunUpdated(
   if (!isTauri()) return () => undefined;
   return listen<DagRunSnapshot>("dag-run-updated", (event) => handler(event.payload));
 }
+
+export async function listDagRuns(projectPath: string): Promise<DagRunSummary[]> {
+  if (!isTauri()) return [];
+  return invokeCommand<DagRunSummary[]>("dag_list_runs", { projectPath });
+}
+
+export async function fetchDagRun(projectPath: string, runId: string): Promise<DagRunSnapshot | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<DagRunSnapshot | null>("dag_get_run", { projectPath, runId });
+}
+

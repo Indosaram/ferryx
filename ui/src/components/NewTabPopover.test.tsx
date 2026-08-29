@@ -47,6 +47,32 @@ describe("NewTabPopover", () => {
     expect(screen.getByText("Agent settings…")).toBeInTheDocument();
   });
 
+  it("renders New DAG View only when onNewDag is provided and calls it on click", () => {
+    const onNewDag = vi.fn();
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <NewTabPopover
+        open={true}
+        onClose={onClose}
+        onNewTerminal={vi.fn()}
+        onNewBrowser={vi.fn()}
+      />
+    );
+    expect(screen.queryByText("New DAG View")).not.toBeInTheDocument();
+    rerender(
+      <NewTabPopover
+        open={true}
+        onClose={onClose}
+        onNewTerminal={vi.fn()}
+        onNewBrowser={vi.fn()}
+        onNewDag={onNewDag}
+      />
+    );
+    fireEvent.click(screen.getByText("New DAG View"));
+    expect(onNewDag).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("calls onNewTerminal when New Terminal is clicked", () => {
     const onNewTerminal = vi.fn();
     const onClose = vi.fn();

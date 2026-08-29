@@ -1,5 +1,5 @@
 import { useRef, useEffect, useMemo, useState } from "react";
-import { TerminalSquare, Globe, FileText, Smartphone, Settings, Sparkles } from "lucide-react";
+import { TerminalSquare, Globe, FileText, Smartphone, Settings, Sparkles, Workflow } from "lucide-react";
 import {
   newBrowserTabUrl,
   resolveSupportedBrowserProfileId,
@@ -23,6 +23,7 @@ interface NewTabPopoverProps {
   onNewBrowser: (url?: string, profileId?: string) => void;
   onNewMarkdown?: () => void;
   onNewMobileEmulator?: () => void;
+  onNewDag?: () => void;
   onOpenSettings?: () => void;
   agents?: PopoverAgent[];
   onLaunchAgent?: (agent: PopoverAgent) => void;
@@ -52,6 +53,7 @@ export function NewTabPopover({
   onNewBrowser,
   onNewMarkdown,
   onNewMobileEmulator,
+  onNewDag,
   onOpenSettings,
   agents,
   onLaunchAgent,
@@ -158,6 +160,22 @@ export function NewTabPopover({
             </select>
           </div>
         </div>
+
+        {onNewDag ? (
+          <button
+            type="button"
+            onClick={() => {
+              onNewDag();
+              onClose();
+            }}
+            className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
+          >
+            <div className="flex items-center gap-2.5">
+              <Workflow className="size-4 text-muted-foreground group-hover:text-foreground" />
+              <span className="font-medium">New DAG View</span>
+            </div>
+          </button>
+        ) : null}
 
         {onNewMarkdown ? (
           <button

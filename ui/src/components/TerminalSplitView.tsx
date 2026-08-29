@@ -33,6 +33,7 @@ import type {
 import { defaultContentForTab, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import { isRedundantSplit as isRedundantPaneSplit, type PaneDirection, type PaneNode } from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
+import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
 import { PaneEdgeDropZones } from "./tab-dnd/PaneEdgeDropZones";
@@ -133,6 +134,7 @@ type TerminalSplitViewProps = {
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab?: () => void;
   onAddBrowserTab?: (url?: string, profileId?: string) => void;
+  onNewDag?: () => void;
   onDuplicateBrowserTab?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
@@ -176,6 +178,7 @@ export function TerminalSplitView({
   onToggleTabPin,
   onAddTab = () => undefined,
   onAddBrowserTab = () => undefined,
+  onNewDag,
   onDuplicateBrowserTab = () => undefined,
   onAddMarkdown,
   onAddMobileEmulator,
@@ -394,6 +397,7 @@ export function TerminalSplitView({
     onToggleTabPin,
     onAddTab,
     onAddBrowserTab,
+    onNewDag,
     onDuplicateBrowserTab,
     onAddMarkdown,
     onAddMobileEmulator,
@@ -452,6 +456,7 @@ export function TerminalSplitView({
             onClose={onCloseTab}
             onAdd={onAddTab}
             onAddBrowser={onAddBrowserTab}
+            onNewDag={onNewDag}
             onDuplicateBrowser={onDuplicateBrowserTab}
             onAddMarkdown={onAddMarkdown}
             onAddMobileEmulator={onAddMobileEmulator}
@@ -547,6 +552,7 @@ type TabGroupViewProps = {
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab: () => void;
   onAddBrowserTab: (url?: string, profileId?: string) => void;
+  onNewDag?: () => void;
   onDuplicateBrowserTab: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
@@ -592,6 +598,7 @@ function TabGroupView({
   onToggleTabPin,
   onAddTab,
   onAddBrowserTab,
+  onNewDag,
   onAddMarkdown,
   onDuplicateBrowserTab,
   onAddMobileEmulator,
@@ -664,6 +671,14 @@ function TabGroupView({
           focusGroup();
           onAddBrowserTab(url, profileId);
         }}
+        onNewDag={
+          onNewDag
+            ? () => {
+                focusGroup();
+                onNewDag();
+              }
+            : undefined
+        }
         onDuplicateBrowser={onDuplicateBrowserTab}
         onAddMarkdown={
           onAddMarkdown
@@ -1007,6 +1022,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   onReload={() => onReloadBrowserTab(tab.id)}
                 />
               );
+            }
+            case "dag": {
+              return <DagGraphView runId={content.runId ?? undefined} />;
             }
           }
         })()}
