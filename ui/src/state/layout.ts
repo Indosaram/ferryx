@@ -1,7 +1,9 @@
 import {
   createBrowserPaneContent,
+  createDagPaneContent,
   createTerminalPaneContent,
   type BrowserPaneState,
+  type DagPaneState,
   type LayoutState,
   type PaneContent,
   type TabGroup,
@@ -36,7 +38,8 @@ export type LayoutAction =
       targetLeafId?: string;
       direction: PaneDirection;
       newLeafId?: string;
-      sessionId: string;
+      sessionId?: string;
+      content?: PaneContent;
       position?: "first" | "second";
       ratio?: number;
     }
@@ -244,7 +247,8 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const newLeafId = action.newLeafId ?? createLayoutId("leaf");
       if (existingLeafIds.includes(newLeafId)) return state;
       const newRoot = splitLeaf(tabLayout.root, targetLeafId, newLeafId, action.direction, action.position, action.ratio);
-      const newContent = createTerminalPaneContent(action.sessionId);
+      const newContent = action.content ?? createTerminalPaneContent(action.sessionId ?? "");
+      const newSessionId = newContent.kind === "terminal" ? newContent.sessionId : "";
       return normalizeLayoutInternal(
         {
           ...state,
@@ -255,7 +259,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
               root: newRoot,
               activeLeafId: newLeafId,
               expandedLeafId: null,
-              sessionIdsByLeafId: { ...tabLayout.sessionIdsByLeafId, [newLeafId]: action.sessionId },
+              sessionIdsByLeafId: { ...tabLayout.sessionIdsByLeafId, [newLeafId]: newSessionId },
               contentsByLeafId: { ...(tabLayout.contentsByLeafId ?? {}), [newLeafId]: newContent },
             },
           },
@@ -626,6 +630,12 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
             worktreeLabel: item.worktreeLabel,
           };
       return createBrowserPaneContent(browserState);
+    }
+    if (item.kind === "dag") {
+      const dagState: DagPaneState = (item as { dag?: DagPaneState }).dag
+        ? { runId: (item as { dag?: DagPaneState }).dag?.runId ?? (item as { runId?: string | null }).runId ?? null }
+        : { runId: (item as { runId?: string | null }).runId ?? null };
+      return createDagPaneContent(dagState);
     }
   }
   return createTerminalPaneContent(fallbackSessionId);

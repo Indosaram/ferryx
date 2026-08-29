@@ -19,6 +19,7 @@ import type {
   ActiveAgent,
   BrowserTab,
   LayoutState,
+  PaneContent,
   TerminalLifecycle,
   TerminalLifecyclePayload,
   TerminalSession,
@@ -65,6 +66,7 @@ export type WorkspaceServices = {
 
 export type SplitPaneOptions = {
   position?: "first" | "second";
+  content?: PaneContent;
 };
 
 export type TabSplitEdge = "left" | "right" | "top" | "bottom";
@@ -101,6 +103,7 @@ export type WorkspaceAction =
       direction: PaneDirection;
       position?: "first" | "second";
       newLeafId: string;
+      content?: PaneContent;
       session: TerminalSession;
     }
   | { type: "MOVE_TAB_TO_GROUP"; sourceTabId: string; targetGroupId: string; targetIndex?: number }
@@ -611,8 +614,13 @@ export function useWorkspaceStore({
         direction,
         position: options.position,
         newLeafId,
+        content: options.content,
         session,
       });
+
+      if (options.content && options.content.kind !== "terminal") {
+        return;
+      }
 
       let backendSessionId: string | null = null;
       try {
@@ -1406,6 +1414,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         direction: action.direction,
         position: action.position,
         newLeafId: action.newLeafId,
+        content: action.content,
         sessionId: action.session.id,
       });
       if (layout === state.layout) return state;

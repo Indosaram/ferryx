@@ -1,6 +1,8 @@
 export type PaneDirection = "horizontal" | "vertical";
 
-export type PaneLeafNode = { type: "leaf"; leafId: string };
+export type PaneLeafKind = "terminal" | "browser" | "dag";
+
+export type PaneLeafNode = { type: "leaf"; leafId: string; kind?: PaneLeafKind };
 
 export type PaneSplitNode = {
   type: "split";
@@ -21,8 +23,8 @@ export function clampRatio(ratio: number): number {
   return Math.min(MAX_PANE_RATIO, Math.max(MIN_PANE_RATIO, ratio));
 }
 
-export function createLeafNode(leafId?: string): PaneNode {
-  return { type: "leaf", leafId: leafId ?? createLeafId() };
+export function createLeafNode(leafId?: string, kind?: PaneLeafKind): PaneNode {
+  return { type: "leaf", leafId: leafId ?? createLeafId(), ...(kind ? { kind } : {}) };
 }
 
 /**
