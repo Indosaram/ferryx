@@ -98,6 +98,39 @@ describe("terminalEventBus backlog buffer", () => {
     terminalEventBus.clearSession(sessionId);
   });
 
+  it("replays retained chunks in order without one contiguous totalBytes delivery", async () => {
+    await terminalEventBus.ensureStarted();
+    const sessionId = "backend-segmented-replay";
+    const retainedChunks = ["first", "second-longer", "third"];
+
+    for (const text of retainedChunks) {
+      callbacks.output?.({
+        sessionId,
+        data: encodeOutput(text),
+      });
+    }
+
+    const replayedChunks: Uint8Array[] = [];
+    const unsubscribe = terminalEventBus.subscribeOutput(
+      sessionId,
+      (chunk) => {
+        expect(chunk).toBeInstanceOf(Uint8Array);
+        replayedChunks.push(chunk as Uint8Array);
+      },
+      true,
+    );
+
+    expect(replayedChunks.map(outputChunkToText)).toEqual(retainedChunks);
+    expect(replayedChunks.map((chunk) => chunk.byteLength)).toEqual(
+      retainedChunks.map((text) => new TextEncoder().encode(text).byteLength),
+    );
+    expect(replayedChunks).toHaveLength(retainedChunks.length);
+    expect(replayedChunks.some((chunk) => chunk.byteLength === retainedChunks.join("").length)).toBe(false);
+
+    unsubscribe();
+    terminalEventBus.clearSession(sessionId);
+  });
+
   it("bounds total backlog size to MAX_BACKLOG_CHARS and replays latest tail to new subscriber", async () => {
     await terminalEventBus.ensureStarted();
     const sessionId = "backend-overflow";
@@ -118,7 +151,7 @@ describe("terminalEventBus backlog buffer", () => {
 
     let replayed = "";
     const unsubscribe = terminalEventBus.subscribeOutput(sessionId, (chunk) => {
-      replayed = outputChunkToText(chunk);
+      replayed += outputChunkToText(chunk);
     }, true);
 
     const maxBacklog = 512 * 1024;
@@ -199,8 +232,8 @@ describe("terminalEventBus backlog buffer", () => {
       true,
     );
 
-    expect(receivedChunks).toHaveLength(1);
-    const replayedBacklog = receivedChunks[0]!;
+    expect(receivedChunks.length).toBeGreaterThan(1);
+    const replayedBacklog = receivedChunks.join("");
     expect(replayedBacklog.length).toBe(maxBacklog);
     expect(replayedBacklog.includes(initialPrefix)).toBe(false);
     expect(replayedBacklog.includes("chunk-0059:")).toBe(true);
@@ -216,11 +249,8 @@ describe("terminalEventBus backlog buffer", () => {
       data: encodeOutput(liveChunk2),
     });
 
-    expect(receivedChunks).toEqual([
-      replayedBacklog,
-      liveChunk1,
-      liveChunk2,
-    ]);
+    expect(receivedChunks.slice(0, -2).join("")).toBe(replayedBacklog);
+    expect(receivedChunks.slice(-2)).toEqual([liveChunk1, liveChunk2]);
 
     unsubscribeTitle();
     unsubscribeOutput();

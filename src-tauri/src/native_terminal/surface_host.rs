@@ -1,7 +1,7 @@
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
 
@@ -149,36 +149,108 @@ impl NativeTerminalSurfaceReceipt {
 
 /// Coordinates render scheduling to coalesce rapid bursts of terminal updates
 /// into at most one pending main-thread render pass.
+const RENDER_IDLE: u8 = 0;
+const RENDER_SCHEDULED: u8 = 1;
+const RENDERING: u8 = 2;
+const RENDER_FOLLOW_UP: u8 = 3;
+
 #[derive(Debug, Default)]
 pub struct RenderScheduleCoordinator {
-    pending: AtomicBool,
+    state: AtomicU8,
 }
 
 impl RenderScheduleCoordinator {
     pub fn new() -> Self {
         Self {
-            pending: AtomicBool::new(false),
+            state: AtomicU8::new(RENDER_IDLE),
         }
     }
 
     /// Attempts to schedule a render pass.
     ///
     /// Returns `true` if this transition successfully scheduled the render (transitioning
-    /// from idle to pending). Returns `false` if a render is already pending and should be coalesced.
+    /// from idle to pending). Output arriving during an active frame marks one coalesced follow-up.
     pub fn schedule_render(&self) -> bool {
-        !self.pending.swap(true, Ordering::SeqCst)
+        loop {
+            let state = self.state.load(Ordering::SeqCst);
+            match state {
+                RENDER_IDLE => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            RENDER_IDLE,
+                            RENDER_SCHEDULED,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                RENDERING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            RENDERING,
+                            RENDER_FOLLOW_UP,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        return false;
+                    }
+                }
+                RENDER_SCHEDULED | RENDER_FOLLOW_UP => return false,
+                _ => unreachable!("invalid render coordinator state"),
+            }
+        }
     }
 
-    /// Consumes the pending render marker, transitioning the coordinator back to idle.
+    /// Marks a scheduled frame as actively rendering without clearing its pending state.
+    pub fn begin_render(&self) -> bool {
+        self.state
+            .compare_exchange(
+                RENDER_SCHEDULED,
+                RENDERING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// Completes the active frame.
     ///
-    /// Returns `true` if a pending render was consumed, or `false` if none was pending.
-    pub fn consume_render(&self) -> bool {
-        self.pending.swap(false, Ordering::SeqCst)
+    /// Returns `true` when output arrived during rendering and one follow-up frame must run.
+    pub fn finish_render(&self) -> bool {
+        loop {
+            let state = self.state.load(Ordering::SeqCst);
+            let (next, follow_up) = match state {
+                RENDERING => (RENDER_IDLE, false),
+                RENDER_FOLLOW_UP => (RENDER_SCHEDULED, true),
+                _ => return false,
+            };
+            if self
+                .state
+                .compare_exchange(state, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return follow_up;
+            }
+        }
     }
 
-    /// Returns `true` if a render pass is currently pending.
+    /// Cancels all scheduled or active render work, transitioning back to idle.
+    ///
+    /// Returns `true` if work was cancelled, or `false` if the coordinator was already idle.
+    pub fn consume_render(&self) -> bool {
+        self.state.swap(RENDER_IDLE, Ordering::SeqCst) != RENDER_IDLE
+    }
+
+    /// Returns `true` if a render pass is scheduled, active, or awaiting a follow-up.
     pub fn is_render_pending(&self) -> bool {
-        self.pending.load(Ordering::SeqCst)
+        self.state.load(Ordering::SeqCst) != RENDER_IDLE
     }
 }
 
@@ -213,6 +285,79 @@ pub struct NativeTerminalSurfaceHostState {
     sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
     pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
+}
+
+fn dispatch_scheduled_render<R: Runtime>(
+    window: WebviewWindow<R>,
+    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
+    session_id: String,
+    coordinator: Arc<RenderScheduleCoordinator>,
+) {
+    let surface_window = window.clone();
+    let follow_up_window = window.clone();
+    let failure_coordinator = Arc::clone(&coordinator);
+    let failure_session_id = session_id.clone();
+    if let Err(err) = window.run_on_main_thread(move || {
+        if !coordinator.begin_render() {
+            return;
+        }
+        let render_state = {
+            let sessions_guard = sessions.lock();
+            sessions_guard.get(&session_id).and_then(|session| {
+                let layout = session.layout?;
+                let logical_bounds = session.logical_bounds?;
+                match session_render_snapshot(session) {
+                    Ok(render_input) => Some((layout, logical_bounds, render_input)),
+                    Err(err) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "Failed to capture native terminal snapshot for render"
+                        );
+                        None
+                    }
+                }
+            })
+        };
+        if let Some((layout, logical_bounds, render_input)) = render_state {
+            let mut hosts_guard = hosts.lock();
+            if let Some(host) = hosts_guard.get_mut(&session_id) {
+                host.layout = Some(layout);
+                host.logical_bounds = Some(logical_bounds);
+                host.target.update_viewport(Some(logical_bounds));
+                if let Err(err) = host.render_snapshot(
+                    &surface_window,
+                    layout,
+                    &render_input.snapshot,
+                    render_input.selection.as_ref(),
+                ) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "Failed to render native terminal snapshot"
+                    );
+                }
+            }
+        }
+
+        if coordinator.finish_render() {
+            dispatch_scheduled_render(
+                follow_up_window,
+                hosts,
+                sessions,
+                session_id,
+                coordinator,
+            );
+        }
+    }) {
+        failure_coordinator.consume_render();
+        tracing::warn!(
+            session_id = %failure_session_id,
+            error = %err,
+            "Failed to dispatch native terminal render to main thread"
+        );
+    }
 }
 
 impl Clone for NativeTerminalSurfaceHostState {
@@ -721,65 +866,13 @@ impl NativeTerminalSurfaceHostState {
                         if session_exists && render_coordinator.schedule_render() {
                             if let Some(app) = &app_handle {
                                 if let Some(window) = app.get_webview_window("main") {
-                                    let hosts_clone = Arc::clone(&hosts);
-                                    let sessions_clone = Arc::clone(&sessions);
-                                    let sid = session_id_owned.clone();
-                                    let window_clone = window.clone();
-                                    let coordinator_clone = Arc::clone(&render_coordinator);
-                                    if let Err(err) = window.run_on_main_thread(move || {
-                                        coordinator_clone.consume_render();
-                                        let render_state = {
-                                            let sessions_guard = sessions_clone.lock();
-                                            sessions_guard.get(&sid).and_then(|session| {
-                                                let layout = session.layout?;
-                                                let logical_bounds = session.logical_bounds?;
-                                                match session_render_snapshot(session) {
-                                                    Ok(render_input) => Some((
-                                                        layout,
-                                                        logical_bounds,
-                                                        render_input,
-                                                    )),
-                                                    Err(err) => {
-                                                        tracing::warn!(
-                                                            session_id = %sid,
-                                                            error = %err,
-                                                            "Failed to capture native terminal snapshot for render"
-                                                        );
-                                                        None
-                                                    }
-                                                }
-                                            })
-                                        };
-                                        if let Some((layout, logical_bounds, render_input)) =
-                                            render_state
-                                        {
-                                            let mut hosts_guard = hosts_clone.lock();
-                                            if let Some(h) = hosts_guard.get_mut(&sid) {
-                                                h.layout = Some(layout);
-                                                h.logical_bounds = Some(logical_bounds);
-                                                h.target.update_viewport(Some(logical_bounds));
-                                                if let Err(err) = h.render_snapshot(
-                                                    &window_clone,
-                                                    layout,
-                                                    &render_input.snapshot,
-                                                    render_input.selection.as_ref(),
-                                                ) {
-                                                    tracing::warn!(
-                                                        session_id = %sid,
-                                                        error = %err,
-                                                        "Failed to render native terminal snapshot"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }) {
-                                        render_coordinator.consume_render();
-                                        tracing::warn!(
-                                            session_id = %session_id_owned,
-                                            error = %err,
-                                            "Failed to dispatch native terminal render to main thread"
-                                        );
-                                    }
+                                    dispatch_scheduled_render(
+                                        window,
+                                        Arc::clone(&hosts),
+                                        Arc::clone(&sessions),
+                                        session_id_owned.clone(),
+                                        Arc::clone(&render_coordinator),
+                                    );
                                 } else {
                                     render_coordinator.consume_render();
                                 }
@@ -1495,6 +1588,39 @@ mod tests {
         assert_eq!(receipt.cell_height_px, cell_metrics.height_px);
         assert_eq!(receipt.rebuilt_rows, 4);
         assert_eq!(receipt.reused_rows, 20);
+    }
+
+    #[test]
+    fn render_schedule_coordinator_stays_pending_until_frame_completion() {
+        let coordinator = RenderScheduleCoordinator::new();
+
+        assert!(coordinator.schedule_render());
+        assert!(coordinator.begin_render());
+        assert!(
+            coordinator.is_render_pending(),
+            "starting a frame must not clear the pending marker before presentation completes"
+        );
+
+        assert!(
+            !coordinator.schedule_render(),
+            "output arriving during the frame must coalesce into one follow-up"
+        );
+        assert!(coordinator.is_render_pending());
+        assert!(
+            coordinator.finish_render(),
+            "frame completion must report the coalesced follow-up"
+        );
+        assert!(
+            coordinator.is_render_pending(),
+            "the coalesced follow-up must remain pending until its frame completes"
+        );
+
+        assert!(coordinator.begin_render());
+        assert!(
+            !coordinator.finish_render(),
+            "a clean frame completion must not request another frame"
+        );
+        assert!(!coordinator.is_render_pending());
     }
 
     #[test]

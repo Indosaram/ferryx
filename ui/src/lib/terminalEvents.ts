@@ -103,18 +103,6 @@ function findPartialOscPrefix(source: string): string {
   return "";
 }
 
-function concatByteChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
-  if (chunks.length === 0) return new Uint8Array();
-  if (chunks.length === 1) return chunks[0] ?? new Uint8Array();
-  const merged = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return merged;
-}
-
 class TerminalEventBus {
   private readonly decoderRegistry = new TerminalOutputDecoderRegistry();
   private readonly outputListeners = new Map<string, Set<OutputListener>>();
@@ -145,7 +133,9 @@ class TerminalEventBus {
     if (replay) {
       const existing = this.backlog.get(sessionId);
       if (existing && existing.totalBytes > 0) {
-        listener(concatByteChunks(existing.chunks, existing.totalBytes));
+        for (const chunk of existing.chunks) {
+          listener(chunk);
+        }
       }
     }
 
