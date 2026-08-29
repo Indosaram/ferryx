@@ -7,8 +7,8 @@
 
 mod bell;
 mod cell_extractor;
-mod color;
 pub mod child_surface;
+mod color;
 pub mod composition;
 mod cursor;
 mod engine;

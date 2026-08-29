@@ -1,4 +1,14 @@
+use serde::{Deserialize, Serialize};
+
 use crate::ipc::IpcError;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NativeTerminalClipboardContent {
+    Text { text: String },
+    Image,
+    Empty,
+}
 
 #[tauri::command]
 pub async fn cmd_native_terminal_attach() -> Result<(), IpcError> {
@@ -60,6 +70,12 @@ pub async fn cmd_native_terminal_search() -> Result<(), IpcError> {
     Err(IpcError::native_terminal_unsupported())
 }
 
+#[tauri::command]
+pub async fn cmd_native_terminal_clipboard_content(
+) -> Result<NativeTerminalClipboardContent, IpcError> {
+    Err(IpcError::native_terminal_unsupported())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +96,7 @@ mod tests {
             cmd_native_terminal_paste().await,
             cmd_native_terminal_mouse().await,
             cmd_native_terminal_search().await,
+            cmd_native_terminal_clipboard_content().await.map(|_| ()),
         ];
 
         for result in results {

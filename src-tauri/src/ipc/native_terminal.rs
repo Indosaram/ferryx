@@ -111,6 +111,69 @@ pub struct NativeTerminalSearchResult {
     pub total_matches: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NativeTerminalClipboardContent {
+    Text { text: String },
+    Image,
+    Empty,
+}
+
+fn is_image_pasteboard_type(t: &str) -> bool {
+    t.starts_with("public.png")
+        || t.starts_with("public.tiff")
+        || t.starts_with("public.jpeg")
+        || t.starts_with("public.heic")
+        || t.starts_with("public.heif")
+        || t.starts_with("public.webp")
+        || t.starts_with("com.compuserve.gif")
+        || t.starts_with("com.microsoft.bmp")
+        || t.starts_with("public.image")
+}
+
+pub fn classify_clipboard_content(
+    text: Option<String>,
+    types: &[String],
+) -> NativeTerminalClipboardContent {
+    if let Some(text) = text {
+        if !text.is_empty() {
+            return NativeTerminalClipboardContent::Text { text };
+        }
+    }
+    let has_image = types.iter().any(|t| is_image_pasteboard_type(t));
+    if has_image {
+        return NativeTerminalClipboardContent::Image;
+    }
+    if !types.is_empty() {
+        // Parity with the previous DOM paste path: ANY non-text payload
+        // (e.g. Finder file URLs) routes the agent image-paste chord.
+        return NativeTerminalClipboardContent::Image;
+    }
+    NativeTerminalClipboardContent::Empty
+}
+
+#[cfg(target_os = "macos")]
+fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let types: Vec<String> = pasteboard
+        .types()
+        .map(|arr| arr.iter().map(|t| t.to_string()).collect())
+        .unwrap_or_default();
+    let text = unsafe {
+        pasteboard
+            .stringForType(NSPasteboardTypeString)
+            .map(|s| s.to_string())
+    };
+    let content = classify_clipboard_content(text, &types);
+    (content, types)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
+    (NativeTerminalClipboardContent::Empty, Vec::new())
+}
+
 fn install_pty_resize_dispatcher(
     state: &NativeTerminalSurfaceHostState,
     daemon_client: Arc<DaemonClient>,
@@ -698,6 +761,74 @@ pub async fn cmd_native_terminal_search<R: Runtime>(
         .map_err(|err| IpcError::internal(err.to_string()))
 }
 
+#[tauri::command]
+pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<NativeTerminalClipboardContent, IpcError> {
+    #[cfg(target_os = "macos")]
+    {
+        let window = match app.get_webview_window("main") {
+            Some(window) => window,
+            None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
+        };
+        let (sender, receiver) = oneshot::channel();
+        if let Err(error) = window.run_on_main_thread(move || {
+            let (content, types) = read_native_pasteboard();
+            if cfg!(debug_assertions)
+                || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1")
+            {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                use std::time::{SystemTime, UNIX_EPOCH};
+
+                let (kind, text_length) = match &content {
+                    NativeTerminalClipboardContent::Text { text } => ("text", text.len()),
+                    NativeTerminalClipboardContent::Image => ("image", 0),
+                    NativeTerminalClipboardContent::Empty => ("empty", 0),
+                };
+                let wall_time_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let entry = serde_json::json!({
+                    "runId": "rust-clipboard",
+                    "sequence": 0,
+                    "event": "terminal.surface.paste.clipboard.classify",
+                    "wallTimeMs": wall_time_ms,
+                    "details": {
+                        "types": types,
+                        "kind": kind,
+                        "textLength": text_length,
+                    }
+                });
+                if let Ok(mut file) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/ferryx-switch-debug.jsonl")
+                {
+                    let _ = writeln!(file, "{entry}");
+                }
+            }
+            let _ = sender.send(content);
+        }) {
+            return Err(IpcError::internal(format!(
+                "Could not dispatch native clipboard read: {error}"
+            )));
+        }
+        match receiver.await {
+            Ok(content) => Ok(content),
+            Err(_) => Err(IpcError::internal(
+                "Main thread stopped before native clipboard read completed",
+            )),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(NativeTerminalClipboardContent::Empty)
+    }
+}
+
 fn into_ipc_receipt(
     session_id: String,
     receipt: NativeTerminalSurfaceReceipt,
@@ -712,5 +843,106 @@ fn into_ipc_receipt(
         cursor_row: receipt.cursor_row,
         cell_width_px: receipt.cell_width_px,
         cell_height_px: receipt.cell_height_px,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_clipboard_content_prefers_non_empty_text() {
+        assert_eq!(
+            classify_clipboard_content(Some("hello".to_string()), &[]),
+            NativeTerminalClipboardContent::Text {
+                text: "hello".to_string()
+            }
+        );
+        assert_eq!(
+            classify_clipboard_content(
+                Some("hello".to_string()),
+                &["public.png".to_string()]
+            ),
+            NativeTerminalClipboardContent::Text {
+                text: "hello".to_string()
+            }
+        );
+        assert_eq!(
+            classify_clipboard_content(
+                Some("hello".to_string()),
+                &["public.file-url".to_string()]
+            ),
+            NativeTerminalClipboardContent::Text {
+                text: "hello".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_clipboard_content_image_when_image_uti_or_non_empty_types() {
+        assert_eq!(
+            classify_clipboard_content(None, &["public.png".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_clipboard_content(Some("".to_string()), &["public.png".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_clipboard_content(None, &["public.jpeg".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_clipboard_content(None, &["public.file-url".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_clipboard_content(Some("".to_string()), &["public.file-url".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+    }
+
+    #[test]
+    fn test_classify_clipboard_content_empty_when_no_text_and_empty_types() {
+        assert_eq!(
+            classify_clipboard_content(None, &[]),
+            NativeTerminalClipboardContent::Empty
+        );
+        assert_eq!(
+            classify_clipboard_content(Some("".to_string()), &[]),
+            NativeTerminalClipboardContent::Empty
+        );
+    }
+
+    #[test]
+    fn test_clipboard_content_serde_tagged_format() {
+        let text_payload = NativeTerminalClipboardContent::Text {
+            text: "pasted value".to_string(),
+        };
+        let text_json = serde_json::to_string(&text_payload).expect("serialize text");
+        assert_eq!(text_json, r#"{"kind":"text","text":"pasted value"}"#);
+        assert_eq!(
+            serde_json::from_str::<NativeTerminalClipboardContent>(&text_json)
+                .expect("deserialize text"),
+            text_payload
+        );
+
+        let image_payload = NativeTerminalClipboardContent::Image;
+        let image_json = serde_json::to_string(&image_payload).expect("serialize image");
+        assert_eq!(image_json, r#"{"kind":"image"}"#);
+        assert_eq!(
+            serde_json::from_str::<NativeTerminalClipboardContent>(&image_json)
+                .expect("deserialize image"),
+            image_payload
+        );
+
+        let empty_payload = NativeTerminalClipboardContent::Empty;
+        let empty_json = serde_json::to_string(&empty_payload).expect("serialize empty");
+        assert_eq!(empty_json, r#"{"kind":"empty"}"#);
+        assert_eq!(
+            serde_json::from_str::<NativeTerminalClipboardContent>(&empty_json)
+                .expect("deserialize empty"),
+            empty_payload
+        );
     }
 }

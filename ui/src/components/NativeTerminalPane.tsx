@@ -1,6 +1,7 @@
 import type { CSSProperties, KeyboardEvent, ReactElement } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { cn } from "../lib/cn";
 import {
@@ -13,6 +14,7 @@ import { switchDebug } from "../lib/switchDebug";
 import {
   isStructuredIpcError,
   onNativeTerminalFocus,
+  onNativeTerminalPaste,
   onNativeTerminalScrollbar,
 } from "../lib/tauri";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
@@ -100,6 +102,11 @@ interface NativeKeyInput {
 
 type NativeTerminalInput = NativeKeyInput | { readonly text: string };
 
+type NativeTerminalClipboardContent =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "image" }
+  | { readonly kind: "empty" };
+
 type NativeTerminalIpcCommand =
   | "cmd_native_terminal_attach"
   | "cmd_native_terminal_detach"
@@ -110,6 +117,7 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_scrollbar"
   | "cmd_native_terminal_copy_selection"
   | "cmd_native_terminal_paste"
+  | "cmd_native_terminal_clipboard_content"
   | "cmd_native_terminal_mouse";
 
 const ignoredBrowserKeys = new Set([
@@ -155,20 +163,48 @@ function toForwardableKeyEvent(
   };
 }
 
+type KeyMatchableEvent = {
+  code?: string;
+  key: string;
+};
+
+type KeyShortcutEvent = KeyMatchableEvent & {
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+};
+
+function isShortcutKey(event: KeyMatchableEvent, code: string, key: string): boolean {
+  if (event.code) {
+    return event.code === code;
+  }
+  return event.key.toLowerCase() === key.toLowerCase();
+}
+
+function isPasteShortcut(event: KeyShortcutEvent): boolean {
+  return (
+    (event.ctrlKey || event.metaKey) &&
+    !event.altKey &&
+    !event.shiftKey &&
+    isShortcutKey(event, "KeyV", "v")
+  );
+}
+
+function isCopyShortcut(event: KeyShortcutEvent): boolean {
+  if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+    return isShortcutKey(event, "KeyC", "c");
+  }
+  if (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey) {
+    return isShortcutKey(event, "KeyC", "c");
+  }
+  return false;
+}
+
 /// Clipboard chords are handled by the browser / the textarea's own copy-paste handlers and must
 /// never be forwarded to the PTY. Plain Ctrl+C is NOT one of these - it is SIGINT.
 function isClipboardShortcut(event: ForwardableKeyEvent): boolean {
-  const key = event.key.toLowerCase();
-  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key === "v") {
-    return true;
-  }
-  if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && key === "c") {
-    return true;
-  }
-  if (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && key === "c") {
-    return true;
-  }
-  return false;
+  return isPasteShortcut(event) || isCopyShortcut(event);
 }
 
 function shouldForwardKey(event: ForwardableKeyEvent): boolean {
@@ -234,6 +270,19 @@ function isEditableElement(el: Element | null): boolean {
   return false;
 }
 
+function closestVisibleTerminalPane(target: EventTarget | null): Element | null {
+  return target instanceof Element
+    ? target.closest('.terminal-host[data-native-terminal-visible="true"]')
+    : null;
+}
+
+function quoteShellPath(path: string): string {
+  if (/[\s'"\\$`!*?[\]();&|<>]/.test(path)) {
+    return `'${path.replace(/'/g, `'\\''`)}'`;
+  }
+  return path;
+}
+
 /**
  * Height in CSS pixels reserved at the top of every terminal pane for the DOM
  * pane-drag handle.
@@ -278,9 +327,13 @@ export function nativeScrollbarThumb(metrics: ScrollbarMetrics | null): {
 }
 
 const sessionInputRecoveries = new Map<string, Promise<void>>();
+const mountedNativeTerminalSessionCounts = new Map<string, number>();
+let lastFocusedNativeTerminalSessionId: string | null = null;
 
 export function resetNativeTerminalPaneForTest(): void {
   sessionInputRecoveries.clear();
+  mountedNativeTerminalSessionCounts.clear();
+  lastFocusedNativeTerminalSessionId = null;
 }
 
 export function NativeTerminalPane({
@@ -542,6 +595,40 @@ export function NativeTerminalPane({
     });
   }, [sendInput]);
 
+  const suppressNextPasteRef = useRef(false);
+
+  const performNativePasteFallback = useCallback(() => {
+    if (!visible || !isTauri() || !targetSessionId) {
+      return;
+    }
+    suppressNextPasteRef.current = true;
+    switchDebug("terminal.surface.paste.native.start", {
+      backendSessionId: targetSessionId,
+    });
+
+    void invoke<NativeTerminalClipboardContent>("cmd_native_terminal_clipboard_content")
+      .then((content) => {
+        if (!content) return;
+        switchDebug("terminal.surface.paste.native.result", {
+          backendSessionId: targetSessionId,
+          kind: content.kind,
+          textLength: content.kind === "text" ? content.text.length : 0,
+        });
+        if (content.kind === "text" && content.text.length > 0) {
+          sendPaste(content.text);
+        } else if (content.kind === "image") {
+          sendImagePasteShortcut();
+        }
+      })
+      .catch((error: unknown) => {
+        switchDebug("terminal.surface.paste.native.error", {
+          backendSessionId: targetSessionId,
+          error: String(error),
+        });
+        reportNativeTerminalIpcFailure("cmd_native_terminal_clipboard_content", error);
+      });
+  }, [sendImagePasteShortcut, sendPaste, targetSessionId, visible]);
+
   const sendMouse = useCallback((
     event: PointerEvent | React.PointerEvent<HTMLDivElement>,
     action: "Press" | "Motion" | "Release",
@@ -679,9 +766,43 @@ export function NativeTerminalPane({
   useEffect(() => {
     if (!visible || !targetSessionId) return;
 
+    mountedNativeTerminalSessionCounts.set(
+      targetSessionId,
+      (mountedNativeTerminalSessionCounts.get(targetSessionId) ?? 0) + 1,
+    );
+
+    return () => {
+      const remaining = (mountedNativeTerminalSessionCounts.get(targetSessionId) ?? 1) - 1;
+      if (remaining > 0) {
+        mountedNativeTerminalSessionCounts.set(targetSessionId, remaining);
+      } else {
+        mountedNativeTerminalSessionCounts.delete(targetSessionId);
+        if (lastFocusedNativeTerminalSessionId === targetSessionId) {
+          lastFocusedNativeTerminalSessionId = null;
+        }
+      }
+    };
+  }, [targetSessionId, visible]);
+
+  useEffect(() => {
+    if (!visible || !targetSessionId) return;
+
     const handleCaptureKeyDown = (event: globalThis.KeyboardEvent) => {
       const activeEl = typeof document !== "undefined" ? document.activeElement : null;
-      const targetEl = event.target as Element | null;
+      const targetEl = event.target instanceof Element ? event.target : null;
+      const targetedPane = closestVisibleTerminalPane(event.target);
+      const hoveredPane = document.querySelector(
+        '.terminal-host[data-native-terminal-visible="true"]:hover',
+      );
+      const fallbackSessionId =
+        lastFocusedNativeTerminalSessionId ?? mountedNativeTerminalSessionCounts.keys().next().value;
+      const ownsInput = targetedPane
+        ? targetedPane === containerRef.current
+        : hoveredPane
+          ? hoveredPane === containerRef.current
+          : fallbackSessionId === targetSessionId;
+      const canClaimInput =
+        ownsInput && (!activeEl || activeEl === document.body || !isEditableElement(activeEl));
       const activeElement = `${activeEl?.tagName ?? ""}/${activeEl?.getAttribute("data-testid") ?? ""}`;
       switchDebug("terminal.surface.input.capture", {
         key: typeof event.key === "string" ? event.key.slice(0, 120) : String(event.key).slice(0, 120),
@@ -699,7 +820,7 @@ export function NativeTerminalPane({
         !event.ctrlKey &&
         !event.altKey &&
         !event.metaKey &&
-        (!activeEl || activeEl === document.body || !isEditableElement(activeEl))
+        canClaimInput
       ) {
         if (event.key.charCodeAt(0) > 0x7f) {
           inputRef.current?.focus();
@@ -719,9 +840,27 @@ export function NativeTerminalPane({
       const forwardable = toForwardableKeyEvent(event);
       if (
         targetEl !== inputRef.current &&
+        isPasteShortcut(forwardable) &&
+        canClaimInput
+      ) {
+        event.preventDefault();
+        inputRef.current?.focus();
+        performNativePasteFallback();
+        return;
+      }
+      if (
+        targetEl !== inputRef.current &&
+        isCopyShortcut(forwardable) &&
+        canClaimInput
+      ) {
+        inputRef.current?.focus();
+        return;
+      }
+      if (
+        targetEl !== inputRef.current &&
         !isClipboardShortcut(forwardable) &&
         shouldForwardKey(forwardable) &&
-        (!activeEl || activeEl === document.body || !isEditableElement(activeEl))
+        canClaimInput
       ) {
         event.preventDefault();
         inputRef.current?.focus();
@@ -743,11 +882,115 @@ export function NativeTerminalPane({
       }
     };
 
+    const handleCapturePaste = (event: globalThis.ClipboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (suppressNextPasteRef.current) {
+        suppressNextPasteRef.current = false;
+        event.preventDefault();
+        return;
+      }
+      const activeEl = typeof document !== "undefined" ? document.activeElement : null;
+      const targetEl = event.target instanceof Element ? event.target : null;
+      const targetedPane = closestVisibleTerminalPane(event.target);
+      const fallbackSessionId =
+        lastFocusedNativeTerminalSessionId ?? mountedNativeTerminalSessionCounts.keys().next().value;
+      const ownsPaste = targetedPane
+        ? targetedPane === containerRef.current
+        : fallbackSessionId === targetSessionId;
+      const activeElement = `${activeEl?.tagName ?? ""}/${activeEl?.getAttribute("data-testid") ?? ""}`;
+      switchDebug("terminal.surface.paste.dom.capture", {
+        suppressed: suppressNextPasteRef.current,
+        ownsPaste,
+        activeElement: activeElement.slice(0, 120),
+      });
+
+      if (
+        activeEl &&
+        activeEl !== inputRef.current &&
+        activeEl !== document.body &&
+        isEditableElement(activeEl)
+      ) {
+        return;
+      }
+      if (targetEl && targetEl !== inputRef.current && isEditableElement(targetEl)) {
+        return;
+      }
+      if (!ownsPaste) {
+        return;
+      }
+
+      event.preventDefault();
+      inputRef.current?.focus();
+
+      const text = event.clipboardData?.getData("text/plain") || event.clipboardData?.getData("text");
+      if (text) {
+        sendPaste(text);
+      } else {
+        sendImagePasteShortcut();
+      }
+    };
+
+    const handleCaptureKeyUp = (event: globalThis.KeyboardEvent) => {
+      if (isShortcutKey(event, "KeyV", "v")) {
+        suppressNextPasteRef.current = false;
+      }
+    };
+
+    const clearPasteSuppression = () => {
+      suppressNextPasteRef.current = false;
+    };
+
     document.addEventListener("keydown", handleCaptureKeyDown, true);
+    document.addEventListener("keyup", handleCaptureKeyUp, true);
+    document.addEventListener("paste", handleCapturePaste, true);
+    window.addEventListener("blur", clearPasteSuppression);
     return () => {
       document.removeEventListener("keydown", handleCaptureKeyDown, true);
+      document.removeEventListener("keyup", handleCaptureKeyUp, true);
+      document.removeEventListener("paste", handleCapturePaste, true);
+      window.removeEventListener("blur", clearPasteSuppression);
+      clearPasteSuppression();
     };
-  }, [sendInput, targetSessionId, visible]);
+  }, [performNativePasteFallback, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
+
+  useEffect(() => {
+    if (!visible || !targetSessionId || !isTauri()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onNativeTerminalPaste(() => {
+      if (disposed) return;
+      const activeEl = typeof document !== "undefined" ? document.activeElement : null;
+      const activeElement = `${activeEl?.tagName ?? ""}/${activeEl?.getAttribute("data-testid") ?? ""}`;
+      const fallbackSessionId =
+        lastFocusedNativeTerminalSessionId ?? mountedNativeTerminalSessionCounts.keys().next().value;
+      switchDebug("terminal.surface.paste.native.event", {
+        fallbackSessionId: fallbackSessionId ?? null,
+        targetSessionId,
+        activeElement,
+      });
+      if (
+        activeEl &&
+        activeEl !== inputRef.current &&
+        activeEl !== document.body &&
+        isEditableElement(activeEl)
+      ) {
+        return;
+      }
+      if (fallbackSessionId !== targetSessionId) return;
+
+      inputRef.current?.focus();
+      performNativePasteFallback();
+    }).then((listener) => {
+      if (disposed) listener();
+      else unlisten = listener;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [performNativePasteFallback, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -757,12 +1000,21 @@ export function NativeTerminalPane({
     let focusFrame: number | undefined;
     void onNativeTerminalFocus((sessionId) => {
       if (disposed || sessionId !== targetSessionId) return;
+      lastFocusedNativeTerminalSessionId = targetSessionId;
       inputRef.current?.focus();
+      switchDebug("terminal.surface.focus.native", {
+        backendSessionId: targetSessionId,
+        activeElement: document.activeElement?.getAttribute("data-testid") ?? document.activeElement?.tagName,
+      });
       if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
       focusFrame = requestAnimationFrame(() => {
         focusFrame = undefined;
         if (disposed) return;
         inputRef.current?.focus();
+        switchDebug("terminal.surface.focus.confirmed", {
+          backendSessionId: targetSessionId,
+          activeElement: document.activeElement?.getAttribute("data-testid") ?? document.activeElement?.tagName,
+        });
       });
     }).then((listener) => {
       if (disposed) listener();
@@ -776,6 +1028,67 @@ export function NativeTerminalPane({
     };
   }, [targetSessionId, visible]);
 
+  useEffect(() => {
+    if (!visible || !isTauri() || !targetSessionId) {
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const setupListener = async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        const unlistenFn = await appWindow.onDragDropEvent((event) => {
+          if (disposed) return;
+          const payload = event.payload;
+          if (payload && payload.type === "drop") {
+            const container = containerRef.current;
+            if (!container) return;
+
+            const rect = container.getBoundingClientRect();
+            const scaleFactor =
+              typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
+                ? window.devicePixelRatio
+                : 1;
+
+            const logicalX = payload.position.x / scaleFactor;
+            const logicalY = payload.position.y / scaleFactor;
+
+            if (
+              logicalX >= rect.left &&
+              logicalX < rect.right &&
+              logicalY >= rect.top &&
+              logicalY < rect.bottom
+            ) {
+              if (payload.paths && payload.paths.length > 0) {
+                const quotedPayload = payload.paths.map(quoteShellPath).join(" ");
+                sendPaste(quotedPayload);
+              }
+            }
+          }
+        });
+
+        if (disposed) {
+          unlistenFn();
+        } else {
+          unlisten = unlistenFn;
+        }
+      } catch (error: unknown) {
+        switchDebug("terminal.surface.drop.listener.error", {
+          backendSessionId: targetSessionId,
+          error: String(error),
+        });
+      }
+    };
+
+    void setupListener();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [sendPaste, targetSessionId, visible]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -1052,16 +1365,30 @@ export function NativeTerminalPane({
               : undefined
           }
           onFocus={() => {
+            lastFocusedNativeTerminalSessionId = targetSessionId;
+            switchDebug("terminal.surface.focus.sink", {
+              backendSessionId: targetSessionId,
+            });
             sendFocus(true);
           }}
           onBlur={(event) => {
+            switchDebug("terminal.surface.focus.blur", {
+              backendSessionId: targetSessionId,
+              composing: isComposingRef.current,
+            });
             isComposingRef.current = false;
             event.currentTarget.value = "";
             sendFocus(false);
           }}
           onPaste={(event) => {
+            if (event.nativeEvent.defaultPrevented || event.defaultPrevented) return;
+            if (suppressNextPasteRef.current) {
+              suppressNextPasteRef.current = false;
+              event.preventDefault();
+              return;
+            }
             event.preventDefault();
-            const text = event.clipboardData?.getData("text");
+            const text = event.clipboardData?.getData("text/plain") || event.clipboardData?.getData("text");
             if (text) {
               sendPaste(text);
             } else {
@@ -1077,20 +1404,14 @@ export function NativeTerminalPane({
               return;
             }
 
-            if (
-              (event.ctrlKey || event.metaKey) &&
-              !event.altKey &&
-              !event.shiftKey &&
-              event.key.toLowerCase() === "v"
-            ) {
+            if (isPasteShortcut(event)) {
+              event.preventDefault();
+              performNativePasteFallback();
               return;
             }
 
             // Copy shortcut: Cmd+C on Mac (without Ctrl) or Ctrl+Shift+C
-            if (
-              (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "c") ||
-              (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "c")
-            ) {
+            if (isCopyShortcut(event)) {
               event.preventDefault();
               handleCopy();
               return;
@@ -1135,10 +1456,17 @@ export function NativeTerminalPane({
           }}
           onCompositionStart={() => {
             isComposingRef.current = true;
+            switchDebug("terminal.surface.composition.start", {
+              backendSessionId: targetSessionId,
+            });
           }}
           onCompositionEnd={(event) => {
             isComposingRef.current = false;
             const text = event.data || event.currentTarget.value;
+            switchDebug("terminal.surface.composition.end", {
+              backendSessionId: targetSessionId,
+              textLength: text.length,
+            });
             event.currentTarget.value = "";
             if (text) {
               sendInput({ text });

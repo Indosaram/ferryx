@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createSwitchDebugLogger } from "./switchDebug";
+import {
+  createSwitchDebugLogger,
+  resolveSwitchDebugEnabled,
+} from "./switchDebug";
 
 describe("switchDebug", () => {
   it("emits ordered structured entries through the configured sink", () => {
@@ -34,5 +37,49 @@ describe("switchDebug", () => {
 
     expect(log("project.select")).toBeNull();
     expect(sink).not.toHaveBeenCalled();
+  });
+
+  describe("resolveSwitchDebugEnabled", () => {
+    it("enables tracing in a dev build", () => {
+      expect(
+        resolveSwitchDebugEnabled({ DEV: true, MODE: "development" }),
+      ).toBe(true);
+    });
+
+    it("stays disabled in a plain production build", () => {
+      expect(
+        resolveSwitchDebugEnabled({ DEV: false, MODE: "production" }),
+      ).toBe(false);
+    });
+
+    it("opts a production build in when VITE_SWITCH_DEBUG is 1", () => {
+      expect(
+        resolveSwitchDebugEnabled({
+          DEV: false,
+          MODE: "production",
+          VITE_SWITCH_DEBUG: "1",
+        }),
+      ).toBe(true);
+    });
+
+    it("never traces under the test runner even when opted in", () => {
+      expect(
+        resolveSwitchDebugEnabled({
+          DEV: true,
+          MODE: "test",
+          VITE_SWITCH_DEBUG: "1",
+        }),
+      ).toBe(false);
+    });
+
+    it("ignores a VITE_SWITCH_DEBUG value that is not exactly 1", () => {
+      expect(
+        resolveSwitchDebugEnabled({
+          DEV: false,
+          MODE: "production",
+          VITE_SWITCH_DEBUG: "true",
+        }),
+      ).toBe(false);
+    });
   });
 });

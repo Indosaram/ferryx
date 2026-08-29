@@ -141,6 +141,9 @@ pub fn is_unshifted_cmd_w_characters(characters: Option<&str>) -> bool {
 pub const ANSI_KEY_CODE_W: u16 = 13;
 
 #[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_V: u16 = 9;
+
+#[cfg(target_os = "macos")]
 pub const ANSI_KEY_CODE_1: u16 = 18;
 #[cfg(target_os = "macos")]
 pub const ANSI_KEY_CODE_5: u16 = 23;
@@ -193,35 +196,202 @@ pub fn is_unshifted_cmd_w(
 }
 
 #[cfg(target_os = "macos")]
+pub fn is_unshifted_cmd_v(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    characters: Option<&str>,
+    key_code: u16,
+) -> bool {
+    is_unshifted_cmd_w_modifiers(flags)
+        && (characters.is_some_and(|chars| chars.eq_ignore_ascii_case("v"))
+            || key_code == ANSI_KEY_CODE_V)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTerminalPasteAction {
+    EmitAndConsume,
+    ConsumeOnly,
+    PassThrough,
+}
+
+#[cfg(target_os = "macos")]
+pub const fn native_key_event_has_characters(event_type: objc2_app_kit::NSEventType) -> bool {
+    matches!(
+        event_type,
+        objc2_app_kit::NSEventType::KeyDown | objc2_app_kit::NSEventType::KeyUp
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NativeTerminalPasteLatch {
+    latched: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl NativeTerminalPasteLatch {
+    pub const fn new() -> Self {
+        Self { latched: false }
+    }
+
+    pub fn is_latched(&self) -> bool {
+        self.latched
+    }
+
+    pub fn handle_event(
+        &mut self,
+        event_type: objc2_app_kit::NSEventType,
+        flags: objc2_app_kit::NSEventModifierFlags,
+        characters: Option<&str>,
+        key_code: u16,
+        has_focused_terminal: bool,
+    ) -> NativeTerminalPasteAction {
+        match event_type {
+            objc2_app_kit::NSEventType::KeyDown => {
+                if !has_focused_terminal || !is_unshifted_cmd_v(flags, characters, key_code) {
+                    NativeTerminalPasteAction::PassThrough
+                } else if self.latched {
+                    NativeTerminalPasteAction::ConsumeOnly
+                } else {
+                    self.latched = true;
+                    NativeTerminalPasteAction::EmitAndConsume
+                }
+            }
+            objc2_app_kit::NSEventType::KeyUp => {
+                if key_code == ANSI_KEY_CODE_V
+                    || characters.is_some_and(|chars| chars.eq_ignore_ascii_case("v"))
+                {
+                    self.latched = false;
+                }
+                NativeTerminalPasteAction::PassThrough
+            }
+            objc2_app_kit::NSEventType::FlagsChanged => {
+                if !flags.contains(objc2_app_kit::NSEventModifierFlags::Command) {
+                    self.latched = false;
+                }
+                NativeTerminalPasteAction::PassThrough
+            }
+            _ => NativeTerminalPasteAction::PassThrough,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     use block2::RcBlock;
-    use objc2_app_kit::{NSEvent, NSEventMask};
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventType};
+    use std::cell::Cell;
     use std::ptr::{self, NonNull};
 
     let app_handle = app.handle().clone();
+    #[cfg(feature = "native-terminal")]
+    let surface_host = app
+        .state::<NativeTerminalSurfaceHostState>()
+        .inner()
+        .clone();
+    let paste_latch = Cell::new(NativeTerminalPasteLatch::new());
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
+        let event_type = event.r#type();
         let flags = event.modifierFlags();
-        let chars = event.charactersIgnoringModifiers();
+        let chars = if native_key_event_has_characters(event_type) {
+            event.charactersIgnoringModifiers()
+        } else {
+            None
+        };
         let chars_str = chars.as_deref().map(|s| s.to_string());
         let key_code = event.keyCode();
-        if is_unshifted_cmd_w(flags, chars_str.as_deref(), key_code) {
+        let worktree_digit = if event_type == NSEventType::KeyDown {
+            unshifted_cmd_digit(flags, chars_str.as_deref(), key_code)
+        } else {
+            None
+        };
+
+        if event_type == NSEventType::KeyDown
+            && is_unshifted_cmd_w(flags, chars_str.as_deref(), key_code)
+        {
             if let Some(window) = app_handle.get_webview_window("main") {
                 let _ = window.emit("menu_close_tab", ());
             }
             ptr::null_mut()
-        } else if let Some(digit) = unshifted_cmd_digit(flags, chars_str.as_deref(), key_code) {
+        } else if let Some(digit) = worktree_digit {
             if let Some(window) = app_handle.get_webview_window("main") {
                 let _ = window.emit("menu_select_worktree", digit);
             }
             ptr::null_mut()
         } else {
-            event_ptr.as_ptr()
+            let has_focused_terminal = {
+                #[cfg(feature = "native-terminal")]
+                {
+                    surface_host.has_focused_session()
+                }
+                #[cfg(not(feature = "native-terminal"))]
+                {
+                    false
+                }
+            };
+            let mut latch = paste_latch.get();
+            let action = latch.handle_event(
+                event_type,
+                flags,
+                chars_str.as_deref(),
+                key_code,
+                has_focused_terminal,
+            );
+            paste_latch.set(latch);
+            if (cfg!(debug_assertions)
+                || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1"))
+                && event_type == NSEventType::KeyDown
+                && is_unshifted_cmd_v(flags, chars_str.as_deref(), key_code)
+            {
+                use std::io::Write;
+                let action_str = match action {
+                    NativeTerminalPasteAction::EmitAndConsume => "EmitAndConsume",
+                    NativeTerminalPasteAction::ConsumeOnly => "ConsumeOnly",
+                    NativeTerminalPasteAction::PassThrough => "PassThrough",
+                };
+                let wall_time_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let record = serde_json::json!({
+                    "runId": "rust-monitor",
+                    "sequence": 0,
+                    "event": "terminal.surface.paste.monitor",
+                    "wallTimeMs": wall_time_ms,
+                    "details": {
+                        "action": action_str,
+                        "hasFocusedTerminal": has_focused_terminal,
+                        "keyCode": key_code,
+                        "characters": chars_str.as_deref(),
+                    }
+                });
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/ferryx-switch-debug.jsonl")
+                {
+                    let _ = writeln!(file, "{}", record);
+                }
+            }
+            match action {
+                NativeTerminalPasteAction::EmitAndConsume => {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.emit("native_terminal_paste", ());
+                    }
+                    ptr::null_mut()
+                }
+                NativeTerminalPasteAction::ConsumeOnly => ptr::null_mut(),
+                NativeTerminalPasteAction::PassThrough => event_ptr.as_ptr(),
+            }
         }
     });
 
     let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown | NSEventMask::KeyUp | NSEventMask::FlagsChanged,
+            &block,
+        )
     };
     if let Some(monitor) = monitor {
         std::mem::forget(monitor);
@@ -386,6 +556,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_select,
         cmd_native_terminal_copy_selection,
         cmd_native_terminal_paste,
+        cmd_native_terminal_clipboard_content,
         cmd_native_terminal_mouse,
         cmd_native_terminal_search,
         cmd_remote_status,
@@ -682,6 +853,160 @@ mod tests {
             0
         ));
         assert!(!is_unshifted_cmd_w(NSEventModifierFlags::Command, None, 0));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn korean_cmd_v_multiple_keydowns_emit_only_once_until_keyup() {
+        use objc2_app_kit::{NSEventModifierFlags, NSEventType};
+
+        let mut latch = NativeTerminalPasteLatch::new();
+
+        // 1. First physical Cmd+V KeyDown (Korean IME produces first event with isARepeat=false)
+        let action1 = latch.handle_event(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            Some("ㅍ"),
+            ANSI_KEY_CODE_V,
+            true,
+        );
+        assert_eq!(action1, NativeTerminalPasteAction::EmitAndConsume);
+
+        // 2. Second duplicate KeyDown during the same physical gesture (also isARepeat=false from AppKit/IME)
+        let action2 = latch.handle_event(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            Some("v"),
+            ANSI_KEY_CODE_V,
+            true,
+        );
+        assert_eq!(
+            action2,
+            NativeTerminalPasteAction::ConsumeOnly,
+            "Duplicate KeyDown within same Cmd+V gesture must be consumed without emit"
+        );
+
+        // 3. Third duplicate KeyDown during the same physical gesture
+        let action3 = latch.handle_event(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            None,
+            ANSI_KEY_CODE_V,
+            true,
+        );
+        assert_eq!(action3, NativeTerminalPasteAction::ConsumeOnly);
+
+        let unrelated_key_up = latch.handle_event(
+            NSEventType::KeyUp,
+            NSEventModifierFlags::Command,
+            Some("a"),
+            0,
+            true,
+        );
+        assert_eq!(unrelated_key_up, NativeTerminalPasteAction::PassThrough);
+        assert!(latch.is_latched());
+
+        // 4. KeyUp for 'V' re-arms the latch
+        let action_up = latch.handle_event(
+            NSEventType::KeyUp,
+            NSEventModifierFlags::empty(),
+            Some("v"),
+            ANSI_KEY_CODE_V,
+            true,
+        );
+        assert_eq!(action_up, NativeTerminalPasteAction::PassThrough);
+
+        // 5. Subsequent Cmd+V KeyDown in a new gesture emits again
+        let action4 = latch.handle_event(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            Some("ㅍ"),
+            ANSI_KEY_CODE_V,
+            true,
+        );
+        assert_eq!(action4, NativeTerminalPasteAction::EmitAndConsume);
+
+        let command_up = latch.handle_event(
+            NSEventType::FlagsChanged,
+            NSEventModifierFlags::empty(),
+            None,
+            0,
+            true,
+        );
+        assert_eq!(command_up, NativeTerminalPasteAction::PassThrough);
+        assert!(!latch.is_latched());
+
+        // 6. When terminal is not focused, Cmd+V passes through unchanged
+        let mut unfocused_latch = NativeTerminalPasteLatch::new();
+        let action_unfocused = unfocused_latch.handle_event(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            Some("v"),
+            ANSI_KEY_CODE_V,
+            false,
+        );
+        assert_eq!(action_unfocused, NativeTerminalPasteAction::PassThrough);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn modifier_events_never_read_key_characters() {
+        use objc2_app_kit::NSEventType;
+
+        assert!(native_key_event_has_characters(NSEventType::KeyDown));
+        assert!(native_key_event_has_characters(NSEventType::KeyUp));
+        assert!(!native_key_event_has_characters(NSEventType::FlagsChanged));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_cmd_v_uses_physical_keycode_under_korean_input() {
+        use objc2_app_kit::{NSEventModifierFlags, NSEventType};
+
+        assert!(is_unshifted_cmd_v(
+            NSEventModifierFlags::Command,
+            Some("ㅍ"),
+            ANSI_KEY_CODE_V,
+        ));
+        assert!(is_unshifted_cmd_v(
+            NSEventModifierFlags::Command,
+            None,
+            ANSI_KEY_CODE_V,
+        ));
+        assert!(!is_unshifted_cmd_v(
+            NSEventModifierFlags::Command | NSEventModifierFlags::Control,
+            Some("ㅍ"),
+            ANSI_KEY_CODE_V,
+        ));
+        assert!(!is_unshifted_cmd_v(
+            NSEventModifierFlags::Control,
+            Some("v"),
+            ANSI_KEY_CODE_V,
+        ));
+
+        let mut latch = NativeTerminalPasteLatch::new();
+        assert_eq!(
+            latch.handle_event(
+                NSEventType::KeyDown,
+                NSEventModifierFlags::Command,
+                Some("ㅍ"),
+                ANSI_KEY_CODE_V,
+                true,
+            ),
+            NativeTerminalPasteAction::EmitAndConsume,
+        );
+
+        let mut unfocused_latch = NativeTerminalPasteLatch::new();
+        assert_eq!(
+            unfocused_latch.handle_event(
+                NSEventType::KeyDown,
+                NSEventModifierFlags::Command,
+                Some("ㅍ"),
+                ANSI_KEY_CODE_V,
+                false,
+            ),
+            NativeTerminalPasteAction::PassThrough,
+        );
     }
 
     #[cfg(unix)]

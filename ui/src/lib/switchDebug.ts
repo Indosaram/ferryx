@@ -39,7 +39,28 @@ export function createSwitchDebugLogger({
   };
 }
 
-const debugEnabled = import.meta.env.DEV && import.meta.env.MODE !== "test";
+type SwitchDebugEnv = {
+  DEV: boolean;
+  MODE: string;
+  VITE_SWITCH_DEBUG?: string;
+};
+
+/**
+ * Tracing is on by default only in a dev build. A release build can opt in at
+ * build time with `VITE_SWITCH_DEBUG=1`, which is how the shipped app is made
+ * observable without the Vite dev server (and therefore without HMR reloads).
+ * The test runner never traces, so opting in cannot pollute test output.
+ */
+export function resolveSwitchDebugEnabled(env: SwitchDebugEnv): boolean {
+  if (env.MODE === "test") return false;
+  return env.DEV || env.VITE_SWITCH_DEBUG === "1";
+}
+
+const debugEnabled = resolveSwitchDebugEnabled({
+  DEV: import.meta.env.DEV,
+  MODE: import.meta.env.MODE,
+  VITE_SWITCH_DEBUG: import.meta.env.VITE_SWITCH_DEBUG as string | undefined,
+});
 const runId = globalThis.crypto.randomUUID();
 const isTauri = "__TAURI_INTERNALS__" in window;
 let sinkTail = Promise.resolve();

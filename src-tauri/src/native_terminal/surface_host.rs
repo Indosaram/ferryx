@@ -14,7 +14,7 @@ use super::error::NativeTerminalError;
 use super::input::{cursor_style_for_focus, NativeTerminalInput};
 use super::platform::PlatformCompositorTarget;
 use super::renderer::font_manager;
-use super::renderer::{NativeTerminalRenderer, RendererConfig, RendererTheme};
+use super::renderer::{NativeTerminalRenderer, RendererConfig, RendererTheme, SelectionSnapshot};
 use super::snapshot::RenderSnapshot;
 use super::surface_error::{classify_surface_error, SurfaceFrameAction};
 pub use super::surface_snapshot::snapshot_for_layout;
@@ -330,6 +330,35 @@ fn take_native_terminal_scrollbar_event(
     (was_visible || is_visible).then_some(NativeTerminalEvent::Scrollbar(payload))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct SessionRenderInput {
+    snapshot: RenderSnapshot,
+    selection: Option<SelectionSnapshot>,
+}
+
+fn session_render_snapshot(
+    session: &NativeTerminalSession,
+) -> Result<SessionRenderInput, NativeTerminalError> {
+    let selection =
+        session
+            .terminal
+            .selection_range()?
+            .map(
+                |(start_col, start_row, end_col, end_row)| SelectionSnapshot {
+                    start_col,
+                    start_row,
+                    end_col,
+                    end_row,
+                },
+            );
+    let mut snapshot = session.terminal.render_snapshot()?;
+    snapshot.cursor.visual_style = cursor_style_for_focus(session.focused);
+    Ok(SessionRenderInput {
+        snapshot,
+        selection,
+    })
+}
+
 fn emit_native_terminal_event<R: Runtime>(
     app: Option<&tauri::AppHandle<R>>,
     event_sink: &RwLock<Option<NativeTerminalEventSink>>,
@@ -357,6 +386,10 @@ fn emit_native_terminal_event<R: Runtime>(
 }
 
 impl NativeTerminalSurfaceHostState {
+    pub fn has_focused_session(&self) -> bool {
+        self.sessions.lock().values().any(|session| session.focused)
+    }
+
     pub fn set_event_sink(&self, sink: NativeTerminalEventSink) {
         *self.event_sink.write() = Some(sink);
     }
@@ -700,12 +733,12 @@ impl NativeTerminalSurfaceHostState {
                                             sessions_guard.get(&sid).and_then(|session| {
                                                 let layout = session.layout?;
                                                 let logical_bounds = session.logical_bounds?;
-                                                match session.terminal.render_snapshot() {
-                                                    Ok(mut snapshot) => {
-                                                        snapshot.cursor.visual_style =
-                                                            cursor_style_for_focus(session.focused);
-                                                        Some((layout, logical_bounds, snapshot))
-                                                    }
+                                                match session_render_snapshot(session) {
+                                                    Ok(render_input) => Some((
+                                                        layout,
+                                                        logical_bounds,
+                                                        render_input,
+                                                    )),
                                                     Err(err) => {
                                                         tracing::warn!(
                                                             session_id = %sid,
@@ -717,7 +750,9 @@ impl NativeTerminalSurfaceHostState {
                                                 }
                                             })
                                         };
-                                        if let Some((layout, logical_bounds, snapshot)) = render_state {
+                                        if let Some((layout, logical_bounds, render_input)) =
+                                            render_state
+                                        {
                                             let mut hosts_guard = hosts_clone.lock();
                                             if let Some(h) = hosts_guard.get_mut(&sid) {
                                                 h.layout = Some(layout);
@@ -726,8 +761,8 @@ impl NativeTerminalSurfaceHostState {
                                                 if let Err(err) = h.render_snapshot(
                                                     &window_clone,
                                                     layout,
-                                                    &snapshot,
-                                                    None,
+                                                    &render_input.snapshot,
+                                                    render_input.selection.as_ref(),
                                                 ) {
                                                     tracing::warn!(
                                                         session_id = %sid,
@@ -981,9 +1016,8 @@ impl NativeTerminalSurfaceHostState {
         let Some(session) = sessions.get(session_id) else {
             return Ok(None);
         };
-        let mut snapshot = session.terminal.render_snapshot()?;
-        snapshot.cursor.visual_style = cursor_style_for_focus(session.focused);
-        Ok(Some(snapshot))
+        let render_input = session_render_snapshot(session)?;
+        Ok(Some(render_input.snapshot))
     }
 
     pub fn encode_input(
@@ -1063,14 +1097,12 @@ impl NativeTerminalSurfaceHostState {
         // and let the caller drop the update.
         self.ensure_surface_attached(&session_id)?;
         let layout = self.prepare_session_layout(request, cell_metrics)?;
-        let snapshot = {
+        let render_input = {
             let sessions = self.sessions.lock();
             let session = sessions
                 .get(&session_id)
                 .ok_or(NativeTerminalError::NoValue)?;
-            let mut snapshot = session.terminal.render_snapshot()?;
-            snapshot.cursor.visual_style = cursor_style_for_focus(session.focused);
-            snapshot
+            session_render_snapshot(session)?
         };
 
         let mut hosts = self.hosts.lock();
@@ -1095,7 +1127,12 @@ impl NativeTerminalSurfaceHostState {
         host.layout = Some(layout);
         host.logical_bounds = Some(logical_bounds);
 
-        host.render_snapshot(window, layout, &snapshot, None)
+        host.render_snapshot(
+            window,
+            layout,
+            &render_input.snapshot,
+            render_input.selection.as_ref(),
+        )
     }
 
     pub fn set_focus<R: Runtime>(
@@ -1105,7 +1142,7 @@ impl NativeTerminalSurfaceHostState {
         focused: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let (layout, logical_bounds, cell_metrics, snapshot) = {
+        let (layout, logical_bounds, cell_metrics, render_input) = {
             let mut sessions = self.sessions.lock();
             let session = sessions
                 .get_mut(session_id)
@@ -1114,20 +1151,24 @@ impl NativeTerminalSurfaceHostState {
             let layout = session.layout.ok_or(NativeTerminalError::NoValue)?;
             let logical_bounds = session.logical_bounds.ok_or(NativeTerminalError::NoValue)?;
             let cell_metrics = session.cell_metrics.ok_or(NativeTerminalError::NoValue)?;
-            let mut snapshot = session.terminal.render_snapshot()?;
-            snapshot.cursor.visual_style = cursor_style_for_focus(focused);
-            (layout, logical_bounds, cell_metrics, snapshot)
+            let render_input = session_render_snapshot(session)?;
+            (layout, logical_bounds, cell_metrics, render_input)
         };
 
         let mut hosts = self.hosts.lock();
         if let Some(host) = hosts.get_mut(session_id) {
             host.layout = Some(layout);
             host.logical_bounds = Some(logical_bounds);
-            host.render_snapshot(window, layout, &snapshot, None)
+            host.render_snapshot(
+                window,
+                layout,
+                &render_input.snapshot,
+                render_input.selection.as_ref(),
+            )
         } else {
             Ok(NativeTerminalSurfaceReceipt::from_snapshot(
                 layout,
-                &snapshot,
+                &render_input.snapshot,
                 0,
                 0,
                 cell_metrics,
@@ -1274,6 +1315,21 @@ impl NativeTerminalSurfaceHost {
             reused_rows,
             cell_metrics,
         ))
+    }
+}
+
+#[cfg(test)]
+impl NativeTerminalSurfaceHostState {
+    fn render_snapshot_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionRenderInput>, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let sessions = self.sessions.lock();
+        let Some(session) = sessions.get(session_id) else {
+            return Ok(None);
+        };
+        session_render_snapshot(session).map(Some)
     }
 }
 
@@ -1666,6 +1722,76 @@ mod tests {
             1,
             "screen inference must stay disabled once the agent reports its own state"
         );
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn native_terminal_surface_host_extracts_live_selection_snapshot_for_render_input() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "term-selection-snapshot-contract";
+
+        let (_tx, rx) = tokio::sync::mpsc::channel(16);
+        let stream_task = tokio::spawn(async {});
+
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"orca selection rendering verification\r\n".to_vec(),
+            messages: rx,
+            stream_task,
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon session");
+
+        // Before selection is made, production render input selection must be None
+        let initial_input = state
+            .render_snapshot_for_session(session_id)
+            .expect("query initial render snapshot input")
+            .expect("session exists");
+        assert_eq!(initial_input.selection, None);
+        assert_eq!(initial_input.snapshot.cols, 80);
+
+        // Install an active word selection ("orca" -> cols 0..3 on row 0)
+        state
+            .with_session_terminal(session_id, |term| term.select_word_at(0, 0))
+            .expect("select word at (0, 0)");
+
+        let input = state
+            .render_snapshot_for_session(session_id)
+            .expect("query live render snapshot input")
+            .expect("session exists");
+
+        let live_selection = input
+            .selection
+            .expect("production render input must include live SelectionSnapshot instead of None");
+
+        assert_eq!(
+            live_selection,
+            SelectionSnapshot {
+                start_col: 0,
+                start_row: 0,
+                end_col: 3,
+                end_row: 0,
+            }
+        );
+        assert_eq!(input.snapshot.cols, 80);
+
+        // Clear selection and verify render input returns to None
+        state
+            .with_session_terminal(session_id, |term| term.clear_selection())
+            .expect("clear selection");
+
+        let cleared_input = state
+            .render_snapshot_for_session(session_id)
+            .expect("query cleared render snapshot input")
+            .expect("session exists");
+        assert_eq!(cleared_input.selection, None);
 
         state.teardown();
     }

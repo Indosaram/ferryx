@@ -2,17 +2,43 @@ import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
+import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
 import { useShortcuts } from "../lib/shortcuts";
-import { NATIVE_TERMINAL_HANDLE_INSET_PX, NativeTerminalPane } from "./NativeTerminalPane";
+import {
+  NATIVE_TERMINAL_HANDLE_INSET_PX,
+  NativeTerminalPane,
+  resetNativeTerminalPaneForTest,
+} from "./NativeTerminalPane";
 
 const tauriCoreMocks = vi.hoisted(() => ({
   invoke: vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined),
   isTauri: vi.fn(() => true),
 }));
 
+const tauriWindowMocks = vi.hoisted(() => {
+  let dragDropListeners: Array<(event: { payload: any }) => void> = [];
+  const unlisten = vi.fn();
+  const onDragDropEvent = vi.fn(async (handler: (event: { payload: any }) => void) => {
+    dragDropListeners.push(handler);
+    return unlisten;
+  });
+  return {
+    onDragDropEvent,
+    unlisten,
+    getDragDropListener: () => dragDropListeners.at(-1) ?? null,
+    getDragDropListeners: () => [...dragDropListeners],
+    reset: () => {
+      dragDropListeners = [];
+      unlisten.mockClear();
+      onDragDropEvent.mockClear();
+    },
+  };
+});
+
 const nativeTerminalEventMocks = vi.hoisted(() => ({
-  focusListeners: [] as Array<(sessionId: string) => void>,
   scrollbarListener: null as ((payload: { sessionId: string; total: number; offset: number; len: number }) => void) | null,
+  focusListeners: [] as Array<(sessionId: string) => void>,
+  pasteListeners: [] as Array<() => void>,
   onNativeTerminalScrollbar: vi.fn(async (handler: (payload: {
     sessionId: string;
     total: number;
@@ -30,6 +56,14 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
       );
     };
   }),
+  onNativeTerminalPaste: vi.fn(async (handler: () => void) => {
+    nativeTerminalEventMocks.pasteListeners.push(handler);
+    return () => {
+      nativeTerminalEventMocks.pasteListeners = nativeTerminalEventMocks.pasteListeners.filter(
+        (candidate) => candidate !== handler,
+      );
+    };
+  }),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -37,9 +71,16 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: tauriCoreMocks.isTauri,
 }));
 
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    onDragDropEvent: tauriWindowMocks.onDragDropEvent,
+  }),
+}));
+
 vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
   onNativeTerminalFocus: nativeTerminalEventMocks.onNativeTerminalFocus,
+  onNativeTerminalPaste: nativeTerminalEventMocks.onNativeTerminalPaste,
   onNativeTerminalScrollbar: nativeTerminalEventMocks.onNativeTerminalScrollbar,
 }));
 
@@ -118,9 +159,12 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
-    nativeTerminalEventMocks.focusListeners = [];
-    nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
+    tauriWindowMocks.reset();
     nativeTerminalEventMocks.scrollbarListener = null;
+    nativeTerminalEventMocks.focusListeners = [];
+    nativeTerminalEventMocks.pasteListeners = [];
+    nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
+    nativeTerminalEventMocks.onNativeTerminalPaste.mockClear();
     nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
     resizeRecords.length = 0;
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
@@ -274,8 +318,6 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
-    nativeTerminalEventMocks.focusListeners = [];
-    nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
     nativeTerminalEventMocks.scrollbarListener = null;
     nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
 
@@ -910,17 +952,22 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () => {
   let restorePaneRect: () => void;
   beforeEach(() => {
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
     restorePaneRect = stubPaneRect();
     tauriCoreMocks.invoke.mockReset();
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
+    tauriWindowMocks.reset();
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
 
   afterEach(() => {
     restorePaneRect();
     cleanup();
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
     vi.unstubAllGlobals();
   });
 
@@ -1435,19 +1482,76 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
-  it("leaves Cmd+V un-cancelled so the DOM paste event handles clipboard data", () => {
-    const session = createSession("term-session-dom-paste");
-    const read = vi.fn();
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { read, readText: vi.fn(), writeText: vi.fn() },
+  it.each([
+    { key: "v", code: "KeyV", description: "Latin v" },
+    { key: "ㅍ", code: "KeyV", description: "Korean character ㅍ" },
+    { key: "Process", code: "KeyV", description: "IME Process key" },
+  ])(
+    "claims macOS Cmd+V ($description) on focused textarea and routes native text clipboard content without DOM paste",
+    async ({ key, code }) => {
+      const session = createSession(`term-session-native-paste-${key}`);
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_native_terminal_clipboard_content") {
+          return { kind: "text", text: "native text from pasteboard" };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId={`term-session-native-paste-${key}`} session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
+
+      const pasteShortcut = new KeyboardEvent("keydown", {
+        key,
+        code,
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+
+      act(() => {
+        textarea.dispatchEvent(pasteShortcut);
+      });
+
+      expect(pasteShortcut.defaultPrevented).toBe(true);
+
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+          sessionId: `term-session-native-paste-${key}`,
+          text: "native text from pasteboard",
+        });
+      });
+
+      const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_native_terminal_paste",
+      );
+      expect(pasteCalls).toHaveLength(1);
+    },
+  );
+
+  it("claims macOS Cmd+V on focused textarea and routes native image clipboard content through agent Ctrl+V shortcut without DOM paste", async () => {
+    const session = createSession("term-session-native-image-paste");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "image" };
+      }
+      return undefined;
     });
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-dom-paste" session={session} />);
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-native-image-paste" session={session} />,
+    );
     const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
     tauriCoreMocks.invoke.mockClear();
 
     const pasteShortcut = new KeyboardEvent("keydown", {
-      key: "v",
+      key: "ㅍ",
+      code: "KeyV",
       metaKey: true,
       bubbles: true,
       cancelable: true,
@@ -1457,12 +1561,777 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       textarea.dispatchEvent(pasteShortcut);
     });
 
-    expect(pasteShortcut.defaultPrevented).toBe(false);
-    expect(read).not.toHaveBeenCalled();
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-native-image-paste",
+        input: {
+          keyEvent: {
+            key: "v",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+
+    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCalls).toHaveLength(0);
+  });
+
+  it("claims Ctrl+V with Korean layout key ㅍ on focused textarea and routes native text clipboard content", async () => {
+    const session = createSession("term-session-korean-ctrl-v");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "native text from pasteboard" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-korean-ctrl-v" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "ㅍ",
+      code: "KeyV",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-korean-ctrl-v",
+        text: "native text from pasteboard",
+      });
+    });
+
+    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCalls).toHaveLength(1);
+  });
+
+  it("claims Ctrl+V with Latin v on focused textarea and routes native text clipboard content", async () => {
+    const session = createSession("term-session-latin-ctrl-v");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "native text from pasteboard" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-latin-ctrl-v" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "v",
+      code: "KeyV",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-latin-ctrl-v",
+        text: "native text from pasteboard",
+      });
+    });
+
+    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCalls).toHaveLength(1);
+  });
+
+  it("claims Ctrl+V on focused textarea and routes native image clipboard content through agent Ctrl+V shortcut without DOM paste", async () => {
+    const session = createSession("term-session-native-image-paste-ctrl-v");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "image" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-native-image-paste-ctrl-v" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "ㅍ",
+      code: "KeyV",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-native-image-paste-ctrl-v",
+        input: {
+          keyEvent: {
+            key: "v",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+
+    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCalls).toHaveLength(0);
+  });
+
+  it("routes AppKit-consumed macOS Cmd+V to the last-focused split terminal exactly once", async () => {
+    const leftSession = createSession("term-session-native-menu-paste-left");
+    const rightSession = createSession("term-session-native-menu-paste-right");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "image" };
+      }
+      return undefined;
+    });
+
+    const { getAllByTestId } = render(
+      <div>
+        <NativeTerminalPane sessionId="term-session-native-menu-paste-left" session={leftSession} />
+        <NativeTerminalPane sessionId="term-session-native-menu-paste-right" session={rightSession} />
+      </div>,
+    );
+    const [leftSink, rightSink] = getAllByTestId("native-terminal-focus-sink");
+    act(() => {
+      leftSink.focus();
+      rightSink.focus();
+    });
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.pasteListeners) {
+        listener();
+      }
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-native-menu-paste-right",
+        input: {
+          keyEvent: {
+            key: "v",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+    const leftInputs = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" &&
+        (args as { sessionId?: string })?.sessionId === "term-session-native-menu-paste-left",
+    );
+    const rightInputs = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" &&
+        (args as { sessionId?: string })?.sessionId === "term-session-native-menu-paste-right",
+    );
+    expect(leftInputs).toHaveLength(0);
+    expect(rightInputs).toHaveLength(1);
+  });
+
+  it("leaves AppKit-consumed Cmd+V to an external editable instead of a terminal", () => {
+    const session = createSession("term-session-native-menu-external-input");
+    const { getByTestId } = render(
+      <div>
+        <input data-testid="external-native-paste-input" />
+        <NativeTerminalPane
+          sessionId="term-session-native-menu-external-input"
+          session={session}
+        />
+      </div>,
+    );
+    const input = getByTestId("external-native-paste-input");
+    input.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.pasteListeners) {
+        listener();
+      }
+    });
+
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_clipboard_content",
+    );
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
       "cmd_native_terminal_paste",
       expect.anything(),
     );
+  });
+
+  it("claims macOS Cmd+V on focused textarea and sends no terminal input when clipboard is empty", async () => {
+    const session = createSession("term-session-native-empty-paste");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "empty" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-native-empty-paste" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "v",
+      code: "KeyV",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+    });
+
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_paste",
+      expect.anything(),
+    );
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    { key: "ㅍ", description: "Korean character ㅍ" },
+    { key: "Process", description: "IME Process key" },
+  ])(
+    "recognizes macOS Korean layout Cmd+V ($description) through neutral document capture fallback, claims focus, and routes native paste without DOM paste",
+    async ({ key }) => {
+      const session = createSession(`term-session-korean-fallback-${key}`);
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_native_terminal_clipboard_content") {
+          return { kind: "text", text: "fallback native text" };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId={`term-session-korean-fallback-${key}`} session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+
+      tauriCoreMocks.invoke.mockClear();
+      (document.activeElement as HTMLElement)?.blur?.();
+      expect(document.activeElement).toBe(document.body);
+
+      const pasteShortcut = new KeyboardEvent("keydown", {
+        key,
+        code: "KeyV",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+
+      act(() => {
+        document.dispatchEvent(pasteShortcut);
+      });
+
+      expect(pasteShortcut.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(textarea);
+
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+          sessionId: `term-session-korean-fallback-${key}`,
+          text: "fallback native text",
+        });
+      });
+    },
+  );
+
+  it("suppresses a subsequent DOM paste event exactly once after macOS Cmd+V keydown fallback", async () => {
+    const session = createSession("term-session-suppress-duplicate-paste");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "native text from keydown" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-suppress-duplicate-paste" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    // 1. Keydown Cmd+V fires and triggers native clipboard inspection
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "v",
+      code: "KeyV",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    // 2. WebKit also emits a DOM paste event synchronously / immediately after
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "duplicate dom paste text" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    // The subsequent DOM paste must be prevented and NOT routed as a second paste
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-suppress-duplicate-paste",
+        text: "native text from keydown",
+      });
+    });
+
+    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCalls).toHaveLength(1);
+  });
+
+  it("keeps duplicate-paste suppression through async clipboard inspection until KeyV keyup", async () => {
+    const session = createSession("term-session-async-suppress-duplicate-paste");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "native async text" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-async-suppress-duplicate-paste"
+        session={session}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "ㅍ",
+      code: "KeyV",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-async-suppress-duplicate-paste",
+        text: "native async text",
+      });
+    });
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "late duplicate DOM paste" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    const pasteCallsBeforeKeyup = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCallsBeforeKeyup).toHaveLength(1);
+
+    act(() => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keyup", {
+          key: "ㅍ",
+          code: "KeyV",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    const laterPasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(laterPasteEvent, "clipboardData", {
+      value: { getData: () => "independent later paste" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(laterPasteEvent);
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-async-suppress-duplicate-paste",
+        text: "independent later paste",
+      });
+    });
+  });
+
+  it("clears native paste suppression when the window loses focus before KeyV keyup", async () => {
+    const session = createSession("term-session-blur-clears-paste-suppression");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "empty" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-blur-clears-paste-suppression"
+        session={session}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ㅍ",
+          code: "KeyV",
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith(
+        "cmd_native_terminal_clipboard_content",
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+
+    const independentPaste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(independentPaste, "clipboardData", {
+      value: { getData: () => "paste after window blur" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(independentPaste);
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-blur-clears-paste-suppression",
+        text: "paste after window blur",
+      });
+    });
+  });
+
+  it("routes neutral BODY Cmd+V native clipboard fallback only to the last-focused split terminal", async () => {
+    const leftSession = createSession("term-session-split-left");
+    const rightSession = createSession("term-session-split-right");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "split targeted native text" };
+      }
+      return undefined;
+    });
+
+    const { getAllByTestId } = render(
+      <div>
+        <NativeTerminalPane sessionId="term-session-split-left" session={leftSession} />
+        <NativeTerminalPane sessionId="term-session-split-right" session={rightSession} />
+      </div>,
+    );
+
+    const [leftSink, rightSink] = getAllByTestId("native-terminal-focus-sink");
+
+    // Focus left, then focus right so right becomes last focused
+    act(() => {
+      leftSink.focus();
+    });
+    act(() => {
+      rightSink.focus();
+    });
+
+    // Blur to neutral BODY
+    act(() => {
+      (document.activeElement as HTMLElement)?.blur?.();
+    });
+    expect(document.activeElement).toBe(document.body);
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "ㅍ",
+      code: "KeyV",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      document.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-split-right",
+        text: "split targeted native text",
+      });
+    });
+
+    const leftPastes = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_paste" &&
+        (args as { sessionId?: string })?.sessionId === "term-session-split-left",
+    );
+    expect(leftPastes).toHaveLength(0);
+  });
+
+  it("does not claim macOS Cmd+V when an external editable input is focused", () => {
+    const session = createSession("term-session-external-input");
+    const { getByTestId } = render(
+      <div>
+        <input data-testid="external-search-input" />
+        <NativeTerminalPane sessionId="term-session-external-input" session={session} />
+      </div>,
+    );
+
+    const input = getByTestId("external-search-input");
+    input.focus();
+    expect(document.activeElement).toBe(input);
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "v",
+      code: "KeyV",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      document.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(false);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_clipboard_content",
+    );
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_paste",
+      expect.anything(),
+    );
+  });
+
+  it("claims native fallback on non-macOS platforms for Ctrl+V", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    try {
+      Object.defineProperty(navigator, "platform", {
+        value: "Linux x86_64",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (X11; Linux x86_64)",
+        configurable: true,
+      });
+
+      const session = createSession("term-session-linux-ctrl-v");
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_native_terminal_clipboard_content") {
+          return { kind: "text", text: "linux text from pasteboard" };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-linux-ctrl-v" session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
+
+      const ctrlVShortcut = new KeyboardEvent("keydown", {
+        key: "v",
+        code: "KeyV",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+
+      act(() => {
+        textarea.dispatchEvent(ctrlVShortcut);
+      });
+
+      expect(ctrlVShortcut.defaultPrevented).toBe(true);
+
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+          sessionId: "term-session-linux-ctrl-v",
+          text: "linux text from pasteboard",
+        });
+      });
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
+  });
+
+  it("ignores standalone Meta key before Korean Cmd+V (ㅍ) across capture fallback and textarea", async () => {
+    const session = createSession("term-session-korean-meta-sequence");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "korean meta sequence text" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-korean-meta-sequence" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+    tauriCoreMocks.invoke.mockClear();
+
+    // 1. Standalone Meta keydown on neutral BODY
+    const metaEvent = new KeyboardEvent("keydown", {
+      key: "Meta",
+      code: "MetaLeft",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      document.dispatchEvent(metaEvent);
+    });
+
+    expect(metaEvent.defaultPrevented).toBe(false);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalled();
+
+    // 2. Korean Cmd+V keydown on document
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "ㅍ",
+      code: "KeyV",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      document.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_send_input", expect.anything());
+    expect(document.activeElement).toBe(textarea);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-korean-meta-sequence",
+        text: "korean meta sequence text",
+      });
+    });
   });
 
   it("forwards a DOM image paste through the agent's Ctrl+V shortcut", () => {
@@ -1555,6 +2424,347 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("routes an image-only paste targeting the terminal pane when the focus sink is not active exclusively through Ctrl+V exactly once", () => {
+    const session = createSession("term-session-image-pane-target");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-image-pane-target" session={session} />);
+    const pane = getByTestId("native-terminal-pane");
+    const textarea = getByTestId("native-terminal-focus-sink");
+    // Ensure the textarea sink is not focused
+    textarea.blur();
+    expect(document.activeElement).not.toBe(textarea);
+    tauriCoreMocks.invoke.mockClear();
+
+    const imageFile = new File([new Uint8Array([137, 80, 78, 71])], "screenshot.png", { type: "image/png" });
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: {
+        types: ["image/png"],
+        files: [imageFile],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => imageFile }],
+        getData: (format: string) => (format === "text" || format === "text/plain" ? "" : ""),
+      },
+    });
+
+    act(() => {
+      pane.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_send_input",
+    );
+    expect(sendInputCalls).toHaveLength(1);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      sessionId: "term-session-image-pane-target",
+      input: {
+        keyEvent: {
+          key: "v",
+          action: "Press",
+          modifiers: {
+            shift: false,
+            ctrl: true,
+            alt: false,
+            superKey: false,
+            capsLock: false,
+            numLock: false,
+          },
+          utf8: null,
+        },
+      },
+    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_paste",
+      expect.anything(),
+    );
+  });
+
+  it("routes a text paste targeting the terminal pane when the focus sink is not active to cmd_native_terminal_paste", () => {
+    const session = createSession("term-session-text-pane-target");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-text-pane-target" session={session} />);
+    const pane = getByTestId("native-terminal-pane");
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.blur();
+    expect(document.activeElement).not.toBe(textarea);
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: {
+        types: ["text/plain"],
+        getData: () => "echo 'hello world'",
+      },
+    });
+
+    act(() => {
+      pane.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCalls).toHaveLength(1);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+      sessionId: "term-session-text-pane-target",
+      text: "echo 'hello world'",
+    });
+  });
+
+  it("routes a body-target image paste only to the last-focused split terminal", () => {
+    const leftSession = createSession("split-image-left", "daemon-image-left");
+    const rightSession = createSession("split-image-right", "daemon-image-right");
+    const { getAllByTestId } = render(
+      <>
+        <NativeTerminalPane sessionId="split-image-left" session={leftSession} />
+        <NativeTerminalPane sessionId="split-image-right" session={rightSession} />
+      </>,
+    );
+    const [, rightSink] = getAllByTestId("native-terminal-focus-sink");
+
+    act(() => {
+      rightSink.focus();
+      rightSink.blur();
+    });
+    expect(document.activeElement).toBe(document.body);
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { types: ["Files", "image/png"], getData: () => "" },
+    });
+
+    act(() => {
+      document.body.dispatchEvent(pasteEvent);
+    });
+
+    const sends = tauriCoreMocks.invoke.mock.calls.filter(
+      ([command]) => command === "cmd_native_terminal_send_input",
+    );
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.[1]).toMatchObject({ sessionId: "daemon-image-right" });
+  });
+
+  it("routes neutral BODY keyboard input only to the last-focused split terminal", () => {
+    const leftSession = createSession("split-key-left", "daemon-key-left");
+    const rightSession = createSession("split-key-right", "daemon-key-right");
+    const { getAllByTestId } = render(
+      <>
+        <NativeTerminalPane sessionId="split-key-left" session={leftSession} />
+        <NativeTerminalPane sessionId="split-key-right" session={rightSession} />
+      </>,
+    );
+    const [, rightSink] = getAllByTestId("native-terminal-focus-sink");
+
+    act(() => {
+      rightSink.focus();
+      rightSink.blur();
+    });
+    expect(document.activeElement).toBe(document.body);
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "x",
+          code: "KeyX",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    const sends = tauriCoreMocks.invoke.mock.calls.filter(
+      ([command]) => command === "cmd_native_terminal_send_input",
+    );
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.[1]).toMatchObject({
+      sessionId: "daemon-key-right",
+      input: { text: "x" },
+    });
+  });
+
+  it("gives a pane-target paste precedence over a previously focused sibling", () => {
+    const leftSession = createSession("split-target-left", "daemon-target-left");
+    const rightSession = createSession("split-target-right", "daemon-target-right");
+    const { getAllByTestId } = render(
+      <>
+        <NativeTerminalPane sessionId="split-target-left" session={leftSession} />
+        <NativeTerminalPane sessionId="split-target-right" session={rightSession} />
+      </>,
+    );
+    const [leftSink] = getAllByTestId("native-terminal-focus-sink");
+    const [, rightPane] = getAllByTestId("native-terminal-pane");
+
+    act(() => {
+      leftSink.focus();
+      leftSink.blur();
+    });
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { types: ["text/plain"], getData: () => "targeted paste" },
+    });
+
+    act(() => {
+      rightPane.dispatchEvent(pasteEvent);
+    });
+
+    const pastes = tauriCoreMocks.invoke.mock.calls.filter(
+      ([command]) => command === "cmd_native_terminal_paste",
+    );
+    expect(pastes).toHaveLength(1);
+    expect(pastes[0]?.[1]).toEqual({
+      sessionId: "daemon-target-right",
+      text: "targeted paste",
+    });
+  });
+
+  it("lets the sole remaining pane claim BODY paste after the previous owner unmounts", () => {
+    const leftSession = createSession("split-unmount-left", "daemon-unmount-left");
+    const rightSession = createSession("split-unmount-right", "daemon-unmount-right");
+    const { getAllByTestId, rerender } = render(
+      <>
+        <NativeTerminalPane sessionId="split-unmount-left" session={leftSession} />
+        <NativeTerminalPane sessionId="split-unmount-right" session={rightSession} />
+      </>,
+    );
+    const [, rightSink] = getAllByTestId("native-terminal-focus-sink");
+
+    act(() => {
+      rightSink.focus();
+      rightSink.blur();
+    });
+    rerender(<NativeTerminalPane sessionId="split-unmount-left" session={leftSession} />);
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { types: ["Files", "image/png"], getData: () => "" },
+    });
+
+    act(() => {
+      document.body.dispatchEvent(pasteEvent);
+    });
+
+    const sends = tauriCoreMocks.invoke.mock.calls.filter(
+      ([command]) => command === "cmd_native_terminal_send_input",
+    );
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.[1]).toMatchObject({ sessionId: "daemon-unmount-left" });
+  });
+
+  it("uses half-open native drop bounds so a split divider belongs to only the right pane", async () => {
+    const leftSession = createSession("split-drop-left", "daemon-drop-left");
+    const rightSession = createSession("split-drop-right", "daemon-drop-right");
+    const { getAllByTestId } = render(
+      <>
+        <NativeTerminalPane sessionId="split-drop-left" session={leftSession} />
+        <NativeTerminalPane sessionId="split-drop-right" session={rightSession} />
+      </>,
+    );
+    const [leftPane, rightPane] = getAllByTestId("native-terminal-pane");
+    leftPane.getBoundingClientRect = () => ({
+      x: 0, y: 0, width: 400, height: 600,
+      top: 0, bottom: 600, left: 0, right: 400,
+      toJSON: () => ({}),
+    }) as DOMRect;
+    rightPane.getBoundingClientRect = () => ({
+      x: 400, y: 0, width: 400, height: 600,
+      top: 0, bottom: 600, left: 400, right: 800,
+      toJSON: () => ({}),
+    }) as DOMRect;
+
+    await waitFor(() => {
+      expect(tauriWindowMocks.getDragDropListeners()).toHaveLength(2);
+    });
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      for (const listener of tauriWindowMocks.getDragDropListeners()) {
+        listener({
+          payload: {
+            type: "drop",
+            paths: ["/Users/indo/divider file.txt"],
+            position: { x: 400, y: 100 },
+          },
+        });
+      }
+    });
+
+    const pastes = tauriCoreMocks.invoke.mock.calls.filter(
+      ([command]) => command === "cmd_native_terminal_paste",
+    );
+    expect(pastes).toHaveLength(1);
+    expect(pastes[0]?.[1]).toEqual({
+      sessionId: "daemon-drop-right",
+      text: "'/Users/indo/divider file.txt'",
+    });
+  });
+
+  it("subscribes to Tauri onDragDropEvent, atomically pasting dropped files inside bounds and ignoring drops outside bounds", async () => {
+    const originalDpr = window.devicePixelRatio;
+    Object.defineProperty(window, "devicePixelRatio", {
+      configurable: true,
+      value: 2,
+    });
+
+    try {
+      const session = createSession("term-session-tauri-dnd");
+      const { unmount } = render(<NativeTerminalPane sessionId="term-session-tauri-dnd" session={session} />);
+
+      await waitFor(() => {
+        expect(tauriWindowMocks.onDragDropEvent).toHaveBeenCalled();
+      });
+
+      const listener = tauriWindowMocks.getDragDropListener();
+      expect(listener).not.toBeNull();
+      tauriCoreMocks.invoke.mockClear();
+
+      // 1. Point that would look inside if unscaled (physical x: 15, y: 35), but at DPR=2 is
+      // logical (7.5, 17.5) which is outside container bounds (left: 10, top: 32). Must be ignored.
+      act(() => {
+        listener?.({
+          payload: {
+            type: "drop",
+            paths: ["/Users/indo/Outside/file.txt"],
+            position: { x: 15, y: 35 },
+          },
+        });
+      });
+
+      expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+        "cmd_native_terminal_paste",
+        expect.anything(),
+      );
+
+      // 2. Event inside pane bounds -> physical (100, 100) -> logical (50, 50), inside bounds [10..810, 32..620],
+      // atomically pasted with shell-safe quoting
+      act(() => {
+        listener?.({
+          payload: {
+            type: "drop",
+            paths: ["/Users/indo/Documents/project report.pdf", "/Users/indo/file2.txt"],
+            position: { x: 100, y: 100 },
+          },
+        });
+      });
+
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-tauri-dnd",
+        text: "'/Users/indo/Documents/project report.pdf' /Users/indo/file2.txt",
+      });
+
+      // 3. Unmount -> invokes unlisten callback
+      unmount();
+      expect(tauriWindowMocks.unlisten).toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, "devicePixelRatio", {
+        configurable: true,
+        value: originalDpr,
+      });
+    }
+  });
 
   it("handles onWheel scrolling by issuing native scroll IPC command", async () => {
     const session = createSession("term-session-1");
@@ -1663,6 +2873,44 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         sessionId: "term-session-1",
       });
       expect(writeTextSpy).toHaveBeenCalledWith("selected native text");
+    });
+  });
+
+  it("copies native selection on macOS Korean layout Cmd+C (ㅊ and Process)", async () => {
+    const session = createSession("term-session-korean-copy");
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(), writeText: writeTextSpy },
+    });
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_copy_selection") {
+        return "selected korean copy text";
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-korean-copy" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+
+    const copyShortcut = new KeyboardEvent("keydown", {
+      key: "ㅊ",
+      code: "KeyC",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(copyShortcut);
+    });
+
+    expect(copyShortcut.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-korean-copy",
+      });
+      expect(writeTextSpy).toHaveBeenCalledWith("selected korean copy text");
     });
   });
 
@@ -2337,13 +3585,17 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(document.activeElement).toBe(leftSink);
 
     act(() => {
+      leftSink.blur();
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
       for (const listener of nativeTerminalEventMocks.focusListeners) {
         listener("daemon-native-focus-right");
       }
-      rightSink.blur();
     });
+    expect(document.activeElement).toBe(rightSink);
 
-    expect(document.activeElement).toBe(document.body);
     act(() => {
       deferredFocus?.(performance.now());
     });
@@ -2373,7 +3625,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     act(() => {
       document.dispatchEvent(
         new KeyboardEvent("keydown", {
-          key: "\u3131",
+          key: "ㄱ",
           code: "KeyR",
           bubbles: true,
           cancelable: true,
@@ -2389,13 +3641,13 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
 
     act(() => {
       fireEvent.compositionStart(sink);
-      sink.value = "\uac00";
-      fireEvent.compositionEnd(sink, { data: "\uac00" });
+      sink.value = "가";
+      fireEvent.compositionEnd(sink, { data: "가" });
     });
 
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
       sessionId: "daemon-native-ime-switch",
-      input: { text: "\uac00" },
+      input: { text: "가" },
     });
   });
 

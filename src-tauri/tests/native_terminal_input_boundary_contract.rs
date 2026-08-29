@@ -564,6 +564,7 @@ fn native_terminal_commands_are_registered_in_tauri_generate_handler() {
         "cmd_native_terminal_select",
         "cmd_native_terminal_copy_selection",
         "cmd_native_terminal_paste",
+        "cmd_native_terminal_clipboard_content",
         "cmd_native_terminal_mouse",
         "cmd_native_terminal_search",
     ];
