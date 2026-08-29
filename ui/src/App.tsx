@@ -57,7 +57,6 @@ import {
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
 import { dagStore } from "./state/dagStore";
-import { DagActivityBadge } from "./components/dag/DagActivityBadge";
 import type { PersistedWorkspaceSession } from "./lib/types";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
@@ -1492,7 +1491,6 @@ function WorkspaceApp({
 
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
-      <DagActivityBadge />
       {isSidebarOpen ? (
         <Sidebar
           open={true}

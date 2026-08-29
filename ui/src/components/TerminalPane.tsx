@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { TerminalSession } from "../lib/types";
 import { NativeTerminalPane } from "./NativeTerminalPane";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
+import { DagPaneBadge } from "./dag/DagPaneBadge";
 
 type TerminalPaneProps = {
   session: TerminalSession;
@@ -23,6 +24,7 @@ export function TerminalPane({
       data-testid="terminal-pane-surface"
       className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
     >
+      <DagPaneBadge projectPath={session.worktreePath ?? session.cwd} />
       <NativeTerminalPane
         sessionId={session.id}
         session={session}
