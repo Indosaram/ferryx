@@ -238,7 +238,17 @@ export type BrowserPaneContent = {
   readonly worktreeLabel?: string;
 };
 
-export type PaneContent = TerminalPaneContent | BrowserPaneContent;
+export type DagPaneState = {
+  readonly runId: string | null;
+};
+
+export type DagPaneContent = {
+  readonly kind: "dag";
+  readonly dag: DagPaneState;
+  readonly runId?: string | null;
+};
+
+export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent;
 
 export function createBrowserPaneContent(browser: BrowserPaneState): BrowserPaneContent {
   const content: BrowserPaneContent = {
@@ -266,6 +276,20 @@ export function createTerminalPaneContent(sessionId: string): TerminalPaneConten
     kind: "terminal",
     sessionId,
   };
+}
+
+export function createDagPaneContent(dag: DagPaneState): DagPaneContent {
+  const content: DagPaneContent = {
+    kind: "dag",
+    dag: { ...dag },
+  };
+  Object.defineProperty(content, "runId", {
+    get() {
+      return this.dag.runId;
+    },
+    enumerable: false,
+  });
+  return content;
 }
 
 /**
