@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 fn resolve_dag_runs_dir(root: &Path) -> PathBuf {
@@ -140,8 +139,11 @@ async fn run_watcher_loop(root: PathBuf, sink: Sender<DagRunSnapshot>) {
     }
 }
 
-pub fn spawn_dag_watcher(root: PathBuf, sink: Sender<DagRunSnapshot>) -> JoinHandle<()> {
-    tokio::spawn(async move {
+pub fn spawn_dag_watcher(
+    root: PathBuf,
+    sink: Sender<DagRunSnapshot>,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
         run_watcher_loop(root, sink).await;
     })
 }
