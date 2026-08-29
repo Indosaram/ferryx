@@ -409,7 +409,13 @@ impl DaemonClient {
         })?;
 
         let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).await.map_err(|e| {
+        let bytes_read = tokio::time::timeout(
+            Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await
+        .map_err(|_| IpcError::new(IpcErrorCode::IoError, "Handshake timed out"))?
+        .map_err(|e| {
             IpcError::new(IpcErrorCode::IoError, format!("Handshake read failed: {e}"))
         })?;
         if bytes_read == 0 || line.trim().is_empty() {
@@ -1142,6 +1148,49 @@ mod tests {
         assert!(!wait.is_finished(), "near-match must not signal readiness");
         writer.write_all(b"FERRYX_DAEMON_READY\n").await.unwrap();
         wait.await.unwrap().expect("exact token signals readiness");
+    }
+
+    #[tokio::test]
+    async fn test_client_handshake_read_times_out() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("test_handshake_timeout.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (handshake_seen_tx, handshake_seen_rx) = oneshot::channel();
+        let (release_server_tx, release_server_rx) = oneshot::channel::<()>();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, _write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Handshake { .. }
+            ));
+            let _ = handshake_seen_tx.send(());
+            let _ = release_server_rx.await;
+        });
+
+        let client = DaemonClient::new_with_socket(socket_path);
+        let request_task =
+            tokio::spawn(async move { client.send_request(DaemonRequest::Ping).await });
+
+        tokio::time::timeout(Duration::from_secs(1), handshake_seen_rx)
+            .await
+            .expect("server must receive the handshake")
+            .expect("server must signal handshake receipt");
+
+        let result = tokio::time::timeout(Duration::from_secs(6), request_task)
+            .await
+            .expect("client must stop waiting after the five-second handshake timeout")
+            .expect("client request task must not panic");
+        let error = result.expect_err("silent daemon must fail the handshake");
+        assert_eq!(error.code, IpcErrorCode::IoError);
+        assert_eq!(error.message, "Handshake timed out");
+
+        let _ = release_server_tx.send(());
+        server_task.await.unwrap();
     }
 
     fn init_test_git_repo() -> tempfile::TempDir {
