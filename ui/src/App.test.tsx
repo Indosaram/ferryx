@@ -2067,6 +2067,75 @@ describe("App project workspace flow", () => {
     expect(deps).not.toMatch(/\bstate\b/);
   });
 
+  it("does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval", async () => {
+    vi.useFakeTimers();
+    try {
+      native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+      native.saveSession.mockClear();
+
+      let currentState = {
+        ...workspace.storeState,
+        workspaceId: "default",
+        activityBySessionId: {} as Record<string, { state: "working"; title: string; isAgent: boolean; agentType?: string }>,
+      };
+
+      storeSpy = vi.spyOn(workspaceStoreModule, "useWorkspaceStore").mockImplementation(() => ({
+        state: currentState as unknown as typeof workspace.storeState,
+        recoveredFromHmr: false,
+        agents: [],
+        activateTab: workspace.activateTab,
+        closeTab: workspace.closeTab,
+        splitPane: workspace.splitPane,
+        closePane: workspace.closePane,
+        focusPane: workspace.focusPane,
+        setPaneRatio: workspace.setPaneRatio,
+        swapPanes: workspace.swapPanes,
+        ensureTabForWorktree: workspace.ensureTabForWorktree,
+        ensureSessionBackends: workspace.ensureSessionBackends,
+        openTab: workspace.openTab,
+        syncWorktrees: workspace.syncWorktrees,
+        restoreWorkspace: workspace.restoreWorkspace,
+        createBrowserTab: workspace.createBrowserTab,
+        subscribeTerminalBell: () => () => undefined,
+      }) as unknown as ReturnType<typeof workspaceStoreModule.useWorkspaceStore>);
+
+      const { rerender } = render(<App />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      native.saveSession.mockClear();
+
+      // Emit rapid transient activity updates every 100ms for 800ms
+      // Structural fields (layout, worktrees, sessions) remain unchanged, only activityBySessionId changes
+      for (let i = 0; i < 8; i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(100);
+          currentState = {
+            ...currentState,
+            activityBySessionId: {
+              ...currentState.activityBySessionId,
+              "sess-1": {
+                state: "working",
+                title: `title-update-${i}`,
+                isAgent: true,
+                agentType: "omo",
+              },
+            },
+          };
+          rerender(<App />);
+        });
+      }
+
+      // 800ms has elapsed. Since initial layout was stable, the 500ms debounce should have fired and saved session,
+      // NOT been starved / reset every 100ms by transient activity updates.
+      expect(native.saveSession).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not pass inline arrow functions for onOpenSettings or onCloseSearch", () => {
     const appSource = readFileSync(resolve(import.meta.dirname ?? ".", "App.tsx"), "utf-8");
     expect(appSource).not.toMatch(/onOpenSettings=\{\(\)\s*=>/);

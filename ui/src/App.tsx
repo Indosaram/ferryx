@@ -792,7 +792,17 @@ function WorkspaceApp({
       void persistSession(activeProject.workspaceId, activeProject.repoRoot, snapshot);
     }, 500);
     return () => clearTimeout(timer);
-  }, [activeProject.repoRoot, activeProject.workspaceId, persistSession, state]);
+  }, [
+    activeProject.repoRoot,
+    activeProject.workspaceId,
+    persistSession,
+    state.layout,
+    state.worktreeLayouts,
+    state.worktrees,
+    state.activeWorktreePath,
+    state.sessions,
+    state.workspaceId,
+  ]);
 
   const [isAddProjectOpen, setIsAddProjectOpen] = useState(false);
   const [createTargetProject, setCreateTargetProject] = useState<RegisteredProject | null>(null);
