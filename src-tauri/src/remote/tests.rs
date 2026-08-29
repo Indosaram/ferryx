@@ -2542,11 +2542,13 @@ async fn test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage()
     let tab1 = RemoteTerminalTabInfo {
         id: "tab-term-1".to_string(),
         label: "build".to_string(),
+        session_id: Some("session-123".to_string()),
         ..Default::default()
     };
     let tab2 = RemoteTerminalTabInfo {
         id: "tab-term-2".to_string(),
         label: "tests".to_string(),
+        session_id: Some("session-456".to_string()),
         ..Default::default()
     };
 
@@ -2564,8 +2566,10 @@ async fn test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage()
     assert!(json_str.contains("\"terminalTabs\":["));
     assert!(json_str.contains("\"id\":\"tab-term-1\""));
     assert!(json_str.contains("\"label\":\"build\""));
+    assert!(json_str.contains("\"sessionId\":\"session-123\""));
     assert!(json_str.contains("\"id\":\"tab-term-2\""));
     assert!(json_str.contains("\"label\":\"tests\""));
+    assert!(json_str.contains("\"sessionId\":\"session-456\""));
 
     // Ensure NO path leakage in serialized structure
     assert!(!json_str.contains("/Users/"));
@@ -3178,4 +3182,355 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
     assert!(!body.contains(dir.path().to_str().expect("utf8")));
 
     handle.stop();
+}
+
+#[test]
+fn test_remote_terminal_tab_info_serializes_and_deserializes_session_id() {
+    use crate::remote::protocol::RemoteTerminalTabInfo;
+
+    let tab = RemoteTerminalTabInfo {
+        id: "tab-1".to_string(),
+        label: "build".to_string(),
+        session_id: Some("session-abc-123".to_string()),
+        ..Default::default()
+    };
+
+    let serialized = serde_json::to_string(&tab).expect("serialize tab");
+    assert!(
+        serialized.contains("\"sessionId\":\"session-abc-123\""),
+        "Serialized tab must contain sessionId, got: {serialized}"
+    );
+
+    // Deserialization with camelCase "sessionId"
+    let parsed: RemoteTerminalTabInfo =
+        serde_json::from_str(&serialized).expect("deserialize camelCase");
+    assert_eq!(parsed.session_id.as_deref(), Some("session-abc-123"));
+
+    // Deserialization with snake_case "session_id" alias
+    let snake_json = serde_json::json!({
+        "id": "tab-2",
+        "label": "test",
+        "session_id": "session-snake-456"
+    });
+    let parsed_snake: RemoteTerminalTabInfo =
+        serde_json::from_value(snake_json).expect("deserialize snake_case");
+    assert_eq!(
+        parsed_snake.session_id.as_deref(),
+        Some("session-snake-456")
+    );
+}
+
+#[tokio::test]
+async fn test_repeated_workspace_state_reads_do_not_rerun_git_discovery_and_refresh_on_change() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo_root = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    crate::worktree::run_git(&repo_root, &["init"]).expect("git init");
+    crate::worktree::run_git(
+        &repo_root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    )
+    .expect("git commit");
+
+    let registry = crate::worktree::WorkspaceRegistry::new();
+    let workspace_id = "ws-cache-test";
+    registry
+        .register(workspace_id, &repo_root)
+        .expect("register");
+
+    let terminal_service = Arc::new(TerminalService::default());
+    let state = Arc::new(RemoteGatewayState::new(terminal_service, registry.clone()));
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::LocalNetwork,
+        port: 0,
+        allow_control: true,
+    };
+    let (handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start server");
+
+    let code_ctrl = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token_ctrl, _) = state
+        .auth_manager
+        .exchange_pairing_code(&code_ctrl, "ControlDevice")
+        .expect("pair ctrl");
+
+    // First request: triggers initial snapshot build
+    let (status1, _body1) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status1, 200);
+    assert_eq!(
+        state.snapshot_build_count(),
+        1,
+        "Initial request must build snapshot once"
+    );
+
+    // Repeated requests (e.g. mobile terminal switching / rapid state polls):
+    // MUST NOT rerun git discovery or rebuild snapshot
+    for _ in 0..5 {
+        let (status, _) = http_request(
+            addr,
+            "GET",
+            "/api/v1/workspace/state",
+            Some(&token_ctrl),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let (status_sess, _) =
+            http_request(addr, "GET", "/api/v1/sessions", Some(&token_ctrl), None).await;
+        assert_eq!(status_sess, 200);
+    }
+    assert_eq!(
+        state.snapshot_build_count(),
+        1,
+        "Repeated workspace-state and sessions reads must reuse cached snapshot without rerunning git discovery"
+    );
+
+    // Now modify workspace registration / worktrees:
+    let manager = registry.manager(workspace_id).expect("manager");
+    let ident = WorktreeIdentity {
+        ws_id: workspace_id.to_string(),
+        slug: "feat-new".to_string(),
+    };
+    let wt_path = manager
+        .worktree_path_for(&ident.ws_id, &ident.slug)
+        .expect("wt path");
+    manager
+        .create_worktree(crate::worktree::CreateWorktreeOptions::new(
+            &ident.ws_id,
+            &ident.slug,
+            &wt_path,
+        ))
+        .expect("create worktree");
+
+    // Subsequent request must detect change and refresh cache
+    let (status_after, body_after) = http_request(
+        addr,
+        "GET",
+        "/api/v1/workspace/state",
+        Some(&token_ctrl),
+        None,
+    )
+    .await;
+    assert_eq!(status_after, 200);
+    assert_eq!(
+        state.snapshot_build_count(),
+        2,
+        "Snapshot must refresh after worktree creation"
+    );
+    let ws_state: RemoteWorkspaceState = serde_json::from_str(&body_after).expect("parse state");
+    assert!(
+        ws_state
+            .worktrees
+            .iter()
+            .any(|w| w.worktree_slug.as_deref() == Some("feat-new")),
+        "Refreshed snapshot must contain newly created worktree"
+    );
+
+    handle.stop();
+}
+
+#[tokio::test]
+async fn test_workspace_snapshot_refreshes_external_git_worktree_changes_after_interval() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo_root = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_root).expect("create repo");
+    crate::worktree::run_git(&repo_root, &["init"]).expect("git init");
+    crate::worktree::run_git(
+        &repo_root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    )
+    .expect("git commit");
+
+    let registry = crate::worktree::WorkspaceRegistry::new();
+    let workspace_id = "ws-external-refresh";
+    registry
+        .register(workspace_id, &repo_root)
+        .expect("register");
+    let state = Arc::new(RemoteGatewayState::new(
+        Arc::new(TerminalService::default()),
+        registry.clone(),
+    ));
+    let initial_time = std::time::Instant::now();
+
+    let initial = state
+        .workspace_snapshot_at(initial_time)
+        .await
+        .expect("initial snapshot");
+    assert!(!initial
+        .worktrees_for(workspace_id, None)
+        .iter()
+        .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
+
+    let manager = registry.manager(workspace_id).expect("manager");
+    let identity = WorktreeIdentity {
+        ws_id: workspace_id.to_string(),
+        slug: "external-change".to_string(),
+    };
+    let external_path = manager
+        .worktree_path_for(&identity.ws_id, &identity.slug)
+        .expect("external path");
+    let external_path_text = external_path.to_string_lossy().into_owned();
+    crate::worktree::run_git(
+        &repo_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "external-change",
+            &external_path_text,
+        ],
+    )
+    .expect("external git worktree add");
+
+    let before_interval = state
+        .workspace_snapshot_at(
+            initial_time + crate::remote::state::WORKSPACE_SNAPSHOT_REFRESH_INTERVAL / 2,
+        )
+        .await
+        .expect("cached snapshot");
+    assert!(!before_interval
+        .worktrees_for(workspace_id, None)
+        .iter()
+        .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
+
+    let refresh_completed = state.next_snapshot_build();
+    let stale = state
+        .workspace_snapshot_at(
+            initial_time + crate::remote::state::WORKSPACE_SNAPSHOT_REFRESH_INTERVAL,
+        )
+        .await
+        .expect("stale snapshot while refresh starts");
+    assert!(!stale
+        .worktrees_for(workspace_id, None)
+        .iter()
+        .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), refresh_completed)
+        .await
+        .expect("background snapshot refresh completes within the test bound");
+    let refreshed = state
+        .workspace_snapshot_at(
+            initial_time + crate::remote::state::WORKSPACE_SNAPSHOT_REFRESH_INTERVAL,
+        )
+        .await
+        .expect("refreshed snapshot");
+    assert!(refreshed
+        .worktrees_for(workspace_id, None)
+        .iter()
+        .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
+    assert_eq!(state.snapshot_build_count(), 2);
+}
+
+#[tokio::test]
+async fn test_workspace_snapshot_started_before_revision_change_is_not_marked_current() {
+    let registry = crate::worktree::WorkspaceRegistry::new();
+    let state = Arc::new(RemoteGatewayState::new(
+        Arc::new(TerminalService::default()),
+        registry.clone(),
+    ));
+    let initial_time = std::time::Instant::now();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let hook_registry = registry.clone();
+    let hook_path = dir.path().to_path_buf();
+    let hook_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_fired_for_callback = Arc::clone(&hook_fired);
+    state.set_snapshot_post_build_hook(Some(Arc::new(move || {
+        if !hook_fired_for_callback.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            hook_registry
+                .register("registered-during-discovery", &hook_path)
+                .expect("register workspace during discovery");
+        }
+    })));
+
+    let built = state
+        .workspace_snapshot_at(initial_time)
+        .await
+        .expect("snapshot built before overlapping registration");
+    assert!(built.projects(None).is_empty());
+    assert!(hook_fired.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(state.snapshot_build_count(), 1);
+    state.set_snapshot_post_build_hook(None);
+
+    let rebuilt = state
+        .workspace_snapshot_at(initial_time)
+        .await
+        .expect("revision mismatch rebuilds");
+    assert!(rebuilt
+        .projects(None)
+        .iter()
+        .any(|project| project.workspace_id == "registered-during-discovery"));
+    assert_eq!(state.snapshot_build_count(), 2);
+}
+
+#[tokio::test]
+async fn test_concurrent_cold_snapshot_requests_coalesce_to_one_git_discovery() {
+    let registry = crate::worktree::WorkspaceRegistry::new();
+    let state = Arc::new(RemoteGatewayState::new(
+        Arc::new(TerminalService::default()),
+        registry,
+    ));
+    let (build_reached_tx, build_reached_rx) = tokio::sync::oneshot::channel();
+    let build_reached_tx = Arc::new(std::sync::Mutex::new(Some(build_reached_tx)));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    state.set_snapshot_post_build_hook(Some(Arc::new({
+        let build_reached_tx = Arc::clone(&build_reached_tx);
+        let release_rx = Arc::clone(&release_rx);
+        move || {
+            if let Some(sender) = build_reached_tx.lock().expect("signal lock").take() {
+                let _ = sender.send(());
+                release_rx
+                    .lock()
+                    .expect("release lock")
+                    .recv()
+                    .expect("release build");
+            }
+        }
+    })));
+
+    let first_state = Arc::clone(&state);
+    let first = tokio::spawn(async move { first_state.workspace_snapshot().await });
+    build_reached_rx.await.expect("first build reaches hook");
+
+    let second_state = Arc::clone(&state);
+    let mut second = Box::pin(async move { second_state.workspace_snapshot().await });
+    tokio::select! {
+        result = &mut second => panic!("second request completed before the in-flight build: {result:?}"),
+        _ = tokio::task::yield_now() => {}
+    }
+
+    release_tx.send(()).expect("release first build");
+    first.await.expect("first join").expect("first snapshot");
+    second.await.expect("second snapshot");
+    state.set_snapshot_post_build_hook(None);
+
+    assert_eq!(state.snapshot_build_count(), 1);
 }

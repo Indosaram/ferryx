@@ -6,7 +6,12 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::sync::{broadcast, watch};
 
 pub type DesktopEventSink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
@@ -71,6 +76,16 @@ struct PersistedRemoteGatewayConfig {
     restart_policy: RemoteRestartPolicy,
 }
 
+#[derive(Debug, Clone)]
+struct WorkspaceCacheEntry {
+    snapshot: Arc<crate::remote::server::WorkspaceSnapshotCache>,
+    revision: u64,
+    created_at: std::time::Instant,
+}
+
+pub(crate) const WORKSPACE_SNAPSHOT_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
@@ -83,6 +98,15 @@ pub struct RemoteGatewayState {
     pub bound_address: RwLock<Option<String>>,
     config_path: Option<PathBuf>,
     pub desktop_event_sink: RwLock<Option<DesktopEventSink>>,
+    snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
+    snapshot_lock: tokio::sync::Mutex<()>,
+    snapshot_refreshing: AtomicBool,
+    #[cfg(test)]
+    snapshot_build_count: Arc<AtomicU64>,
+    #[cfg(test)]
+    snapshot_build_completed: Notify,
+    #[cfg(test)]
+    snapshot_post_build_hook: Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl RemoteGatewayState {
@@ -142,7 +166,141 @@ impl RemoteGatewayState {
             bound_address: RwLock::new(None),
             config_path,
             desktop_event_sink: RwLock::new(None),
+            snapshot_cache: RwLock::new(None),
+            snapshot_lock: tokio::sync::Mutex::new(()),
+            snapshot_refreshing: AtomicBool::new(false),
+            #[cfg(test)]
+            snapshot_build_count: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            snapshot_build_completed: Notify::new(),
+            #[cfg(test)]
+            snapshot_post_build_hook: Arc::new(RwLock::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub fn snapshot_build_count(&self) -> u64 {
+        self.snapshot_build_count.load(Ordering::Acquire)
+    }
+
+    pub fn invalidate_workspace_snapshot(&self) {
+        *self.snapshot_cache.write() = None;
+    }
+
+    pub(crate) async fn workspace_snapshot(
+        self: &Arc<Self>,
+    ) -> Result<Arc<crate::remote::server::WorkspaceSnapshotCache>, String> {
+        self.workspace_snapshot_at(std::time::Instant::now()).await
+    }
+
+    pub(crate) async fn workspace_snapshot_at(
+        self: &Arc<Self>,
+        now: std::time::Instant,
+    ) -> Result<Arc<crate::remote::server::WorkspaceSnapshotCache>, String> {
+        let current_rev = self.workspace_registry.revision();
+        let mut observed_snapshot = None;
+
+        {
+            let cache = self.snapshot_cache.read();
+            if let Some(entry) = cache.as_ref() {
+                observed_snapshot = Some(Arc::clone(&entry.snapshot));
+                if entry.revision == current_rev {
+                    let snapshot = Arc::clone(&entry.snapshot);
+                    if now.saturating_duration_since(entry.created_at)
+                        >= WORKSPACE_SNAPSHOT_REFRESH_INTERVAL
+                        && self
+                            .snapshot_refreshing
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                    {
+                        let state = Arc::clone(self);
+                        let observed_snapshot = Some(Arc::clone(&snapshot));
+                        tokio::spawn(async move {
+                            if let Err(error) = state
+                                .rebuild_workspace_snapshot(now, observed_snapshot)
+                                .await
+                            {
+                                tracing::warn!(%error, "background workspace snapshot refresh failed");
+                            }
+                            state.snapshot_refreshing.store(false, Ordering::Release);
+                            #[cfg(test)]
+                            state.snapshot_build_completed.notify_one();
+                        });
+                    }
+                    return Ok(snapshot);
+                }
+            }
+        }
+
+        self.rebuild_workspace_snapshot(now, observed_snapshot)
+            .await
+    }
+
+    async fn rebuild_workspace_snapshot(
+        &self,
+        now: std::time::Instant,
+        observed_snapshot: Option<Arc<crate::remote::server::WorkspaceSnapshotCache>>,
+    ) -> Result<Arc<crate::remote::server::WorkspaceSnapshotCache>, String> {
+        let _guard = self.snapshot_lock.lock().await;
+        let current_rev = self.workspace_registry.revision();
+
+        {
+            let cache = self.snapshot_cache.read();
+            if let Some(entry) = cache.as_ref() {
+                if entry.revision == current_rev {
+                    match observed_snapshot.as_ref() {
+                        None => return Ok(Arc::clone(&entry.snapshot)),
+                        Some(observed) if !Arc::ptr_eq(observed, &entry.snapshot) => {
+                            return Ok(Arc::clone(&entry.snapshot));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+
+        let registry = self.workspace_registry.clone();
+        #[cfg(test)]
+        let build_counter = Arc::clone(&self.snapshot_build_count);
+        #[cfg(test)]
+        let post_build_hook = Arc::clone(&self.snapshot_post_build_hook);
+        let snapshot = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            build_counter.fetch_add(1, Ordering::AcqRel);
+            let snapshot = crate::remote::server::WorkspaceSnapshotCache::build(&registry);
+            #[cfg(test)]
+            if let Some(hook) = post_build_hook.read().as_ref() {
+                hook();
+            }
+            snapshot
+        })
+        .await
+        .map_err(|error| format!("workspace snapshot task failed: {error}"))?;
+
+        let snapshot_arc = Arc::new(snapshot);
+        {
+            let mut cache = self.snapshot_cache.write();
+            *cache = Some(WorkspaceCacheEntry {
+                snapshot: Arc::clone(&snapshot_arc),
+                // Use the revision observed before discovery started. A managed
+                // mutation that overlaps the blocking Git scan is therefore a
+                // mismatch on the next request, never falsely marked as part of
+                // this snapshot.
+                revision: current_rev,
+                created_at: now,
+            });
+        }
+        Ok(snapshot_arc)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_snapshot_build(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.snapshot_build_completed.notified()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.snapshot_post_build_hook.write() = hook;
     }
 
     pub fn set_active_selection(&self, selection: RemoteActiveDesktopSelection) {

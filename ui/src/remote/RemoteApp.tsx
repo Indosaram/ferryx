@@ -31,6 +31,7 @@ type RemoteActiveSelectionChange = {
 
 export type WaitingTabTarget = {
   readonly tabId?: string | null;
+  readonly sessionId?: string | null;
   readonly label: string;
   readonly workspaceId: string;
   readonly worktreeSlug: string | null;
@@ -54,6 +55,7 @@ function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] 
           seen.add(key);
           targets.push({
             tabId: tab.id,
+            sessionId: tab.sessionId,
             label: tab.label,
             workspaceId: currentWorkspaceId,
             worktreeSlug: currentWorktreeSlug,
@@ -76,6 +78,7 @@ function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] 
           seen.add(key);
           targets.push({
             tabId: option.tabId ?? null,
+            sessionId: option.sessionId ?? null,
             label: option.worktreeLabel ?? option.worktreeSlug ?? option.workspaceId,
             workspaceId: option.workspaceId,
             worktreeSlug: option.worktreeSlug,
@@ -179,7 +182,11 @@ export const RemoteApp: React.FC = () => {
   const [token, setToken] = useState<string | null>(getRemoteAuthToken);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
+  const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
+  const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
   const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
+  const optimisticSocketSessionIdRef = useRef<string | null>(null);
+  const optimisticSocketClosedRef = useRef(false);
   const selectionRequestAcceptedRef = useRef(false);
   const selectionEventReceivedRef = useRef(false);
   const confirmationInFlightRef = useRef(false);
@@ -191,6 +198,9 @@ export const RemoteApp: React.FC = () => {
     setToken(null);
     setModel(EMPTY_MODEL);
     setPending(null);
+    setOptimisticSessionId(null);
+    optimisticSocketSessionIdRef.current = null;
+    optimisticSocketClosedRef.current = false;
     pendingSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
@@ -266,7 +276,7 @@ export const RemoteApp: React.FC = () => {
     };
   }, [model, token]);
 
-  const clearPendingSelection = useCallback(() => {
+  const clearPendingSelection = useCallback((retryFailedSocket = false) => {
     if (confirmationTimeoutRef.current !== null) {
       clearTimeout(confirmationTimeoutRef.current);
       confirmationTimeoutRef.current = null;
@@ -276,6 +286,26 @@ export const RemoteApp: React.FC = () => {
     selectionEventReceivedRef.current = false;
     confirmationInFlightRef.current = false;
     setPending(null);
+    setOptimisticSessionId(null);
+    if (retryFailedSocket && optimisticSocketClosedRef.current) {
+      setTerminalRetryGeneration((generation) => generation + 1);
+    }
+    if (!retryFailedSocket) optimisticSocketSessionIdRef.current = null;
+    optimisticSocketClosedRef.current = false;
+  }, []);
+
+  const handleTerminalSocketLifecycle = useCallback((sessionId: string, state: "open" | "closed") => {
+    if (optimisticSocketSessionIdRef.current !== sessionId) return;
+    if (state === "open") {
+      optimisticSocketClosedRef.current = false;
+      return;
+    }
+    if (pendingSelectionRef.current) {
+      optimisticSocketClosedRef.current = true;
+    } else {
+      optimisticSocketSessionIdRef.current = null;
+      setTerminalRetryGeneration((generation) => generation + 1);
+    }
   }, []);
 
   const confirmSelection = useCallback(async (option: RemoteContextOption) => {
@@ -285,7 +315,7 @@ export const RemoteApp: React.FC = () => {
     confirmationInFlightRef.current = false;
     if (pendingSelectionRef.current !== option) return;
     if (confirmed && modelConfirmsSelection(option, confirmed)) {
-      clearPendingSelection();
+      clearPendingSelection(true);
     }
   }, [clearPendingSelection, refreshWorkspace]);
 
@@ -303,6 +333,7 @@ export const RemoteApp: React.FC = () => {
         return;
       }
       if (!selection || !selectionMatchesActiveContext(pendingSelection, selection)) {
+        clearPendingSelection();
         void refreshWorkspace();
         return;
       }
@@ -330,7 +361,12 @@ export const RemoteApp: React.FC = () => {
     pendingSelectionRef.current = option;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
+    optimisticSocketClosedRef.current = false;
     setPending(option);
+    if (option.sessionId) {
+      optimisticSocketSessionIdRef.current = option.sessionId;
+      setOptimisticSessionId(option.sessionId);
+    }
 
     try {
       const response = await fetch(
@@ -348,21 +384,12 @@ export const RemoteApp: React.FC = () => {
       if (!response.ok) throw new Error(`Selection failed (${response.status})`);
 
       selectionRequestAcceptedRef.current = true;
-      workspaceRefreshVersionRef.current += 1;
-      confirmationInFlightRef.current = true;
-      const immediatelyObserved = await refreshWorkspace();
-      confirmationInFlightRef.current = false;
-      if (immediatelyObserved && modelConfirmsSelection(option, immediatelyObserved)) {
-        clearPendingSelection();
-        return;
-      }
       armConfirmationTimeout(option);
       if (selectionEventReceivedRef.current) void confirmSelection(option);
     } catch {
-      confirmationInFlightRef.current = false;
       clearPendingSelection();
     }
-  }, [armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, refreshWorkspace, token]);
+  }, [armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, token]);
 
   const tabs = model.context.terminalTabs;
   const activeIndex = tabs && model.context.activeTabId
@@ -379,6 +406,7 @@ export const RemoteApp: React.FC = () => {
         worktreeSlug: model.context.worktreeSlug,
         worktreeLabel: model.context.worktreeLabel,
         tabId: prevTab.id,
+        sessionId: prevTab.sessionId,
       });
     }
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
@@ -392,6 +420,7 @@ export const RemoteApp: React.FC = () => {
         worktreeSlug: model.context.worktreeSlug,
         worktreeLabel: model.context.worktreeLabel,
         tabId: nextTab.id,
+        sessionId: nextTab.sessionId,
       });
     }
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
@@ -399,6 +428,7 @@ export const RemoteApp: React.FC = () => {
   if (!token) return <PairingPage onPaired={handlePaired} />;
 
   const activeTerminal = model.context.activeTerminal;
+  const effectiveSessionId = optimisticSessionId ?? activeTerminal?.sessionId ?? null;
   const waitingTargets = collectWaitingTargets(model);
   const firstWaiting = waitingTargets.length > 0 ? waitingTargets[0] : null;
   const waitingCount = waitingTargets.length;
@@ -429,6 +459,7 @@ export const RemoteApp: React.FC = () => {
                   worktreeSlug: firstWaiting.worktreeSlug,
                   worktreeLabel: firstWaiting.worktreeLabel,
                   tabId: firstWaiting.tabId,
+                  sessionId: firstWaiting.sessionId,
                 });
               }}
               className="flex h-5 items-center gap-1 rounded bg-status-warning/15 px-1.5 text-[11px] font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
@@ -457,14 +488,16 @@ export const RemoteApp: React.FC = () => {
         pending={pending}
         onSelect={(option) => void selectContext(option)}
       >
-        {activeTerminal ? (
+        {effectiveSessionId ? (
           <RemoteTerminal
-            sessionId={activeTerminal.sessionId}
+            key={`${effectiveSessionId}:${terminalRetryGeneration}`}
+            sessionId={effectiveSessionId}
             token={token}
             onBack={() => undefined}
             embedded
             onSwipePreviousTab={handleSwipePreviousTab}
             onSwipeNextTab={handleSwipeNextTab}
+            onSocketLifecycle={handleTerminalSocketLifecycle}
           />
         ) : null}
       </RemoteWorkspaceMirror>

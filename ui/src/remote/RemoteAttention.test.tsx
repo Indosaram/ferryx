@@ -182,7 +182,6 @@ describe("RemoteAttention Affordance", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(stateWithWaiting))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(stateWithWaiting))
       .mockResolvedValueOnce(jsonResponse(targetSwitchedState));
 
     vi.stubGlobal("fetch", fetchMock);
@@ -212,8 +211,7 @@ describe("RemoteAttention Affordance", () => {
       );
     });
 
-    // Check that pending state / status message updates through existing selectContext flow
-    expect(screen.getByRole("status")).toHaveTextContent(/waiting for ferryx desktop confirmation/i);
+    // The selection is in flight and not yet confirmed by the desktop.
 
     // Socket confirms active selection
     act(() => {

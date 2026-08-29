@@ -19,6 +19,7 @@ export type RemoteTerminalTabInfo = {
   agentType?: string;
   worktreeSlug?: string;
   worktreeLabel?: string;
+  sessionId?: string;
 };
 
 export type RemoteTerminalItem = {
@@ -43,6 +44,7 @@ export type RemoteContextOption = {
   worktreeSlug: string | null;
   worktreeLabel: string | null;
   tabId?: string | null;
+  sessionId?: string | null;
   attention?: "working" | "waiting" | "done";
 };
 
@@ -111,6 +113,7 @@ function tabItem(value: unknown): RemoteTerminalTabInfo | null {
   const agentType = safeContextText(item?.agentType ?? item?.agent_type) ?? undefined;
   const worktreeSlug = safeContextText(item?.worktreeSlug ?? item?.worktree_slug) ?? undefined;
   const worktreeLabel = safeContextText(item?.worktreeLabel ?? item?.worktree_label) ?? undefined;
+  const sessionId = safeContextText(item?.sessionId ?? item?.session_id) ?? undefined;
   return {
     id,
     label,
@@ -118,6 +121,7 @@ function tabItem(value: unknown): RemoteTerminalTabInfo | null {
     ...(agentType ? { agentType } : {}),
     ...(worktreeSlug ? { worktreeSlug } : {}),
     ...(worktreeLabel ? { worktreeLabel } : {}),
+    ...(sessionId ? { sessionId } : {}),
   };
 }
 
@@ -134,11 +138,15 @@ function contextOption(value: unknown, fallbackWorkspaceId: string | null): Remo
   if (!workspaceId) return null;
   const worktreeSlug = safeContextText(item.worktreeSlug ?? item.slug);
   const worktreeLabel = safeContextText(item.worktreeLabel ?? item.label ?? item.branch);
+  const tabId = safeContextText(item.tabId ?? item.tab_id);
+  const sessionId = safeContextText(item.sessionId ?? item.session_id);
   const attention = parseActivityState(item.attention ?? item.activityState ?? item.activity_state);
   return {
     workspaceId,
     worktreeSlug,
     worktreeLabel: worktreeLabel ?? worktreeSlug,
+    ...(tabId ? { tabId } : {}),
+    ...(sessionId ? { sessionId } : {}),
     ...(attention ? { attention } : {}),
   };
 }
@@ -501,6 +509,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                       worktreeSlug: prevTab.worktreeSlug ?? model.context.worktreeSlug,
                       worktreeLabel: prevTab.worktreeLabel ?? model.context.worktreeLabel,
                       tabId: prevTab.id,
+                      sessionId: prevTab.sessionId,
                     });
                   }
                 }}
@@ -526,6 +535,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                       worktreeSlug: nextTab.worktreeSlug ?? model.context.worktreeSlug,
                       worktreeLabel: nextTab.worktreeLabel ?? model.context.worktreeLabel,
                       tabId: nextTab.id,
+                      sessionId: nextTab.sessionId,
                     });
                   }
                 }}
@@ -567,6 +577,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                         worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
                         worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
                         tabId: tab.id,
+                        sessionId: tab.sessionId,
                       });
                     }}
                     className={`flex h-7 min-w-0 max-w-40 items-center gap-1.5 rounded px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${

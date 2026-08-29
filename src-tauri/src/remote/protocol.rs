@@ -29,6 +29,8 @@ pub struct RemoteTerminalTabInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub worktree_label: Option<String>,
+    #[serde(default, alias = "session_id", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

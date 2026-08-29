@@ -243,8 +243,7 @@ fn canonicalize_or_raw(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Snapshot of one registered workspace, captured once per request so repeated
-/// session lookups don't each re-list git worktrees from disk.
+#[derive(Debug, Clone)]
 struct WorkspaceSnapshot {
     workspace_id: String,
     /// Canonicalized repo root (the manager's root is already canonical at
@@ -254,9 +253,10 @@ struct WorkspaceSnapshot {
     worktrees: Vec<crate::worktree::Worktree>,
 }
 
-/// Request-scoped cache of the workspace registry's contents. Building this once
-/// per request (rather than once per session) avoids repeated `git worktree list`
-/// subprocess invocations when a request needs metadata for many sessions.
+/// Cached snapshot of the workspace registry's contents. Cached across requests
+/// to avoid repeated `git worktree list` subprocess invocations during remote
+/// state polling and terminal switching.
+#[derive(Debug, Clone)]
 pub(crate) struct WorkspaceSnapshotCache {
     workspaces: Vec<WorkspaceSnapshot>,
 }
@@ -343,7 +343,10 @@ impl WorkspaceSnapshotCache {
         Self { workspaces }
     }
 
-    fn projects(&self, selection: Option<&RemoteActiveDesktopSelection>) -> Vec<RemoteProjectInfo> {
+    pub(crate) fn projects(
+        &self,
+        selection: Option<&RemoteActiveDesktopSelection>,
+    ) -> Vec<RemoteProjectInfo> {
         self.workspaces
             .iter()
             .map(|w| RemoteProjectInfo {
@@ -373,7 +376,7 @@ impl WorkspaceSnapshotCache {
 
     /// Previously listed worktrees for `workspace_id`, if registered. Reuses the
     /// snapshot captured at cache-build time instead of re-listing from disk.
-    fn worktrees_for(
+    pub(crate) fn worktrees_for(
         &self,
         workspace_id: &str,
         selection: Option<&RemoteActiveDesktopSelection>,
@@ -506,7 +509,10 @@ async fn list_sessions(
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
-    let cache = WorkspaceSnapshotCache::build(&state.workspace_registry);
+    let cache = state
+        .workspace_snapshot()
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     let sessions = get_active_running_sessions(&state, &cache);
 
     Ok(Json(sessions))
@@ -524,10 +530,10 @@ async fn get_workspace_state(
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
-    // Build the request-scoped snapshot once: it drives `projects`, the active
-    // workspace's `worktrees`, and every session's derived metadata below, so a
-    // request with many sessions only lists each workspace's git worktrees once.
-    let cache = WorkspaceSnapshotCache::build(&state.workspace_registry);
+    let cache = state
+        .workspace_snapshot()
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let active_selection = state.active_selection.read().clone();
     let projects = cache.projects(active_selection.as_ref());

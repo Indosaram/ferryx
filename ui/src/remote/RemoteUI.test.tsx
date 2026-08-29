@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useId } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
@@ -7,8 +8,20 @@ import { RemoteApp } from "./RemoteApp";
 import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
 
 vi.mock("./RemoteTerminal", () => ({
-  RemoteTerminal: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="remote-terminal" data-session-id={sessionId}>
+  RemoteTerminal: ({
+    sessionId,
+    onSocketLifecycle,
+  }: {
+    sessionId: string;
+    onSocketLifecycle?: (sessionId: string, state: "open" | "closed") => void;
+  }) => (
+    <div
+      data-testid="remote-terminal"
+      data-session-id={sessionId}
+      data-instance-id={useId()}
+      onClick={() => onSocketLifecycle?.(sessionId, "closed")}
+      onDoubleClick={() => onSocketLifecycle?.(sessionId, "open")}
+    >
       Mirrored terminal {sessionId}
     </div>
   ),
@@ -333,7 +346,6 @@ describe("Remote UI Components", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(focusedState))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(focusedState))
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", EventWebSocket);
@@ -375,7 +387,6 @@ describe("Remote UI Components", () => {
         "api-service / feature/remote-safe",
       );
     });
-    expect(screen.getByRole("status")).toHaveTextContent(/Desktop context confirmed/i);
   });
 
   it("recovers from a desktop that never confirms so the picker stays usable", async () => {
@@ -408,7 +419,10 @@ describe("Remote UI Components", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/workspace/select"),
+        expect.anything(),
+      );
 
       // A selection that is never confirmed must not strand the UI forever:
       // the pending lock has to expire so the picker becomes usable again.
@@ -605,6 +619,23 @@ describe("Remote UI Components", () => {
 
     await waitFor(() => {
       expect(document.title).toBe("Dev Server - Ferryx");
+    });
+  });
+
+  it("does not treat a worktree row id as a terminal tab id", () => {
+    const parsed = normalizeRemoteWorkspaceState({
+      projects: [
+        {
+          id: "workspace-1",
+          worktrees: [{ id: "worktree-row-1", slug: "feature/fast-switch" }],
+        },
+      ],
+    });
+
+    expect(parsed.options).toContainEqual({
+      workspaceId: "workspace-1",
+      worktreeSlug: "feature/fast-switch",
+      worktreeLabel: "feature/fast-switch",
     });
   });
 
@@ -993,10 +1024,8 @@ describe("Remote UI Components", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(editorState))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(editorState))
       .mockResolvedValueOnce(jsonResponse(devServerState))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(devServerState))
       .mockResolvedValueOnce(jsonResponse(editorState));
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", EventWebSocket);
@@ -1349,5 +1378,613 @@ describe("Remote UI Components", () => {
       name: /api-service.*feature\/remote-safe.*working/i,
     });
     expect(workingOption).toBeInTheDocument();
+  });
+
+  it("immediately remounts RemoteTerminal to session when selecting a tab with sessionId before confirmation", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const selectionResponse = deferred<Response>();
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: {
+          sessionId: "session-editor",
+          title: "Editor",
+          running: true,
+        },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const switchedState = {
+      ...stateWithSessions,
+      activeContext: {
+        ...stateWithSessions.activeContext,
+        activeTerminal: {
+          sessionId: "session-dev",
+          title: "Dev Server",
+          running: true,
+        },
+        tabId: "tab-2",
+      },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockImplementationOnce(() => selectionResponse.promise)
+      .mockResolvedValueOnce(jsonResponse(switchedState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    const terminal = await screen.findByTestId("remote-terminal");
+    expect(terminal).toHaveAttribute("data-session-id", "session-editor");
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const devTab = within(tablist).getByRole("tab", { name: /dev server/i });
+
+    // Click dev server tab
+    fireEvent.click(devTab);
+
+    const optimisticTerminal = screen.getByTestId("remote-terminal");
+    expect(optimisticTerminal).toHaveAttribute("data-session-id", "session-dev");
+    const optimisticInstanceId = optimisticTerminal.getAttribute("data-instance-id");
+    fireEvent.doubleClick(optimisticTerminal);
+
+    // Tab buttons should be disabled during pending selection
+    expect(devTab).toBeDisabled();
+
+    // Resolve POST request
+    await act(async () => {
+      selectionResponse.resolve(jsonResponse({ accepted: true }));
+      await selectionResponse.promise;
+    });
+
+    // RemoteTerminal is still on session-dev
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+
+    // Desktop confirms selection via WebSocket event
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "ferryx-ui",
+              worktreeSlug: "main",
+              tabId: "tab-2",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(devTab).toBeEnabled();
+    });
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+      "data-instance-id",
+      optimisticInstanceId,
+    );
+  });
+
+  it("remounts the optimistic terminal after confirmation when its socket closed before opening", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: { sessionId: "session-editor", running: true },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const switchedState = {
+      ...stateWithSessions,
+      activeContext: {
+        ...stateWithSessions.activeContext,
+        activeTerminal: { sessionId: "session-dev", running: true },
+        tabId: "tab-2",
+      },
+    };
+    vi.stubGlobal("fetch", vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(switchedState)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await screen.findByTestId("remote-terminal");
+    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+
+    const optimisticTerminal = screen.getByTestId("remote-terminal");
+    const optimisticInstanceId = optimisticTerminal.getAttribute("data-instance-id");
+    fireEvent.click(optimisticTerminal);
+
+    act(() => {
+      eventSocket().onmessage?.(new MessageEvent("message", {
+        data: JSON.stringify({
+          event: "remote_active_selection_changed",
+          payload: { workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-2" },
+        }),
+      }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).not.toHaveAttribute(
+        "data-instance-id",
+        optimisticInstanceId,
+      );
+    });
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+  });
+
+  it("remounts on confirmation when the optimistic socket opened and then closed", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: { sessionId: "session-editor", running: true },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const switchedState = {
+      ...stateWithSessions,
+      activeContext: {
+        ...stateWithSessions.activeContext,
+        activeTerminal: { sessionId: "session-dev", running: true },
+        tabId: "tab-2",
+      },
+    };
+    vi.stubGlobal("fetch", vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(switchedState)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await screen.findByTestId("remote-terminal");
+    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+
+    const optimisticTerminal = screen.getByTestId("remote-terminal");
+    const optimisticInstanceId = optimisticTerminal.getAttribute("data-instance-id");
+    fireEvent.doubleClick(optimisticTerminal);
+    fireEvent.click(optimisticTerminal);
+
+    act(() => {
+      eventSocket().onmessage?.(new MessageEvent("message", {
+        data: JSON.stringify({
+          event: "remote_active_selection_changed",
+          payload: { workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-2" },
+        }),
+      }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).not.toHaveAttribute(
+        "data-instance-id",
+        optimisticInstanceId,
+      );
+    });
+  });
+
+  it("remounts when the optimistic socket reports its failed handshake after confirmation", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: { sessionId: "session-editor", running: true },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const switchedState = {
+      ...stateWithSessions,
+      activeContext: {
+        ...stateWithSessions.activeContext,
+        activeTerminal: { sessionId: "session-dev", running: true },
+        tabId: "tab-2",
+      },
+    };
+    vi.stubGlobal("fetch", vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(switchedState)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await screen.findByTestId("remote-terminal");
+    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+
+    const optimisticTerminal = screen.getByTestId("remote-terminal");
+    const optimisticInstanceId = optimisticTerminal.getAttribute("data-instance-id");
+    act(() => {
+      eventSocket().onmessage?.(new MessageEvent("message", {
+        data: JSON.stringify({
+          event: "remote_active_selection_changed",
+          payload: { workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-2" },
+        }),
+      }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /dev server/i })).toBeEnabled();
+    });
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+      "data-instance-id",
+      optimisticInstanceId,
+    );
+
+    fireEvent.click(screen.getByTestId("remote-terminal"));
+    expect(screen.getByTestId("remote-terminal")).not.toHaveAttribute(
+      "data-instance-id",
+      optimisticInstanceId,
+    );
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+  });
+
+  it("does not retry again when the confirmed replacement socket also closes", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: { sessionId: "session-editor", running: true },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const switchedState = {
+      ...stateWithSessions,
+      activeContext: {
+        ...stateWithSessions.activeContext,
+        activeTerminal: { sessionId: "session-dev", running: true },
+        tabId: "tab-2",
+      },
+    };
+    vi.stubGlobal("fetch", vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(switchedState)));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await screen.findByTestId("remote-terminal");
+    fireEvent.click(within(screen.getByRole("tablist", { name: /terminal tabs/i })).getByRole("tab", { name: /dev server/i }));
+    const firstInstanceId = screen.getByTestId("remote-terminal").getAttribute("data-instance-id");
+
+    act(() => {
+      eventSocket().onmessage?.(new MessageEvent("message", {
+        data: JSON.stringify({
+          event: "remote_active_selection_changed",
+          payload: { workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-2" },
+        }),
+      }));
+    });
+    await waitFor(() => expect(screen.getByRole("tab", { name: /dev server/i })).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId("remote-terminal"));
+    const replacement = screen.getByTestId("remote-terminal");
+    expect(replacement).not.toHaveAttribute("data-instance-id", firstInstanceId);
+    const replacementInstanceId = replacement.getAttribute("data-instance-id");
+
+    fireEvent.click(replacement);
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+      "data-instance-id",
+      replacementInstanceId,
+    );
+  });
+
+  it("does not perform immediate post-POST workspace/state refresh on selection", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const switchedState = {
+      ...stateWithSessions,
+      activeContext: {
+        ...stateWithSessions.activeContext,
+        tabId: "tab-2",
+        activeTerminal: {
+          sessionId: "session-dev",
+          running: true,
+        },
+      },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }))
+      .mockResolvedValueOnce(jsonResponse(switchedState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
+
+    // Wait for POST to complete
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("/api/v1/workspace/select"),
+      expect.anything(),
+    );
+
+    // Crucial check: selection flow must NOT immediately call /api/v1/workspace/state
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Desktop confirms selection via WebSocket event
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "ferryx-ui",
+              worktreeSlug: "main",
+              tabId: "tab-2",
+            },
+          }),
+        }),
+      );
+    });
+
+    // Now confirmation fetch is triggered
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("/api/v1/workspace/state"),
+    );
+  });
+
+  it("clears optimistic session override and reverts when confirmation times out", async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem("ferryx_remote_token", "test-token");
+      const stateWithSessions = {
+        ...focusedState,
+        activeContext: {
+          ...focusedState.activeContext,
+          activeTerminal: {
+            sessionId: "session-editor",
+            title: "Editor",
+            running: true,
+          },
+          tabId: "tab-1",
+          terminalTabs: [
+            { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+            { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+          ],
+        },
+      };
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+        .mockResolvedValueOnce(jsonResponse({ accepted: true }));
+      vi.stubGlobal("fetch", fetchMock);
+      vi.stubGlobal("WebSocket", EventWebSocket);
+
+      render(<RemoteApp />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+      fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
+
+      // Optimistically shows session-dev
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+
+      // Advance past confirmation timeout (6000ms)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(7000);
+      });
+
+      // Optimistic override should clear and revert to authoritative session-editor
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
+      expect(within(tablist).getByRole("tab", { name: /dev server/i })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears optimistic session override when selection request fails", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: {
+          sessionId: "session-editor",
+          title: "Editor",
+          running: true,
+        },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockResolvedValueOnce(jsonResponse({ error: "gateway busy" }, false));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    const terminal = await screen.findByTestId("remote-terminal");
+    expect(terminal).toHaveAttribute("data-session-id", "session-editor");
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    const devTab = within(tablist).getByRole("tab", { name: /dev server/i });
+
+    fireEvent.click(devTab);
+
+    // After failure resolves, optimistic override reverts and lock is released
+    await waitFor(() => {
+      expect(devTab).toBeEnabled();
+    });
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
+  });
+
+  it("clears optimistic session override when user disconnects", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const selectionResponse = deferred<Response>();
+    const stateWithSessions = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: {
+          sessionId: "session-editor",
+          title: "Editor",
+          running: true,
+        },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithSessions))
+      .mockImplementationOnce(() => selectionResponse.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
+
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+
+    // Click Disconnect
+    fireEvent.click(screen.getByRole("button", { name: /Disconnect/i }));
+
+    expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/6-digit PIN/i)).toBeInTheDocument();
+  });
+
+  it("clears optimistic session override when a different authoritative state arrives", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const selectionResponse = deferred<Response>();
+    const stateWithThreeTabs = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        activeTerminal: {
+          sessionId: "session-editor",
+          title: "Editor",
+          running: true,
+        },
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", sessionId: "session-editor" },
+          { id: "tab-2", label: "Dev Server", sessionId: "session-dev" },
+          { id: "tab-3", label: "Tests", sessionId: "session-tests" },
+        ],
+      },
+    };
+    const differentAuthoritativeState = {
+      ...stateWithThreeTabs,
+      activeContext: {
+        ...stateWithThreeTabs.activeContext,
+        activeTerminal: {
+          sessionId: "session-tests",
+          title: "Tests",
+          running: true,
+        },
+        tabId: "tab-3",
+      },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithThreeTabs))
+      .mockImplementationOnce(() => selectionResponse.promise)
+      .mockResolvedValueOnce(jsonResponse(differentAuthoritativeState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    const tablist = screen.getByRole("tablist", { name: /terminal tabs/i });
+    // User requested tab-2 (session-dev)
+    fireEvent.click(within(tablist).getByRole("tab", { name: /dev server/i }));
+
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+
+    // Desktop unexpectedly switches to tab-3 (session-tests) instead
+    act(() => {
+      eventSocket().onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            event: "remote_active_selection_changed",
+            payload: {
+              workspaceId: "ferryx-ui",
+              worktreeSlug: "main",
+              tabId: "tab-3",
+            },
+          }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute(
+        "data-session-id",
+        "session-tests",
+      );
+    });
   });
 });

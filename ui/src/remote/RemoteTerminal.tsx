@@ -21,6 +21,10 @@ type RemoteTerminalProps = {
   readonly embedded?: boolean;
   readonly onSwipeNextTab?: () => void;
   readonly onSwipePreviousTab?: () => void;
+  readonly onSocketLifecycle?: (
+    sessionId: string,
+    state: "open" | "closed",
+  ) => void;
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
@@ -206,6 +210,7 @@ export function RemoteTerminal({
   embedded = false,
   onSwipeNextTab,
   onSwipePreviousTab,
+  onSocketLifecycle,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -305,11 +310,13 @@ export function RemoteTerminal({
     socket.onopen = () => {
       if (socketRef.current !== socket) return;
       setConnected(true);
+      onSocketLifecycle?.(socketRequest.sessionId, "open");
       requestResizeRef.current();
     };
     socket.onclose = () => {
       if (socketRef.current !== socket) return;
       setConnected(false);
+      onSocketLifecycle?.(socketRequest.sessionId, "closed");
     };
     socket.onmessage = (event) => {
       if (socketRef.current !== socket) return;
@@ -320,13 +327,13 @@ export function RemoteTerminal({
     };
 
     return () => {
-      socket.close();
       if (socketRef.current === socket) {
         socketRef.current = null;
         activeSocketRequestRef.current = null;
       }
+      socket.close();
     };
-  }, [socketRequest]);
+  }, [onSocketLifecycle, socketRequest]);
 
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
     if (event.touches.length >= 2) {

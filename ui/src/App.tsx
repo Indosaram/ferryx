@@ -268,6 +268,7 @@ export function deriveFocusedTerminal(
 
     return paneSessionIds.map(({ leafId, sessionId }, index) => {
       const paneSession = sessionId ? state.sessions[sessionId] : undefined;
+      const backendSessionId = paneSession?.backendSessionId;
       const panePath = paneSession?.worktreePath ?? paneSession?.cwd;
       // Each pane carries its own worktree so the remote can select across worktrees instead of
       // guessing from whichever context is currently mirrored.
@@ -286,6 +287,7 @@ export function deriveFocusedTerminal(
         ...(activity?.agentType ? { agentType: activity.agentType } : {}),
         ...(paneSlug ? { worktreeSlug: paneSlug } : {}),
         ...(paneLabel ? { worktreeLabel: paneLabel } : {}),
+        ...(backendSessionId ? { sessionId: backendSessionId } : {}),
       };
     });
   });

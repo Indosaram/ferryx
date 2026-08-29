@@ -580,6 +580,7 @@ export type RemoteTerminalTabInfo = {
   agentType?: string;
   worktreeSlug?: string;
   worktreeLabel?: string;
+  sessionId?: string;
 };
 
 export type FocusedTerminalPayload = {

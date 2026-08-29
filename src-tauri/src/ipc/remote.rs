@@ -366,6 +366,16 @@ fn sanitize_worktree_text(value: Option<String>) -> Option<String> {
     }
 }
 
+fn sanitize_session_id(value: Option<String>) -> Option<String> {
+    let s = value?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 || trimmed.chars().any(char::is_control) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_remote_set_active_selection(
     manager: State<'_, Arc<RemoteGatewayManager>>,
@@ -396,6 +406,7 @@ pub async fn cmd_remote_set_active_selection(
                     agent_type: sanitize_agent_type(tab.agent_type),
                     worktree_slug: sanitize_worktree_text(tab.worktree_slug),
                     worktree_label: sanitize_worktree_text(tab.worktree_label),
+                    session_id: sanitize_session_id(tab.session_id),
                 })
                 .collect(),
         })

@@ -7,6 +7,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceRegistry {
     workspaces: Arc<RwLock<HashMap<String, WorktreeManager>>>,
+    revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl WorkspaceRegistry {
@@ -50,6 +51,8 @@ impl WorkspaceRegistry {
             return Err(WorktreeError::WorkspaceAlreadyRegistered { workspace_id });
         }
         workspaces.insert(workspace_id, manager);
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
 
@@ -77,11 +80,25 @@ impl WorkspaceRegistry {
             }
         }
         workspaces.insert(workspace_id.clone(), manager);
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(workspace_id)
     }
 
     pub fn contains(&self, workspace_id: &str) -> bool {
         self.workspaces.read().contains_key(workspace_id)
+    }
+
+    pub fn revision(&self) -> u64 {
+        let registry_rev = self.revision.load(std::sync::atomic::Ordering::Acquire);
+        let mgr_revs: u64 = self.workspaces.read().values().map(|m| m.revision()).sum();
+        registry_rev.wrapping_add(mgr_revs)
+    }
+
+    pub fn bump_revision(&self) -> u64 {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1
     }
 
     pub fn list(&self) -> Vec<(String, WorktreeManager)> {

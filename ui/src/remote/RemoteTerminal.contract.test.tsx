@@ -23,6 +23,10 @@ class MockWebSocket {
   }
 }
 
+class SynchronousCloseWebSocket extends MockWebSocket {
+  override close = vi.fn(() => this.onclose?.());
+}
+
 function socket(): MockWebSocket {
   const value = MockWebSocket.latest;
   if (!value) throw new Error("Expected remote terminal WebSocket");
@@ -85,6 +89,53 @@ describe("remote terminal grid contract", () => {
     act(() => socket().onopen?.());
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
     expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it("reports whether a socket opened or closed before opening", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onSocketLifecycle = vi.fn();
+    const first = render(
+      <RemoteTerminal
+        sessionId="session-closed"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+
+    act(() => socket().onclose?.());
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-closed", "closed");
+
+    first.unmount();
+    render(
+      <RemoteTerminal
+        sessionId="session-open"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+    act(() => {
+      socket().onopen?.();
+      socket().onclose?.();
+    });
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-open", "open");
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-open", "closed");
+    expect(onSocketLifecycle).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not report an intentional component teardown as a socket failure", () => {
+    vi.stubGlobal("WebSocket", SynchronousCloseWebSocket);
+    const onSocketLifecycle = vi.fn();
+    const view = render(
+      <RemoteTerminal
+        sessionId="session-intentional-close"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+
+    view.unmount();
+
+    expect(onSocketLifecycle).not.toHaveBeenCalled();
   });
 
   it("reattaches to the newly focused session and ignores callbacks from the old socket", async () => {

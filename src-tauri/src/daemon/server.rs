@@ -59,6 +59,14 @@ pub fn get_lock_path() -> PathBuf {
     get_runtime_dir().join("daemon.lock")
 }
 
+#[cfg(unix)]
+fn get_persistent_lock_path() -> Option<PathBuf> {
+    std::env::var_os("FERRYX_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx")))
+        .map(|base| base.join("locks").join("daemon.lock"))
+}
+
 pub fn get_default_session_path() -> PathBuf {
     if let Some(mut base) = dirs_next().or_else(dirs_fallback) {
         base.push("rorca");
@@ -283,6 +291,47 @@ fn open_secure_lock_file(path: &Path) -> Result<File, String> {
     Ok(file)
 }
 
+#[cfg(unix)]
+struct DaemonLockFiles {
+    _persistent: Option<File>,
+    _legacy: File,
+}
+
+#[cfg(unix)]
+fn try_lock_file(file: &File) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("Another daemon instance is already holding the lock.".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn acquire_daemon_locks(
+    persistent_path: Option<&Path>,
+    legacy_path: &Path,
+) -> Result<DaemonLockFiles, String> {
+    let persistent = if let Some(path) = persistent_path {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("Persistent lock path has no parent: {}", path.display()))?;
+        ensure_runtime_directory(parent)?;
+        let file = open_secure_lock_file(path)?;
+        try_lock_file(&file)?;
+        Some(file)
+    } else {
+        None
+    };
+
+    let legacy = open_secure_lock_file(legacy_path)?;
+    try_lock_file(&legacy)?;
+    Ok(DaemonLockFiles {
+        _persistent: persistent,
+        _legacy: legacy,
+    })
+}
+
 fn remove_stale_socket_after_lock(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(_) => {
@@ -497,17 +546,11 @@ impl DaemonServer {
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
 
-        // Flock lock for atomic bind & stale socket recovery.
-        let _lock_file = open_secure_lock_file(&lock_path)?;
-
         #[cfg(unix)]
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            let fd = _lock_file.as_raw_fd();
-            if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
-                return Err("Another daemon instance is already holding the lock.".into());
-            }
-        }
+        let _lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
+
+        #[cfg(not(unix))]
+        let _lock_file = open_secure_lock_file(&lock_path)?;
 
         // Clean up stale socket only after lock acquisition and safe ownership check.
         remove_stale_socket_after_lock(&socket_path)?;
@@ -1502,6 +1545,52 @@ mod tests {
         assert!(remove_stale_socket_after_lock(&socket_symlink).is_err());
         assert!(socket_symlink.symlink_metadata().is_ok());
         assert_eq!(fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_persistent_daemon_lock_survives_legacy_tmp_lock_replacement() {
+        let dir = tempdir().unwrap();
+        let persistent = dir.path().join("data").join("locks").join("daemon.lock");
+        let legacy_dir = dir.path().join("runtime");
+        fs::create_dir(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join("daemon.lock");
+
+        let first = acquire_daemon_locks(Some(&persistent), &legacy).expect("first lock set");
+        fs::remove_file(&legacy).expect("unlink legacy lock");
+        fs::write(&legacy, b"").expect("recreate legacy lock inode");
+
+        let second = acquire_daemon_locks(Some(&persistent), &legacy);
+        assert!(second.is_err(), "persistent lock must reject split brain");
+        drop(first);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_persistent_daemon_lock_creates_only_dedicated_secure_directory() {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path().join("data");
+        fs::create_dir(&data_root).unwrap();
+        fs::set_permissions(&data_root, fs::Permissions::from_mode(0o755)).unwrap();
+        let persistent = data_root.join("locks").join("daemon.lock");
+        let runtime = dir.path().join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        let legacy = runtime.join("daemon.lock");
+
+        let locks = acquire_daemon_locks(Some(&persistent), &legacy).expect("dual locks");
+        let data_mode = fs::symlink_metadata(&data_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let lock_dir_mode = fs::symlink_metadata(persistent.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(data_mode, 0o755);
+        assert_eq!(lock_dir_mode, 0o700);
+        drop(locks);
     }
 
     /// End-to-end proof of the path a phone tap actually travels: HTTP POST on

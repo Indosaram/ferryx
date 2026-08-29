@@ -99,6 +99,7 @@ pub struct WorktreeManager {
     writer_leases: WriterLeaseRegistry,
     delete_lock: Arc<Mutex<()>>,
     dirty_snapshots: Arc<Mutex<HashMap<PathBuf, bool>>>,
+    revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl WorktreeManager {
@@ -139,7 +140,18 @@ impl WorktreeManager {
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
             dirty_snapshots: Arc::new(Mutex::new(HashMap::new())),
+            revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn bump_revision(&self) -> u64 {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1
     }
 
     pub fn repo_root(&self) -> &Path {
@@ -403,17 +415,17 @@ impl WorktreeManager {
         )?;
 
         let target_canonical = self.canonical_allowed_path(&options.path)?;
-        inspect_worktree(&target_canonical).or_else(|_| {
-            Ok(Worktree {
-                path: target_canonical,
-                head: String::new(),
-                branch: Some(format!("refs/heads/{branch_name}")),
-                bare: false,
-                detached: false,
-                locked: None,
-                prunable: None,
-            })
-        })
+        let result = inspect_worktree(&target_canonical).unwrap_or_else(|_| Worktree {
+            path: target_canonical,
+            head: String::new(),
+            branch: Some(format!("refs/heads/{branch_name}")),
+            bare: false,
+            detached: false,
+            locked: None,
+            prunable: None,
+        });
+        self.bump_revision();
+        Ok(result)
     }
 
     pub fn list_worktrees(&self) -> Result<Vec<Worktree>, WorktreeError> {
@@ -526,6 +538,7 @@ impl WorktreeManager {
 
         git_worktree_remove(&self.repo_root, &canonical, force)?;
         self.dirty_snapshots.lock().remove(&canonical);
+        self.bump_revision();
         Ok(git_worktree_prune(&self.repo_root).is_ok())
     }
 
