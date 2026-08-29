@@ -117,6 +117,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
             cols: Some(80),
             rows: Some(24),
             client_request_id: None,
+            shell: None,
         },
     )
     .await
@@ -198,6 +199,7 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
             cols: Some(80),
             rows: Some(24),
             client_request_id: None,
+            shell: None,
         },
     )
     .await
@@ -375,6 +377,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
             cols: Some(80),
             rows: Some(24),
             client_request_id: None,
+            shell: None,
         },
     )
     .await
@@ -450,6 +453,7 @@ async fn terminal_cwd_cache_and_resolution_contract() {
             cols: Some(80),
             rows: Some(24),
             client_request_id: None,
+            shell: None,
         },
     )
     .await
@@ -507,6 +511,7 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
             cols: Some(80),
             rows: Some(24),
             client_request_id: None,
+            shell: None,
         },
     )
     .await
@@ -645,6 +650,7 @@ async fn test_project_registration_then_daemon_spawn() {
             cols: Some(80),
             rows: Some(24),
             client_request_id: None,
+            shell: None,
         },
     )
     .await

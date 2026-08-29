@@ -118,6 +118,8 @@ pub struct TerminalPreferences {
     pub source: TerminalPreferencesSource,
     pub status: TerminalPreferencesStatus,
     pub source_path: Option<PathBuf>,
+    #[serde(default)]
+    pub default_shell: Option<String>,
 }
 
 impl TerminalPreferences {
@@ -131,6 +133,7 @@ impl TerminalPreferences {
             source: TerminalPreferencesSource::Defaults,
             status,
             source_path,
+            default_shell: None,
         }
     }
 
@@ -209,6 +212,7 @@ impl TerminalPreferences {
             source: TerminalPreferencesSource::Ghostty,
             status: TerminalPreferencesStatus::Imported,
             source_path: Some(source_path),
+            default_shell: None,
         }
     }
 }
@@ -617,6 +621,7 @@ pub struct TerminalPreferenceOverrides {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub macos_option_as_alt: Option<bool>,
+    pub shell: Option<String>,
 }
 
 struct PreferenceCache {
@@ -648,6 +653,14 @@ pub fn apply_terminal_preference_overrides(
     }
     if let Some(option_as_alt) = overrides.macos_option_as_alt {
         effective.macos_option_as_alt = option_as_alt;
+    }
+    if let Some(shell) = &overrides.shell {
+        let trimmed = shell.trim();
+        if trimmed.is_empty() {
+            effective.default_shell = None;
+        } else {
+            effective.default_shell = Some(trimmed.to_string());
+        }
     }
     effective
 }
@@ -758,5 +771,25 @@ mod tests {
         let prefs = TerminalPreferences::imported(prefs_config, PathBuf::from("test"));
         assert_eq!(prefs.theme.extended_ansi.len(), 240);
         assert_eq!(prefs.theme.extended_ansi[0], "#color_16");
+    }
+
+    #[test]
+    fn test_apply_terminal_preference_overrides_shell() {
+        let base = TerminalPreferences::defaults(TerminalPreferencesStatus::Absent, None);
+        assert_eq!(base.default_shell, None);
+
+        let overrides = TerminalPreferenceOverrides {
+            shell: Some("pwsh".to_string()),
+            ..Default::default()
+        };
+        let effective = apply_terminal_preference_overrides(&base, &overrides);
+        assert_eq!(effective.default_shell.as_deref(), Some("pwsh"));
+
+        let empty_overrides = TerminalPreferenceOverrides {
+            shell: Some("   ".to_string()),
+            ..Default::default()
+        };
+        let effective_empty = apply_terminal_preference_overrides(&base, &empty_overrides);
+        assert_eq!(effective_empty.default_shell, None);
     }
 }

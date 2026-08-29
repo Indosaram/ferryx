@@ -21,6 +21,7 @@ import {
   loadTerminalSettings,
   resetTerminalPreferencesCache,
   resolveTerminalSettings,
+  saveTerminalSettings,
   syncTerminalBackground,
   useTerminalSettings,
 } from "./terminalSettings";
@@ -151,6 +152,7 @@ describe("terminal settings", () => {
       fontFamily: null,
       fontSize: null,
       macosOptionAsAlt: null,
+      shell: null,
     });
 
     act(() => result.current.updateSettings({ fontSize: 17 }));
@@ -159,6 +161,17 @@ describe("terminal settings", () => {
         fontFamily: null,
         fontSize: 17,
         macosOptionAsAlt: null,
+        shell: null,
+      }),
+    );
+
+    act(() => result.current.updateSettings({ shell: "pwsh" }));
+    await waitFor(() =>
+      expect(native.applyTerminalOverrides).toHaveBeenLastCalledWith({
+        fontFamily: null,
+        fontSize: 17,
+        macosOptionAsAlt: null,
+        shell: "pwsh",
       }),
     );
 
@@ -166,6 +179,14 @@ describe("terminal settings", () => {
     act(() => result.current.updateSettings({ fontSize: 17 }));
     await waitFor(() => expect(result.current.settings.fontSize).toBe(17));
     expect(native.applyTerminalOverrides).toHaveBeenCalledTimes(callsAfterChange);
+  });
+
+  it("normalizes empty and whitespace shell strings to null", () => {
+    act(() => {
+      const saved = saveTerminalSettings({ shell: "   " });
+      expect(saved.shell).toBeNull();
+    });
+    expect(loadTerminalSettings().shell).toBeNull();
   });
 
   it("reports a font-size-only override as a local override", () => {

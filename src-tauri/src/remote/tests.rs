@@ -2034,6 +2034,7 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
             Some(repo_dir.to_str().unwrap().to_string()),
             80,
             24,
+            None,
         )
         .await
         .expect("spawn daemon terminal");
@@ -2291,6 +2292,7 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
             ),
             80,
             24,
+            None,
         )
         .await
         .expect("spawn selected-worktree terminal");

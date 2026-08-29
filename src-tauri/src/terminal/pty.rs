@@ -52,7 +52,7 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
-        let cmd = CommandBuilder::new_default_prog();
+        let cmd = crate::terminal::shell::resolve_shell_command(None);
         self.spawn(cmd, cols, rows)
     }
 

@@ -79,6 +79,8 @@ pub enum DaemonRequest {
         cwd: Option<String>,
         cols: u16,
         rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Write {
@@ -501,6 +503,7 @@ mod tests {
             cwd: Some("/tmp/test-cwd".to_string()),
             cols: 120,
             rows: 40,
+            shell: None,
         };
         let spawn_json = serde_json::to_string(&spawn_req).expect("serialize spawn");
         assert!(spawn_json.contains(r#""clientRequestId":"req-abc-123""#));
@@ -549,5 +552,54 @@ mod tests {
         };
         let list_json = serde_json::to_string(&list).expect("serialize list");
         assert!(list_json.contains(r#""epoch":777777"#));
+    }
+
+    #[test]
+    fn test_spawn_shell_field_roundtrip_and_backward_compatibility() {
+        // Back-compat: JSON without shell field deserializes to None
+        let legacy_json = r#"{"type":"spawn","clientRequestId":"req-1","workspaceId":"ws-1","worktree":null,"cwd":"/home","cols":80,"rows":24}"#;
+        let req: DaemonRequest = serde_json::from_str(legacy_json).expect("deserialize legacy spawn");
+        match req {
+            DaemonRequest::Spawn {
+                client_request_id,
+                workspace_id,
+                worktree,
+                cwd,
+                cols,
+                rows,
+                shell,
+            } => {
+                assert_eq!(client_request_id, "req-1");
+                assert_eq!(workspace_id, "ws-1");
+                assert_eq!(worktree, None);
+                assert_eq!(cwd, Some("/home".to_string()));
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+                assert_eq!(shell, None);
+            }
+            _ => panic!("Expected Spawn variant"),
+        }
+
+        // Roundtrip with shell: "pwsh"
+        let spawn_with_shell = DaemonRequest::Spawn {
+            client_request_id: "req-2".to_string(),
+            workspace_id: "ws-2".to_string(),
+            worktree: None,
+            cwd: None,
+            cols: 100,
+            rows: 30,
+            shell: Some("pwsh".to_string()),
+        };
+        let serialized = serde_json::to_string(&spawn_with_shell).expect("serialize spawn with shell");
+        assert!(serialized.contains(r#""shell":"pwsh""#));
+        let deserialized: DaemonRequest = serde_json::from_str(&serialized).expect("deserialize spawn with shell");
+        match deserialized {
+            DaemonRequest::Spawn { shell, .. } => {
+                assert_eq!(shell, Some("pwsh".to_string()));
+            }
+            _ => panic!("Expected Spawn variant"),
+        }
+
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 2);
     }
 }

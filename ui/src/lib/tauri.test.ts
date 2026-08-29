@@ -108,9 +108,32 @@ describe("Tauri IPC wrapper contract", () => {
         worktree: { wsId: "ws-main", slug: "main" },
         cwd: null,
         clientRequestId: "spawn-logical-action-1",
+        shell: null,
       },
     });
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
+  });
+
+  it("spawns terminals with custom shell override", async () => {
+    core.invoke.mockResolvedValue({ sessionId: "backend-session-2" });
+
+    await expect(
+      spawnTerminal({
+        workspaceId: "workspace-main",
+        worktree: null,
+        shell: "pwsh",
+      }),
+    ).resolves.toBe("backend-session-2");
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_spawn", {
+      request: {
+        workspaceId: "workspace-main",
+        worktree: null,
+        cwd: null,
+        clientRequestId: null,
+        shell: "pwsh",
+      },
+    });
   });
 
   it("sends worktree create DTOs in camelCase", async () => {

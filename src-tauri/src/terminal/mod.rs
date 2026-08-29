@@ -33,12 +33,14 @@ pub mod preferences;
 pub mod pty;
 pub mod service;
 pub mod session;
+pub mod shell;
 
 pub use output_hub::*;
 pub use preferences::*;
 pub use pty::*;
 pub use service::*;
 pub use session::*;
+pub use shell::*;
 
 #[cfg(test)]
 mod tests;

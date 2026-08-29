@@ -524,6 +524,7 @@ impl DaemonClient {
         cwd: Option<String>,
         cols: u16,
         rows: u16,
+        shell: Option<String>,
     ) -> Result<String, IpcError> {
         let resp = self
             .send_request(DaemonRequest::Spawn {
@@ -533,6 +534,7 @@ impl DaemonClient {
                 cwd,
                 cols,
                 rows,
+                shell,
             })
             .await?;
 
@@ -1395,6 +1397,7 @@ mod tests {
                 None,
                 80,
                 24,
+                None,
             )
             .await
             .expect("spawn terminal");
@@ -1497,6 +1500,7 @@ mod tests {
                 None,
                 90,
                 35,
+                None,
             )
             .await
             .expect("spawn terminal");
@@ -1509,6 +1513,7 @@ mod tests {
                 None,
                 90,
                 35,
+                None,
             )
             .await
             .expect("idempotent spawn");

@@ -14,6 +14,7 @@ export type TerminalSettings = {
   macosOptionAsAlt: boolean | null;
   fontSize: number | null;
   scrollback: number;
+  shell: string | null;
 };
 
 export type TerminalSettingSource = "local" | "ghostty" | "fallback";
@@ -39,6 +40,7 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   macosOptionAsAlt: null,
   fontSize: null,
   scrollback: 10_000,
+  shell: null,
 };
 
 const TERMINAL_SETTINGS_EVENT = "orca:terminal-settings";
@@ -81,6 +83,7 @@ export const FALLBACK_PREFERENCES: TerminalPreferences = {
   source: "defaults",
   status: "absent",
   sourcePath: null,
+  defaultShell: null,
 };
 
 export function loadTerminalSettings(storage: Pick<Storage, "getItem" | "setItem"> | null = browserStorage()): TerminalSettings {
@@ -185,6 +188,7 @@ async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
     fontFamily: settings.fontFamily,
     fontSize: settings.fontSize,
     macosOptionAsAlt: settings.macosOptionAsAlt,
+    shell: settings.shell,
   };
   const serialized = JSON.stringify(payload);
   if (pushedOverrides === serialized) return;
@@ -269,7 +273,14 @@ function normalizeTerminalSettings(settings: Partial<TerminalSettings>): Termina
       ? clampInteger(settings.fontSize, 13, FONT_SIZE_MIN, FONT_SIZE_MAX)
       : null,
     scrollback: clampInteger(settings.scrollback, DEFAULT_TERMINAL_SETTINGS.scrollback, SCROLLBACK_MIN, SCROLLBACK_MAX),
+    shell: normalizeOptionalString(settings.shell),
   };
+}
+
+function normalizeOptionalString(value: string | null | undefined) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function normalizeOptionalFontFamily(value: string | null | undefined) {

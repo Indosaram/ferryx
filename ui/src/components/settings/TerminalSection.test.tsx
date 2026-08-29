@@ -84,4 +84,41 @@ describe("TerminalSection", () => {
     expect(screen.getByLabelText(/font family/i)).toHaveValue("Courier");
     expect(screen.getByLabelText(/font size/i)).toHaveValue(18);
   });
+
+  it("renders Default shell selector and changing it calls onShell", () => {
+    const onShell = vi.fn();
+    render(<TerminalSection {...defaultProps} shell={null} onShell={onShell} />);
+
+    const shellSelect = screen.getByLabelText(/default shell/i);
+    expect(shellSelect).toBeInTheDocument();
+    expect(shellSelect).toHaveValue("");
+
+    fireEvent.change(shellSelect, { target: { value: "pwsh" } });
+    expect(onShell).toHaveBeenCalledWith("pwsh");
+  });
+
+  it("handles custom shell path input and commits on blur/enter", () => {
+    const onShell = vi.fn();
+    render(<TerminalSection {...defaultProps} shell={null} onShell={onShell} />);
+
+    const shellSelect = screen.getByLabelText(/default shell/i);
+    fireEvent.change(shellSelect, { target: { value: "custom" } });
+
+    const customInput = screen.getByLabelText(/custom shell path/i);
+    expect(customInput).toBeInTheDocument();
+
+    fireEvent.change(customInput, { target: { value: "/bin/fish" } });
+    fireEvent.blur(customInput);
+    expect(onShell).toHaveBeenCalledWith("/bin/fish");
+  });
+
+  it("renders custom shell selection when prop is custom path", () => {
+    render(<TerminalSection {...defaultProps} shell="/opt/homebrew/bin/nu" />);
+
+    const shellSelect = screen.getByLabelText(/default shell/i);
+    expect(shellSelect).toHaveValue("custom");
+
+    const customInput = screen.getByLabelText(/custom shell path/i);
+    expect(customInput).toHaveValue("/opt/homebrew/bin/nu");
+  });
 });

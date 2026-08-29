@@ -25,6 +25,8 @@ pub struct TerminalOverridesRequest {
     pub font_size: Option<f32>,
     #[serde(default)]
     pub macos_option_as_alt: Option<bool>,
+    #[serde(default)]
+    pub shell: Option<String>,
 }
 
 impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
@@ -33,6 +35,7 @@ impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
             font_family: request.font_family,
             font_size: request.font_size,
             macos_option_as_alt: request.macos_option_as_alt,
+            shell: request.shell,
         }
     }
 }

@@ -10,7 +10,6 @@ use crate::session::{clear_session_from_path, load_session_from_path, save_sessi
 use crate::terminal::{PtyManager, PtySessionState, TerminalOutputHub, TerminalService};
 use crate::worktree::{WorkspaceRegistry, WorktreeIdentity, WorktreeManager};
 use parking_lot::{Mutex, RwLock};
-use portable_pty::CommandBuilder;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -660,9 +659,18 @@ impl DaemonServer {
                     cwd,
                     cols,
                     rows,
+                    shell,
                 }) => {
                     let res = self
-                        .handle_spawn(&client_request_id, &workspace_id, worktree, cwd, cols, rows)
+                        .handle_spawn(
+                            &client_request_id,
+                            &workspace_id,
+                            worktree,
+                            cwd,
+                            cols,
+                            rows,
+                            shell,
+                        )
                         .await;
                     match res {
                         Ok(session_id) => DaemonResponse::SpawnOk { session_id },
@@ -967,6 +975,7 @@ impl DaemonServer {
         cwd: Option<String>,
         cols: u16,
         rows: u16,
+        shell: Option<String>,
     ) -> Result<String, String> {
         if client_request_id.trim().is_empty() {
             return Err("clientRequestId cannot be empty".into());
@@ -1043,7 +1052,7 @@ impl DaemonServer {
             default_cwd
         };
 
-        let mut cmd = CommandBuilder::new_default_prog();
+        let mut cmd = crate::terminal::shell::resolve_shell_command(shell.as_deref());
         cmd.env("PROMPT_EOL_MARK", "");
         cmd.cwd(normalize_process_cwd(&resolved_cwd));
 
@@ -1338,7 +1347,7 @@ mod tests {
 
         // 1. Spawning before registration must fail explicitly (no GUI CWD fallback)
         let unreg_res = server
-            .handle_spawn("req-unreg-1", "ws-app", None, None, 80, 24)
+            .handle_spawn("req-unreg-1", "ws-app", None, None, 80, 24, None)
             .await;
         assert!(
             unreg_res.is_err(),
@@ -1359,7 +1368,7 @@ mod tests {
 
         // 3. Spawning in registered workspace succeeds
         let spawn_res = server
-            .handle_spawn("req-reg-1", "ws-app", None, None, 80, 24)
+            .handle_spawn("req-reg-1", "ws-app", None, None, 80, 24, None)
             .await;
         assert!(spawn_res.is_ok());
 
@@ -1387,8 +1396,8 @@ mod tests {
 
         let req_id = "spawn-req-idempotency-1".to_string();
         let (first, second) = tokio::join!(
-            server.handle_spawn(&req_id, "default", None, None, 80, 24),
-            server.handle_spawn(&req_id, "default", None, None, 80, 24),
+            server.handle_spawn(&req_id, "default", None, None, 80, 24, None),
+            server.handle_spawn(&req_id, "default", None, None, 80, 24, None),
         );
         let session1 = first.expect("first spawn succeeds");
         let session2 = second.expect("concurrent duplicate succeeds");
@@ -1405,14 +1414,14 @@ mod tests {
             .await
             .expect("close first session");
         let replacement = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24)
+            .handle_spawn(&req_id, "default", None, None, 80, 24, None)
             .await
             .expect("dead cached session is never returned");
         assert_ne!(session1, replacement);
 
         server.expire_spawn_request_for_test(&req_id);
         let after_ttl = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24)
+            .handle_spawn(&req_id, "default", None, None, 80, 24, None)
             .await
             .expect("a repeated id never creates a second live shell");
         assert_eq!(replacement, after_ttl);
@@ -1436,6 +1445,7 @@ mod tests {
                 Some("/nonexistent/path/for/rorca/test/123".to_string()),
                 80,
                 24,
+                None,
             )
             .await;
         assert!(err_nonexistent.is_err());
@@ -1450,6 +1460,7 @@ mod tests {
                 Some(outside.path().to_string_lossy().into_owned()),
                 80,
                 24,
+                None,
             )
             .await;
         assert!(
@@ -1467,6 +1478,7 @@ mod tests {
                 Some(symlink_outside.to_string_lossy().into_owned()),
                 80,
                 24,
+                None,
             )
             .await;
         assert!(
@@ -1484,6 +1496,7 @@ mod tests {
                 Some(ok_cwd.clone()),
                 80,
                 24,
+                None,
             )
             .await;
         assert!(ok_res.is_ok());
@@ -1969,7 +1982,7 @@ mod tests {
             .unwrap();
 
         let session_id = server
-            .handle_spawn("req-seq-1", "default", None, None, 80, 24)
+            .handle_spawn("req-seq-1", "default", None, None, 80, 24, None)
             .await
             .unwrap();
 

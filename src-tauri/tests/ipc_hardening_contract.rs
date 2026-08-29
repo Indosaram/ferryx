@@ -114,6 +114,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
             cols: Some(80),
             rows: Some(24),
             client_request_id: None,
+            shell: None,
         },
     )
     .await

@@ -91,6 +91,7 @@ export type TerminalPreferences = {
   source: "defaults" | "ghostty";
   status: "imported" | "absent" | "malformed";
   sourcePath: string | null;
+  defaultShell?: string | null;
 };
 
 type WorktreeStatusRequest = {
@@ -107,6 +108,7 @@ export type SpawnTerminalRequest = {
   worktree: WorktreeIdentity | null;
   cwd?: string | null;
   clientRequestId?: string | null;
+  shell?: string | null;
 };
 
 export function isTauriRuntime() {
@@ -166,6 +168,7 @@ export async function getTerminalPreferences(): Promise<TerminalPreferences> {
       source: "defaults",
       status: "absent",
       sourcePath: null,
+      defaultShell: null,
     };
   }
   return invokeCommand<TerminalPreferences>("cmd_terminal_preferences");
@@ -175,13 +178,21 @@ export type TerminalOverrides = {
   fontFamily: string | null;
   fontSize: number | null;
   macosOptionAsAlt: boolean | null;
+  shell?: string | null;
 };
+
+export type TerminalOverridesRequest = TerminalOverrides;
 
 export async function applyTerminalOverrides(
   overrides: TerminalOverrides,
 ): Promise<TerminalPreferences | null> {
   if (!isTauri()) return null;
-  return invokeCommand<TerminalPreferences>("cmd_terminal_apply_overrides", { overrides });
+  return invokeCommand<TerminalPreferences>("cmd_terminal_apply_overrides", {
+    overrides: {
+      ...overrides,
+      shell: overrides.shell ?? null,
+    },
+  });
 }
 
 export async function listWorktrees(workspaceId: string) {
@@ -239,7 +250,12 @@ export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) 
 export async function spawnTerminal(request: SpawnTerminalRequest) {
   if (!isTauri()) return `preview:${request.workspaceId}:${request.worktree?.slug ?? "root"}:${crypto.randomUUID()}`;
   const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", {
-    request: { ...request, cwd: request.cwd ?? null, clientRequestId: request.clientRequestId ?? null },
+    request: {
+      ...request,
+      cwd: request.cwd ?? null,
+      clientRequestId: request.clientRequestId ?? null,
+      shell: request.shell ?? null,
+    },
   });
   return response.sessionId;
 }

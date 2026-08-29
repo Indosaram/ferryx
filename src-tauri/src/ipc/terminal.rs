@@ -313,6 +313,8 @@ pub struct SpawnTerminalRequest {
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     pub client_request_id: Option<String>,
+    #[serde(default)]
+    pub shell: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -641,6 +643,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let client_request_id = request
         .client_request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let effective_shell = request
+        .shell
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| crate::terminal::cached_terminal_preferences().default_shell.clone());
     let session_id = match daemon_client
         .spawn_terminal(
             client_request_id,
@@ -649,6 +655,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             Some(cwd.to_string_lossy().to_string()),
             cols,
             rows,
+            effective_shell,
         )
         .await
     {

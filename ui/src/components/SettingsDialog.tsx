@@ -39,7 +39,7 @@ export function SettingsDialog({
 type SettingsDialogBodyProps = Omit<SettingsDialogProps, "open">;
 
 function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
-  const { settings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
+  const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
   const [section, setSection] = useState<SectionId>("general");
   const isMac = isMacShortcutPlatform();
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -80,7 +80,8 @@ function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
   const hasLocalTerminalOverride =
     settings.fontFamilySource === "local" ||
     settings.macosOptionAsAltSource === "local" ||
-    settings.fontSizeSource === "local";
+    settings.fontSizeSource === "local" ||
+    localSettings.shell !== null;
   let terminalSource = "Built-in defaults";
   if (hasLocalTerminalOverride) {
     terminalSource = "Local override";
@@ -133,13 +134,15 @@ function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
               fontFamily={settings.fontFamily}
               fontSize={settings.fontSize}
               macosOptionAsAlt={settings.macosOptionAsAlt}
+              shell={localSettings.shell}
               source={terminalSource}
               sourcePath={nativePreferences.sourcePath}
               onFontFamily={(fontFamily) => updateSettings({ fontFamily })}
               onFontSize={(fontSize) => updateSettings({ fontSize })}
               onOptionAsAlt={(macosOptionAsAlt) => updateSettings({ macosOptionAsAlt })}
+              onShell={(shell) => updateSettings({ shell })}
               onUseImported={() => {
-                updateSettings({ fontFamily: null, macosOptionAsAlt: null, fontSize: null });
+                updateSettings({ fontFamily: null, macosOptionAsAlt: null, fontSize: null, shell: null });
                 void refreshNativePreferences();
               }}
             />
