@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
+
+type TaggedSink = Sender<(String, DagRunSnapshot)>;
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 fn resolve_dag_runs_dir(root: &Path) -> PathBuf {
@@ -22,9 +24,10 @@ fn resolve_dag_runs_dir(root: &Path) -> PathBuf {
 }
 
 async fn scan_and_emit(
+    project_path: &str,
     root: &Path,
     cache: &mut HashMap<String, DagRunSnapshot>,
-    sink: &Sender<DagRunSnapshot>,
+    sink: &TaggedSink,
 ) -> bool {
     let runs_dir = resolve_dag_runs_dir(root);
     let target_dir = if runs_dir.is_dir() {
@@ -51,7 +54,7 @@ async fn scan_and_emit(
                     };
                     if is_updated {
                         cache.insert(snapshot.run_id.clone(), snapshot.clone());
-                        if sink.send(snapshot).await.is_err() {
+                        if sink.send((project_path.to_string(), snapshot)).await.is_err() {
                             return false;
                         }
                     }
@@ -62,7 +65,7 @@ async fn scan_and_emit(
     true
 }
 
-async fn run_watcher_loop(root: PathBuf, sink: Sender<DagRunSnapshot>) {
+async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink) {
     let mut cache = HashMap::new();
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(64);
 
@@ -96,7 +99,7 @@ async fn run_watcher_loop(root: PathBuf, sink: Sender<DagRunSnapshot>) {
         _ => (true, None),
     };
 
-    if !scan_and_emit(&root, &mut cache, &sink).await {
+    if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
         return;
     }
 
@@ -126,12 +129,12 @@ async fn run_watcher_loop(root: PathBuf, sink: Sender<DagRunSnapshot>) {
                 }
             }, if debounce_sleep.is_some() => {
                 debounce_sleep = None;
-                if !scan_and_emit(&root, &mut cache, &sink).await {
+                if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
                     break;
                 }
             }
             _ = poll_interval.tick(), if polling_mode => {
-                if !scan_and_emit(&root, &mut cache, &sink).await {
+                if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
                     break;
                 }
             }
@@ -140,11 +143,12 @@ async fn run_watcher_loop(root: PathBuf, sink: Sender<DagRunSnapshot>) {
 }
 
 pub fn spawn_dag_watcher(
-    root: PathBuf,
-    sink: Sender<DagRunSnapshot>,
+    project_path: PathBuf,
+    sink: TaggedSink,
 ) -> tauri::async_runtime::JoinHandle<()> {
+    let tagged = project_path.to_string_lossy().to_string();
     tauri::async_runtime::spawn(async move {
-        run_watcher_loop(root, sink).await;
+        run_watcher_loop(tagged, project_path, sink).await;
     })
 }
 
@@ -177,6 +181,8 @@ mod tests {
             .await
             .expect("first snapshot receive must not time out")
             .expect("first snapshot must be received");
+        let (tagged_project, first) = first;
+        assert_eq!(tagged_project, temp_dir.path().to_string_lossy().to_string());
         assert_eq!(first.status, DagRunStatus::Running);
 
         let updated_json = FIXTURE_F107_JSON.replace(
@@ -189,8 +195,10 @@ mod tests {
             .await
             .expect("second snapshot receive must not time out")
             .expect("second snapshot must be received");
+        let (tagged_project_second, second) = second;
+        assert_eq!(tagged_project_second, tagged_project);
         assert_eq!(second.status, DagRunStatus::Completed);
-        assert_ne!(first, second);
+        assert_ne!((tagged_project, first), (tagged_project_second, second));
     }
 
     #[tokio::test]
@@ -207,14 +215,14 @@ mod tests {
                 Ok(Some(snapshot)) => {
                     println!(
                         "runId: {}, status: {:?}, counts: total={}, completed={}, failed={}, cancelled={}, running={}, skipped={}",
-                        snapshot.run_id,
-                        snapshot.status,
-                        snapshot.counts.total,
-                        snapshot.counts.completed,
-                        snapshot.counts.failed,
-                        snapshot.counts.cancelled,
-                        snapshot.counts.running,
-                        snapshot.counts.skipped,
+                        snapshot.1.run_id,
+                        snapshot.1.status,
+                        snapshot.1.counts.total,
+                        snapshot.1.counts.completed,
+                        snapshot.1.counts.failed,
+                        snapshot.1.counts.cancelled,
+                        snapshot.1.counts.running,
+                        snapshot.1.counts.skipped,
                     );
                 }
                 _ => break,

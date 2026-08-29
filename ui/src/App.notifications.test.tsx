@@ -57,6 +57,8 @@ const native = {
 };
 
 vi.mock("./lib/tauri", () => ({
+  listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  watchDagProject: vi.fn(() => Promise.resolve([])),
   DEFAULT_WORKSPACE_ID: "default",
   DEFAULT_TERMINAL_FONT_STACK: "monospace",
   getTerminalPreferences: () => Promise.resolve({}),

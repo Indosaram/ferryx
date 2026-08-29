@@ -1,7 +1,11 @@
 use crate::dag::journal::{list_run_summaries, parse_run_checkpoint, DagRunSnapshot, DagRunSummary};
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use crate::ipc::run_blocking;
+use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use tauri::{AppHandle, Emitter};
 
 fn resolve_dag_runs_dir(project_path: &Path) -> PathBuf {
     let nested = project_path.join(".omo/senpi-task/dag");
@@ -16,6 +20,79 @@ fn resolve_dag_runs_dir(project_path: &Path) -> PathBuf {
     } else {
         nested.join("runs")
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagRunUpdatedPayload {
+    pub project_path: String,
+    pub snapshot: DagRunSnapshot,
+}
+
+fn dag_watched_roots() -> &'static Mutex<HashSet<String>> {
+    static DAG_WATCHED_ROOTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    DAG_WATCHED_ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn canonical_project_key(project_path: &str) -> String {
+    std::fs::canonicalize(project_path)
+        .map(|canonical| canonical.to_string_lossy().to_string())
+        .unwrap_or_else(|_| project_path.to_string())
+}
+
+fn load_current_snapshots(project_path: &str) -> Vec<DagRunSnapshot> {
+    let runs_dir = resolve_dag_runs_dir(Path::new(project_path));
+    if !runs_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut snapshots = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&runs_dir) else {
+        return snapshots;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(snapshot) = parse_run_checkpoint(&content) {
+                    snapshots.push(snapshot);
+                }
+            }
+        }
+    }
+    snapshots.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    snapshots
+}
+
+/// Registers a per-project dag journal watcher (idempotent per canonical path) and
+/// returns the current run inventory so the UI can hydrate immediately.
+#[tauri::command]
+pub async fn dag_watch_project<R: tauri::Runtime>(
+    project_path: String,
+    app: AppHandle<R>,
+) -> Result<Vec<DagRunSnapshot>, IpcError> {
+    let key = canonical_project_key(&project_path);
+    let is_new_root = {
+        let mut watched = dag_watched_roots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        watched.insert(key)
+    };
+    if is_new_root {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, DagRunSnapshot)>(100);
+        crate::dag::watcher::spawn_dag_watcher(PathBuf::from(&project_path), tx);
+        tauri::async_runtime::spawn(async move {
+            while let Some((tagged, snapshot)) = rx.recv().await {
+                let payload = DagRunUpdatedPayload {
+                    project_path: tagged,
+                    snapshot,
+                };
+                if let Err(error) = app.emit("dag-run-updated", &payload) {
+                    tracing::debug!("Failed to emit dag-run-updated event: {error}");
+                }
+            }
+        });
+    }
+    Ok(load_current_snapshots(&project_path))
 }
 
 #[tauri::command]

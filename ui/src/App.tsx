@@ -49,11 +49,15 @@ import {
   setBadgeCount,
   spawnTerminal,
   writeTerminal,
+  listenDagRunUpdated,
+  watchDagProject,
   type AgentDetection,
   type FocusedTerminalPayload,
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
+import { dagStore } from "./state/dagStore";
+import { DagActivityBadge } from "./components/dag/DagActivityBadge";
 import type { PersistedWorkspaceSession } from "./lib/types";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
@@ -61,7 +65,6 @@ import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
-  createDagPaneContent,
   worktreeIdentity,
   type DirtyState,
   type StructuredIpcError,
@@ -69,7 +72,7 @@ import {
   type Worktree,
 } from "./lib/types";
 import { checkForUpdate, registerWindowCloseGuard } from "./lib/updater";
-import { collectLeafIds, findFirstLeafId, type PaneDirection } from "./state/paneTree";
+import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
@@ -598,6 +601,45 @@ function WorkspaceApp({
     state.worktrees,
   );
   const inactiveProjectWorktreesRef = useRef(inactiveProjectWorktrees);
+
+  // Dag journals: watch every known project root and worktree so any omo graph run
+  // anywhere lights up the activity badge, regardless of which cwd the app started in.
+  const dagWatchedPathsRef = useRef<Set<string>>(new Set());
+  const activeWorktreePathsKey = state.worktrees.map((worktree) => worktree.path).join("\n");
+  useEffect(() => {
+    const paths = new Set<string>();
+    for (const project of projectsRef.current) paths.add(project.repoRoot);
+    for (const worktrees of Object.values(inactiveProjectWorktreesRef.current)) {
+      for (const worktree of worktrees) paths.add(worktree.path);
+    }
+    for (const path of activeWorktreePathsKey.split("\n")) {
+      if (path.length > 0) paths.add(path);
+    }
+    for (const path of paths) {
+      if (dagWatchedPathsRef.current.has(path)) continue;
+      dagWatchedPathsRef.current.add(path);
+      void watchDagProject(path)
+        .then((snapshots) => {
+          for (const snapshot of snapshots) dagStore.applySnapshot(path, snapshot);
+        })
+        .catch(() => undefined);
+    }
+  }, [inactiveProjectWorktrees, activeWorktreePathsKey]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenDagRunUpdated((event) => {
+      dagStore.applySnapshot(event.projectPath, event.snapshot);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   inactiveProjectWorktreesRef.current = inactiveProjectWorktrees;
 
   useEffect(() => {
@@ -1291,24 +1333,6 @@ function WorkspaceApp({
     [createBrowserTab, reportRuntimeError],
   );
 
-  const handleNewDagPane = useCallback(() => {
-    const snapshot = stateRef.current;
-    const focusedGroup = snapshot.layout.focusedGroupId
-      ? snapshot.layout.tabGroups?.[snapshot.layout.focusedGroupId]
-      : undefined;
-    const activeTabId =
-      focusedGroup?.activeTabId ?? snapshot.layout.activeTabId ?? snapshot.layout.tabs[0]?.id ?? null;
-    const focusedTab = activeTabId
-      ? snapshot.layout.tabs.find((tab) => tab.id === activeTabId)
-      : undefined;
-    if (!focusedTab || focusedTab.kind === "browser") return;
-    const tabLayout = snapshot.layout.layoutsByTabId?.[focusedTab.id];
-    if (!tabLayout) return;
-    const leafId = tabLayout.activeLeafId ?? findFirstLeafId(tabLayout.root);
-    if (!leafId) return;
-    void splitPane(focusedTab.id, leafId, "horizontal", { content: createDagPaneContent() });
-  }, [splitPane]);
-
 
   const handleDuplicateBrowserTab = useCallback(
     (tabId: string, profileId?: string) => {
@@ -1468,6 +1492,7 @@ function WorkspaceApp({
 
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
+      <DagActivityBadge />
       {isSidebarOpen ? (
         <Sidebar
           open={true}
@@ -1526,7 +1551,6 @@ function WorkspaceApp({
             onToggleTabPin={setTabPinned}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
-            onNewDag={handleNewDagPane}
             onOpenSettings={handleOpenSettings}
             agents={launchableAgents}
             onLaunchAgent={handleLaunchAgent}

@@ -2,7 +2,6 @@ import React, { useSyncExternalStore } from "react";
 import type { DagNodeSnapshot, DagRunSnapshot } from "../../lib/dagTypes";
 import { deriveDagRunCounts } from "../../lib/dagTypes";
 import { dagStore } from "../../state/dagStore";
-import { fetchDagRun, listDagRuns } from "../../lib/tauri";
 import { DagEdgeLayer } from "./DagEdgeLayer";
 import { DagNodeCard } from "./DagNodeCard";
 import {
@@ -50,23 +49,6 @@ export function DagGraphView({
 
     return null;
   }, [propSnapshot, runId, projectPath, storeState]);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    const resolvedPath = projectPath ?? ".";
-    void listDagRuns(resolvedPath)
-      .then(async (summaries) => {
-        for (const summary of summaries) {
-          if (cancelled) return;
-          const run = await fetchDagRun(resolvedPath, summary.runId);
-          if (run && !cancelled) dagStore.applySnapshot(resolvedPath, run);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [projectPath]);
 
   if (!activeRun) {
     return (

@@ -134,7 +134,6 @@ type TerminalSplitViewProps = {
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab?: () => void;
   onAddBrowserTab?: (url?: string, profileId?: string) => void;
-  onNewDag?: () => void;
   onDuplicateBrowserTab?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
@@ -178,7 +177,6 @@ export function TerminalSplitView({
   onToggleTabPin,
   onAddTab = () => undefined,
   onAddBrowserTab = () => undefined,
-  onNewDag,
   onDuplicateBrowserTab = () => undefined,
   onAddMarkdown,
   onAddMobileEmulator,
@@ -397,7 +395,6 @@ export function TerminalSplitView({
     onToggleTabPin,
     onAddTab,
     onAddBrowserTab,
-    onNewDag,
     onDuplicateBrowserTab,
     onAddMarkdown,
     onAddMobileEmulator,
@@ -456,7 +453,6 @@ export function TerminalSplitView({
             onClose={onCloseTab}
             onAdd={onAddTab}
             onAddBrowser={onAddBrowserTab}
-            onNewDag={onNewDag}
             onDuplicateBrowser={onDuplicateBrowserTab}
             onAddMarkdown={onAddMarkdown}
             onAddMobileEmulator={onAddMobileEmulator}
@@ -552,7 +548,6 @@ type TabGroupViewProps = {
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab: () => void;
   onAddBrowserTab: (url?: string, profileId?: string) => void;
-  onNewDag?: () => void;
   onDuplicateBrowserTab: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
@@ -598,7 +593,6 @@ function TabGroupView({
   onToggleTabPin,
   onAddTab,
   onAddBrowserTab,
-  onNewDag,
   onAddMarkdown,
   onDuplicateBrowserTab,
   onAddMobileEmulator,
@@ -671,14 +665,6 @@ function TabGroupView({
           focusGroup();
           onAddBrowserTab(url, profileId);
         }}
-        onNewDag={
-          onNewDag
-            ? () => {
-                focusGroup();
-                onNewDag();
-              }
-            : undefined
-        }
         onDuplicateBrowser={onDuplicateBrowserTab}
         onAddMarkdown={
           onAddMarkdown

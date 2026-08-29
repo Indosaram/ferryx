@@ -1,4 +1,4 @@
-import type { DagRunSnapshot, DagRunSummary } from "./dagTypes";
+import type { DagRunSnapshot } from "./dagTypes";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -356,6 +356,15 @@ export async function onNativeTerminalFocus(
   return listen<string>("native_terminal_focus", (event) => handler(event.payload));
 }
 
+/**
+ * AppKit can consume Cmd+V before Korean IME/WebKit emits either `keydown` or `paste`.
+ * The native key monitor forwards that physical shortcut here.
+ */
+export async function onNativeTerminalPaste(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<void>("native_terminal_paste", () => handler());
+}
+
 export async function onNewTerminalTabMenu(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<void>("menu_new_terminal_tab", () => handler());
@@ -655,20 +664,19 @@ export async function installCliLauncher(): Promise<CliLauncherStatus> {
   return invokeCommand<CliLauncherStatus>("cmd_cli_launcher_install");
 }
 
+export type DagRunUpdatedEvent = {
+  projectPath: string;
+  snapshot: DagRunSnapshot;
+};
+
 export async function listenDagRunUpdated(
-  handler: (snapshot: DagRunSnapshot) => void,
+  handler: (event: DagRunUpdatedEvent) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<DagRunSnapshot>("dag-run-updated", (event) => handler(event.payload));
+  return listen<DagRunUpdatedEvent>("dag-run-updated", (event) => handler(event.payload));
 }
 
-export async function listDagRuns(projectPath: string): Promise<DagRunSummary[]> {
+export async function watchDagProject(projectPath: string): Promise<DagRunSnapshot[]> {
   if (!isTauri()) return [];
-  return invokeCommand<DagRunSummary[]>("dag_list_runs", { projectPath });
+  return invokeCommand<DagRunSnapshot[]>("dag_watch_project", { projectPath });
 }
-
-export async function fetchDagRun(projectPath: string, runId: string): Promise<DagRunSnapshot | null> {
-  if (!isTauri()) return null;
-  return invokeCommand<DagRunSnapshot | null>("dag_get_run", { projectPath, runId });
-}
-

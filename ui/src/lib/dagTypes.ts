@@ -48,11 +48,6 @@ export type DagRunCounts = {
   readonly running: number;
 };
 
-export type DagRunSummary = Pick<
-  DagRunSnapshot,
-  "runId" | "runKey" | "name" | "status" | "startedAt" | "updatedAt" | "counts"
->;
-
 export type DagRunSnapshot = {
   readonly runId: string;
   readonly runKey: string;

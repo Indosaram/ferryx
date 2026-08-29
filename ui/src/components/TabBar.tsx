@@ -46,7 +46,6 @@ type TabBarProps = {
   onAddBrowser?: (url?: string, profileId?: string) => void;
   onDuplicateBrowser?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
-  onNewDag?: () => void;
   onAddMobileEmulator?: () => void;
   onOpenSettings?: () => void;
   agents?: Array<{ name: string; command: string; args: string }>;
@@ -83,7 +82,6 @@ export function TabBar({
   onAddBrowser,
   onDuplicateBrowser,
   onAddMarkdown,
-  onNewDag,
   onAddMobileEmulator,
   onOpenSettings,
   agents,
@@ -218,14 +216,6 @@ export function TabBar({
                   ? () => {
                       setIsNewTabOpen(false);
                       onAddMarkdown();
-                    }
-                  : undefined
-              }
-              onNewDag={
-                onNewDag
-                  ? () => {
-                      setIsNewTabOpen(false);
-                      onNewDag();
                     }
                   : undefined
               }
