@@ -1507,7 +1507,7 @@ pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
+        let _ = crate::util::no_window_command("cmd")
             .args(["/C", "start", &valid_url])
             .spawn();
     }

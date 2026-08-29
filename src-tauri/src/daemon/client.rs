@@ -337,7 +337,7 @@ impl DaemonClient {
         // Launch external ferryx --daemon binary with exact bounded readiness event
         let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ferryx"));
 
-        let mut child = tokio::process::Command::new(&binary_path)
+        let mut child = crate::util::no_window_tokio_command(&binary_path)
             .arg("--daemon")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

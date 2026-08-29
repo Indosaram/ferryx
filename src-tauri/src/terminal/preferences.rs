@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -519,7 +518,7 @@ fn resolve_theme(mut config: GhosttyTerminalConfig) -> GhosttyTerminalConfig {
 }
 
 fn try_load_from_ghostty_cli() -> Option<GhosttyTerminalConfig> {
-    let mut cmd = Command::new("ghostty");
+    let mut cmd = crate::util::no_window_command("ghostty");
     cmd.arg("+show-config");
 
     let output = cmd.output().ok()?;

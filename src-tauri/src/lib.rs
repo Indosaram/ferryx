@@ -8,14 +8,17 @@ pub mod notification;
 pub mod remote;
 pub mod session;
 pub mod terminal;
+pub mod util;
 pub mod worktree;
 pub mod dag;
 
 use crate::daemon::DaemonClient;
 #[cfg(feature = "native-terminal")]
-use crate::native_terminal::surface_host::{
-    NativeTerminalSurfaceHostState, NATIVE_TERMINAL_FOCUS_EVENT,
-};
+use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
+#[cfg(all(target_os = "macos", feature = "native-terminal"))]
+use crate::native_terminal::surface_host::NATIVE_TERMINAL_FOCUS_EVENT;
+#[cfg(all(target_os = "windows", feature = "native-terminal"))]
+use crate::native_terminal::platform::windows_focus::install_windows_terminal_focus_monitor;
 use ipc::*;
 use notification::audio::NotificationAudioPlayer;
 use std::sync::Arc;

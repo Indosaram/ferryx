@@ -1,6 +1,5 @@
 use crate::worktree::model::{DirtyFile, DirtyState, Worktree, WorktreeError};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn escape_git_arg_for_log(arg: &str) -> String {
     let mut escaped = String::with_capacity(arg.len());
@@ -80,7 +79,7 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
             .join(" ")
     );
 
-    let output = Command::new("git")
+    let output = crate::util::no_window_command("git")
         .args(&arg_strs)
         .current_dir(cwd_path)
         .output()

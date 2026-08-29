@@ -59,7 +59,7 @@ pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[allow(dead_code)]
 fn run_opener(program: &str, args: &[&str]) -> bool {
-    std::process::Command::new(program)
+    crate::util::no_window_command(program)
         .args(args)
         .status()
         .map(|status| status.success())

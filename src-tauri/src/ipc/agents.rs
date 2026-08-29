@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,7 +63,7 @@ fn search_paths() -> Vec<PathBuf> {
 // would actually resolve against - the GUI process PATH alone misses most of it.
 fn login_shell_path() -> Option<OsString> {
     let shell = env::var("SHELL").ok().filter(|s| !s.trim().is_empty())?;
-    let output = Command::new(&shell)
+    let output = crate::util::no_window_command(&shell)
         .args(["-lic", "printf %s \"$PATH\""])
         .env("PROMPT_EOL_MARK", "")
         .output()
