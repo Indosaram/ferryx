@@ -633,6 +633,45 @@ describe("App project workspace flow", () => {
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("beta");
   });
 
+  it("restores multi-project native session catalog when single persisted project differs from startup", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.getInitialProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+    localStorage.setItem(
+      PROJECTS_STORAGE_KEY,
+      JSON.stringify([{ workspaceId: "orca-lite-release-verify-13768", repoRoot: "/repo/orca-lite-release-verify-13768" }]),
+    );
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite-release-verify-13768");
+    native.loadSession.mockResolvedValue({
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "orca-lite-release-verify-13768",
+      workspaces: {
+        "orca-lite-release-verify-13768": {
+          workspaceId: "orca-lite-release-verify-13768",
+          repoRoot: "/repo/orca-lite-release-verify-13768",
+          worktrees: [],
+          activeWorktreePath: "/repo/orca-lite-release-verify-13768",
+          layout: { splitMode: "none", primaryTabId: null, secondaryTabId: null, activeTabId: null, tabs: [] },
+          terminalSessions: {},
+        },
+        "superwiki-mail-otp": {
+          workspaceId: "superwiki-mail-otp",
+          repoRoot: "/repo/superwiki-mail-otp",
+          worktrees: [],
+          activeWorktreePath: "/repo/superwiki-mail-otp",
+          layout: { splitMode: "none", primaryTabId: null, secondaryTabId: null, activeTabId: null, tabs: [] },
+          terminalSessions: {},
+        },
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project orca-lite-release-verify-13768")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Project superwiki-mail-otp" })).toBeInTheDocument();
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite-release-verify-13768");
+  });
+
   it("does not restore historical projects into an existing multi-project catalog", async () => {
     native.isTauriRuntime.mockReturnValue(true);
     localStorage.setItem(
