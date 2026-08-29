@@ -1,11 +1,12 @@
 import type { DagNodeRoute, DagNodeSnapshot, DagNodeState, DagRunCounts, DagRunSnapshot } from "../../lib/dagTypes";
 
 export const CARD_WIDTH = 220;
-export const CARD_HEIGHT = 84;
+export const CARD_HEIGHT = 56;
 export const GAP_X = 72;
-export const GAP_Y = 24;
+export const GAP_Y = 14;
 export const PAD_X = 32;
-export const PAD_Y = 32;
+export const PAD_Y = 44;
+export const WAVE_LABEL_HEIGHT = 18;
 
 export function getNodeStateGlyph(state: DagNodeState): string {
   switch (state) {

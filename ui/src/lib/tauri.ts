@@ -676,7 +676,12 @@ export async function listenDagRunUpdated(
   return listen<DagRunUpdatedEvent>("dag-run-updated", (event) => handler(event.payload));
 }
 
-export async function watchDagProject(projectPath: string): Promise<DagRunSnapshot[]> {
-  if (!isTauri()) return [];
-  return invokeCommand<DagRunSnapshot[]>("dag_watch_project", { projectPath });
+export type DagWatchProjectResult = {
+  projectPath: string;
+  runs: DagRunSnapshot[];
+};
+
+export async function watchDagProject(projectPath: string): Promise<DagWatchProjectResult> {
+  if (!isTauri()) return { projectPath, runs: [] };
+  return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
 }

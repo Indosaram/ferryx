@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { TerminalActivity } from "../lib/activity";
 import type { TerminalSession } from "../lib/types";
 import { NativeTerminalPane } from "./NativeTerminalPane";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
@@ -7,6 +8,7 @@ import { DagPaneBadge } from "./dag/DagPaneBadge";
 type TerminalPaneProps = {
   session: TerminalSession;
   active: boolean;
+  activity?: TerminalActivity;
   searchOpen?: boolean;
   onCloseSearch?: () => void;
 };
@@ -14,6 +16,7 @@ type TerminalPaneProps = {
 export function TerminalPane({
   session,
   active: _active,
+  activity,
   searchOpen,
   onCloseSearch,
 }: TerminalPaneProps) {
@@ -24,7 +27,12 @@ export function TerminalPane({
       data-testid="terminal-pane-surface"
       className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
     >
-      <DagPaneBadge projectPath={session.worktreePath ?? session.cwd} />
+      <DagPaneBadge
+        projectPath={session.worktreePath ?? session.cwd}
+        paneId={session.id}
+        agentPresent={activity?.isAgent === true}
+        agentWorking={activity?.isAgent === true && activity.state === "working"}
+      />
       <NativeTerminalPane
         sessionId={session.id}
         session={session}

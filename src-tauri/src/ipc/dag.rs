@@ -29,6 +29,13 @@ pub struct DagRunUpdatedPayload {
     pub snapshot: DagRunSnapshot,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagWatchProjectResponse {
+    pub project_path: String,
+    pub runs: Vec<DagRunSnapshot>,
+}
+
 fn dag_watched_roots() -> &'static Mutex<HashSet<String>> {
     static DAG_WATCHED_ROOTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     DAG_WATCHED_ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
@@ -64,22 +71,23 @@ fn load_current_snapshots(project_path: &str) -> Vec<DagRunSnapshot> {
 }
 
 /// Registers a per-project dag journal watcher (idempotent per canonical path) and
-/// returns the current run inventory so the UI can hydrate immediately.
+/// returns the current run inventory and canonical project path so the UI can
+/// hydrate immediately.
 #[tauri::command]
 pub async fn dag_watch_project<R: tauri::Runtime>(
     project_path: String,
     app: AppHandle<R>,
-) -> Result<Vec<DagRunSnapshot>, IpcError> {
-    let key = canonical_project_key(&project_path);
+) -> Result<DagWatchProjectResponse, IpcError> {
+    let canonical = run_blocking(move || Ok(canonical_project_key(&project_path))).await?;
     let is_new_root = {
         let mut watched = dag_watched_roots()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        watched.insert(key)
+        watched.insert(canonical.clone())
     };
     if is_new_root {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, DagRunSnapshot)>(100);
-        crate::dag::watcher::spawn_dag_watcher(PathBuf::from(&project_path), tx);
+        crate::dag::watcher::spawn_dag_watcher(PathBuf::from(&canonical), tx);
         tauri::async_runtime::spawn(async move {
             while let Some((tagged, snapshot)) = rx.recv().await {
                 let payload = DagRunUpdatedPayload {
@@ -92,7 +100,12 @@ pub async fn dag_watch_project<R: tauri::Runtime>(
             }
         });
     }
-    Ok(load_current_snapshots(&project_path))
+    let snapshot_project = canonical.clone();
+    let runs = run_blocking(move || Ok(load_current_snapshots(&snapshot_project))).await?;
+    Ok(DagWatchProjectResponse {
+        project_path: canonical,
+        runs,
+    })
 }
 
 #[tauri::command]
@@ -213,5 +226,67 @@ mod tests {
             .await
             .expect("get missing run");
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dag_watch_project_canonical_key_and_dedup() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let (_temp, canonical_path, relative_path) = run_blocking(|| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let runs_dir = temp.path().join(".omo/senpi-task/dag/runs");
+            std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+            std::fs::write(
+                runs_dir.join("dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.json"),
+                FIXTURE_F107,
+            )
+            .expect("write checkpoint");
+
+            let canonical_path = std::fs::canonicalize(temp.path())
+                .expect("canonicalize")
+                .to_string_lossy()
+                .to_string();
+            std::fs::create_dir_all(temp.path().join("sub")).expect("create sub");
+            let relative_path = format!("{}/sub/..", temp.path().display());
+
+            Ok((temp, canonical_path, relative_path))
+        })
+        .await
+        .expect("set up project");
+
+        let res1 = dag_watch_project(relative_path.clone(), app.handle().clone())
+            .await
+            .expect("watch project relative");
+
+        assert_eq!(res1.project_path, canonical_path);
+        assert_eq!(res1.runs.len(), 1);
+        assert_eq!(res1.runs[0].run_id, "dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7");
+        let serialized = serde_json::to_value(&res1).expect("serialize response");
+        assert_eq!(
+            serialized["projectPath"].as_str(),
+            Some(canonical_path.as_str())
+        );
+        assert!(serialized.get("project_path").is_none());
+
+        let (has_canonical_root, has_relative_root) = {
+            let watched = dag_watched_roots()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            (
+                watched.contains(&canonical_path),
+                watched.contains(&relative_path),
+            )
+        };
+        assert!(has_canonical_root);
+        assert!(!has_relative_root);
+
+        let res2 = dag_watch_project(canonical_path.clone(), app.handle().clone())
+            .await
+            .expect("watch project canonical");
+
+        assert_eq!(res2.project_path, canonical_path);
+        assert_eq!(res2.runs.len(), 1);
+        assert_eq!(res2.runs[0].run_id, "dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7");
     }
 }

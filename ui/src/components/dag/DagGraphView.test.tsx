@@ -10,6 +10,7 @@ import { createLayoutState } from "../../state/layout";
 import { createLeafNode } from "../../state/paneTree";
 import { TerminalSplitView } from "../TerminalSplitView";
 import { DagGraphView } from "./DagGraphView";
+import { calculateNodePosition } from "./dagViewUtils";
 
 const sampleSnapshot: DagRunSnapshot = parseDagRunSnapshot(dagRunSampleJson)!;
 
@@ -29,6 +30,30 @@ describe("DagGraphView", () => {
     render(<DagGraphView snapshot={sampleSnapshot} />);
     const waveColumns = screen.getAllByTestId("dag-wave-column");
     expect(waveColumns).toHaveLength(4);
+  });
+
+  it("positions node cards on the same geometry the edge layer draws to", () => {
+    render(<DagGraphView snapshot={sampleSnapshot} />);
+
+    const waves = [...sampleSnapshot.waves].sort((a, b) => a.index - b.index);
+    waves.forEach((wave, colIndex) => {
+      wave.nodeIds.forEach((nodeId, rowIndex) => {
+        const expected = calculateNodePosition(colIndex, rowIndex);
+        const card = screen.getByTestId(`dag-node-${nodeId}`);
+        expect(card.style.left).toBe(`${expected.x}px`);
+        expect(card.style.top).toBe(`${expected.y}px`);
+      });
+    });
+  });
+
+  it("draws edges with a theme-aware stroke instead of hardcoded white", () => {
+    render(<DagGraphView snapshot={sampleSnapshot} />);
+
+    const paths = document.querySelectorAll("path[data-testid^='dag-edge-']");
+    expect(paths.length).toBeGreaterThan(0);
+    for (const path of paths) {
+      expect(path.getAttribute("stroke")).toContain("--foreground-rgb");
+    }
   });
 
   it("renders a card containing the first node label from the fixture", () => {

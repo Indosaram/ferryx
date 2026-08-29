@@ -1,7 +1,10 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { NATIVE_TERMINAL_HANDLE_INSET_PX } from "./NativeTerminalPane";
+import {
+  NATIVE_TERMINAL_BOTTOM_INSET_PX,
+  NATIVE_TERMINAL_HANDLE_INSET_PX,
+} from "./NativeTerminalPane";
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
 
 const tauriCoreMocks = vi.hoisted(() => ({
@@ -88,8 +91,10 @@ describe("pane handle reachability over a native terminal", () => {
     // terminal starting exactly below the strip leaves the handle uncovered.
     expect(handle).toHaveClass("h-3");
     expect(terminal.style.marginTop).toBe(`${NATIVE_TERMINAL_HANDLE_INSET_PX}px`);
+    // The bottom strip is reserved too, so the floating DAG badge lands outside
+    // the native surface box instead of being painted over by it.
     expect(terminal.style.height).toBe(
-      `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX}px)`,
+      `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX}px)`,
     );
 
     // The handle is a sibling of the terminal, so a press on it must not be

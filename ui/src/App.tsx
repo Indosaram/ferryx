@@ -609,6 +609,7 @@ function WorkspaceApp({
   // anywhere lights up the activity badge, regardless of which cwd the app started in.
   const dagWatchedPathsRef = useRef<Set<string>>(new Set());
   const activeWorktreePathsKey = state.worktrees.map((worktree) => worktree.path).join("\n");
+  const projectRootsKey = projects.map((project) => project.repoRoot).join("\n");
   useEffect(() => {
     const paths = new Set<string>();
     for (const project of projectsRef.current) paths.add(project.repoRoot);
@@ -622,12 +623,14 @@ function WorkspaceApp({
       if (dagWatchedPathsRef.current.has(path)) continue;
       dagWatchedPathsRef.current.add(path);
       void watchDagProject(path)
-        .then((snapshots) => {
-          for (const snapshot of snapshots) dagStore.applySnapshot(path, snapshot);
+        // Events are tagged with the backend's canonical path, so hydrate under
+        // that same key or the pane lookup would never find these runs.
+        .then(({ projectPath, runs }) => {
+          for (const snapshot of runs) dagStore.applySnapshot(projectPath, snapshot);
         })
         .catch(() => undefined);
     }
-  }, [inactiveProjectWorktrees, activeWorktreePathsKey]);
+  }, [inactiveProjectWorktrees, activeWorktreePathsKey, projectRootsKey]);
 
   useEffect(() => {
     let disposed = false;
@@ -1550,6 +1553,7 @@ function WorkspaceApp({
             sessions={state.sessions}
             unreadTabIds={state.unreadTabIds}
             activityByTabId={tabActivity}
+            activityBySessionId={state.activityBySessionId}
             onActivateTab={handleSelectTerminalTab}
             onCloseTab={handleCloseTab}
             onCloseOtherTabs={handleCloseOtherTabs}

@@ -5,6 +5,7 @@ import type { TerminalSession } from "../lib/types";
 import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
 import { useShortcuts } from "../lib/shortcuts";
 import {
+  NATIVE_TERMINAL_BOTTOM_INSET_PX,
   NATIVE_TERMINAL_HANDLE_INSET_PX,
   NativeTerminalPane,
   resetNativeTerminalPaneForTest,
@@ -433,12 +434,14 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     expect(primaryRecord.observer.observe).toHaveBeenCalled();
   });
 
-  it("reserves the pane-handle strip at the top of the reported native bounds", async () => {
+  it("reserves the pane-handle strip at the top and bottom overlay strip in the reported native bounds", async () => {
     // The native compositor view is parented above the WKWebView, so anything
     // inside the reported bounds is painted over. The pane-drag handle only
-    // stays visible if that strip is excluded from the surface geometry.
+    // stays visible if that top strip is excluded, and bottom overlays (e.g. DAG indicator)
+    // stay visible if the bottom strip is excluded from surface geometry.
     const session = createSession("term-session-1");
     const paneRect = { x: 10, y: 20, width: 800, height: 600 };
+    const totalInsetHeight = NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX;
     // The viewport is offset from the pane box by the reserved handle strip, so
     // the browser measures it shorter and lower than its parent.
     // The browser applies the reservation, so both the pane box and the viewport
@@ -447,9 +450,9 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       return {
         ...paneRect,
         y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
-        height: paneRect.height - NATIVE_TERMINAL_HANDLE_INSET_PX,
+        height: paneRect.height - totalInsetHeight,
         top: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
-        bottom: paneRect.y + paneRect.height,
+        bottom: paneRect.y + paneRect.height - NATIVE_TERMINAL_BOTTOM_INSET_PX,
         left: paneRect.x,
         right: paneRect.x + paneRect.width,
         toJSON: () => ({}),
@@ -460,14 +463,16 @@ describe("NativeTerminalPane geometry reporting contract", () => {
       <NativeTerminalPane sessionId="term-session-1" session={session} />,
     );
 
+    expect(NATIVE_TERMINAL_BOTTOM_INSET_PX).toBe(20);
+
     // The strip is reserved on the pane's own box, so it is not terminal area
     // in the DOM and cannot swallow the press that starts a handle drag ...
     const pane = getByTestId("native-terminal-pane");
     expect(pane.style.marginTop).toBe(`${NATIVE_TERMINAL_HANDLE_INSET_PX}px`);
-    expect(pane.style.height).toBe(`calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX}px)`);
+    expect(pane.style.height).toBe(`calc(100% - ${totalInsetHeight}px)`);
 
     // ... and excluded from the geometry handed to the compositor, so the
-    // native surface cannot paint over the handle.
+    // native surface cannot paint over the handle or the bottom overlay strip.
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
         sessionId: "term-session-1",
@@ -475,7 +480,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
           x: paneRect.x,
           y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
           width: paneRect.width,
-          height: paneRect.height - NATIVE_TERMINAL_HANDLE_INSET_PX,
+          height: paneRect.height - totalInsetHeight,
         },
         scaleFactor: 2,
       });

@@ -19,7 +19,7 @@ import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { Columns2, Rows2, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 
-import type { ActivitySummary } from "../lib/activity";
+import type { ActivitySummary, TerminalActivity } from "../lib/activity";
 import type {
   BrowserTab,
   LayoutState,
@@ -151,6 +151,7 @@ type TerminalSplitViewProps = {
   onFocusPane?: (tabId: string, leafId: string) => void;
   unreadTabIds?: Record<string, boolean>;
   activityByTabId?: Record<string, ActivitySummary | undefined>;
+  activityBySessionId?: Record<string, TerminalActivity>;
   leadingSpacer?: number;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
@@ -194,6 +195,7 @@ export function TerminalSplitView({
   onFocusPane = () => undefined,
   unreadTabIds,
   activityByTabId,
+  activityBySessionId,
   leadingSpacer = 0,
   searchLeafId,
   onCloseSearch,
@@ -412,6 +414,7 @@ export function TerminalSplitView({
     onFocusPane,
     unreadTabIds,
     activityByTabId,
+    activityBySessionId,
     searchLeafId,
     onCloseSearch,
     splitTerminalTab,
@@ -571,6 +574,7 @@ type TabGroupViewProps = {
   onFocusPane: (tabId: string, leafId: string) => void;
   unreadTabIds?: Record<string, boolean>;
   activityByTabId?: Record<string, ActivitySummary | undefined>;
+  activityBySessionId?: Record<string, TerminalActivity>;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   splitTerminalTab: (tabId: string, direction: PaneDirection) => void;
@@ -610,6 +614,7 @@ function TabGroupView({
   onFocusPane,
   unreadTabIds,
   activityByTabId,
+  activityBySessionId,
   searchLeafId,
   onCloseSearch,
   splitTerminalTab,
@@ -703,6 +708,7 @@ function TabGroupView({
             tab={activeTab}
             tabLayout={activeTabLayout}
             sessions={sessions}
+            activityBySessionId={activityBySessionId}
             groupFocused={isFocused}
             browserPanesVisible={browserPanesVisible}
             dropFeedbackLeafId={dropFeedbackLeafId}
@@ -741,6 +747,7 @@ type PaneRendererProps = {
   tab: WorkspaceTab;
   tabLayout: TabPaneLayout;
   sessions: Record<string, TerminalSession>;
+  activityBySessionId?: Record<string, TerminalActivity>;
   groupFocused: boolean;
   browserPanesVisible: boolean;
   dropFeedbackLeafId: string | null;
@@ -772,6 +779,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         tab={tab}
         content={content}
         session={session}
+        activity={props.activityBySessionId?.[sessionId]}
         isOnlyLeaf={tabLayout.root.type === "leaf"}
         isActive={props.groupFocused && tabLayout.activeLeafId === node.leafId}
         browserPanesVisible={browserPanesVisible}
@@ -816,6 +824,7 @@ type PaneLeafViewProps = {
   tab: WorkspaceTab;
   content: PaneContent;
   session: TerminalSession;
+  activity?: TerminalActivity;
   isOnlyLeaf: boolean;
   isActive: boolean;
   browserPanesVisible: boolean;
@@ -834,6 +843,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   tab,
   content,
   session,
+  activity,
   isOnlyLeaf,
   isActive,
   browserPanesVisible,
@@ -965,6 +975,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 <TerminalPane
                   session={session}
                   active={isActive}
+                  activity={activity}
                   searchOpen={searchOpen}
                   onCloseSearch={onCloseSearch}
                 />

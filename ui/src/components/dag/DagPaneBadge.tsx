@@ -1,12 +1,16 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import type { DagRunSnapshot } from "../../lib/dagTypes";
 import { dagStore } from "../../state/dagStore";
+import { dagRunOwnership } from "../../state/dagRunOwnership";
 import { DagGraphView } from "./DagGraphView";
-
-const MAX_POPOVER_RUNS = 6;
 
 export type DagPaneBadgeProps = {
   projectPath?: string;
+  /** Identifies this pane as a run owner; sibling panes of one project must not share a run. */
+  paneId?: string;
+  agentPresent?: boolean;
+  agentWorking?: boolean;
 };
 
 function cleanPath(p: string): string {
@@ -18,12 +22,10 @@ function cleanPath(p: string): string {
 }
 
 function matchesPathBoundary(panePath: string, projectKey: string): boolean {
-  const pane = cleanPath(panePath);
-  const proj = cleanPath(projectKey);
-  if (!pane || !proj) return false;
-  if (pane === proj) return true;
-  if (proj === "/") return pane.startsWith("/");
-  return pane.startsWith(proj + "/");
+  if (!panePath || !projectKey) return false;
+  if (panePath === projectKey) return true;
+  if (projectKey === "/") return panePath.startsWith("/");
+  return panePath.startsWith(`${projectKey}/`);
 }
 
 function resolveProjectRuns(
@@ -34,41 +36,60 @@ function resolveProjectRuns(
   const normalizedPane = cleanPath(projectPath);
   if (!normalizedPane) return [];
 
-  // Check exact match first
-  const exactKey = Object.keys(state.runsByProject).find(
-    (k) => cleanPath(k) === normalizedPane,
-  );
-  if (exactKey && state.runsByProject[exactKey]) {
-    return Object.values(state.runsByProject[exactKey]);
-  }
-
-  // Find longest prefix match respecting directory path boundaries (nested cwd)
   let bestKey: string | null = null;
-  let bestKeyLen = -1;
+  let bestKeyLength = -1;
   for (const key of Object.keys(state.runsByProject)) {
     const cleanedKey = cleanPath(key);
-    if (matchesPathBoundary(normalizedPane, cleanedKey)) {
-      if (cleanedKey.length > bestKeyLen) {
-        bestKey = key;
-        bestKeyLen = cleanedKey.length;
-      }
+    if (
+      matchesPathBoundary(normalizedPane, cleanedKey) &&
+      cleanedKey.length > bestKeyLength
+    ) {
+      bestKey = key;
+      bestKeyLength = cleanedKey.length;
     }
   }
 
-  return bestKey ? Object.values(state.runsByProject[bestKey] ?? {}) : [];
+  return bestKey === null ? [] : Object.values(state.runsByProject[bestKey]);
 }
 
 function runUpdatedAt(run: DagRunSnapshot): number {
   const parsed = run.updatedAt ?? run.completedAt ?? run.startedAt;
-  if (parsed === null || parsed === undefined) return Number.NaN;
+  if (parsed === null) return Number.NaN;
   const time = Date.parse(parsed);
   return Number.isFinite(time) ? time : Number.NaN;
 }
 
-export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | null {
+function GraphGlyph(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="size-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M8 5.2v2.6M7.2 8.6 4.6 10.6M8.8 8.6l2.6 2" />
+      <circle cx="8" cy="3.4" r="1.9" fill="currentColor" stroke="none" />
+      <circle cx="3.4" cy="12.2" r="1.9" fill="currentColor" stroke="none" />
+      <circle cx="12.6" cy="12.2" r="1.9" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function DagPaneBadge({
+  projectPath,
+  paneId,
+  agentPresent = false,
+  agentWorking = false,
+}: DagPaneBadgeProps): JSX.Element | null {
   const storeState = useSyncExternalStore(dagStore.subscribe, () => dagStore.getState());
+  const ownersByRunId = useSyncExternalStore(
+    dagRunOwnership.subscribe,
+    () => dagRunOwnership.getState(),
+  );
   const [open, setOpen] = useState(false);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   const runs = useMemo(
     () => resolveProjectRuns(storeState, projectPath),
@@ -82,17 +103,38 @@ export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | 
     [runs],
   );
 
-  if (runningRuns.length === 0) return null;
+  useEffect(() => {
+    dagRunOwnership.retain(runningRuns.map((candidate) => candidate.runId));
+  }, [runningRuns]);
 
-  const popoverRuns = runningRuns.slice(0, MAX_POPOVER_RUNS);
-  const selected =
-    popoverRuns.find((r) => r.runId === selectedRunId) ??
-    popoverRuns[0] ??
-    null;
+  useEffect(() => {
+    if (!agentWorking || paneId === undefined || paneId === "") return;
+    for (const candidate of runningRuns) dagRunOwnership.claim(candidate.runId, paneId);
+  }, [agentWorking, paneId, runningRuns]);
+
+  const run = useMemo(() => {
+    const owned = runningRuns.find((candidate) => ownersByRunId[candidate.runId] === paneId);
+    if (owned) return owned;
+    if (!agentPresent) return null;
+    return runningRuns.find((candidate) => ownersByRunId[candidate.runId] === undefined) ?? null;
+  }, [runningRuns, ownersByRunId, paneId, agentPresent]);
+
+  const visible = run !== null;
+
+  useEffect(() => {
+    if (!open || !visible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, visible]);
+
+  if (run === null) return null;
 
   return (
     <div
-      className="no-drag absolute bottom-3 right-5 z-30"
+      className="no-drag absolute bottom-0 right-5 z-30"
       data-testid="dag-pane-badge"
     >
       <button
@@ -100,75 +142,60 @@ export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | 
         data-testid="dag-pane-badge-button"
         aria-label="dag run in progress"
         onClick={() => setOpen((previous) => !previous)}
-        className="flex size-5 items-center justify-center rounded-md border border-border/60 bg-card/85 text-accent backdrop-blur-sm transition-colors hover:bg-accent/25 animate-pulse"
+        className="flex size-5 items-center justify-center rounded-md border border-indigo-400/40 bg-zinc-900/85 text-indigo-300 shadow-[0_0_10px_rgb(99_102_241_/_0.35)] backdrop-blur-sm transition-colors hover:bg-zinc-800 animate-pulse"
         style={{ filter: "drop-shadow(0 0 4px currentColor)" }}
       >
-        <svg
-          viewBox="0 0 16 16"
-          className="size-3"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.6"
-          aria-hidden="true"
-        >
-          <circle cx="8" cy="3.5" r="2" />
-          <circle cx="3" cy="12.5" r="2" />
-          <circle cx="13" cy="12.5" r="2" />
-          <path d="M8 5.5v2.8M8 8.3L4.3 10.9M8 8.3l3.7 2.6" />
-        </svg>
+        <GraphGlyph />
       </button>
 
-      {open ? (
-        <>
-          <div
-            data-testid="dag-pane-popover-backdrop"
-            className="fixed inset-0 z-[69] cursor-default"
-            onClick={() => setOpen(false)}
-            aria-hidden="true"
-          />
-          <div
-            data-testid="dag-pane-popover"
-            className="absolute bottom-8 right-0 z-[70] flex max-h-[60vh] w-[400px] flex-col overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl"
-          >
-            <div className="flex items-center justify-between border-b border-border px-3 py-2 text-[11px] font-medium text-muted-foreground">
-              <span>
-                DAG runs · {runningRuns.length} running
-              </span>
-            </div>
-            <div className="flex min-h-0 flex-col overflow-y-auto">
-              {popoverRuns.map((run) => (
-                <button
-                  key={run.runId}
-                  type="button"
-                  data-testid={`dag-pane-run-${run.runId}`}
-                  onClick={() => setSelectedRunId(run.runId)}
-                  className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[11px] transition-colors hover:bg-accent/15 ${
-                    selected?.runId === run.runId ? "bg-accent/10 font-medium" : ""
-                  }`}
+      {open
+        ? createPortal(
+            <>
+              <div
+                data-testid="dag-pane-modal-backdrop"
+                className="fixed inset-0 z-[100] bg-black/60"
+                onClick={() => setOpen(false)}
+                aria-hidden="true"
+              />
+              <div className="pointer-events-none fixed inset-0 z-[101] flex items-center justify-center p-6">
+                <div
+                  data-testid="dag-pane-modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="DAG runs"
+                  className="pointer-events-auto flex h-[min(820px,86vh)] w-[min(1280px,92vw)] flex-col overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-2xl"
                 >
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <span aria-hidden="true">▶</span>
-                    <span className="truncate text-foreground">{run.name}</span>
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                    running ·{" "}
-                    {run.counts.completed +
-                      run.counts.failed +
-                      run.counts.cancelled +
-                      run.counts.skipped}
-                    /{run.counts.total} done
-                  </span>
-                </button>
-              ))}
-            </div>
-            {selected ? (
-              <div className="h-[260px] overflow-hidden border-t border-border">
-                <DagGraphView snapshot={selected} />
+                  <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+                    <span className="flex min-w-0 items-center gap-2 text-xs text-foreground">
+                      <span className="shrink-0 text-indigo-500">
+                        <GraphGlyph />
+                      </span>
+                      <span className="truncate font-medium" data-testid="dag-pane-modal-title">
+                        {run.name}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="dag-pane-modal-close"
+                      aria-label="Close DAG runs"
+                      onClick={() => setOpen(false)}
+                      className="rounded-md px-2 py-0.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div
+                    className="min-h-0 flex-1 overflow-hidden"
+                    data-testid={`dag-pane-run-${run.runId}`}
+                  >
+                    <DagGraphView snapshot={run} showRunName={false} />
+                  </div>
+                </div>
               </div>
-            ) : null}
-          </div>
-        </>
-      ) : null}
+            </>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

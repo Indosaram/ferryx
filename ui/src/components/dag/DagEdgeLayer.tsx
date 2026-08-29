@@ -43,7 +43,7 @@ export function DagEdgeLayer({
           markerHeight="4"
           orient="auto-start-reverse"
         >
-          <path d="M 0 0 L 6 3 L 0 6 z" fill="rgba(255, 255, 255, 0.25)" />
+          <path d="M 0 0 L 6 3 L 0 6 z" fill="rgb(var(--foreground-rgb) / 0.45)" />
         </marker>
         <marker
           id="dag-arrow-critical"
@@ -54,7 +54,7 @@ export function DagEdgeLayer({
           markerHeight="4"
           orient="auto-start-reverse"
         >
-          <path d="M 0 0 L 6 3 L 0 6 z" fill="rgb(229, 229, 229)" />
+          <path d="M 0 0 L 6 3 L 0 6 z" fill="rgb(var(--foreground-rgb) / 0.9)" />
         </marker>
       </defs>
 
@@ -77,9 +77,12 @@ export function DagEdgeLayer({
             key={`${edge.from}->${edge.to}`}
             d={d}
             fill="none"
-            stroke={isCritical ? "rgb(229 229 229 / 0.75)" : "rgb(255 255 255 / 0.15)"}
+            stroke={
+              isCritical
+                ? "rgb(var(--foreground-rgb) / 0.8)"
+                : "rgb(var(--foreground-rgb) / 0.35)"
+            }
             strokeWidth={isCritical ? 2 : 1.5}
-            strokeDasharray={isCritical ? undefined : undefined}
             markerEnd={isCritical ? "url(#dag-arrow-critical)" : "url(#dag-arrow)"}
             data-testid={`dag-edge-${edge.from}-${edge.to}`}
             data-critical={isCritical ? "true" : "false"}

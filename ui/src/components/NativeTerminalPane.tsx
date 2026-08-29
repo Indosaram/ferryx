@@ -305,6 +305,7 @@ function quoteShellPath(path: string): string {
  * pane-handle drag, so the handle could be seen and hovered but not dragged.
  */
 export const NATIVE_TERMINAL_HANDLE_INSET_PX = 12;
+export const NATIVE_TERMINAL_BOTTOM_INSET_PX = 20;
 export const NATIVE_TERMINAL_SCROLLBAR_WIDTH_PX = 12;
 const NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX = 20;
 
@@ -1320,7 +1321,7 @@ export function NativeTerminalPane({
       className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", className)}
       style={{
         marginTop: `${NATIVE_TERMINAL_HANDLE_INSET_PX}px`,
-        height: `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX}px)`,
+        height: `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX}px)`,
         ...style,
       }}
       onPointerDown={(event) => {

@@ -13,18 +13,22 @@ import {
   GAP_Y,
   PAD_X,
   PAD_Y,
+  WAVE_LABEL_HEIGHT,
 } from "./dagViewUtils";
 
 export type DagGraphViewProps = {
   readonly runId?: string | null;
   readonly projectPath?: string;
   readonly snapshot?: DagRunSnapshot;
+  /** A host that already titles the run (the pane modal) turns this off to avoid a doubled title. */
+  readonly showRunName?: boolean;
 };
 
 export function DagGraphView({
   runId,
   projectPath,
   snapshot: propSnapshot,
+  showRunName = true,
 }: DagGraphViewProps): JSX.Element {
   const storeState = useSyncExternalStore(dagStore.subscribe, () => dagStore.getState());
 
@@ -72,7 +76,8 @@ export function DagGraphView({
   const bottleneckMap = new Map<string, number>(
     (activeRun.bottlenecks || []).map((b) => [b.nodeId, b.blockedCount]),
   );
-  const criticalPathSet = new Set<string>(activeRun.criticalPath || []);
+  const criticalPath = activeRun.criticalPath || [];
+  const criticalPathSet = new Set<string>(criticalPath);
 
   const nodePositions = new Map<string, { x: number; y: number }>();
   let maxCol = 0;
@@ -88,6 +93,7 @@ export function DagGraphView({
 
   const contentWidth = PAD_X * 2 + (maxCol + 1) * CARD_WIDTH + maxCol * GAP_X;
   const contentHeight = PAD_Y * 2 + (maxRow + 1) * CARD_HEIGHT + maxRow * GAP_Y;
+  const waveLabelTop = PAD_Y - WAVE_LABEL_HEIGHT;
 
   return (
     <div
@@ -95,14 +101,17 @@ export function DagGraphView({
       data-testid="dag-graph-view"
       data-run-id={activeRun.runId}
     >
-      {/* Header */}
       <div
         className="flex h-9 shrink-0 items-center justify-between border-b border-border/40 bg-card/60 px-3 text-xs text-muted-foreground backdrop-blur-sm"
         data-testid="dag-header"
       >
         <div className="flex items-center gap-2 min-w-0 font-medium">
-          <span className="truncate text-foreground">{activeRun.name}</span>
-          <span className="text-muted-foreground/60">&mdash;</span>
+          {showRunName && (
+            <>
+              <span className="truncate text-foreground">{activeRun.name}</span>
+              <span className="text-muted-foreground/60">&mdash;</span>
+            </>
+          )}
           <span className="shrink-0 text-muted-foreground font-mono">
             wave {activeWaveNumber}/{totalWaves}
           </span>
@@ -111,51 +120,63 @@ export function DagGraphView({
             {counts.completed}/{counts.total} done, {counts.running} running
           </span>
         </div>
+        <div className="flex shrink-0 items-center gap-3 font-mono text-[10px]" data-testid="dag-legend">
+          <span className="text-indigo-500">▶ running</span>
+          <span className="text-foreground/60">✓ done</span>
+          <span className="text-muted-foreground">◌ waiting</span>
+          <span className="text-rose-500">✗ failed</span>
+        </div>
       </div>
 
-      {/* Graph Area */}
-      <div className="relative flex-1 overflow-auto p-8 scrollbar-sleek">
+      <div className="relative flex-1 overflow-auto scrollbar-sleek">
         <div
           className="relative"
           style={{ width: contentWidth, height: contentHeight, minWidth: "100%", minHeight: "100%" }}
         >
-          {/* SVG Bezier Edges Layer Under HTML Cards */}
           <DagEdgeLayer
             edges={activeRun.edges}
             nodePositions={nodePositions}
-            criticalPath={activeRun.criticalPath || []}
+            criticalPath={criticalPath}
             width={contentWidth}
             height={contentHeight}
           />
 
-          {/* HTML Node Columns */}
-          <div className="absolute inset-0 flex" style={{ gap: GAP_X, padding: `${PAD_Y}px ${PAD_X}px` }}>
-            {waves.map((wave) => (
+          {waves.map((wave, colIndex) => (
+            <React.Fragment key={wave.index}>
               <div
-                key={wave.index}
                 data-testid="dag-wave-column"
                 data-wave-index={wave.index}
-                className="flex flex-col"
-                style={{ width: CARD_WIDTH, gap: GAP_Y }}
+                className="absolute font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
+                style={{
+                  left: calculateNodePosition(colIndex, 0).x,
+                  top: waveLabelTop,
+                  width: CARD_WIDTH,
+                }}
               >
-                {wave.nodeIds.map((nodeId) => {
-                  const node = nodeMap.get(nodeId);
-                  if (!node) return null;
-                  const isCritical = criticalPathSet.has(node.id);
-                  const blockedCount = bottleneckMap.get(node.id) ?? 0;
-                  return (
-                    <DagNodeCard
-                      key={node.id}
-                      node={node}
-                      isCriticalPath={isCritical}
-                      blockedCount={blockedCount}
-                      style={{ height: CARD_HEIGHT, width: CARD_WIDTH }}
-                    />
-                  );
-                })}
+                wave {wave.index + 1}
               </div>
-            ))}
-          </div>
+              {wave.nodeIds.map((nodeId, rowIndex) => {
+                const node = nodeMap.get(nodeId);
+                if (!node) return null;
+                const position = calculateNodePosition(colIndex, rowIndex);
+                return (
+                  <DagNodeCard
+                    key={node.id}
+                    node={node}
+                    isCriticalPath={criticalPathSet.has(node.id)}
+                    blockedCount={bottleneckMap.get(node.id) ?? 0}
+                    style={{
+                      position: "absolute",
+                      left: position.x,
+                      top: position.y,
+                      height: CARD_HEIGHT,
+                      width: CARD_WIDTH,
+                    }}
+                  />
+                );
+              })}
+            </React.Fragment>
+          ))}
         </div>
       </div>
     </div>
