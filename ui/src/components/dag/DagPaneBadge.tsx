@@ -1,10 +1,8 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import type { DagRunSnapshot } from "../../lib/dagTypes";
 import { dagStore } from "../../state/dagStore";
 import { DagGraphView } from "./DagGraphView";
 
-const COMPLETED_GRACE_MS = 90_000;
-const LIVE_TICK_MS = 15_000;
 const MAX_POPOVER_RUNS = 6;
 
 export type DagPaneBadgeProps = {
@@ -67,15 +65,8 @@ function runUpdatedAt(run: DagRunSnapshot): number {
   return Number.isFinite(time) ? time : Number.NaN;
 }
 
-function isLive(run: DagRunSnapshot, now: number): boolean {
-  if (run.status === "running" || run.status === "paused") return true;
-  const updated = runUpdatedAt(run);
-  return Number.isFinite(updated) && now - updated < COMPLETED_GRACE_MS;
-}
-
 export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | null {
   const storeState = useSyncExternalStore(dagStore.subscribe, () => dagStore.getState());
-  const [now, setNow] = useState(() => Date.now());
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
@@ -83,25 +74,17 @@ export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | 
     () => resolveProjectRuns(storeState, projectPath),
     [storeState, projectPath],
   );
-  const liveRuns = useMemo(
+  const runningRuns = useMemo(
     () =>
       runs
-        .filter((run) => isLive(run, now))
+        .filter((run) => run.status === "running")
         .sort((a, b) => runUpdatedAt(b) - runUpdatedAt(a)),
-    [runs, now],
+    [runs],
   );
-  const hasRunning = liveRuns.some((run) => run.status === "running");
-  const visible = liveRuns.length > 0 || open;
 
-  useEffect(() => {
-    if (!visible) return;
-    const timer = window.setInterval(() => setNow(Date.now()), LIVE_TICK_MS);
-    return () => window.clearInterval(timer);
-  }, [visible]);
+  if (runningRuns.length === 0) return null;
 
-  if (!visible) return null;
-
-  const popoverRuns = liveRuns.slice(0, MAX_POPOVER_RUNS);
+  const popoverRuns = runningRuns.slice(0, MAX_POPOVER_RUNS);
   const selected =
     popoverRuns.find((r) => r.runId === selectedRunId) ??
     popoverRuns[0] ??
@@ -109,18 +92,16 @@ export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | 
 
   return (
     <div
-      className="no-drag absolute bottom-2.5 right-2.5 z-30"
+      className="no-drag absolute bottom-3 right-5 z-30"
       data-testid="dag-pane-badge"
     >
       <button
         type="button"
         data-testid="dag-pane-badge-button"
-        aria-label={hasRunning ? "dag run in progress" : "recent dag runs"}
+        aria-label="dag run in progress"
         onClick={() => setOpen((previous) => !previous)}
-        className={`flex size-5 items-center justify-center rounded-md border border-border/60 bg-card/85 text-accent backdrop-blur-sm transition-colors hover:bg-accent/25 ${
-          hasRunning ? "animate-pulse" : "opacity-60"
-        }`}
-        style={hasRunning ? { filter: "drop-shadow(0 0 4px currentColor)" } : undefined}
+        className="flex size-5 items-center justify-center rounded-md border border-border/60 bg-card/85 text-accent backdrop-blur-sm transition-colors hover:bg-accent/25 animate-pulse"
+        style={{ filter: "drop-shadow(0 0 4px currentColor)" }}
       >
         <svg
           viewBox="0 0 16 16"
@@ -151,10 +132,7 @@ export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | 
           >
             <div className="flex items-center justify-between border-b border-border px-3 py-2 text-[11px] font-medium text-muted-foreground">
               <span>
-                DAG runs{" "}
-                {hasRunning
-                  ? `· ${liveRuns.filter((run) => run.status === "running").length} running`
-                  : ""}
+                DAG runs · {runningRuns.length} running
               </span>
             </div>
             <div className="flex min-h-0 flex-col overflow-y-auto">
@@ -169,21 +147,11 @@ export function DagPaneBadge({ projectPath }: DagPaneBadgeProps): JSX.Element | 
                   }`}
                 >
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <span aria-hidden="true">
-                      {run.status === "running"
-                        ? "▶"
-                        : run.status === "failed"
-                          ? "✗"
-                          : run.status === "completed"
-                            ? "✓"
-                            : run.status === "paused"
-                              ? "⏸"
-                              : "⊘"}
-                    </span>
+                    <span aria-hidden="true">▶</span>
                     <span className="truncate text-foreground">{run.name}</span>
                   </span>
                   <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                    {run.status === "running" ? "running · " : ""}
+                    running ·{" "}
                     {run.counts.completed +
                       run.counts.failed +
                       run.counts.cancelled +

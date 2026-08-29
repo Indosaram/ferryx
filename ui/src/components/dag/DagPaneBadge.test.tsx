@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, act } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import dagRunSampleJson from "../../state/__fixtures__/dagRunSample.json";
 import { parseDagRunSnapshot, type DagRunSnapshot } from "../../lib/dagTypes";
@@ -15,7 +15,6 @@ describe("DagPaneBadge", () => {
 
   afterEach(() => {
     cleanup();
-    vi.useRealTimers();
   });
 
   it("idle hidden: renders null when dagStore has no runs", () => {
@@ -51,7 +50,7 @@ describe("DagPaneBadge", () => {
 
     const badge = screen.getByTestId("dag-pane-badge");
     expect(badge).toBeInTheDocument();
-    expect(badge).toHaveClass("no-drag", "absolute", "bottom-2.5", "right-2.5", "z-30");
+    expect(badge).toHaveClass("no-drag", "absolute", "bottom-3", "right-5", "z-30");
 
     const button = screen.getByTestId("dag-pane-badge-button");
     expect(button).toHaveAttribute("aria-label", "dag run in progress");
@@ -137,54 +136,52 @@ describe("DagPaneBadge", () => {
     expect(screen.queryByTestId("dag-pane-popover")).not.toBeInTheDocument();
   });
 
-  it("stale terminal run hidden: completed/failed run older than grace period is hidden", () => {
-    const now = Date.now();
-    const staleTime = new Date(now - 120_000).toISOString(); // 120s ago (>90s grace)
+  it("non-running runs hidden: completed, failed, cancelled, and paused runs render null immediately without grace period", () => {
+    const nonRunningStatuses = ["completed", "failed", "cancelled", "paused"] as const;
 
-    const completedRun: DagRunSnapshot = {
-      ...baseSnapshot,
-      runId: "run-completed-stale",
-      status: "completed",
-      completedAt: staleTime,
-      updatedAt: staleTime,
-    };
-    dagStore.applySnapshot("/repo/my-project", completedRun);
+    for (const status of nonRunningStatuses) {
+      dagStore.reset();
+      const nonRunningRun: DagRunSnapshot = {
+        ...baseSnapshot,
+        runId: `run-${status}`,
+        status,
+        updatedAt: new Date().toISOString(),
+      };
+      dagStore.applySnapshot("/repo/my-project", nonRunningRun);
 
-    render(<DagPaneBadge projectPath="/repo/my-project" />);
-    expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+      const { unmount } = render(<DagPaneBadge projectPath="/repo/my-project" />);
+      expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+      unmount();
+    }
   });
 
-  it("recent completed run is visible without pulse and hides after grace period expires", () => {
-    vi.useFakeTimers();
-    const baseTime = 1_700_000_000_000;
-    vi.setSystemTime(baseTime);
-
-    const recentTime = new Date(baseTime - 30_000).toISOString(); // 30s ago (<90s grace)
-    const recentRun: DagRunSnapshot = {
+  it("disappears immediately when run transitions away from running, closing open popover", () => {
+    const activeRun: DagRunSnapshot = {
       ...baseSnapshot,
-      runId: "run-recent-completed",
-      status: "completed",
-      completedAt: recentTime,
-      updatedAt: recentTime,
+      runId: "run-live-1",
+      name: "Pipeline In Progress",
+      status: "running",
     };
-    dagStore.applySnapshot("/repo/my-project", recentRun);
+    dagStore.applySnapshot("/repo/my-project", activeRun);
 
     render(<DagPaneBadge projectPath="/repo/my-project" />);
 
-    // Visible within grace period, not pulsing
-    const button = screen.getByTestId("dag-pane-badge-button");
-    expect(button).toBeInTheDocument();
-    expect(button).toHaveAttribute("aria-label", "recent dag runs");
-    expect(button).not.toHaveClass("animate-pulse");
-    expect(button).toHaveClass("opacity-60");
+    // Open popover
+    fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
+    expect(screen.getByTestId("dag-pane-popover")).toBeInTheDocument();
 
-    // Advance time past the 90s grace period (e.g. 70s later, total 100s since run completed)
+    // Run completes
     act(() => {
-      vi.advanceTimersByTime(70_000);
+      const completedRun: DagRunSnapshot = {
+        ...activeRun,
+        status: "completed",
+      };
+      dagStore.applySnapshot("/repo/my-project", completedRun);
     });
 
-    // Stale run is now hidden
+    // Entire badge and popover must disappear immediately
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("dag-pane-popover")).not.toBeInTheDocument();
   });
 
   it("switches graph preview when clicking between multiple popover runs", () => {
