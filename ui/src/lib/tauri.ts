@@ -1,3 +1,4 @@
+import type { DagRunSnapshot } from "./dagTypes";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -645,4 +646,11 @@ export async function installCliLauncher(): Promise<CliLauncherStatus> {
     throw new Error("Ferryx CLI installation is available only in the desktop app");
   }
   return invokeCommand<CliLauncherStatus>("cmd_cli_launcher_install");
+}
+
+export async function listenDagRunUpdated(
+  handler: (snapshot: DagRunSnapshot) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<DagRunSnapshot>("dag-run-updated", (event) => handler(event.payload));
 }

@@ -2,6 +2,7 @@ pub mod agents;
 pub mod browser;
 pub mod browser_cli;
 pub mod cli_install;
+pub mod dag;
 pub mod debug;
 pub mod error;
 #[cfg(feature = "native-terminal")]
@@ -34,6 +35,7 @@ mod tests;
 pub use agents::*;
 pub use browser::*;
 pub use cli_install::*;
+pub use dag::*;
 pub use debug::*;
 pub use error::*;
 #[cfg(feature = "native-terminal")]

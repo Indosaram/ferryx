@@ -88,6 +88,8 @@ rodio = { version = "0.22", default-features = false, features = [
     "vorbis",
     "mp4",
 ] }
+notify = "7"
+
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"

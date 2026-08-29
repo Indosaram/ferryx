@@ -231,6 +231,19 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
 /// Relays desktop-directed remote gateway events from the daemon (which owns the
 /// gateway) into Tauri events the frontend already listens for. Without this the
 /// remote client's selection requests never reach the desktop.
+fn start_dag_event_watcher<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    dag::watcher::spawn_dag_watcher(root, tx);
+    tauri::async_runtime::spawn(async move {
+        while let Some(snapshot) = rx.recv().await {
+            if let Err(error) = app.emit("dag-run-updated", snapshot) {
+                tracing::debug!("Failed to emit dag-run-updated event: {error}");
+            }
+        }
+    });
+}
+
 fn start_remote_event_bridge<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     daemon_client: Arc<DaemonClient>,
@@ -291,6 +304,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 Arc::clone(&browser_cli_manager),
             )?;
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
+            start_dag_event_watcher(app.handle().clone());
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
@@ -386,6 +400,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_close,
         cmd_browser_list,
         cmd_browser_open_external,
+        dag_list_runs,
+        dag_get_run,
     ])
 }
 
