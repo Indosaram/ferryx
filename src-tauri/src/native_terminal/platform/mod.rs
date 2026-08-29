@@ -6,6 +6,9 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(all(target_os = "windows", feature = "native-terminal"))]
+pub mod windows_focus;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 
@@ -26,6 +29,11 @@ pub use macos::NativeChildViewHandle;
 
 #[cfg(target_os = "windows")]
 pub use windows::NativeChildViewHandle;
+
+#[cfg(all(target_os = "windows", feature = "native-terminal"))]
+pub use windows_focus::{
+    install_windows_terminal_focus_monitor, uninstall_windows_terminal_focus_monitor,
+};
 
 #[cfg(target_os = "linux")]
 pub use linux::NativeChildViewHandle;

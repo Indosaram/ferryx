@@ -511,6 +511,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             install_macos_key_monitor(app)?;
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
             install_macos_terminal_focus_monitor(app)?;
+            #[cfg(all(target_os = "windows", feature = "native-terminal"))]
+            install_windows_terminal_focus_monitor(app)?;
             ipc::browser_cli::start_browser_cli_server(
                 app.handle().clone(),
                 Arc::clone(&browser_cli_manager),
