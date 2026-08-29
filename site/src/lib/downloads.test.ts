@@ -41,19 +41,14 @@ describe('Cross-Platform Download Configuration', () => {
 
     const assetIds = windows.assets.map((a) => a.id);
     expect(assetIds).toContain('windows-exe');
-    expect(assetIds).toContain('windows-msix');
-    expect(assetIds).toContain('windows-store');
+    expect(assetIds).toContain('windows-msi');
 
     const exeAsset = windows.assets.find((a) => a.id === 'windows-exe');
     expect(exeAsset?.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`);
 
-    const msixAsset = windows.assets.find((a) => a.id === 'windows-msix');
-    expect(msixAsset?.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64.msix`);
-    expect(msixAsset?.fileType).toBe('.msix');
-
-    const storeAsset = windows.assets.find((a) => a.id === 'windows-store');
-    expect(storeAsset?.isStore).toBe(true);
-    expect(storeAsset?.url.startsWith('https://apps.microsoft.com/')).toBe(true);
+    const msiAsset = windows.assets.find((a) => a.id === 'windows-msi');
+    expect(msiAsset?.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64.msi`);
+    expect(msiAsset?.fileType).toBe('.msi');
   });
 
   test('Linux platform configuration and assets are valid', () => {

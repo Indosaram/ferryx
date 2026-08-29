@@ -156,8 +156,6 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
                         key={asset.id}
                         href={asset.url}
                         onClick={() => setIsOpen(false)}
-                        target={asset.isStore ? '_blank' : undefined}
-                        rel={asset.isStore ? 'noreferrer' : undefined}
                         className={cn(
                           'group flex items-center justify-between p-2 rounded-xl text-xs transition-colors',
                           asset.recommended
@@ -182,11 +180,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
                           <span className={cn('px-1.5 py-0.5 text-[10px] font-mono rounded border', asset.recommended ? 'bg-page/15 text-page border-page/20' : 'border-line bg-page text-ink-soft')}>
                             {asset.fileType}
                           </span>
-                          {asset.isStore ? (
-                            <ExternalLink className={cn('h-3.5 w-3.5', asset.recommended ? 'text-page/70 group-hover:text-page' : 'text-ink-faint group-hover:text-ink')} />
-                          ) : (
-                            <Download className={cn('h-3.5 w-3.5', asset.recommended ? 'text-page/70 group-hover:text-page' : 'text-ink-faint group-hover:text-ink')} />
-                          )}
+                          <Download className={cn('h-3.5 w-3.5', asset.recommended ? 'text-page/70 group-hover:text-page' : 'text-ink-faint group-hover:text-ink')} />
                         </div>
                       </a>
                     ))}

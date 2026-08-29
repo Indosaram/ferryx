@@ -4,7 +4,6 @@ export interface DownloadAsset {
   architecture: string;
   fileType: string;
   url: string;
-  isStore?: boolean;
   recommended?: boolean;
   notes: string;
 }
@@ -73,21 +72,12 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
         notes: 'Recommended direct NSIS installer',
       },
       {
-        id: 'windows-msix',
-        name: 'MSIX Package (.msix)',
-        architecture: 'Windows App Package (x64)',
-        fileType: '.msix',
-        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64.msix`,
-        notes: 'Self-contained MSIX app package',
-      },
-      {
-        id: 'windows-store',
-        name: 'Microsoft Store',
-        architecture: 'Windows Store App',
-        fileType: 'Store',
-        url: 'https://apps.microsoft.com/detail/ferryx',
-        isStore: true,
-        notes: 'Install & auto-update via Microsoft Store',
+        id: 'windows-msi',
+        name: 'MSI Installer (.msi)',
+        architecture: 'Windows Installer (x64)',
+        fileType: '.msi',
+        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64.msi`,
+        notes: 'For managed or scripted deployment',
       },
     ],
   },
