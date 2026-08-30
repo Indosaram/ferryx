@@ -78,6 +78,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn FT_Done_Face(face: *mut FtFaceRec) -> c_int;
     fn FT_Set_Pixel_Sizes(face: *mut FtFaceRec, width: c_uint, height: c_uint) -> c_int;
+    fn FT_Get_Char_Index(face: *mut FtFaceRec, charcode: c_ulong_t) -> c_uint;
     fn FT_Load_Char(face: *mut FtFaceRec, code: c_ulong_t, flags: i32) -> c_int;
 }
 
@@ -118,8 +119,14 @@ fn library() -> Option<&'static Mutex<Library>> {
         .as_ref()
 }
 
-fn resolve_font_path(family: &str) -> Option<String> {
-    let name = CString::new(family).ok()?;
+fn resolve_font_path(family: &str, ch: char, bold: bool, italic: bool) -> Option<String> {
+    let weight = if bold { "bold" } else { "regular" };
+    let slant = if italic { "italic" } else { "roman" };
+    let query = format!(
+        "{family}:charset={:x}:weight={weight}:slant={slant}",
+        ch as u32
+    );
+    let name = CString::new(query).ok()?;
     let file_key = CString::new("file").ok()?;
     // SAFETY: every fontconfig pattern created here is destroyed before returning, and the
     // borrowed file string is copied out while its owning pattern is still alive.
@@ -160,8 +167,8 @@ pub fn rasterize_to_alpha_buffer(
     width: u32,
     height: u32,
     font_size: f32,
-    _bold: bool,
-    _italic: bool,
+    bold: bool,
+    italic: bool,
 ) -> bool {
     if width == 0 || height == 0 || buffer.len() < (width * height) as usize {
         return false;
@@ -172,7 +179,9 @@ pub fn rasterize_to_alpha_buffer(
     let Some(library) = library() else {
         return false;
     };
-    let Some(path) = resolve_font_path(family).or_else(|| resolve_font_path("monospace")) else {
+    let Some(path) = resolve_font_path(family, ch, bold, italic)
+        .or_else(|| resolve_font_path("monospace", ch, bold, italic))
+    else {
         return false;
     };
     let Ok(path) = CString::new(path) else {
@@ -191,6 +200,10 @@ pub fn rasterize_to_alpha_buffer(
             return false;
         }
         FT_Set_Pixel_Sizes(face, 0, pixel_size);
+        if FT_Get_Char_Index(face, ch as c_ulong_t) == 0 {
+            FT_Done_Face(face);
+            return false;
+        }
         if FT_Load_Char(face, ch as c_ulong_t, FT_LOAD_RENDER) != 0 {
             FT_Done_Face(face);
             return false;
@@ -206,7 +219,7 @@ pub fn rasterize_to_alpha_buffer(
             return false;
         }
 
-        let baseline = (pixel_size as c_int * 4) / 5;
+        let baseline = height as c_int - (height as c_int / 5).max(1);
         let left = (*slot).bitmap_left.max(0);
         let top = (baseline - (*slot).bitmap_top).max(0);
         let mut inked = false;

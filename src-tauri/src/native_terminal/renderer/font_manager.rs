@@ -131,7 +131,7 @@ impl FontManager {
             let fs = *self.font_size.lock() * scale;
             CellMetrics {
                 width_px: (fs * 0.6).round().max(1.0) as u32,
-                height_px: (fs * 1.5).round().max(1.0) as u32,
+                height_px: (fs * 1.25).round().max(1.0) as u32,
             }
         }
     }
