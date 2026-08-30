@@ -14,6 +14,12 @@ No Electron anywhere.
 [**Docs**](https://indosaram.github.io/ferryx/docs/introduction/) &nbsp;·&nbsp;
 [**Discord**](https://discord.gg/Z2hBkQEHUG)
 
+<br />
+
+<img src="site/public/demo.png" alt="Ferryx running an agent in a split terminal next to an embedded browser tab" width="960" />
+
+<sub>An agent working in a native terminal pane, split beside an embedded browser tab.</sub>
+
 </div>
 
 ---
@@ -24,7 +30,7 @@ No Electron anywhere.
 | :--- | :--- | :--- |
 | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
 | **Windows** | NSIS installer (x64) | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
-| **Windows** | MSIX package, Store & sideloading | [`.msix`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64.msix) |
+| **Windows** | MSI installer, managed deployment (x64) | [`.msi`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64.msi) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
 
