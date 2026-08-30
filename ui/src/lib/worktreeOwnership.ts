@@ -1,13 +1,14 @@
 import { worktreeIdentity, type RegisteredProject, type Worktree } from "./types";
 
-/** Registered roots may carry a trailing separator; comparisons must not. */
-function normalizeRoot(path: string): string {
-  return path.replace(/\/+$/, "");
+/** Paths may carry mixed separators or trailing slashes; comparisons must not. */
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
 function ownsPath(root: string, path: string): boolean {
-  const normalized = normalizeRoot(root);
-  return path === normalized || path.startsWith(`${normalized}/`);
+  const normalizedRoot = normalizePath(root);
+  const normalizedPath = normalizePath(path);
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
 /**
@@ -31,7 +32,8 @@ export function resolveWorktreeOwnerId(
     // (`.orca-worktrees/`), so only an exact root match outranks its branch.
     !projects.some(
       (project) =>
-        project.workspaceId !== identityOwner && normalizeRoot(project.repoRoot) === worktree.path,
+        project.workspaceId !== identityOwner &&
+        normalizePath(project.repoRoot) === normalizePath(worktree.path),
     )
   ) {
     return identityOwner;
@@ -39,7 +41,7 @@ export function resolveWorktreeOwnerId(
 
   const pathOwner = projects
     .filter((project) => ownsPath(project.repoRoot, worktree.path))
-    .sort((left, right) => normalizeRoot(right.repoRoot).length - normalizeRoot(left.repoRoot).length)[0];
+    .sort((left, right) => normalizePath(right.repoRoot).length - normalizePath(left.repoRoot).length)[0];
   if (pathOwner) return pathOwner.workspaceId;
 
   return fallbackProjectId;

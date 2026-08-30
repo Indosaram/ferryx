@@ -46,4 +46,36 @@ describe("resolveWorktreeOwnerId", () => {
 
     expect(resolveWorktreeOwnerId(row, projects, "beta")).toBe("alpha");
   });
+
+  it("resolves ownership for nested drive-letter backslash paths and avoids sibling prefixes", () => {
+    const projects = [
+      project("outer", "C:\\repos\\outer"),
+      project("inner", "C:\\repos\\outer\\inner\\"),
+    ];
+
+    expect(
+      resolveWorktreeOwnerId(worktree("C:\\repos\\outer\\inner\\sub", null), projects, "outer"),
+    ).toBe("inner");
+    expect(
+      resolveWorktreeOwnerId(worktree("C:\\repos\\outer-sibling\\nested", null), projects, "fallback"),
+    ).toBe("fallback");
+  });
+
+  it("resolves ownership for UNC paths and avoids sibling prefixes", () => {
+    const projects = [
+      project("outer", "\\\\server\\share\\outer"),
+      project("inner", "\\\\server\\share\\outer\\inner\\"),
+    ];
+
+    expect(
+      resolveWorktreeOwnerId(worktree("\\\\server\\share\\outer\\inner\\sub", null), projects, "outer"),
+    ).toBe("inner");
+    expect(
+      resolveWorktreeOwnerId(
+        worktree("\\\\server\\share\\outer-sibling\\nested", null),
+        projects,
+        "fallback",
+      ),
+    ).toBe("fallback");
+  });
 });
