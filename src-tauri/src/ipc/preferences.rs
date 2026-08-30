@@ -1,12 +1,18 @@
+#[cfg(feature = "native-terminal")]
 use std::sync::Arc;
 
 use serde::Deserialize;
+#[cfg(feature = "native-terminal")]
 use tauri::{AppHandle, Manager, Runtime, State};
+#[cfg(feature = "native-terminal")]
 use tokio::sync::oneshot;
 
+#[cfg(feature = "native-terminal")]
 use crate::daemon::DaemonClient;
 use crate::ipc::{run_blocking, IpcError};
+#[cfg(feature = "native-terminal")]
 use crate::native_terminal::composition::LogicalBounds;
+#[cfg(feature = "native-terminal")]
 use crate::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState,
 };
@@ -42,6 +48,7 @@ impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
 
 /// Re-renders every attached native terminal with the current font metrics and pushes the new
 /// grid size to the daemon, so a font change is visible without waiting for a resize event.
+#[cfg(feature = "native-terminal")]
 async fn rerender_native_sessions<R: Runtime>(
     app: &AppHandle<R>,
     daemon_client: &DaemonClient,
@@ -100,6 +107,7 @@ async fn rerender_native_sessions<R: Runtime>(
 }
 
 /// Re-imports the Ghostty configuration and returns it without local overrides applied.
+#[cfg(feature = "native-terminal")]
 #[tauri::command]
 pub async fn cmd_terminal_preferences<R: Runtime>(
     app: AppHandle<R>,
@@ -111,6 +119,13 @@ pub async fn cmd_terminal_preferences<R: Runtime>(
     Ok(imported)
 }
 
+#[cfg(not(feature = "native-terminal"))]
+#[tauri::command]
+pub async fn cmd_terminal_preferences() -> Result<TerminalPreferences, IpcError> {
+    run_blocking(|| Ok(reload_terminal_preferences().as_ref().clone())).await
+}
+
+#[cfg(feature = "native-terminal")]
 #[tauri::command]
 pub async fn cmd_terminal_apply_overrides<R: Runtime>(
     app: AppHandle<R>,
@@ -126,4 +141,17 @@ pub async fn cmd_terminal_apply_overrides<R: Runtime>(
     .await?;
     rerender_native_sessions(&app, daemon_client.inner(), state.inner()).await?;
     Ok(effective)
+}
+
+#[cfg(not(feature = "native-terminal"))]
+#[tauri::command]
+pub async fn cmd_terminal_apply_overrides(
+    overrides: TerminalOverridesRequest,
+) -> Result<TerminalPreferences, IpcError> {
+    run_blocking(move || {
+        Ok(set_terminal_preference_overrides(overrides.into())
+            .as_ref()
+            .clone())
+    })
+    .await
 }

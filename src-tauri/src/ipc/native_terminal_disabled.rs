@@ -21,6 +21,11 @@ pub async fn cmd_native_terminal_detach() -> Result<(), IpcError> {
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_close() -> Result<(), IpcError> {
+    Err(IpcError::native_terminal_unsupported())
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_set_bounds() -> Result<(), IpcError> {
     Err(IpcError::native_terminal_unsupported())
 }
@@ -86,6 +91,7 @@ mod tests {
         let results = vec![
             cmd_native_terminal_attach().await,
             cmd_native_terminal_detach().await,
+            cmd_native_terminal_close().await,
             cmd_native_terminal_set_bounds().await,
             cmd_native_terminal_set_focus().await,
             cmd_native_terminal_send_input().await,
