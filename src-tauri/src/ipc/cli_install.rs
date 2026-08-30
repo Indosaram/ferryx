@@ -320,7 +320,7 @@ mod tests {
         let home = Path::new("/mock/home");
         let status = resolve_launcher_status(true, Some(home), None)
             .expect("Unix status with HOME should succeed");
-        assert_eq!(status.launcher_path, "/mock/home/.local/bin/ferryx");
+        assert_eq!(PathBuf::from(status.launcher_path), home.join(".local/bin/ferryx"));
         assert_eq!(status.is_supported, cfg!(unix));
     }
 
