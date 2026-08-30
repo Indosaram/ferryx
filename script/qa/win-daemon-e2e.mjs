@@ -21,6 +21,14 @@ export function pathsMatch(a, b) {
   return normalizePath(a) === normalizePath(b);
 }
 
+export function parseRepoRoot(args, portIndex, portFileIndex) {
+  return args.find((arg, index) =>
+    !arg.startsWith("-") &&
+    !(portIndex >= 0 && index === portIndex + 1) &&
+    !(portFileIndex >= 0 && index === portFileIndex + 1)
+  ) ?? "C:\\Users\\sook\\ferryx-winbuild\\orca-lite";
+}
+
 export function parsePtyOutput(text) {
   const lines = text
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
@@ -134,6 +142,9 @@ export function runPureSelfTest() {
   const n2 = normalizePath("c:/users/sook/ferryx-winbuild/orca-lite/");
   if (n1 !== "c:/users/sook/ferryx-winbuild/orca-lite" || n1 !== n2) throw new Error("normalizePath mismatch");
   if (!pathsMatch("\\\\?\\C:\\foo\\bar", "c:/foo/bar")) throw new Error("pathsMatch mismatch");
+  if (parseRepoRoot(["C:\\Users\\sook\\ferryx-ulw-01a04fcf"], -1, -1) !== "C:\\Users\\sook\\ferryx-ulw-01a04fcf") {
+    throw new Error("parseRepoRoot positional argument mismatch");
+  }
   const parsed = parsePtyOutput(
     'PS > Write-Output "FERRYX_MARKER=sig-42"; Write-Output "FERRYX_CWD=$((Get-Location).Path)"\r\n' +
     "FERRYX_MARKER=sig-42\r\nFERRYX_CWD=C:\\Users\\sook\r\nPS > ",
@@ -153,8 +164,7 @@ async function main() {
   const pIdx = args.indexOf("--port"), pfIdx = args.indexOf("--port-file");
   const customPort = pIdx !== -1 ? Number(args[pIdx + 1]) : null;
   const customPortFile = pfIdx !== -1 ? args[pfIdx + 1] : null;
-  const repoRoot = args.find((a, i) => !a.startsWith("-") && i !== pIdx + 1 && i !== pfIdx + 1)
-    ?? "C:\\Users\\sook\\ferryx-winbuild\\orca-lite";
+  const repoRoot = parseRepoRoot(args, pIdx, pfIdx);
 
   const portFile = customPortFile ?? join(process.env.LOCALAPPDATA ?? "C:\\ProgramData", "Ferryx", "runtime", "daemon.port");
   const port = customPort ?? Number(readFileSync(portFile, "utf8").trim());
