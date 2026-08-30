@@ -1,0 +1,39 @@
+---
+import DiagnosticLayout from '../../../layouts/DiagnosticLayout.astro';
+import { DiagnosticApp } from '../../../components/diagnostic/DiagnosticApp';
+
+const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+
+const title = '코딩 에이전트 워크플로 진단 — 나에게 맞는 멀티 에이전트 환경 찾기';
+const description =
+  'tmux, Cursor부터 Git Worktree, Conductor, Ferryx까지 — 7개 질문을 통해 병렬 AI 코딩 환경 핏을 즉시 진단합니다.';
+---
+
+<DiagnosticLayout title={title} description={description} lang="ko">
+  <div class="flex flex-col gap-6">
+    <div class="flex flex-col gap-2 border-b border-line pb-4">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-mono uppercase tracking-wider text-ink-soft">
+          인터랙티브 워크플로 진단
+        </span>
+        <a
+          href={`${baseUrl}diagnostic/`}
+          class="text-xs font-mono text-ink-soft hover:text-ink underline"
+        >
+          English
+        </a>
+      </div>
+      <h1 class="text-3xl font-bold tracking-tight text-ink">
+        코딩 에이전트 워크플로 진단
+      </h1>
+      <p class="text-sm text-ink-soft max-w-2xl">
+        tmux, Cursor부터 Git Worktree, Conductor, Ferryx까지 — 병렬 AI 코딩 환경의
+        동시성, 지속성, 격리 요구사항에 맞는 최적의 작업 환경을 찾아드립니다.
+      </p>
+    </div>
+
+    <DiagnosticApp client:load lang="ko" basePath={baseUrl} />
+  </div>
+</DiagnosticLayout>

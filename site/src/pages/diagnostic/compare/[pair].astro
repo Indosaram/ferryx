@@ -1,0 +1,29 @@
+---
+import DiagnosticLayout from '../../../layouts/DiagnosticLayout.astro';
+import { COMPARE_PAIRS, type ComparePairDefinition } from '../../../data/compare';
+import { CompareView } from '../../../components/diagnostic/CompareView';
+
+export function getStaticPaths() {
+  return COMPARE_PAIRS.map((pair) => ({
+    params: { pair: pair.slug },
+    props: { pair },
+  }));
+}
+
+interface Props {
+  readonly pair: ComparePairDefinition;
+}
+
+const { pair } = Astro.props;
+
+const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+
+const title = `${pair.titleEn} — Technical Comparison`;
+const description = pair.summaryEn;
+---
+
+<DiagnosticLayout title={title} description={description} lang="en">
+  <CompareView client:load pair={pair} lang="en" basePath={baseUrl} />
+</DiagnosticLayout>

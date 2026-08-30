@@ -1,0 +1,12 @@
+---
+import DiagnosticLayout from '../../../../layouts/DiagnosticLayout.astro';
+import { MethodologyView } from '../../../../components/diagnostic/MethodologyView';
+
+const title = '진단 채점 방법론 및 공정성 증명 — Ferryx';
+const description =
+  '전체 729개 답변 경로 전수 시뮬레이션 결과, 공동 1위 동점 처리 로직, 가산 매칭 수식 및 편향 방지 원칙을 공개합니다.';
+---
+
+<DiagnosticLayout title={title} description={description} lang="ko">
+  <MethodologyView client:load lang="ko" />
+</DiagnosticLayout>
