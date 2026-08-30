@@ -45,13 +45,15 @@ export function Navbar({ basePath }: { basePath: string }) {
         </nav>
 
         <div className="flex items-center space-x-2">
-          <ThemeToggle />
+          <div className="hidden sm:block">
+            <ThemeToggle />
+          </div>
           <a
             href={DISCORD_INVITE_URL}
             target="_blank"
             rel="noreferrer"
             aria-label="Join the Ferryx Discord"
-            className="text-ink-soft hover:text-ink transition-colors"
+            className="hidden sm:block text-ink-soft hover:text-ink transition-colors"
           >
             <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-ink-soft hover:text-ink hover:bg-ink/[0.04]">
               <DiscordIcon className="h-4 w-4" />
@@ -61,7 +63,7 @@ export function Navbar({ basePath }: { basePath: string }) {
             href="https://github.com/Indosaram/ferryx"
             target="_blank"
             rel="noreferrer"
-            className="text-ink-soft hover:text-ink transition-colors"
+            className="hidden sm:block text-ink-soft hover:text-ink transition-colors"
           >
             <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-ink-soft hover:text-ink hover:bg-ink/[0.04]">
               <Github className="h-4 w-4" />
