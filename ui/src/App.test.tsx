@@ -19,6 +19,11 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
+Object.defineProperty(globalThis.navigator, "platform", {
+  configurable: true,
+  value: "MacIntel",
+});
+
 const { readFileSync } = await import("node:fs");
 const { resolve } = await import("node:path");
 

@@ -14,7 +14,7 @@ export function Features() {
       eyebrow: "Rendering",
       title: "Native Ghostty & wgpu Engine",
       description: "Desktop terminal panes render directly via native libghostty and a GPU-accelerated wgpu pipeline for crisp font rasterization and low-latency throughput.",
-      points: ["libghostty terminal core", "wgpu GPU pipeline", "Sub-frame input latency"],
+      points: ["libghostty terminal core", "wgpu GPU pipeline", "50-frame offscreen p50 3.10 ms on M4 Max"],
     },
     {
       visual: AgentsVisual,
@@ -34,15 +34,15 @@ export function Features() {
       visual: MobileVisual,
       eyebrow: "Remote",
       title: "Mobile Web Pairing",
-      description: "Secure, authenticated remote web access via QR/PIN code. Stream terminal output via lightweight browser xterm.js and steer agent workflows on the go.",
+      description: "Secure, authenticated remote web access via QR/PIN code. Stream terminal output through a dependency-free DOM grid and steer agent workflows on the go.",
       points: ["6-digit PIN pairing", "Streamed terminal grid", "Steer agents from a phone"],
     },
     {
       visual: ZeroElectronVisual,
       eyebrow: "Architecture",
       title: "Zero Electron Overhead",
-      description: "Built on Tauri v2 and native Webview2/WebKit engines paired with a headless Rust PTY daemon. Instant startup with minimal footprint.",
-      points: ["Tauri v2 shell", "Headless Rust PTY daemon", "macOS, Windows, Linux"],
+      description: "Built on Tauri v2 and native WebView2/WebKit engines paired with a headless Rust PTY daemon. The core is cross-platform; selected OS integrations remain macOS-first.",
+      points: ["Tauri v2 shell", "Headless Rust PTY daemon", "Cross-platform core, macOS-first integrations"],
     },
     {
       visual: PersistenceVisual,
@@ -64,7 +64,7 @@ export function Features() {
             Speed. Isolation. Total control.
           </h2>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
-            Every layer in Ferryx is engineered from scratch for minimal latency, zero memory leaks, and seamless autonomous agent collaboration.
+            Ferryx combines a measured WGPU terminal path, a leak-checked libghostty-vt boundary, and a headless Rust daemon for parallel agent collaboration.
           </p>
         </div>
 

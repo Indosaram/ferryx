@@ -675,6 +675,7 @@ fn local_overrides_replace_imported_font_and_option_as_alt() {
     let effective = ferryx_lib::terminal::apply_terminal_preference_overrides(
         &imported,
         &ferryx_lib::terminal::TerminalPreferenceOverrides {
+            shell: None,
             font_family: Some("JetBrains Mono".into()),
             font_size: Some(17.0),
             macos_option_as_alt: Some(false),
@@ -693,6 +694,7 @@ fn local_overrides_replace_imported_font_and_option_as_alt() {
     let rejected = ferryx_lib::terminal::apply_terminal_preference_overrides(
         &imported,
         &ferryx_lib::terminal::TerminalPreferenceOverrides {
+            shell: None,
             font_family: Some("   ".into()),
             font_size: Some(0.0),
             macos_option_as_alt: None,

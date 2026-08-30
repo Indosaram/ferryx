@@ -203,6 +203,7 @@ impl TestDaemonClient {
                 workspace_id: workspace_id.to_string(),
                 worktree: None,
                 cwd: None,
+                shell: None,
                 cols,
                 rows,
             })

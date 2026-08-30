@@ -24,7 +24,7 @@ export function Navbar({ basePath }: { basePath: string }) {
               Ferryx
             </span>
           </a>
-          <Badge variant="secondary" className="hidden sm:inline-flex text-[10px] px-2 py-0.5 border-line bg-surface text-ink-soft">
+          <Badge variant="secondary" className="hidden lg:inline-flex text-[10px] px-2 py-0.5 border-line bg-surface text-ink-soft">
             v0.1.0-alpha
           </Badge>
         </div>
@@ -33,22 +33,27 @@ export function Navbar({ basePath }: { basePath: string }) {
           <a href={`${basePath}docs/introduction/`} className="hover:text-ink transition-colors">
             Docs
           </a>
-          <a href="#features" className="hover:text-ink transition-colors">
+          <a href={`${basePath}diagnostic/`} className="hover:text-ink transition-colors">
+            Diagnostic
+          </a>
+          <a href={`${basePath}#features`} className="hover:text-ink transition-colors">
             Features
           </a>
-          <a href="#architecture" className="hover:text-ink transition-colors">
+          <a href={`${basePath}#architecture`} className="hover:text-ink transition-colors">
             Architecture
           </a>
         </nav>
 
         <div className="flex items-center space-x-2">
-          <ThemeToggle />
+          <div className="hidden sm:block">
+            <ThemeToggle />
+          </div>
           <a
             href={DISCORD_INVITE_URL}
             target="_blank"
             rel="noreferrer"
             aria-label="Join the Ferryx Discord"
-            className="text-ink-soft hover:text-ink transition-colors"
+            className="hidden sm:block text-ink-soft hover:text-ink transition-colors"
           >
             <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-ink-soft hover:text-ink hover:bg-ink/[0.04]">
               <DiscordIcon className="h-4 w-4" />
@@ -58,7 +63,7 @@ export function Navbar({ basePath }: { basePath: string }) {
             href="https://github.com/Indosaram/ferryx"
             target="_blank"
             rel="noreferrer"
-            className="text-ink-soft hover:text-ink transition-colors"
+            className="hidden sm:block text-ink-soft hover:text-ink transition-colors"
           >
             <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-ink-soft hover:text-ink hover:bg-ink/[0.04]">
               <Github className="h-4 w-4" />

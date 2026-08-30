@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use worktree::WorkspaceRegistry;
 
-#[cfg(desktop)]
+#[cfg(target_os = "macos")]
 fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 
@@ -68,22 +68,11 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
         .select_all()
         .build()?;
 
-    let toggle_sidebar = MenuItemBuilder::with_id("sidebar.left.toggle", "Toggle Sidebar")
-        .accelerator("CmdOrCtrl+B")
-        .build(app)?;
-    let command_palette = MenuItemBuilder::with_id("commandPalette.open", "Command Palette...")
-        .accelerator("CmdOrCtrl+K")
-        .build(app)?;
     let close_window = MenuItemBuilder::with_id("window.close", "Close Window")
         .accelerator("CmdOrCtrl+Shift+W")
         .build(app)?;
 
-    let view_menu = SubmenuBuilder::new(app, "View")
-        .item(&toggle_sidebar)
-        .item(&command_palette)
-        .separator()
-        .fullscreen()
-        .build()?;
+    let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
 
     let window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()
@@ -92,7 +81,7 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
         .item(&close_window)
         .build()?;
 
-    let menu = Menu::default(app.handle())?;
+    let menu = Menu::new(app.handle())?;
     menu.append(&app_menu)?;
     menu.append(&file_menu)?;
     menu.append(&edit_menu)?;
@@ -112,12 +101,6 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
                 }
                 "window.close" => {
                     let _ = window.close();
-                }
-                "sidebar.left.toggle" => {
-                    let _ = window.emit("menu_toggle_sidebar", ());
-                }
-                "commandPalette.open" => {
-                    let _ = window.emit("menu_command_palette", ());
                 }
                 _ => {}
             }
@@ -505,7 +488,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
 
     let builder = builder
         .setup(move |app| {
-            #[cfg(desktop)]
+            #[cfg(target_os = "macos")]
             install_app_menu(app)?;
             #[cfg(target_os = "macos")]
             install_macos_key_monitor(app)?;

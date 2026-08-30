@@ -1,0 +1,39 @@
+---
+import DiagnosticLayout from '../../layouts/DiagnosticLayout.astro';
+import { DiagnosticApp } from '../../components/diagnostic/DiagnosticApp';
+
+const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+
+const title = 'Coding Agent Workflow Diagnostic — Find Your Ideal Multi-Agent Setup';
+const description =
+  'Interactive 7-question diagnostic to find your optimal coding agent workspace among tmux, herdr, Conductor, Orca, Superset, Ferryx, and more.';
+---
+
+<DiagnosticLayout title={title} description={description} lang="en">
+  <div class="flex flex-col gap-6">
+    <div class="flex flex-col gap-2 border-b border-line pb-4">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-mono uppercase tracking-wider text-ink-soft">
+          Interactive Diagnostic
+        </span>
+        <a
+          href={`${baseUrl}ko/diagnostic/`}
+          class="text-xs font-mono text-ink-soft hover:text-ink underline"
+        >
+          한국어로 전환 (Korean)
+        </a>
+      </div>
+      <h1 class="text-3xl font-bold tracking-tight text-ink">
+        Coding Agent Workflow Diagnostic
+      </h1>
+      <p class="text-sm text-ink-soft max-w-2xl">
+        tmux, Cursor, Git Worktrees, Conductor, and Ferryx — find the multi-agent orchestration
+        environment that precisely fits your concurrency, persistence, and isolation needs.
+      </p>
+    </div>
+
+    <DiagnosticApp client:load lang="en" basePath={baseUrl} />
+  </div>
+</DiagnosticLayout>
