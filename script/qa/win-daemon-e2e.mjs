@@ -22,8 +22,16 @@ export function pathsMatch(a, b) {
 }
 
 export function parsePtyOutput(text) {
-  const marker = text.match(/FERRYX_MARKER=([a-zA-Z0-9_-]+)/)?.[1] ?? null;
-  const cwd = text.match(/FERRYX_CWD=([^\r\n]+)/)?.[1]?.trim() ?? null;
+  const lines = text
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim());
+  const marker = lines
+    .map((line) => line.match(/^FERRYX_MARKER=([a-zA-Z0-9_-]+)$/)?.[1])
+    .findLast(Boolean) ?? null;
+  const cwd = lines
+    .map((line) => line.match(/^FERRYX_CWD=((?:[a-zA-Z]:[\\/]|\\\\)[^\r\n]+)$/)?.[1])
+    .findLast(Boolean) ?? null;
   return { marker, cwd };
 }
 
@@ -126,7 +134,10 @@ export function runPureSelfTest() {
   const n2 = normalizePath("c:/users/sook/ferryx-winbuild/orca-lite/");
   if (n1 !== "c:/users/sook/ferryx-winbuild/orca-lite" || n1 !== n2) throw new Error("normalizePath mismatch");
   if (!pathsMatch("\\\\?\\C:\\foo\\bar", "c:/foo/bar")) throw new Error("pathsMatch mismatch");
-  const parsed = parsePtyOutput("Prompt> FERRYX_MARKER=sig-42\r\nFERRYX_CWD=C:\\Users\\sook\r\nPS > ");
+  const parsed = parsePtyOutput(
+    'PS > Write-Output "FERRYX_MARKER=sig-42"; Write-Output "FERRYX_CWD=$((Get-Location).Path)"\r\n' +
+    "FERRYX_MARKER=sig-42\r\nFERRYX_CWD=C:\\Users\\sook\r\nPS > ",
+  );
   if (parsed.marker !== "sig-42" || parsed.cwd !== "C:\\Users\\sook") throw new Error("parsePtyOutput mismatch");
   console.log("SELF-TEST PASS: pure normalization and PTY signal parser verified.");
 }
