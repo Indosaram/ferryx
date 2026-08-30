@@ -8,10 +8,13 @@ import {
 } from "react";
 
 const NativeTerminalVisibilityContext = createContext(true);
-const DIALOG_SELECTOR = '[role="dialog"]';
+const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"]';
 
-function isDialogSurfaceVisible(): boolean {
-  return typeof document !== "undefined" && document.querySelector(DIALOG_SELECTOR) !== null;
+function isYieldingSurfaceVisible(): boolean {
+  return (
+    typeof document !== "undefined" &&
+    document.querySelector(YIELDING_SURFACE_SELECTOR) !== null
+  );
 }
 
 export function NativeTerminalVisibilityProvider({
@@ -28,20 +31,20 @@ export function NativeTerminalVisibilityProvider({
 /**
  * Native compositor child views live above WKWebView on macOS, so DOM z-index cannot
  * cover them. The active terminal therefore has to relinquish its native surface while
- * any modal/dialog surface (Settings, New Tab menu, etc.) is mounted. The semantic dialog
- * selector keeps this independent from dialog implementation classes while the context
- * supplies an explicit visibility override for other owners/tests.
+ * any modal/dialog or overlay surface (Settings, New Tab menu, Search overlay, etc.)
+ * is mounted. The semantic selector keeps this independent from dialog implementation
+ * classes while the context supplies an explicit visibility override for other owners/tests.
  */
 export function useNativeTerminalVisibility(): boolean {
   const ownerVisible = useContext(NativeTerminalVisibilityContext);
-  const [dialogOpen, setDialogOpen] = useState(isDialogSurfaceVisible);
+  const [surfaceOpen, setSurfaceOpen] = useState(isYieldingSurfaceVisible);
 
   useEffect(() => {
     if (typeof document === "undefined" || typeof MutationObserver === "undefined") {
       return;
     }
 
-    const update = () => setDialogOpen(isDialogSurfaceVisible());
+    const update = () => setSurfaceOpen(isYieldingSurfaceVisible());
     update();
 
     const observer = new MutationObserver(update);
@@ -49,5 +52,5 @@ export function useNativeTerminalVisibility(): boolean {
     return () => observer.disconnect();
   }, []);
 
-  return ownerVisible && !dialogOpen;
+  return ownerVisible && !surfaceOpen;
 }

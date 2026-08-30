@@ -1,26 +1,53 @@
-import { StrictMode } from "react";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { JSDOM } from "jsdom";
 
-import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
+if (typeof window === "undefined") {
+  const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", { url: "http://localhost:3000" });
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  globalThis.navigator = dom.window.navigator;
+  globalThis.HTMLElement = dom.window.HTMLElement;
+  globalThis.HTMLInputElement = dom.window.HTMLInputElement;
+  globalThis.HTMLTextAreaElement = dom.window.HTMLTextAreaElement;
+  globalThis.MutationObserver = dom.window.MutationObserver;
+  globalThis.Element = dom.window.Element;
+  globalThis.Node = dom.window.Node;
+  globalThis.Event = dom.window.Event;
+  globalThis.CustomEvent = dom.window.CustomEvent;
+  globalThis.MouseEvent = dom.window.MouseEvent;
+  globalThis.KeyboardEvent = dom.window.KeyboardEvent;
+  globalThis.dispatchEvent = dom.window.dispatchEvent.bind(dom.window);
+  globalThis.addEventListener = dom.window.addEventListener.bind(dom.window);
+  globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
+}
+
+const { StrictMode } = await import("react");
+const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
+await import("../test/setup");
+
+const { NativeTerminalVisibilityProvider } = await import("../lib/nativeTerminalVisibility");
+const { NativeTerminalPane } = await import("./NativeTerminalPane");
 import type { TerminalSession } from "../lib/types";
-import { NativeTerminalPane } from "./NativeTerminalPane";
 
-const tauriCoreMocks = vi.hoisted(() => ({
-  invoke: vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined),
-  isTauri: vi.fn(() => true),
-  listen: vi.fn(async () => () => undefined),
-}));
+const tauriInvoke = vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined);
+const tauriIsTauri = vi.fn(() => true);
+const tauriListen = vi.fn<(event?: string, handler?: any) => Promise<any>>(async () => () => undefined);
+
+const tauriCoreMocks = {
+  invoke: tauriInvoke,
+  isTauri: tauriIsTauri,
+  listen: tauriListen,
+};
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: tauriCoreMocks.invoke,
-  isTauri: tauriCoreMocks.isTauri,
+  invoke: (cmd: string, args?: any) => tauriInvoke(cmd, args),
+  isTauri: () => tauriIsTauri(),
 }));
 
 // isTauri() is mocked true, so event subscriptions pass their runtime guard and
 // would reach the real bridge, which has no __TAURI_INTERNALS__ under jsdom.
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: tauriCoreMocks.listen,
+  listen: (event: string, handler: any) => tauriListen(event, handler),
 }));
 
 class TestResizeObserver implements ResizeObserver {
@@ -64,6 +91,7 @@ const PANE_RECT = {
 
 describe("NativeTerminalPane compositor ownership lifecycle", () => {
   let restorePaneRect: () => void;
+  const originalResizeObserver = globalThis.ResizeObserver;
 
   beforeEach(() => {
     const originalRect = HTMLElement.prototype.getBoundingClientRect;
@@ -77,15 +105,26 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     tauriCoreMocks.invoke.mockResolvedValue(undefined);
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
-    vi.stubGlobal("ResizeObserver", TestResizeObserver);
-    document.querySelectorAll('[role="dialog"]').forEach((node) => node.remove());
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      writable: true,
+      value: TestResizeObserver,
+    });
+    document.querySelectorAll('[role="dialog"], [role="search"]').forEach((node) => node.remove());
   });
 
   afterEach(async () => {
     restorePaneRect();
     cleanup();
     await Promise.resolve();
-    vi.unstubAllGlobals();
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      writable: true,
+      value: originalResizeObserver,
+    });
+    if (typeof vi.unstubAllGlobals === "function") {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("does not block a new split pane attach behind an unrelated session", async () => {
@@ -229,6 +268,51 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     newTabMenu.remove();
     await waitFor(() => {
       expect(lifecycleCalls()).toEqual([["cmd_native_terminal_attach", "backend-newtab"]]);
+      expect(view.getByTestId("native-terminal-pane")).toHaveAttribute(
+        "data-native-terminal-visible",
+        "true",
+      );
+    });
+  });
+
+  it("detaches and blocks input while a mounted role=search Terminal search overlay covers the active pane", async () => {
+    const view = render(<NativeTerminalPane session={session("backend-search")} />);
+
+    await waitFor(() => {
+      expect(lifecycleCalls()).toEqual([["cmd_native_terminal_attach", "backend-search"]]);
+    });
+    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute(
+      "data-native-terminal-visible",
+      "true",
+    );
+
+    const searchOverlay = document.createElement("div");
+    searchOverlay.setAttribute("role", "search");
+    searchOverlay.setAttribute("aria-label", "Terminal search");
+    document.body.appendChild(searchOverlay);
+
+    await waitFor(() => {
+      expect(lifecycleCalls()).toEqual([
+        ["cmd_native_terminal_attach", "backend-search"],
+        ["cmd_native_terminal_detach", "backend-search"],
+      ]);
+      expect(view.getByTestId("native-terminal-pane")).toHaveAttribute(
+        "data-native-terminal-visible",
+        "false",
+      );
+    });
+
+    tauriCoreMocks.invoke.mockClear();
+    const sink = view.getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    fireEvent.input(sink, { target: { value: "must-not-reach-pty" } });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.anything(),
+    );
+
+    searchOverlay.remove();
+    await waitFor(() => {
+      expect(lifecycleCalls()).toEqual([["cmd_native_terminal_attach", "backend-search"]]);
       expect(view.getByTestId("native-terminal-pane")).toHaveAttribute(
         "data-native-terminal-visible",
         "true",
