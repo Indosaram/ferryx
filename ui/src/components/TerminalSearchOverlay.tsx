@@ -4,11 +4,53 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { IconButton } from "./ui/IconButton";
 
+export type NativeTerminalSearchMatch = {
+  row: number;
+  startCol: number;
+  endCol: number;
+};
+
+export type NativeTerminalSearchResult = {
+  matches: NativeTerminalSearchMatch[];
+  totalMatches: number;
+};
+
 export type TerminalSearchOverlayProps = {
   sessionId?: string;
   onClose: () => void;
   onFocusTerminal?: () => void;
 };
+
+function parseSearchResponse(raw: unknown): NativeTerminalSearchMatch[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw.map((item) => {
+      if (Array.isArray(item)) {
+        return {
+          row: Number(item[0] ?? 0),
+          startCol: Number(item[1] ?? 0),
+          endCol: Number(item[2] ?? 0),
+        };
+      }
+      if (item && typeof item === "object") {
+        const obj = item as Record<string, unknown>;
+        return {
+          row: Number(obj.row ?? 0),
+          startCol: Number(obj.startCol ?? obj.start_col ?? 0),
+          endCol: Number(obj.endCol ?? obj.end_col ?? 0),
+        };
+      }
+      return { row: 0, startCol: 0, endCol: 0 };
+    });
+  }
+  if (typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.matches)) {
+      return parseSearchResponse(obj.matches);
+    }
+  }
+  return [];
+}
 
 export function TerminalSearchOverlay({
   sessionId,
@@ -18,7 +60,7 @@ export function TerminalSearchOverlay({
   const [query, setQuery] = useState("");
   const [resultIndex, setResultIndex] = useState<number | null>(null);
   const [resultCount, setResultCount] = useState<number | null>(null);
-  const [nativeMatches, setNativeMatches] = useState<Array<[number, number, number]>>([]);
+  const [nativeMatches, setNativeMatches] = useState<NativeTerminalSearchMatch[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -34,16 +76,17 @@ export function TerminalSearchOverlay({
       return;
     }
 
-    void invoke<Array<[number, number, number]>>("cmd_native_terminal_search", {
+    void invoke<NativeTerminalSearchResult | Array<[number, number, number]>>("cmd_native_terminal_search", {
       sessionId,
       query: searchQuery,
       caseSensitive: false,
     })
-      .then((matches) => {
-        if (Array.isArray(matches)) {
+      .then((response) => {
+        const matches = parseSearchResponse(response);
+        if (matches.length > 0) {
           setNativeMatches(matches);
           setResultCount(matches.length);
-          setResultIndex(matches.length > 0 ? 0 : null);
+          setResultIndex(0);
         } else {
           setNativeMatches([]);
           setResultCount(0);
