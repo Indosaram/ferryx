@@ -366,20 +366,99 @@ async fn test_remote_server_serves_spa_index_html() {
         .await
         .expect("start server");
 
-    let parsed: std::net::SocketAddr = addr;
-    if let Ok(mut stream) = tokio::net::TcpStream::connect(parsed).await {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        let _ = stream.write_all(req).await;
-        let mut buf = [0u8; 4096];
-        if let Ok(n) = stream.read(&mut buf).await {
-            let res = String::from_utf8_lossy(&buf[..n]);
-            assert!(res.contains("200 OK"));
-            assert!(res.contains("<!doctype html>") || res.contains("<html"));
-        }
-    }
+    let (status, body) = http_request(addr, "GET", "/", None, None).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(r#"<div id="root"></div>"#) || body.contains("/assets/"),
+        "Remote server must serve compiled SPA index HTML, got:\n{body}"
+    );
+    assert!(
+        !body.contains("Ferryx Remote Server Active"),
+        "Remote server must not fall back to placeholder when compiled UI is available"
+    );
+
+    // SPA navigation fallback: non-asset path returns index.html
+    let (spa_status, spa_body) = http_request(addr, "GET", "/workspaces/active", None, None).await;
+    assert_eq!(spa_status, 200);
+    assert!(
+        spa_body.contains(r#"<div id="root"></div>"#) || spa_body.contains("/assets/"),
+        "SPA fallback route must serve compiled index.html"
+    );
 
     handle.stop();
+}
+
+#[test]
+fn test_resolve_dist_dir_packaged_macos_bundle_layout() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let macos_dir = dir.path().join("Ferryx.app/Contents/MacOS");
+    let resources_ui_dist = dir.path().join("Ferryx.app/Contents/Resources/ui/dist");
+    std::fs::create_dir_all(&macos_dir).unwrap();
+    std::fs::create_dir_all(&resources_ui_dist).unwrap();
+    std::fs::write(
+        resources_ui_dist.join("index.html"),
+        "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+    )
+    .unwrap();
+
+    let exe_path = macos_dir.join("ferryx");
+    let isolated_cwd = dir.path().join("isolated_cwd");
+    std::fs::create_dir_all(&isolated_cwd).unwrap();
+
+    let resolved = crate::remote::server::resolve_dist_dir_from(
+        Some(&isolated_cwd),
+        Some(&exe_path),
+        None,
+    );
+    let expected = resources_ui_dist.canonicalize().unwrap();
+    assert_eq!(resolved.as_deref(), Some(expected.as_path()));
+}
+
+#[test]
+fn test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let install_dir = dir.path().join("FerryxApp");
+    let resources_ui_dist = install_dir.join("resources/ui/dist");
+    std::fs::create_dir_all(&resources_ui_dist).unwrap();
+    std::fs::write(
+        resources_ui_dist.join("index.html"),
+        "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+    )
+    .unwrap();
+
+    let exe_path = install_dir.join("ferryx");
+    let isolated_cwd = dir.path().join("isolated_cwd");
+    std::fs::create_dir_all(&isolated_cwd).unwrap();
+
+    let resolved = crate::remote::server::resolve_dist_dir_from(
+        Some(&isolated_cwd),
+        Some(&exe_path),
+        None,
+    );
+    let expected = resources_ui_dist.canonicalize().unwrap();
+    assert_eq!(resolved.as_deref(), Some(expected.as_path()));
+}
+
+#[test]
+fn test_resolve_dist_dir_isolated_runtime_debug_fallback() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let isolated_cwd = dir.path().join("isolated_cwd");
+    let fake_exe = dir.path().join("somewhere/else/ferryx");
+    std::fs::create_dir_all(&isolated_cwd).unwrap();
+    std::fs::create_dir_all(fake_exe.parent().unwrap()).unwrap();
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let expected_dist = manifest_dir.join("../ui/dist");
+
+    if expected_dist.join("index.html").exists() {
+        let resolved = crate::remote::server::resolve_dist_dir_from(
+            Some(&isolated_cwd),
+            Some(&fake_exe),
+            Some(&manifest_dir),
+        );
+        let expected = expected_dist.canonicalize().unwrap();
+        assert_eq!(resolved.as_deref(), Some(expected.as_path()));
+    }
 }
 
 #[test]

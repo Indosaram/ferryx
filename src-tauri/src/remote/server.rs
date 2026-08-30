@@ -1257,32 +1257,55 @@ async fn handle_terminal_grid_socket(
     };
 }
 
-fn resolve_dist_dir() -> PathBuf {
-    let mut candidates = vec![
-        PathBuf::from("ui/dist"),
-        PathBuf::from("../ui/dist"),
-        PathBuf::from("../../ui/dist"),
-    ];
-    if let Ok(cwd) = std::env::current_dir() {
+pub(crate) fn resolve_dist_dir_from(
+    cwd: Option<&Path>,
+    exe: Option<&Path>,
+    manifest_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // 1. Packaged Tauri bundle resource directory (established by bundle.resources: {"../ui/dist": "ui/dist"})
+    if let Some(exe) = exe {
+        if let Some(exe_dir) = exe.parent() {
+            // macOS bundle: Ferryx.app/Contents/MacOS/ferryx -> Contents/Resources/ui/dist
+            candidates.push(exe_dir.join("../Resources/ui/dist"));
+            // Windows / Linux packaged layout: next to executable or resources subdirectory
+            candidates.push(exe_dir.join("ui/dist"));
+            candidates.push(exe_dir.join("resources/ui/dist"));
+        }
+    }
+
+    // 2. Dev / debug compile-time manifest directory
+    if let Some(manifest_dir) = manifest_dir {
+        candidates.push(manifest_dir.join("../ui/dist"));
+        candidates.push(manifest_dir.join("ui/dist"));
+    }
+
+    // 3. Dev / standalone CWD
+    if let Some(cwd) = cwd {
         candidates.push(cwd.join("ui/dist"));
-        candidates.push(cwd.join("dist"));
+        candidates.push(cwd.join("../ui/dist"));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cur = exe;
-        for _ in 0..6 {
-            if let Some(parent) = cur.parent() {
-                candidates.push(parent.join("ui/dist"));
-                candidates.push(parent.join("Resources/ui/dist"));
-                candidates.push(parent.join("../Resources/ui/dist"));
-                candidates.push(parent.join("../Resources"));
-                cur = parent.to_path_buf();
-            }
+
+    // 4. Default fallback relative path
+    candidates.push(PathBuf::from("ui/dist"));
+    candidates.push(PathBuf::from("../ui/dist"));
+
+    for c in candidates {
+        if c.is_dir() && c.join("index.html").is_file() {
+            return Some(c.canonicalize().unwrap_or(c));
         }
     }
-    for c in &candidates {
-        if c.exists() && c.is_dir() && c.join("index.html").exists() {
-            return c.clone();
-        }
+    None
+}
+
+pub(crate) fn resolve_dist_dir() -> PathBuf {
+    let cwd = std::env::current_dir().ok();
+    let exe = std::env::current_exe().ok();
+    let manifest_dir = option_env!("CARGO_MANIFEST_DIR").map(Path::new);
+
+    if let Some(found) = resolve_dist_dir_from(cwd.as_deref(), exe.as_deref(), manifest_dir) {
+        return found;
     }
     PathBuf::from("ui/dist")
 }
