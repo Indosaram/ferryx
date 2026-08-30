@@ -24,7 +24,7 @@ export function Navbar({ basePath }: { basePath: string }) {
               Ferryx
             </span>
           </a>
-          <Badge variant="secondary" className="hidden sm:inline-flex text-[10px] px-2 py-0.5 border-line bg-surface text-ink-soft">
+          <Badge variant="secondary" className="hidden lg:inline-flex text-[10px] px-2 py-0.5 border-line bg-surface text-ink-soft">
             v0.1.0-alpha
           </Badge>
         </div>
@@ -33,10 +33,13 @@ export function Navbar({ basePath }: { basePath: string }) {
           <a href={`${basePath}docs/introduction/`} className="hover:text-ink transition-colors">
             Docs
           </a>
-          <a href="#features" className="hover:text-ink transition-colors">
+          <a href={`${basePath}diagnostic/`} className="hover:text-ink transition-colors">
+            Diagnostic
+          </a>
+          <a href={`${basePath}#features`} className="hover:text-ink transition-colors">
             Features
           </a>
-          <a href="#architecture" className="hover:text-ink transition-colors">
+          <a href={`${basePath}#architecture`} className="hover:text-ink transition-colors">
             Architecture
           </a>
         </nav>
