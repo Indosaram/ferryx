@@ -1,0 +1,19 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Ferryx",
+        "width": 1280,
+        "height": 850,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "hiddenTitle": false,
+        "titleBarStyle": "Visible",
+        "transparent": false
+      }
+    ]
+  }
+}
