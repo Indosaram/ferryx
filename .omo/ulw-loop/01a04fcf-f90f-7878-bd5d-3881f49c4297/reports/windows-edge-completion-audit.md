@@ -1,6 +1,6 @@
 # Windows Edge Completion Audit
 
-Audit target: final evidence tree at `04ed078`
+Audit target: corrected atomic evidence tree at `743f28e`
 
 Host: `maho-win`
 
