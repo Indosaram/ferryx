@@ -42,7 +42,7 @@ type TabBarProps = {
   onSplitDown?: (tabId: string) => void;
   /** Whole-tab split, valid for terminal and browser tabs. */
   onMoveTabToSplit?: (tabId: string, edge: TabDropEdge) => void;
-  onAdd: () => void;
+  onAdd: (shell?: string) => void;
   onAddBrowser?: (url?: string, profileId?: string) => void;
   onDuplicateBrowser?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
@@ -203,9 +203,9 @@ export function TabBar({
             <NewTabPopover
               open={isNewTabOpen}
               onClose={() => setIsNewTabOpen(false)}
-              onNewTerminal={() => {
+              onNewTerminal={(shell) => {
                 setIsNewTabOpen(false);
-                onAdd();
+                onAdd(shell);
               }}
               onNewBrowser={(url, profileId) => {
                 setIsNewTabOpen(false);

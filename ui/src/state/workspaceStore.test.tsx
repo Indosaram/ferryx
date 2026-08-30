@@ -202,6 +202,20 @@ afterEach(() => {
 });
 
 describe("useWorkspaceStore terminal ownership", () => {
+  it("forwards a per-tab shell override to the backend spawn", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ workspaceId: "ws-main", initialWorktrees: [worktree], services }),
+    );
+    await act(async () => {
+      await result.current.openTab(worktree, undefined, undefined, "wsl");
+    });
+
+    expect(services.spawnTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({ shell: "wsl" }),
+    );
+  });
+
   it("splits a pane by creating an independent backend PTY and local session", async () => {
     const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));

@@ -1107,10 +1107,10 @@ function WorkspaceApp({
     };
   }, [handleRemoteSelectionRequested]);
 
-  const handleAddTerminalTab = useCallback(() => {
+  const handleAddTerminalTab = useCallback((shell?: string) => {
     const activeWt = activeWorktreeRef.current;
     if (!activeWt) return;
-    void openTab(activeWt).catch(reportRuntimeError);
+    void openTab(activeWt, undefined, undefined, shell).catch(reportRuntimeError);
   }, [openTab, reportRuntimeError]);
 
   const handleLaunchAgent = useCallback(

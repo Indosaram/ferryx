@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.ferryx.app",
   "build": {
-    "beforeDevCommand": "bun run --cwd ui dev",
+    "beforeDevCommand": "bun scripts/dev-frontend.mjs",
     "devUrl": "http://127.0.0.1:5173",
     "beforeBuildCommand": "bun run --cwd ui build",
     "frontendDist": "../ui/dist"

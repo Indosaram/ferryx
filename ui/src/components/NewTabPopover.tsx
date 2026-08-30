@@ -19,7 +19,7 @@ export type PopoverAgent = {
 interface NewTabPopoverProps {
   open: boolean;
   onClose: () => void;
-  onNewTerminal: () => void;
+  onNewTerminal: (shell?: string) => void;
   onNewBrowser: (url?: string, profileId?: string) => void;
   onNewMarkdown?: () => void;
   onNewMobileEmulator?: () => void;
@@ -27,6 +27,7 @@ interface NewTabPopoverProps {
   agents?: PopoverAgent[];
   onLaunchAgent?: (agent: PopoverAgent) => void;
   defaultAgentId?: string | null;
+  showWindowsTerminalKinds?: boolean;
 }
 
 function isUsableDefaultAgent(agent: PopoverAgent, defaultAgentId?: string | null): boolean {
@@ -56,12 +57,16 @@ export function NewTabPopover({
   agents,
   onLaunchAgent,
   defaultAgentId,
+  showWindowsTerminalKinds =
+    typeof navigator !== "undefined" &&
+    (navigator.platform.toLowerCase().startsWith("win") || navigator.userAgent.includes("Windows")),
 }: NewTabPopoverProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isMac = isMacShortcutPlatform();
   const { settings } = useBrowserSettings();
   const browserProfiles = useMemo(() => supportedBrowserProfiles(settings), [settings]);
   const [browserProfileId, setBrowserProfileId] = useState(() => resolveSupportedBrowserProfileId(undefined, settings));
+  const [terminalShell, setTerminalShell] = useState("");
   const launcherAgents = useMemo(
     () => (agents && agents.length > 0 ? orderAgentsForNewTab(agents, defaultAgentId) : agents),
     [agents, defaultAgentId],
@@ -110,8 +115,8 @@ export function NewTabPopover({
         <button
           type="button"
           onClick={() => {
-            onNewTerminal();
-            onClose();
+          onNewTerminal(terminalShell || undefined);
+          onClose();
           }}
           className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
         >
@@ -122,7 +127,24 @@ export function NewTabPopover({
           <span className="text-[11px] font-mono text-muted-foreground">
             {shortcutLabel("tab.newTerminal", isMac)}
           </span>
-        </button>
+      </button>
+      {showWindowsTerminalKinds ? (
+        <div className="flex items-center gap-2 px-2.5 pb-2">
+          <span className="text-[10px] text-muted-foreground">Shell</span>
+          <select
+            aria-label="Terminal shell"
+            value={terminalShell}
+            onChange={(event) => setTerminalShell(event.target.value)}
+            className="min-w-0 flex-1 rounded border border-border bg-background px-1.5 py-1 text-[10px] text-foreground outline-none focus:border-ring"
+          >
+            <option value="">Default shell</option>
+            <option value="pwsh">PowerShell</option>
+            <option value="powershell">Windows PowerShell</option>
+            <option value="cmd">Command Prompt</option>
+            <option value="wsl">WSL</option>
+          </select>
+        </div>
+      ) : null}
 
         <div className="rounded-lg hover:bg-accent/30">
           <button

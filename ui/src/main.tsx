@@ -1,10 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { installSettingsRuntimeBridge } from "./lib/settingsRuntimeBridge";
+import { isMacShortcutPlatform } from "./lib/shortcuts";
 import { applyCachedTerminalBackground } from "./lib/terminalSettings";
 import "./index.css";
 import "./settings-runtime.css";
 
+document.documentElement.classList.toggle("platform-macos", isMacShortcutPlatform());
 installSettingsRuntimeBridge();
 applyCachedTerminalBackground();
 

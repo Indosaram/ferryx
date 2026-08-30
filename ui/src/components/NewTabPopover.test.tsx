@@ -9,6 +9,24 @@ afterEach(() => {
 });
 
 describe("NewTabPopover", () => {
+  it("offers Windows terminal kinds from the new-tab menu", () => {
+    const onNewTerminal = vi.fn();
+
+    render(
+      <NewTabPopover
+        open={true}
+        onClose={vi.fn()}
+        onNewTerminal={onNewTerminal}
+        onNewBrowser={vi.fn()}
+        showWindowsTerminalKinds={true}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("Terminal shell"), { target: { value: "cmd" } });
+    fireEvent.click(screen.getByText("New Terminal"));
+    expect(onNewTerminal).toHaveBeenCalledWith("cmd");
+  });
+
   it("renders an action-only menu without a search input", () => {
     render(
       <NewTabPopover

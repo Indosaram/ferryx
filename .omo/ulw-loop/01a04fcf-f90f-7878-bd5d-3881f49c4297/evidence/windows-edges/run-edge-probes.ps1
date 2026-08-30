@@ -10,9 +10,11 @@ $runtime = Join-Path $edgeLocalAppData "Ferryx\runtime"
 $portFile = Join-Path $runtime "daemon.port"
 $lockFile = Join-Path $runtime "daemon.lock"
 $driver = Join-Path $repo "probe-daemon-edges.mjs"
+$driverSource = Join-Path $PSScriptRoot "probe-daemon-edges.mjs"
 
 Remove-Item $edgeRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $runtime, $edgeAppData | Out-Null
+Copy-Item $driverSource $driver -Force
 
 # Stale runtime files must not prevent a clean start or survive as a stale port.
 Set-Content -Path $portFile -Value "9" -NoNewline
@@ -56,6 +58,7 @@ try {
   }
   Remove-Item $driver -Force -ErrorAction SilentlyContinue
   Remove-Item $edgeRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item $driver -Force -ErrorAction SilentlyContinue
   $remaining = @(
     Get-CimInstance Win32_Process -Filter "Name = 'ferryx.exe'" |
       Where-Object { $_.ExecutablePath -eq $exe -and $_.CommandLine -match '--daemon' }

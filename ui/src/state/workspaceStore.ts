@@ -58,6 +58,7 @@ export type WorkspaceServices = {
     worktree: WorktreeIdentity | null;
     cwd?: string | null;
     clientRequestId?: string | null;
+    shell?: string | null;
   }) => Promise<string>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
   closeTerminal: (sessionId: string) => Promise<void>;
@@ -364,7 +365,7 @@ export function useWorkspaceStore({
   }, [dispatch]);
 
   const createSpawnedTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string) => {
+    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
       await services.ensureTerminalEvents();
       const backendSessionId =
         backendSessionIdOverride ??
@@ -372,6 +373,7 @@ export function useWorkspaceStore({
           workspaceId,
           worktree: worktreeIdentity(worktree),
           cwd: worktree.path,
+          shell,
         }));
       const sessionId = createId("session");
       const tabId = createId("tab");
@@ -395,7 +397,7 @@ export function useWorkspaceStore({
   );
 
   const openTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string) => {
+    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
       const capturedWorktreePath = worktree.path;
       switchDebug("terminal.open.start", {
         workspaceId,
@@ -404,7 +406,7 @@ export function useWorkspaceStore({
         sessionCount: Object.keys(stateRef.current.sessions).length,
         backendOverride: backendSessionIdOverride ?? null,
       });
-      const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride);
+      const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride, shell);
       // The active project can change while the spawn is in flight; landing this
       // tab now would inject one project's worktree into another's state, and
       // dropping it silently would orphan the backend PTY we just created.
@@ -1917,7 +1919,7 @@ function clearWorktreeUnreadWhenRead(
 
 async function spawnTerminalForLogicalAction(
   services: WorkspaceServices,
-  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null },
+  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null },
 ): Promise<string> {
   const clientRequestId = createClientRequestId();
   const stableRequest = { ...request, clientRequestId };
