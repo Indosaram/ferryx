@@ -236,6 +236,15 @@ fn native_terminal_host_composition_target_must_be_platform_child_view_not_root_
             "Native terminal host target must be a dedicated platform child compositor view above WKWebView, not the occluded root WebviewWindow"
         );
         assert!(
+            descriptor.target_kind.is_child_compositor(),
+            "macOS target kind must be a child compositor"
+        );
+        assert_ne!(
+            descriptor.target_kind,
+            CompositorTargetKind::RootWebviewWindow,
+            "macOS host target must not be root window"
+        );
+        assert!(
             descriptor.pointer_transparent,
             "Native terminal child view must be pointer-transparent for web focus/input routing"
         );
@@ -249,16 +258,93 @@ fn native_terminal_host_composition_target_must_be_platform_child_view_not_root_
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, the target must be a dedicated WS_CHILD HWND / DirectComposition child window,
+        // never the root WebView2 window.
+        assert_eq!(
+            descriptor.target_kind,
+            CompositorTargetKind::WindowsChildWindow,
+            "Native terminal host target must be a dedicated Windows child compositor window (WS_CHILD HWND), not the occluded root WebviewWindow"
+        );
+        assert!(
+            descriptor.target_kind.is_child_compositor(),
+            "Windows target kind must be a child compositor"
+        );
+        assert_ne!(
+            descriptor.target_kind,
+            CompositorTargetKind::RootWebviewWindow,
+            "Windows host target must not be root window"
+        );
+        assert!(
+            !descriptor.pointer_transparent,
+            "Windows active_for_platform root handle must honestly report uninitialized pointer transparency before child creation"
+        );
+        assert!(
+            !descriptor.layer_backed,
+            "Windows active_for_platform root handle must honestly report uninitialized layer backing before child creation"
+        );
+        let err = descriptor
+            .validate_desktop_composition()
+            .expect_err("Unattached Windows active descriptor must reject composition until child window clipping is established");
+        assert!(
+            matches!(&err, NativeTerminalError::GpuPipelineError(msg) if msg.contains("Windows native terminal")),
+            "Expected Windows child window validation error, got: {err:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, the target must be a dedicated X11 child window or Wayland subsurface,
+        // never the root window.
+        assert_eq!(
+            descriptor.target_kind,
+            CompositorTargetKind::LinuxChildWindow,
+            "Native terminal host target must be a dedicated Linux child compositor window (X11 subwindow / Wayland subsurface), not the occluded root WebviewWindow"
+        );
+        assert!(
+            descriptor.target_kind.is_child_compositor(),
+            "Linux target kind must be a child compositor"
+        );
+        assert_ne!(
+            descriptor.target_kind,
+            CompositorTargetKind::RootWebviewWindow,
+            "Linux host target must not be root window"
+        );
+        assert!(
+            !descriptor.pointer_transparent,
+            "Linux active_for_platform root handle must honestly report uninitialized pointer transparency before child creation"
+        );
+        assert!(
+            !descriptor.layer_backed,
+            "Linux active_for_platform root handle must honestly report uninitialized layer backing before child creation"
+        );
+        let err = descriptor
+            .validate_desktop_composition()
+            .expect_err("Unattached Linux active descriptor must reject composition until child window clipping is established");
+        assert!(
+            matches!(&err, NativeTerminalError::GpuPipelineError(msg) if msg.contains("Linux native terminal")),
+            "Expected Linux child window validation error, got: {err:?}"
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         assert_eq!(
             descriptor.target_kind,
             CompositorTargetKind::UnsupportedFallback,
-            "Non-macOS platforms must fall back explicitly until platform compositor targets are implemented"
+            "Non-desktop / unsupported platforms must fall back explicitly"
         );
         assert!(
-            descriptor.validate_desktop_composition().is_err(),
-            "Non-macOS fallback targets must reject desktop native composition"
+            !descriptor.target_kind.is_child_compositor(),
+            "Fallback target kind must not be a child compositor"
+        );
+        let err = descriptor
+            .validate_desktop_composition()
+            .expect_err("Fallback targets must reject desktop native composition");
+        assert!(
+            matches!(&err, NativeTerminalError::GpuPipelineError(msg) if msg.contains("Unsupported platform")),
+            "Expected Unsupported platform error, got: {err:?}"
         );
     }
 }

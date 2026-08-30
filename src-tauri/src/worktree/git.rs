@@ -17,7 +17,6 @@ fn escape_git_arg_for_log(arg: &str) -> String {
     }
     escaped
 }
-
 fn validate_git_value(value: &str, label: &str) -> Result<(), WorktreeError> {
     if value.is_empty() {
         return Err(WorktreeError::InvalidNamespace {
@@ -37,23 +36,48 @@ fn validate_git_value(value: &str, label: &str) -> Result<(), WorktreeError> {
     Ok(())
 }
 
-fn validate_git_path_argument(path: &Path) -> Result<&str, WorktreeError> {
+pub fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(unc) = path.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else if let Some(stripped) = path.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else if let Some(stripped) = path.strip_prefix("//?/") {
+        stripped.to_string()
+    } else if let Some(stripped) = path.strip_prefix(r"\\.\") {
+        stripped.to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+pub fn normalize_path_for_git(path: &Path) -> PathBuf {
+    if let Some(path_str) = path.to_str() {
+        PathBuf::from(strip_verbatim_prefix(path_str))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn validate_git_path_argument(path: &Path) -> Result<String, WorktreeError> {
     let path_str = path
         .to_str()
         .ok_or_else(|| WorktreeError::ParseError("Invalid UTF-8 in worktree path".into()))?;
-    if path_str.starts_with('-') {
+    let normalized = strip_verbatim_prefix(path_str);
+    if normalized.starts_with('-') {
         return Err(WorktreeError::InvalidPath {
             path: path.to_path_buf(),
             reason: "Git path argument cannot start with a dash".into(),
         });
     }
-    if path_str.chars().any(char::is_control) {
+    if normalized.chars().any(char::is_control) {
         return Err(WorktreeError::InvalidPath {
             path: path.to_path_buf(),
             reason: "Git path argument cannot contain control characters".into(),
         });
     }
-    Ok(path_str)
+    Ok(normalized)
 }
 
 fn validate_base_ref(repo_root: &Path, base_ref: &str) -> Result<(), WorktreeError> {
@@ -69,6 +93,7 @@ fn validate_base_ref(repo_root: &Path, base_ref: &str) -> Result<(), WorktreeErr
 /// Executes a git command in the specified directory.
 pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<String, WorktreeError> {
     let cwd_path = cwd.as_ref();
+    let normalized_cwd = normalize_path_for_git(cwd_path);
     let arg_strs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
     let command_str = format!(
         "git {}",
@@ -81,7 +106,7 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
 
     let output = crate::util::no_window_command("git")
         .args(&arg_strs)
-        .current_dir(cwd_path)
+        .current_dir(&normalized_cwd)
         .output()
         .map_err(WorktreeError::Io)?;
 
@@ -286,7 +311,7 @@ pub fn git_worktree_add(
         validate_base_ref(repo_root, base)?;
     }
 
-    let mut args = vec!["worktree", "add", "-b", branch_name, "--", path_str];
+    let mut args = vec!["worktree", "add", "-b", branch_name, "--", path_str.as_str()];
     if let Some(base) = base_ref {
         args.push(base);
     }
@@ -354,7 +379,7 @@ pub fn git_worktree_remove(
     if force {
         args.push("--force");
     }
-    args.extend(["--", path_str]);
+    args.extend(["--", path_str.as_str()]);
     run_git(repo_root, &args)?;
     Ok(())
 }
@@ -378,4 +403,43 @@ pub fn git_branch_delete(
     let flag = if force { "-D" } else { "-d" };
     run_git(repo_root, &["branch", flag, "--", branch_name])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_path_argument_normalization_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            validate_git_path_argument(Path::new(r"\\?\C:\Users\orca\repo\.orca-worktrees\ws\task")).unwrap(),
+            r"C:\Users\orca\repo\.orca-worktrees\ws\task"
+        );
+        assert_eq!(
+            validate_git_path_argument(Path::new("//?/C:/Users/orca/repo/.orca-worktrees/ws/task")).unwrap(),
+            "C:/Users/orca/repo/.orca-worktrees/ws/task"
+        );
+        assert_eq!(
+            validate_git_path_argument(Path::new(r"\\?\UNC\server\share\repo\.orca-worktrees\ws\task")).unwrap(),
+            r"\\server\share\repo\.orca-worktrees\ws\task"
+        );
+        assert_eq!(
+            validate_git_path_argument(Path::new("//?/UNC/server/share/repo/.orca-worktrees/ws/task")).unwrap(),
+            "//server/share/repo/.orca-worktrees/ws/task"
+        );
+        assert_eq!(
+            validate_git_path_argument(Path::new(r"\\.\C:\Users\orca\repo\.orca-worktrees\ws\task")).unwrap(),
+            r"C:\Users\orca\repo\.orca-worktrees\ws\task"
+        );
+        assert_eq!(
+            validate_git_path_argument(Path::new(r"C:\Users\orca\repo\.orca-worktrees\ws\task")).unwrap(),
+            r"C:\Users\orca\repo\.orca-worktrees\ws\task"
+        );
+        assert_eq!(
+            validate_git_path_argument(Path::new("/Users/orca/repo/.orca-worktrees/ws/task")).unwrap(),
+            "/Users/orca/repo/.orca-worktrees/ws/task"
+        );
+        assert!(validate_git_path_argument(Path::new("-bad-path")).is_err());
+        assert!(validate_git_path_argument(Path::new("bad\npath")).is_err());
+    }
 }
