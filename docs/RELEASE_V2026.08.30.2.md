@@ -16,3 +16,4 @@ Built locally from `release/v2026.08.30.2`. No CI artifacts are used.
 - Real Vite-server regression test fetches `/src/index.css` and confirms required Ferryx Tailwind utilities.
 - Windows opacity, menu, clean-dev resource, native-terminal platform transparency, shell selection, and edge-probe contracts are included.
 - UI production build and platform release bundling are executed from clean release trees.
+- Windows is published as the signed NSIS updater target. MSI is intentionally omitted because the date-based Ferryx version exceeds MSI's 8-bit major-version limit.
