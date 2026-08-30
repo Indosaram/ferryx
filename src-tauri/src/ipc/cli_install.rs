@@ -44,15 +44,49 @@ pub struct CliLauncherStatus {
     pub is_supported: bool,
 }
 
-pub fn get_default_launcher_path() -> Result<PathBuf, CliInstallError> {
-    let home = std::env::var_os("HOME").ok_or(CliInstallError::HomeDirNotFound)?;
-    if home.is_empty() {
+pub fn get_default_launcher_path_from(home: Option<&Path>) -> Result<PathBuf, CliInstallError> {
+    let home = home.ok_or(CliInstallError::HomeDirNotFound)?;
+    if home.as_os_str().is_empty() {
         return Err(CliInstallError::HomeDirNotFound);
     }
-    Ok(PathBuf::from(home)
-        .join(".local")
-        .join("bin")
-        .join("ferryx"))
+    Ok(home.join(".local").join("bin").join("ferryx"))
+}
+
+pub fn get_default_launcher_path() -> Result<PathBuf, CliInstallError> {
+    let home = std::env::var_os("HOME");
+    get_default_launcher_path_from(home.as_deref().map(Path::new))
+}
+
+pub fn resolve_launcher_status(
+    is_unix: bool,
+    home: Option<&Path>,
+    active_exe: Option<&Path>,
+) -> Result<CliLauncherStatus, CliInstallError> {
+    let active_exe_canonical = active_exe.and_then(|p| {
+        std::fs::canonicalize(p)
+            .ok()
+            .or_else(|| Some(p.to_path_buf()))
+    });
+    let active_exe_str = active_exe_canonical
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+
+    if !is_unix {
+        return Ok(CliLauncherStatus {
+            launcher_path: String::new(),
+            is_installed: false,
+            is_symlink: false,
+            current_target: None,
+            active_executable: active_exe_str,
+            is_supported: false,
+        });
+    }
+
+    let launcher_path = get_default_launcher_path_from(home)?;
+    Ok(check_launcher_status(
+        &launcher_path,
+        active_exe_canonical.as_deref(),
+    ))
 }
 
 pub fn get_canonical_active_executable() -> Result<PathBuf, CliInstallError> {
@@ -215,9 +249,14 @@ pub fn install_launcher(
 #[tauri::command]
 pub async fn cmd_cli_launcher_status() -> Result<CliLauncherStatus, IpcError> {
     run_blocking(|| {
-        let launcher_path = get_default_launcher_path()?;
+        let home = std::env::var_os("HOME");
         let active_exe = get_canonical_active_executable().ok();
-        Ok(check_launcher_status(&launcher_path, active_exe.as_deref()))
+        let status = resolve_launcher_status(
+            cfg!(unix),
+            home.as_deref().map(Path::new),
+            active_exe.as_deref(),
+        )?;
+        Ok(status)
     })
     .await
 }
@@ -237,6 +276,53 @@ pub async fn cmd_cli_launcher_install() -> Result<CliLauncherStatus, IpcError> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_resolve_launcher_status_non_unix_without_home_returns_unsupported() {
+        let status = resolve_launcher_status(false, None, None)
+            .expect("non-Unix status must succeed even without HOME");
+        assert!(!status.is_supported);
+        assert!(!status.is_installed);
+        assert!(!status.is_symlink);
+        assert_eq!(status.launcher_path, "");
+        assert_eq!(status.current_target, None);
+        assert_eq!(status.active_executable, None);
+    }
+
+    #[test]
+    fn test_resolve_launcher_status_non_unix_preserves_active_exe() {
+        let fake_exe = Path::new("/custom/bin/ferryx.exe");
+        let status = resolve_launcher_status(false, None, Some(fake_exe))
+            .expect("non-Unix status must succeed even without HOME");
+        assert!(!status.is_supported);
+        assert!(!status.is_installed);
+        assert!(!status.is_symlink);
+        assert_eq!(status.launcher_path, "");
+        assert_eq!(status.current_target, None);
+        assert_eq!(
+            status.active_executable,
+            Some("/custom/bin/ferryx.exe".into())
+        );
+    }
+
+    #[test]
+    fn test_resolve_launcher_status_unix_requires_home() {
+        let err = resolve_launcher_status(true, None, None)
+            .expect_err("Unix status without HOME must return HomeDirNotFound");
+        match err {
+            CliInstallError::HomeDirNotFound => {}
+            other => panic!("expected HomeDirNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_launcher_status_unix_with_home() {
+        let home = Path::new("/mock/home");
+        let status = resolve_launcher_status(true, Some(home), None)
+            .expect("Unix status with HOME should succeed");
+        assert_eq!(status.launcher_path, "/mock/home/.local/bin/ferryx");
+        assert_eq!(status.is_supported, cfg!(unix));
+    }
 
     #[test]
     fn test_cli_launcher_status_dto_camel_case_contract() {
