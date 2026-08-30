@@ -119,6 +119,88 @@ pub enum NativeTerminalClipboardContent {
     Empty,
 }
 
+pub const CF_TEXT_ID: u32 = 1;
+pub const CF_BITMAP_ID: u32 = 2;
+pub const CF_DIB_ID: u32 = 8;
+pub const CF_UNICODETEXT_ID: u32 = 13;
+pub const CF_HDROP_ID: u32 = 15;
+pub const CF_DIBV5_ID: u32 = 17;
+
+pub fn decode_windows_clipboard_utf16(slice: &[u16]) -> Option<String> {
+    if slice.is_empty() {
+        return None;
+    }
+    let len = slice
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(slice.len());
+    if len == 0 {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&slice[..len]);
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+pub fn is_windows_image_or_file_format(format_id: u32, format_name: Option<&str>) -> bool {
+    match format_id {
+        CF_BITMAP_ID | CF_DIB_ID | CF_DIBV5_ID | CF_HDROP_ID => true,
+        _ => {
+            if let Some(name) = format_name {
+                let name_lower = name.to_ascii_lowercase();
+                name_lower.starts_with("png")
+                    || name_lower.starts_with("image/")
+                    || name_lower.contains("bitmap")
+                    || name_lower.contains("dib")
+                    || name_lower == "jfif"
+                    || name_lower == "gif"
+                    || name_lower == "tiff"
+                    || name_lower == "heic"
+                    || name_lower == "heif"
+                    || name_lower == "webp"
+                    || name_lower.starts_with("filename")
+                    || name_lower.starts_with("filegroupdescriptor")
+                    || name_lower.starts_with("filecontents")
+            } else {
+                false
+            }
+        }
+    }
+}
+
+pub fn classify_windows_clipboard(
+    text: Option<String>,
+    format_ids: &[u32],
+    format_names: &[String],
+) -> NativeTerminalClipboardContent {
+    if let Some(text) = text {
+        if !text.is_empty() {
+            return NativeTerminalClipboardContent::Text { text };
+        }
+    }
+    let has_image_id = format_ids
+        .iter()
+        .any(|&id| is_windows_image_or_file_format(id, None));
+    if has_image_id {
+        return NativeTerminalClipboardContent::Image;
+    }
+    let has_image_name = format_names
+        .iter()
+        .any(|name| is_windows_image_or_file_format(0, Some(name.as_str())));
+    if has_image_name {
+        return NativeTerminalClipboardContent::Image;
+    }
+    if !format_ids.is_empty() || !format_names.is_empty() {
+        // Parity with macOS DOM paste fallback: non-text clipboard items
+        // (e.g. custom dropped files / shell objects) route to the image/attachment paste chord.
+        return NativeTerminalClipboardContent::Image;
+    }
+    NativeTerminalClipboardContent::Empty
+}
+
 fn is_image_pasteboard_type(t: &str) -> bool {
     t.starts_with("public.png")
         || t.starts_with("public.tiff")
@@ -169,7 +251,135 @@ fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     (content, types)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardFormatNameW,
+        IsClipboardFormatAvailable, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            // SAFETY: UB category: FFI boundary UB.
+            // Runtime invariant: CloseClipboard is called exactly once when ClipboardGuard is dropped
+            // to balance a preceding successful OpenClipboard call for the current thread/task.
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+
+    let mut opened = false;
+    for _ in 0..5 {
+        // SAFETY: UB category: FFI boundary UB.
+        // Runtime invariant: Calling OpenClipboard with null HWND (0) is explicitly valid per Win32
+        // specification to associate the clipboard with the current process task. Return value is checked
+        // before proceeding.
+        if unsafe { OpenClipboard(std::ptr::null_mut() as HWND) } != 0 {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    if !opened {
+        return (NativeTerminalClipboardContent::Empty, Vec::new());
+    }
+
+    let _guard = ClipboardGuard;
+
+    let mut format_ids = Vec::new();
+    let mut format_names = Vec::new();
+    let mut descriptor_types = Vec::new();
+
+    let mut format = 0u32;
+    loop {
+        // SAFETY: UB category: FFI boundary UB.
+        // Runtime invariant: EnumClipboardFormats is invoked only while the clipboard is opened by the current task.
+        // It starts with 0 and passes the previously returned format ID until 0 is returned.
+        format = unsafe { EnumClipboardFormats(format) };
+        if format == 0 {
+            break;
+        }
+        format_ids.push(format);
+
+        if format >= 0xC000 {
+            let mut name_buf = [0u16; 256];
+            // SAFETY: UB category: Out-of-bounds/invalid pointer and FFI boundary UB.
+            // Runtime invariant: name_buf is a valid stack-allocated slice of 256 u16 elements. The length
+            // passed (256) matches the buffer capacity, preventing out-of-bounds writes. format is a registered ID (>= 0xC000).
+            let len = unsafe {
+                GetClipboardFormatNameW(format, name_buf.as_mut_ptr(), name_buf.len() as i32)
+            };
+            if len > 0 {
+                let name = String::from_utf16_lossy(&name_buf[..len as usize]);
+                descriptor_types.push(name.clone());
+                format_names.push(name);
+            } else {
+                descriptor_types.push(format!("CF_CUSTOM_{format}"));
+            }
+        } else {
+            let name = match format {
+                CF_UNICODETEXT_ID => "CF_UNICODETEXT",
+                CF_TEXT_ID => "CF_TEXT",
+                CF_BITMAP_ID => "CF_BITMAP",
+                CF_DIB_ID => "CF_DIB",
+                CF_DIBV5_ID => "CF_DIBV5",
+                CF_HDROP_ID => "CF_HDROP",
+                other => {
+                    descriptor_types.push(format!("CF_STANDARD_{other}"));
+                    ""
+                }
+            };
+            if !name.is_empty() {
+                descriptor_types.push(name.to_string());
+            }
+        }
+    }
+
+    let mut text: Option<String> = None;
+    // SAFETY: UB category: FFI boundary UB.
+    // Runtime invariant: CF_UNICODETEXT_ID (13) is a standard Win32 format constant, and query occurs
+    // while the clipboard is opened.
+    if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT_ID) } != 0 {
+        // SAFETY: UB category: FFI boundary UB.
+        // Runtime invariant: GetClipboardData is called on the currently open clipboard. The returned
+        // handle is checked for null before being dereferenced or passed to GlobalLock.
+        let handle = unsafe { GetClipboardData(CF_UNICODETEXT_ID) };
+        if !handle.is_null() {
+            // SAFETY: UB category: Invalid pointer and FFI boundary UB.
+            // Runtime invariant: handle is non-null and obtained from GetClipboardData. The returned
+            // pointer is checked for null before dereferencing.
+            let ptr = unsafe { GlobalLock(handle) } as *const u16;
+            if !ptr.is_null() {
+                // SAFETY: UB category: FFI boundary UB.
+                // Runtime invariant: handle is a valid, non-null global memory handle returned by GetClipboardData.
+                let byte_size = unsafe { GlobalSize(handle) };
+                let max_u16_len = byte_size / std::mem::size_of::<u16>();
+                if max_u16_len > 0 {
+                    // SAFETY: UB category: Out-of-bounds/invalid pointer.
+                    // Runtime invariant: ptr is non-null, aligned for u16, and valid for read access for
+                    // byte_size bytes as guaranteed by GlobalLock and GlobalSize. max_u16_len is bounded by byte_size.
+                    let slice = unsafe { std::slice::from_raw_parts(ptr, max_u16_len) };
+                    text = decode_windows_clipboard_utf16(slice);
+                }
+                // SAFETY: UB category: FFI boundary UB.
+                // Runtime invariant: GlobalUnlock is called exactly once for the successful GlobalLock call on the valid handle.
+                unsafe {
+                    GlobalUnlock(handle);
+                }
+            }
+        }
+    }
+
+    let content = classify_windows_clipboard(text, &format_ids, &format_names);
+    (content, descriptor_types)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     (NativeTerminalClipboardContent::Empty, Vec::new())
 }
@@ -822,7 +1032,51 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
             )),
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        let (content, types) = tokio::task::spawn_blocking(read_native_pasteboard)
+            .await
+            .unwrap_or_else(|_| (NativeTerminalClipboardContent::Empty, Vec::new()));
+        if cfg!(debug_assertions)
+            || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1")
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            let (kind, text_length) = match &content {
+                NativeTerminalClipboardContent::Text { text } => ("text", text.len()),
+                NativeTerminalClipboardContent::Image => ("image", 0),
+                NativeTerminalClipboardContent::Empty => ("empty", 0),
+            };
+            let wall_time_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let entry = serde_json::json!({
+                "runId": "rust-clipboard",
+                "sequence": 0,
+                "event": "terminal.surface.paste.clipboard.classify",
+                "wallTimeMs": wall_time_ms,
+                "details": {
+                    "types": types,
+                    "kind": kind,
+                    "textLength": text_length,
+                }
+            });
+            let log_path = std::env::temp_dir().join("ferryx-switch-debug.jsonl");
+            if let Ok(mut file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+            {
+                let _ = writeln!(file, "{entry}");
+            }
+        }
+        Ok(content)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = app;
         Ok(NativeTerminalClipboardContent::Empty)
@@ -943,6 +1197,102 @@ mod tests {
             serde_json::from_str::<NativeTerminalClipboardContent>(&empty_json)
                 .expect("deserialize empty"),
             empty_payload
+        );
+    }
+
+    #[test]
+    fn test_decode_windows_clipboard_utf16() {
+        let utf16: Vec<u16> = "Hello, world!\0".encode_utf16().collect();
+        assert_eq!(
+            decode_windows_clipboard_utf16(&utf16),
+            Some("Hello, world!".to_string())
+        );
+
+        let utf16_emoji: Vec<u16> = "🚀 Ferryx Clipboard 🦀\0".encode_utf16().collect();
+        assert_eq!(
+            decode_windows_clipboard_utf16(&utf16_emoji),
+            Some("🚀 Ferryx Clipboard 🦀".to_string())
+        );
+
+        let utf16_no_null: Vec<u16> = "No null terminator".encode_utf16().collect();
+        assert_eq!(
+            decode_windows_clipboard_utf16(&utf16_no_null),
+            Some("No null terminator".to_string())
+        );
+
+        assert_eq!(decode_windows_clipboard_utf16(&[]), None);
+        assert_eq!(decode_windows_clipboard_utf16(&[0, 0, 0]), None);
+    }
+
+    #[test]
+    fn test_is_windows_image_or_file_format() {
+        assert!(is_windows_image_or_file_format(CF_BITMAP_ID, None));
+        assert!(is_windows_image_or_file_format(CF_DIB_ID, None));
+        assert!(is_windows_image_or_file_format(CF_DIBV5_ID, None));
+        assert!(is_windows_image_or_file_format(CF_HDROP_ID, None));
+        assert!(is_windows_image_or_file_format(49152, Some("PNG")));
+        assert!(is_windows_image_or_file_format(49153, Some("image/png")));
+        assert!(is_windows_image_or_file_format(49154, Some("image/jpeg")));
+        assert!(is_windows_image_or_file_format(49155, Some("image/webp")));
+        assert!(is_windows_image_or_file_format(49156, Some("image/gif")));
+        assert!(is_windows_image_or_file_format(49157, Some("FileNameW")));
+        assert!(is_windows_image_or_file_format(49158, Some("FileGroupDescriptorW")));
+        assert!(is_windows_image_or_file_format(49159, Some("FileContents")));
+        assert!(!is_windows_image_or_file_format(CF_UNICODETEXT_ID, None));
+        assert!(!is_windows_image_or_file_format(CF_TEXT_ID, None));
+        assert!(!is_windows_image_or_file_format(49160, Some("CustomNonImageFormat")));
+    }
+
+    #[test]
+    fn test_classify_windows_clipboard_prefers_text() {
+        let text = Some("Hello Windows".to_string());
+        let format_ids = vec![CF_UNICODETEXT_ID, CF_BITMAP_ID];
+        let format_names = vec!["PNG".to_string()];
+        assert_eq!(
+            classify_windows_clipboard(text, &format_ids, &format_names),
+            NativeTerminalClipboardContent::Text {
+                text: "Hello Windows".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_windows_clipboard_image_when_bitmap_dib_hdrop_or_custom_image() {
+        assert_eq!(
+            classify_windows_clipboard(None, &[CF_BITMAP_ID], &[]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_windows_clipboard(None, &[CF_DIB_ID], &[]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_windows_clipboard(None, &[CF_DIBV5_ID], &[]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_windows_clipboard(None, &[CF_HDROP_ID], &[]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_windows_clipboard(None, &[49152], &["PNG".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_windows_clipboard(Some("".to_string()), &[CF_BITMAP_ID], &[]),
+            NativeTerminalClipboardContent::Image
+        );
+    }
+
+    #[test]
+    fn test_classify_windows_clipboard_empty_when_no_text_or_image() {
+        assert_eq!(
+            classify_windows_clipboard(None, &[], &[]),
+            NativeTerminalClipboardContent::Empty
+        );
+        assert_eq!(
+            classify_windows_clipboard(Some("".to_string()), &[], &[]),
+            NativeTerminalClipboardContent::Empty
         );
     }
 }

@@ -128,6 +128,13 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 dispatch2 = "0.3"
 block2 = "0.6"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+] }
+
 [dev-dependencies]
 tempfile = "3.17"
 tokio-test = "0.4"
