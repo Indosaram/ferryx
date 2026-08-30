@@ -30,6 +30,10 @@ use tokio::sync::broadcast;
 
 #[cfg(unix)]
 pub fn get_runtime_dir() -> PathBuf {
+    // SAFETY:
+    // Category: Foreign Function Interface (FFI).
+    // Invariant: `libc::getuid` is a stateless, side-effect-free POSIX syscall wrapper that
+    // takes no arguments, dereferences no pointers, and always returns the current process's UID.
     let uid = unsafe { libc::getuid() };
     PathBuf::from(format!("/tmp/rorca-{uid}"))
 }
@@ -58,11 +62,28 @@ pub fn get_lock_path() -> PathBuf {
     get_runtime_dir().join("daemon.lock")
 }
 
-#[cfg(unix)]
 fn get_persistent_lock_path() -> Option<PathBuf> {
     std::env::var_os("FERRYX_DATA_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx")))
+        .or_else(|| {
+            #[cfg(unix)]
+            {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx"))
+            }
+            #[cfg(windows)]
+            {
+                std::env::var_os("APPDATA")
+                    .map(|appdata| PathBuf::from(appdata).join("Ferryx"))
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE")
+                            .map(|home| PathBuf::from(home).join(".ferryx"))
+                    })
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx"))
+            }
+        })
         .map(|base| base.join("locks").join("daemon.lock"))
 }
 
@@ -172,6 +193,10 @@ fn validate_safe_ownership_and_type_for_uid(
 
 #[cfg(unix)]
 fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Result<(), String> {
+    // SAFETY:
+    // Category: Foreign Function Interface (FFI).
+    // Invariant: `libc::getuid` is a stateless, side-effect-free POSIX syscall wrapper that
+    // takes no arguments, dereferences no pointers, and always returns the current process's UID.
     validate_safe_ownership_and_type_for_uid(path, kind, unsafe { libc::getuid() })
 }
 
@@ -182,6 +207,10 @@ fn validate_safe_ownership_and_type(path: &Path, kind: RuntimeNodeKind) -> Resul
 
 #[cfg(unix)]
 pub(crate) fn validate_runtime_socket_path(path: &Path) -> Result<(), String> {
+    // SAFETY:
+    // Category: Foreign Function Interface (FFI).
+    // Invariant: `libc::getuid` is a stateless, side-effect-free POSIX syscall wrapper that
+    // takes no arguments, dereferences no pointers, and always returns the current process's UID.
     validate_runtime_socket_path_for_uid(path, unsafe { libc::getuid() })
 }
 
@@ -291,23 +320,141 @@ fn open_secure_lock_file(path: &Path) -> Result<File, String> {
 }
 
 #[cfg(unix)]
-struct DaemonLockFiles {
-    _persistent: Option<File>,
-    _legacy: File,
+#[derive(Debug)]
+pub(crate) struct DaemonLockFile {
+    _file: File,
 }
 
 #[cfg(unix)]
-fn try_lock_file(file: &File) -> Result<(), String> {
-    use std::os::unix::io::AsRawFd;
+impl DaemonLockFile {
+    pub(crate) fn try_lock(file: File) -> Result<Self, String> {
+        use std::os::unix::io::AsRawFd;
 
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err("Another daemon instance is already holding the lock.".into());
+        // SAFETY:
+        // Category: Foreign Function Interface (FFI) / Invalid File Descriptor.
+        // Invariant: `file.as_raw_fd()` returns a valid open file descriptor borrowed from `file`,
+        // which remains open and valid for the duration of the `libc::flock` call.
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            return Err("Another daemon instance is already holding the lock.".into());
+        }
+        Ok(Self { _file: file })
     }
-    Ok(())
 }
 
 #[cfg(unix)]
-fn acquire_daemon_locks(
+impl Drop for DaemonLockFile {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+
+        // SAFETY:
+        // Category: Foreign Function Interface (FFI) / Invalid File Descriptor.
+        // Invariant: `self._file.as_raw_fd()` returns a valid open file descriptor owned by `self._file`,
+        // which has not been closed yet. Calling `libc::flock` with `LOCK_UN` synchronously clears
+        // the exclusive lock before the descriptor is closed by `_file`'s drop.
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct DaemonLockFile {
+    file: File,
+}
+
+#[cfg(windows)]
+impl DaemonLockFile {
+    pub(crate) fn try_lock(file: File) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+        };
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = file.as_raw_handle() as HANDLE;
+        // SAFETY:
+        // Category: Uninitialized Memory.
+        // Invariant: `OVERLAPPED` is a C-compatible repr(C) struct whose all-zero bit pattern
+        // is valid memory representing zero offset (Offset=0, OffsetHigh=0) and null hEvent.
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        // SAFETY:
+        // Category: Foreign Function Interface (FFI) / Invalid Handle Dereference.
+        // Invariant: `handle` is guaranteed to be a valid, open Win32 file handle owned by `file`,
+        // which remains open and valid for the duration of this Win32 `LockFileEx` call.
+        // `&mut overlapped` points to a valid, properly aligned, stack-allocated `OVERLAPPED` struct.
+        let ret = unsafe {
+            LockFileEx(
+                handle,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+
+        if ret == 0 {
+            return Err("Another daemon instance is already holding the lock.".into());
+        }
+
+        Ok(Self { file })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DaemonLockFile {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = self.file.as_raw_handle() as HANDLE;
+        // SAFETY:
+        // Category: Uninitialized Memory.
+        // Invariant: `OVERLAPPED` is a C-compatible repr(C) struct whose all-zero bit pattern
+        // is valid memory representing zero offset (Offset=0, OffsetHigh=0) and null hEvent.
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        // SAFETY:
+        // Category: Foreign Function Interface (FFI) / Invalid Handle Dereference.
+        // Invariant: `handle` is guaranteed to be a valid, open Win32 file handle owned by `self.file`,
+        // which has not been closed yet. The offset (0) and length (1 byte) exactly match the
+        // exclusive range locked in `DaemonLockFile::try_lock`.
+        unsafe {
+            UnlockFileEx(handle, 0, 1, 0, &mut overlapped);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Debug)]
+pub(crate) struct DaemonLockFile {
+    _file: File,
+}
+
+#[cfg(not(any(unix, windows)))]
+impl DaemonLockFile {
+    pub(crate) fn try_lock(file: File) -> Result<Self, String> {
+        Ok(Self { _file: file })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DaemonLockFiles {
+    _persistent: Option<DaemonLockFile>,
+    _legacy: DaemonLockFile,
+}
+
+fn try_lock_file(file: File) -> Result<DaemonLockFile, String> {
+    DaemonLockFile::try_lock(file)
+}
+
+pub(crate) fn acquire_daemon_locks(
     persistent_path: Option<&Path>,
     legacy_path: &Path,
 ) -> Result<DaemonLockFiles, String> {
@@ -317,17 +464,17 @@ fn acquire_daemon_locks(
             .ok_or_else(|| format!("Persistent lock path has no parent: {}", path.display()))?;
         ensure_runtime_directory(parent)?;
         let file = open_secure_lock_file(path)?;
-        try_lock_file(&file)?;
-        Some(file)
+        let locked = try_lock_file(file)?;
+        Some(locked)
     } else {
         None
     };
 
     let legacy = open_secure_lock_file(legacy_path)?;
-    try_lock_file(&legacy)?;
+    let locked = try_lock_file(legacy)?;
     Ok(DaemonLockFiles {
         _persistent: persistent,
-        _legacy: legacy,
+        _legacy: locked,
     })
 }
 
@@ -545,11 +692,7 @@ impl DaemonServer {
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
 
-        #[cfg(unix)]
         let _lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
-
-        #[cfg(not(unix))]
-        let _lock_file = open_secure_lock_file(&lock_path)?;
 
         // Clean up stale socket only after lock acquisition and safe ownership check.
         remove_stale_socket_after_lock(&socket_path)?;
@@ -1576,6 +1719,68 @@ mod tests {
         let second = acquire_daemon_locks(Some(&persistent), &legacy);
         assert!(second.is_err(), "persistent lock must reject split brain");
         drop(first);
+    }
+
+    #[test]
+    fn test_daemon_exclusive_lock_semantics_rejects_duplicates_and_releases_on_drop() {
+        let dir = tempdir().unwrap();
+        let persistent = dir.path().join("data").join("locks").join("daemon.lock");
+        let legacy_dir = dir.path().join("runtime");
+        fs::create_dir(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join("daemon.lock");
+
+        // 1. Dual lock acquisition succeeds for first instance
+        let first = acquire_daemon_locks(Some(&persistent), &legacy).expect("first lock set");
+
+        // 2. Second instance attempting dual lock is rejected deterministically without sleeps
+        let second_dual = acquire_daemon_locks(Some(&persistent), &legacy);
+        assert!(
+            second_dual.is_err(),
+            "second daemon instance must be rejected while first instance holds lock"
+        );
+        assert_eq!(
+            second_dual.unwrap_err(),
+            "Another daemon instance is already holding the lock."
+        );
+
+        // 3. Second instance attempting legacy-only lock is also rejected deterministically
+        let second_legacy = acquire_daemon_locks(None, &legacy);
+        assert!(
+            second_legacy.is_err(),
+            "second daemon instance requesting legacy lock must be rejected"
+        );
+        assert_eq!(
+            second_legacy.unwrap_err(),
+            "Another daemon instance is already holding the lock."
+        );
+
+        // 4. Dropping the first lock guard via RAII releases held locks
+        drop(first);
+
+        // 5. Subsequent dual lock acquisition now succeeds
+        let third = acquire_daemon_locks(Some(&persistent), &legacy)
+            .expect("subsequent dual lock acquisition after RAII drop");
+
+        // 6. Collision rejected while third is held
+        let third_collision = acquire_daemon_locks(None, &legacy);
+        assert!(third_collision.is_err());
+        assert_eq!(
+            third_collision.unwrap_err(),
+            "Another daemon instance is already holding the lock."
+        );
+
+        drop(third);
+
+        // 7. Legacy-only lock acquisition succeeds after third is dropped
+        let fourth = acquire_daemon_locks(None, &legacy)
+            .expect("legacy-only acquisition after RAII release");
+        let fourth_collision = acquire_daemon_locks(None, &legacy);
+        assert!(fourth_collision.is_err());
+        assert_eq!(
+            fourth_collision.unwrap_err(),
+            "Another daemon instance is already holding the lock."
+        );
+        drop(fourth);
     }
 
     #[cfg(unix)]
