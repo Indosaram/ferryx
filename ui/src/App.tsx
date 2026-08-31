@@ -1,6 +1,9 @@
 import { PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
+import { withTimeout } from "./lib/withTimeout";
+
 import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { AddProjectDialog, AddWorktreeDialog } from "./components/ProjectDialogs";
@@ -49,6 +52,7 @@ import {
   setBadgeCount,
   spawnTerminal,
   writeTerminal,
+  bootTrace,
   listenDagRunUpdated,
   watchDagProject,
   type AgentDetection,
@@ -184,8 +188,10 @@ export function App() {
   useEffect(() => {
     if (!isNativeRuntime) return;
     let cancelled = false;
-    void getInitialProject()
+    void bootTrace("initial.start");
+    void withTimeout(getInitialProject(), STARTUP_TIMEOUT_MS, "cmd_project_initial")
       .then(async (startup) => {
+        void bootTrace("initial.ok");
         const storedBootstrap = loadProjectBootstrap();
         const savedSession = await loadSession().catch(() => null);
         const recovered = recoverProjectBootstrap(savedSession);
@@ -208,6 +214,7 @@ export function App() {
         if (!cancelled) setBootstrap(prepared);
       })
       .catch((error) => {
+        void bootTrace("initial.error", { message: String(error).slice(0, 200) });
         if (!cancelled) setBootstrapError(error instanceof Error ? error.message : String(error));
       });
     return () => {
