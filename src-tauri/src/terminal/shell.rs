@@ -86,7 +86,11 @@ where
                     .unwrap_or_else(|| "/bin/zsh".to_string());
                 ShellCommandPlan {
                     program,
-                    args: Vec::new(),
+                    // Login shells source ~/.zprofile, where Homebrew's brew shellenv and
+                    // similar PATH setup live. Without this, GUI-launched daemons pass a
+                    // minimal PATH and panes lose /opt/homebrew/bin entirely (starship,
+                    // brew, etc. "command not found"). Matches Ghostty's login default.
+                    args: vec!["-l".to_string()],
                 }
             }
         },
@@ -102,7 +106,7 @@ where
                     .unwrap_or_else(|| "/bin/bash".to_string());
                 ShellCommandPlan {
                     program,
-                    args: Vec::new(),
+                    args: vec!["-l".to_string()],
                 }
             }
         },
@@ -250,7 +254,7 @@ mod tests {
             plan,
             ShellCommandPlan {
                 program: "/opt/homebrew/bin/fish".to_string(),
-                args: vec![],
+                args: vec!["-l".to_string()],
             }
         );
     }
@@ -267,6 +271,23 @@ mod tests {
             plan,
             ShellCommandPlan {
                 program: "/bin/zsh".to_string(),
+                args: vec!["-l".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_custom_shell_keeps_no_login_flag() {
+        let plan = resolve_shell_command_pure(
+            Some("/usr/local/bin/nu"),
+            TargetPlatform::MacOS,
+            |_| true,
+            |_| None,
+        );
+        assert_eq!(
+            plan,
+            ShellCommandPlan {
+                program: "/usr/local/bin/nu".to_string(),
                 args: vec![],
             }
         );
@@ -284,7 +305,7 @@ mod tests {
             with_env,
             ShellCommandPlan {
                 program: "/bin/zsh".to_string(),
-                args: vec![],
+                args: vec!["-l".to_string()],
             }
         );
 
@@ -298,7 +319,7 @@ mod tests {
             without_env,
             ShellCommandPlan {
                 program: "/bin/bash".to_string(),
-                args: vec![],
+                args: vec!["-l".to_string()],
             }
         );
     }
@@ -316,7 +337,7 @@ mod tests {
                 plan_mac,
                 ShellCommandPlan {
                     program: "/bin/zsh".to_string(),
-                    args: vec![],
+                    args: vec!["-l".to_string()],
                 },
                 "failed for macos pref: {:?}",
                 pref
