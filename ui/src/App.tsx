@@ -176,17 +176,16 @@ function canonicalizeProjectBootstrap(stored: ProjectBootstrap, startup: Registe
 export function App() {
   useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
-  const [bootstrap, setBootstrap] = useState<ProjectBootstrap | null>(() =>
-    isNativeRuntime ? null : loadProjectBootstrap(),
-  );
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrap, setBootstrap] = useState<ProjectBootstrap>(() => loadProjectBootstrap());
 
   useEffect(() => {
     if (isNativeRuntime) void checkForUpdate();
   }, [isNativeRuntime]);
 
   useEffect(() => {
-    if (!isNativeRuntime) return;
+    if (!isNativeRuntime) {
+      return;
+    }
     let cancelled = false;
     void bootTrace("initial.start");
     void withTimeout(getInitialProject(), STARTUP_TIMEOUT_MS, "cmd_project_initial")
@@ -215,21 +214,11 @@ export function App() {
       })
       .catch((error) => {
         void bootTrace("initial.error", { message: String(error).slice(0, 200) });
-        if (!cancelled) setBootstrapError(error instanceof Error ? error.message : String(error));
       });
     return () => {
       cancelled = true;
     };
   }, [isNativeRuntime]);
-
-  if (bootstrapError) {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background text-xs text-destructive">
-        Unable to initialize project: {bootstrapError}
-      </div>
-    );
-  }
-  if (!bootstrap) return <div className="h-screen w-screen bg-background" aria-label="Initializing project" />;
 
   return <WorkspaceApp initialProjects={bootstrap.projects} initialActiveProjectId={bootstrap.activeProjectId} />;
 }
