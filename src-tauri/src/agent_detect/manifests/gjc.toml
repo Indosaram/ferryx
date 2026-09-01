@@ -1,0 +1,42 @@
+# Sourced from the GJC (gajae-code) TUI sources 2026-08-31; every anchor was
+# verified upstream (shared.ts interruptHint, approval-gate.ts gate titles,
+# welcome.ts box title). Manifests are evaluated globally, so every rule must
+# stay gjc-exclusive - bare shared pi-family patterns belong to omo.toml.
+id = "gjc"
+version = "2026.08.31.1"
+min_engine_version = 1
+updated_at = "2026-08-31T00:00:00Z"
+aliases = ["gajaessi", "gajae"]
+
+[[rules]]
+id = "gate_blocked"
+state = "blocked"
+priority = 400
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["approve the plan?"] },
+  { contains = ["approve execution?"] },
+]
+
+[[rules]]
+id = "esc_hint_working"
+state = "working"
+priority = 210
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+all = [
+  { line_regex = ['(?i)\[esc\]\s*$'] },
+  { any = [
+    { line_regex = ['^[\x{2800}-\x{28FF}]'] },
+    { contains = ["running…"] },
+  ] },
+]
+
+[[rules]]
+id = "welcome_idle"
+state = "idle"
+priority = 60
+region = "whole_recent"
+visible_idle = true
+contains = ["gjc forge"]
