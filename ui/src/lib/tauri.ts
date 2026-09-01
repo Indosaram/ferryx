@@ -143,6 +143,16 @@ export async function getInitialProject() {
   return invokeCommand<RegisteredProject>("cmd_project_initial");
 }
 
+export async function bootTrace(
+  stage: string,
+  details?: Record<string, unknown>,
+) {
+  if (!isTauri()) return;
+  await invokeCommand("cmd_boot_trace", {
+    request: { stage, details: details ?? {} },
+  }).catch(() => {});
+}
+
 export async function listProjectBranches(workspaceId: string) {
   return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
 }

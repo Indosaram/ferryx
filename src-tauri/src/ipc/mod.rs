@@ -4,6 +4,7 @@ pub mod browser_cli;
 pub mod cli_install;
 pub mod dag;
 pub mod debug;
+pub mod diagnostics;
 pub mod error;
 #[cfg(feature = "native-terminal")]
 pub mod native_terminal;
@@ -38,6 +39,7 @@ pub use browser::*;
 pub use cli_install::*;
 pub use dag::*;
 pub use debug::*;
+pub use diagnostics::*;
 pub use error::*;
 #[cfg(feature = "native-terminal")]
 pub use native_terminal::*;

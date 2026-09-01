@@ -1,6 +1,9 @@
 import { PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
+import { withTimeout } from "./lib/withTimeout";
+
 import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { AddProjectDialog, AddWorktreeDialog } from "./components/ProjectDialogs";
@@ -50,6 +53,7 @@ import {
   setBadgeCount,
   spawnTerminal,
   writeTerminal,
+  bootTrace,
   listenDagRunUpdated,
   watchDagProject,
   type AgentDetection,
@@ -178,20 +182,21 @@ function canonicalizeProjectBootstrap(stored: ProjectBootstrap, startup: Registe
 export function App() {
   useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
-  const [bootstrap, setBootstrap] = useState<ProjectBootstrap | null>(() =>
-    isNativeRuntime ? null : loadProjectBootstrap(),
-  );
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrap, setBootstrap] = useState<ProjectBootstrap>(() => loadProjectBootstrap());
 
   useEffect(() => {
     if (isNativeRuntime) void checkForUpdate();
   }, [isNativeRuntime]);
 
   useEffect(() => {
-    if (!isNativeRuntime) return;
+    if (!isNativeRuntime) {
+      return;
+    }
     let cancelled = false;
-    void getInitialProject()
+    void bootTrace("initial.start");
+    void withTimeout(getInitialProject(), STARTUP_TIMEOUT_MS, "cmd_project_initial")
       .then(async (startup) => {
+        void bootTrace("initial.ok");
         const storedBootstrap = loadProjectBootstrap();
         const savedSession = await loadSession().catch(() => null);
         const recovered = recoverProjectBootstrap(savedSession);
@@ -214,21 +219,12 @@ export function App() {
         if (!cancelled) setBootstrap(prepared);
       })
       .catch((error) => {
-        if (!cancelled) setBootstrapError(error instanceof Error ? error.message : String(error));
+        void bootTrace("initial.error", { message: String(error).slice(0, 200) });
       });
     return () => {
       cancelled = true;
     };
   }, [isNativeRuntime]);
-
-  if (bootstrapError) {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background text-xs text-destructive">
-        Unable to initialize project: {bootstrapError}
-      </div>
-    );
-  }
-  if (!bootstrap) return <div className="h-screen w-screen bg-background" aria-label="Initializing project" />;
 
   return <WorkspaceApp initialProjects={bootstrap.projects} initialActiveProjectId={bootstrap.activeProjectId} />;
 }
