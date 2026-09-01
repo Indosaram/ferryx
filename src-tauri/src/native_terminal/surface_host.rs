@@ -15,11 +15,12 @@ use super::input::{cursor_style_for_focus, NativeTerminalInput};
 use super::platform::PlatformCompositorTarget;
 use super::renderer::font_manager;
 use super::renderer::{NativeTerminalRenderer, RendererConfig, RendererTheme, SelectionSnapshot};
-use super::snapshot::RenderSnapshot;
+use super::snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 use super::surface_error::{classify_surface_error, SurfaceFrameAction};
 pub use super::surface_snapshot::snapshot_for_layout;
 use super::terminal::NativeTerminal;
 use crate::daemon::{DaemonAttachment, DaemonStreamMessage};
+use crate::terminal::output_hub::HistorySegment;
 use crate::terminal::preferences::cached_terminal_preferences;
 
 pub const NATIVE_TERMINAL_TITLE_EVENT: &str = "native_terminal_title";
@@ -60,6 +61,8 @@ pub struct NativeTerminalAgentStatePayload {
     pub state: String,
     pub rule_id: String,
     pub manifest_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +260,7 @@ impl RenderScheduleCoordinator {
 pub struct NativeTerminalSession {
     pub terminal: NativeTerminal,
     pub focused: bool,
+    pub preedit: Option<String>,
     pub layout: Option<SurfaceCompositionLayout>,
     pub logical_bounds: Option<LogicalBounds>,
     pub cell_metrics: Option<CellMetrics>,
@@ -342,13 +346,7 @@ fn dispatch_scheduled_render<R: Runtime>(
         }
 
         if coordinator.finish_render() {
-            dispatch_scheduled_render(
-                follow_up_window,
-                hosts,
-                sessions,
-                session_id,
-                coordinator,
-            );
+            dispatch_scheduled_render(follow_up_window, hosts, sessions, session_id, coordinator);
         }
     }) {
         failure_coordinator.consume_render();
@@ -443,6 +441,7 @@ fn take_native_terminal_events(
                         state: state_str.to_string(),
                         rule_id: detection.rule_id,
                         manifest_id: detection.manifest_id,
+                        provider_session: None,
                     },
                 ));
             }
@@ -481,6 +480,60 @@ struct SessionRenderInput {
     selection: Option<SelectionSnapshot>,
 }
 
+fn preedit_char_wide(c: char) -> bool {
+    matches!(
+        c,
+        '\u{1100}'..='\u{11ff}'
+            | '\u{3130}'..='\u{318f}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{a960}'..='\u{a97f}'
+            | '\u{ac00}'..='\u{d7a3}'
+            | '\u{d7b0}'..='\u{d7ff}'
+            | '\u{ff01}'..='\u{ff60}'
+            | '\u{ffe0}'..='\u{ffe6}'
+    )
+}
+
+fn apply_preedit_to_snapshot(snapshot: &mut RenderSnapshot, preedit: &str) {
+    if preedit.is_empty() || snapshot.cursor.y >= snapshot.rows {
+        return;
+    }
+
+    let cols = snapshot.cols as usize;
+    let Some(row) = snapshot.grid.get_mut(snapshot.cursor.y as usize) else {
+        return;
+    };
+    let mut col = snapshot.cursor.x as usize;
+
+    for c in preedit.chars() {
+        let wide = preedit_char_wide(c);
+        let width = if wide { 2 } else { 1 };
+        if col + width > cols || col + width > row.len() {
+            break;
+        }
+
+        row[col] = CellSnapshot {
+            text: c.to_string(),
+            wide: if wide {
+                CellWide::Wide
+            } else {
+                CellWide::Narrow
+            },
+            underline: true,
+            ..Default::default()
+        };
+        if wide {
+            row[col + 1] = CellSnapshot {
+                wide: CellWide::SpacerTail,
+                underline: true,
+                ..Default::default()
+            };
+        }
+        col += width;
+    }
+}
+
 fn session_render_snapshot(
     session: &NativeTerminalSession,
 ) -> Result<SessionRenderInput, NativeTerminalError> {
@@ -498,10 +551,39 @@ fn session_render_snapshot(
             );
     let mut snapshot = session.terminal.render_snapshot()?;
     snapshot.cursor.visual_style = cursor_style_for_focus(session.focused);
+    if session.focused {
+        if let Some(preedit) = session
+            .preedit
+            .as_deref()
+            .filter(|preedit| !preedit.is_empty())
+        {
+            apply_preedit_to_snapshot(&mut snapshot, preedit);
+        }
+    }
     Ok(SessionRenderInput {
         snapshot,
         selection,
     })
+}
+
+fn feed_attachment_history(
+    terminal: &mut NativeTerminal,
+    history: &[u8],
+    segments: &[HistorySegment],
+) -> Result<(), NativeTerminalError> {
+    if segments.is_empty() {
+        return terminal.feed(history);
+    }
+    for segment in segments {
+        if let (Some(cols), Some(rows)) = (segment.cols, segment.rows) {
+            if terminal.dimensions()? != (cols, rows) {
+                let metrics = font_manager::derived_cell_metrics();
+                terminal.resize(cols, rows, metrics.width_px, metrics.height_px)?;
+            }
+        }
+        terminal.feed(&segment.bytes)?;
+    }
+    Ok(())
 }
 
 fn emit_native_terminal_event<R: Runtime>(
@@ -568,6 +650,13 @@ impl NativeTerminalSurfaceHostState {
             .and_then(|session| session.logical_bounds)
     }
 
+    pub fn session_cell_metrics(&self, session_id: &str) -> Option<CellMetrics> {
+        self.sessions
+            .lock()
+            .get(session_id)
+            .and_then(|session| session.cell_metrics)
+    }
+
     /// Maps DOM logical coordinates against attached session viewports.
     /// Uses half-open bounds `left <= x < right` and `top <= y < bottom` so split
     /// boundaries deterministically map to exactly one pane.
@@ -598,6 +687,20 @@ impl NativeTerminalSurfaceHostState {
         f(&mut session.terminal)
     }
 
+    pub fn reapply_theme_to_sessions(&self) {
+        let theme = &cached_terminal_preferences().theme;
+        let mut sessions = self.sessions.lock();
+        for (session_id, session) in sessions.iter_mut() {
+            if let Err(error) = session.terminal.apply_theme_preferences(theme) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    ?error,
+                    "ghostty theme injection failed on reapply; using built-in palette"
+                );
+            }
+        }
+    }
+
     /// Rejects geometry work for a session with no mounted compositor surface.
     ///
     /// Returns [`NativeTerminalError::SessionDetached`] for both a closed session and one that is
@@ -621,7 +724,15 @@ impl NativeTerminalSurfaceHostState {
         let (session, initialized) = match sessions.get_mut(&request.session_id) {
             Some(session) => (session, false),
             None => {
-                let terminal = NativeTerminal::new(layout.cols, layout.rows)?;
+                let mut terminal = NativeTerminal::new(layout.cols, layout.rows)?;
+                if let Err(error) =
+                    terminal.apply_theme_preferences(&cached_terminal_preferences().theme)
+                {
+                    tracing::warn!(
+                        ?error,
+                        "ghostty theme injection failed; using built-in palette"
+                    );
+                }
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
                 sessions.insert(
@@ -629,6 +740,7 @@ impl NativeTerminalSurfaceHostState {
                     NativeTerminalSession {
                         terminal,
                         focused: false,
+                        preedit: None,
                         layout: None,
                         logical_bounds: None,
                         cell_metrics: None,
@@ -767,56 +879,100 @@ impl NativeTerminalSurfaceHostState {
 
         let (update_sender, render_coordinator, events) = {
             let mut sessions = self.sessions.lock();
-            let (update_sender, render_coordinator) =
-                if let Some(session) = sessions.get_mut(session_id) {
-                    // A backgrounded session kept streaming without a surface; this attach gives it
-                    // one again and re-enables geometry updates.
-                    session.surface_attached = true;
-                    if let Some(task) = session.stream_task.take() {
-                        task.abort();
+            let (update_sender, render_coordinator) = if let Some(session) =
+                sessions.get_mut(session_id)
+            {
+                // A backgrounded session kept streaming without a surface; this attach gives it
+                // one again and re-enables geometry updates.
+                session.surface_attached = true;
+                if let Some(task) = session.stream_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = session.pump_task.take() {
+                    task.abort();
+                }
+                if attachment.history_segments.is_empty() {
+                    if let (Some(cols), Some(rows)) = (attachment.pty_cols, attachment.pty_rows) {
+                        if session.terminal.dimensions()? != (cols, rows) {
+                            let metrics = session
+                                .cell_metrics
+                                .unwrap_or_else(font_manager::derived_cell_metrics);
+                            session.terminal.resize(
+                                cols,
+                                rows,
+                                metrics.width_px,
+                                metrics.height_px,
+                            )?;
+                        }
                     }
-                    if let Some(task) = session.pump_task.take() {
-                        task.abort();
+                }
+                session.terminal.reset();
+                feed_attachment_history(
+                    &mut session.terminal,
+                    &attachment.history,
+                    &attachment.history_segments,
+                )?;
+                if let Some(layout) = session.layout {
+                    if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+                        let metrics = session
+                            .cell_metrics
+                            .unwrap_or_else(font_manager::derived_cell_metrics);
+                        session.terminal.resize(
+                            layout.cols,
+                            layout.rows,
+                            metrics.width_px,
+                            metrics.height_px,
+                        )?;
                     }
-                    session.terminal.reset();
-                    if !attachment.history.is_empty() {
-                        session.terminal.feed(&attachment.history)?;
-                    }
-                    session.last_sequence = attachment.end_sequence;
-                    session.render_coordinator.consume_render();
-                    (
-                        session.update_sender.clone(),
-                        Arc::clone(&session.render_coordinator),
-                    )
-                } else {
-                    let mut terminal = NativeTerminal::new(initial_dims.0, initial_dims.1)?;
-                    if !attachment.history.is_empty() {
-                        terminal.feed(&attachment.history)?;
-                    }
-                    // A fresh session created by an attach owns a surface by definition.
-                    let (update_sender, _) = tokio::sync::watch::channel(());
-                    let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
-                    sessions.insert(
-                        session_id.to_string(),
-                        NativeTerminalSession {
-                            terminal,
-                            focused: false,
-                            layout: None,
-                            logical_bounds: None,
-                            cell_metrics: None,
-                            stream_task: None,
-                            pump_task: None,
-                            last_sequence: attachment.end_sequence,
-                            update_sender: update_sender.clone(),
-                            render_coordinator: Arc::clone(&render_coordinator),
-                            last_agent_activity: None,
-                            last_scrollbar: None,
-                            agent_reports_own_state: false,
-                            surface_attached: true,
-                        },
+                }
+                session.last_sequence = attachment.end_sequence;
+                session.render_coordinator.consume_render();
+                (
+                    session.update_sender.clone(),
+                    Arc::clone(&session.render_coordinator),
+                )
+            } else {
+                let initial_cols = attachment.pty_cols.unwrap_or(initial_dims.0);
+                let initial_rows = attachment.pty_rows.unwrap_or(initial_dims.1);
+                let mut terminal = NativeTerminal::new(initial_cols, initial_rows)?;
+                if let Err(error) =
+                    terminal.apply_theme_preferences(&cached_terminal_preferences().theme)
+                {
+                    tracing::warn!(
+                        ?error,
+                        "ghostty theme injection failed; using built-in palette"
                     );
-                    (update_sender, render_coordinator)
-                };
+                }
+                feed_attachment_history(
+                    &mut terminal,
+                    &attachment.history,
+                    &attachment.history_segments,
+                )?;
+                // A fresh session created by an attach owns a surface by definition.
+                let (update_sender, _) = tokio::sync::watch::channel(());
+                let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
+                sessions.insert(
+                    session_id.to_string(),
+                    NativeTerminalSession {
+                        terminal,
+                        focused: false,
+                        preedit: None,
+                        layout: None,
+                        logical_bounds: None,
+                        cell_metrics: None,
+                        stream_task: None,
+                        pump_task: None,
+                        last_sequence: attachment.end_sequence,
+                        update_sender: update_sender.clone(),
+                        render_coordinator: Arc::clone(&render_coordinator),
+                        last_agent_activity: None,
+                        last_scrollbar: None,
+                        agent_reports_own_state: false,
+                        surface_attached: true,
+                    },
+                );
+                (update_sender, render_coordinator)
+            };
             let session = sessions
                 .get_mut(session_id)
                 .ok_or(NativeTerminalError::NoValue)?;
@@ -881,12 +1037,26 @@ impl NativeTerminalSurfaceHostState {
                             }
                         }
                     }
-                    DaemonStreamMessage::Lagged { history, .. } => {
+                    DaemonStreamMessage::Lagged {
+                        history, segments, ..
+                    } => {
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
                                 sess.terminal.reset();
-                                if let Err(err) = sess.terminal.feed(&history) {
+                                let parsed_segments: Vec<HistorySegment> = segments
+                                    .into_iter()
+                                    .map(|s| HistorySegment {
+                                        cols: s.cols,
+                                        rows: s.rows,
+                                        bytes: s.bytes,
+                                    })
+                                    .collect();
+                                if let Err(err) = feed_attachment_history(
+                                    &mut sess.terminal,
+                                    &history,
+                                    &parsed_segments,
+                                ) {
                                     tracing::warn!(
                                         session_id = %session_id_owned,
                                         error = %err,
@@ -922,7 +1092,12 @@ impl NativeTerminalSurfaceHostState {
                             update_sender.send_replace(());
                         }
                     }
-                    DaemonStreamMessage::AgentState { state, agent, .. } => {
+                    DaemonStreamMessage::AgentState {
+                        state,
+                        agent,
+                        provider_session,
+                        ..
+                    } => {
                         let reported = match state.as_ref() {
                             "working" => Some(crate::agent_detect::AgentActivity::Working),
                             "blocked" => Some(crate::agent_detect::AgentActivity::Blocked),
@@ -958,6 +1133,7 @@ impl NativeTerminalSurfaceHostState {
                                                 .as_deref()
                                                 .unwrap_or(AGENT_EXTENSION_MANIFEST_ID)
                                                 .to_string(),
+                                            provider_session: provider_session.clone(),
                                         },
                                     ),
                                 );
@@ -1131,6 +1307,7 @@ impl NativeTerminalSurfaceHostState {
                     NativeTerminalSession {
                         terminal,
                         focused: false,
+                        preedit: None,
                         layout: None,
                         logical_bounds: None,
                         cell_metrics: None,
@@ -1267,6 +1444,37 @@ impl NativeTerminalSurfaceHostState {
                 cell_metrics,
             ))
         }
+    }
+
+    pub fn set_preedit<R: Runtime>(
+        &self,
+        window: &WebviewWindow<R>,
+        session_id: &str,
+        preedit: Option<String>,
+    ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let render_coordinator = {
+            let mut sessions = self.sessions.lock();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or(NativeTerminalError::NoValue)?;
+            if session.preedit != preedit {
+                session.preedit = preedit;
+            }
+            Arc::clone(&session.render_coordinator)
+        };
+
+        if render_coordinator.schedule_render() {
+            dispatch_scheduled_render(
+                window.clone(),
+                Arc::clone(&self.hosts),
+                Arc::clone(&self.sessions),
+                session_id.to_string(),
+                render_coordinator,
+            );
+        }
+
+        self.get_receipt(window, session_id)
     }
 }
 
@@ -1470,6 +1678,9 @@ mod tests {
                 end_sequence: Some(sequence),
                 gap: None,
                 history: format!("\x1b]2;{title}\x07").into_bytes(),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -1561,6 +1772,106 @@ mod tests {
             "the PTY resize path must receive the exact ghostty grid dimensions"
         );
         state.teardown();
+    }
+
+    fn preedit_test_snapshot(cols: u16, rows: u16, cursor_x: u16, cursor_y: u16) -> RenderSnapshot {
+        RenderSnapshot {
+            cols,
+            rows,
+            cursor: super::super::cursor::CursorSnapshot {
+                x: cursor_x,
+                y: cursor_y,
+                visible: true,
+                blinking: false,
+                wide_tail: false,
+                visual_style: super::super::cursor::CursorVisualStyle::Block,
+            },
+            grid: vec![vec![CellSnapshot::default(); cols as usize]; rows as usize],
+        }
+    }
+
+    #[test]
+    fn preedit_narrow_ascii_overwrites_cells_with_underlines_without_moving_cursor() {
+        let mut snapshot = preedit_test_snapshot(5, 2, 1, 1);
+        let original_cursor = snapshot.cursor.clone();
+
+        apply_preedit_to_snapshot(&mut snapshot, "ab");
+
+        assert_eq!(snapshot.cursor, original_cursor);
+        assert_eq!(snapshot.grid[1][1].text, "a");
+        assert_eq!(snapshot.grid[1][1].wide, CellWide::Narrow);
+        assert!(snapshot.grid[1][1].underline);
+        assert_eq!(snapshot.grid[1][2].text, "b");
+        assert_eq!(snapshot.grid[1][2].wide, CellWide::Narrow);
+        assert!(snapshot.grid[1][2].underline);
+    }
+
+    #[test]
+    fn preedit_hangul_syllable_writes_wide_cell_and_underlined_spacer_tail() {
+        let mut snapshot = preedit_test_snapshot(4, 1, 1, 0);
+
+        apply_preedit_to_snapshot(&mut snapshot, "한");
+
+        assert_eq!(snapshot.grid[0][1].text, "한");
+        assert_eq!(snapshot.grid[0][1].wide, CellWide::Wide);
+        assert!(snapshot.grid[0][1].underline);
+        assert_eq!(snapshot.grid[0][2].text, "");
+        assert_eq!(snapshot.grid[0][2].wide, CellWide::SpacerTail);
+        assert!(snapshot.grid[0][2].underline);
+    }
+
+    #[test]
+    fn preedit_clamps_at_row_end_without_writing_out_of_bounds() {
+        let mut snapshot = preedit_test_snapshot(3, 1, 2, 0);
+
+        apply_preedit_to_snapshot(&mut snapshot, "abc");
+
+        assert_eq!(snapshot.grid[0].len(), 3);
+        assert_eq!(snapshot.grid[0][2].text, "a");
+        assert!(snapshot.grid[0][2].underline);
+    }
+
+    #[test]
+    fn empty_preedit_leaves_snapshot_grid_unchanged() {
+        let mut snapshot = preedit_test_snapshot(3, 1, 1, 0);
+        snapshot.grid[0][1].text = "existing".to_string();
+        snapshot.grid[0][1].bold = true;
+        let original_grid = snapshot.grid.clone();
+
+        apply_preedit_to_snapshot(&mut snapshot, "");
+
+        assert_eq!(snapshot.grid, original_grid);
+    }
+
+    #[test]
+    fn preedit_fully_replaces_existing_cell_text_colors_and_attributes() {
+        let mut snapshot = preedit_test_snapshot(2, 1, 0, 0);
+        snapshot.grid[0][0] = CellSnapshot {
+            text: "old".to_string(),
+            wide: CellWide::SpacerHead,
+            fg: Some(super::super::color::ColorRgb { r: 1, g: 2, b: 3 }),
+            bg: Some(super::super::color::ColorRgb { r: 4, g: 5, b: 6 }),
+            bold: true,
+            italic: true,
+            underline: false,
+            inverse: true,
+            faint: true,
+            blink: true,
+            invisible: true,
+            strikethrough: true,
+            overline: true,
+        };
+
+        apply_preedit_to_snapshot(&mut snapshot, "x");
+
+        assert_eq!(
+            snapshot.grid[0][0],
+            CellSnapshot {
+                text: "x".to_string(),
+                underline: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -1671,6 +1982,9 @@ mod tests {
                 end_sequence: Some(1),
                 gap: None,
                 history: b"Working (esc to interrupt)\r\n".to_vec(),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -1693,6 +2007,9 @@ mod tests {
                 end_sequence: Some(2),
                 gap: None,
                 history: b"Still Working (esc to interrupt)\r\n".to_vec(),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -1714,6 +2031,9 @@ mod tests {
                 end_sequence: Some(3),
                 gap: None,
                 history: b"\x1b[2J\x1b[HAction Required: allow command?\r\npress enter to confirm or esc to cancel\r\n".to_vec(),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -1749,6 +2069,9 @@ mod tests {
             end_sequence: Some(1),
             gap: None,
             history: b"Working (esc to interrupt)\r\n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -1807,6 +2130,9 @@ mod tests {
             end_sequence: Some(1),
             gap: None,
             history: Vec::new(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -1818,6 +2144,7 @@ mod tests {
             session_id: session_id.into(),
             state: "blocked".into(),
             agent: Some("omo".into()),
+            provider_session: None,
         })
         .await
         .expect("send agent state report");
@@ -1867,6 +2194,9 @@ mod tests {
             end_sequence: Some(1),
             gap: None,
             history: b"orca selection rendering verification\r\n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
             messages: rx,
             stream_task,
         };
@@ -1919,6 +2249,82 @@ mod tests {
             .expect("session exists");
         assert_eq!(cleared_input.selection, None);
 
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn attach_replays_history_at_daemon_pty_size() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "daemon-pty-size-attach";
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"\x1b[100GX".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: Some(120),
+            pty_rows: Some(30),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon session with reported pty size");
+
+        let sessions = state.sessions.lock();
+        let sess = sessions.get(session_id).unwrap();
+        assert_eq!(sess.terminal.dimensions().unwrap(), (120, 30));
+        let snap = sess.terminal.render_snapshot().unwrap();
+        assert_eq!(snap.grid[0][99].text, "X");
+        drop(sessions);
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn attach_replays_segmented_history_across_resizes() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "daemon-segmented-history-attach";
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(2),
+            gap: None,
+            history: b"A\x1b[100GX".to_vec(),
+            history_segments: vec![
+                crate::terminal::output_hub::HistorySegment {
+                    cols: Some(80),
+                    rows: Some(24),
+                    bytes: b"A".to_vec(),
+                },
+                crate::terminal::output_hub::HistorySegment {
+                    cols: Some(120),
+                    rows: Some(30),
+                    bytes: b"\x1b[100GX".to_vec(),
+                },
+            ],
+            pty_cols: None,
+            pty_rows: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon session with segmented history");
+
+        let sessions = state.sessions.lock();
+        let sess = sessions.get(session_id).unwrap();
+        assert_eq!(sess.terminal.dimensions().unwrap(), (120, 30));
+        let snap = sess.terminal.render_snapshot().unwrap();
+        assert_eq!(snap.grid[0][0].text, "A");
+        assert_eq!(snap.grid[0][99].text, "X");
+        drop(sessions);
         state.teardown();
     }
 }

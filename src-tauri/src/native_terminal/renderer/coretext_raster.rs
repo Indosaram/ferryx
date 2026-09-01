@@ -36,6 +36,14 @@ pub mod macos {
             space: *const CGColorSpace,
             bitmap_info: u32,
         ) -> *mut CGContext;
+        fn CGContextSetAllowsFontSmoothing(context: *mut CGContext, flag: bool);
+        fn CGContextSetShouldSmoothFonts(context: *mut CGContext, flag: bool);
+        fn CGContextSetAllowsFontSubpixelPositioning(context: *mut CGContext, flag: bool);
+        fn CGContextSetShouldSubpixelPositionFonts(context: *mut CGContext, flag: bool);
+        fn CGContextSetAllowsFontSubpixelQuantization(context: *mut CGContext, flag: bool);
+        fn CGContextSetShouldSubpixelQuantizeFonts(context: *mut CGContext, flag: bool);
+        fn CGContextSetAllowsAntialiasing(context: *mut CGContext, flag: bool);
+        fn CGContextSetShouldAntialias(context: *mut CGContext, flag: bool);
         fn CGContextRelease(context: *mut CGContext);
         fn CGContextSetTextPosition(context: *mut CGContext, x: CGFloat, y: CGFloat);
         fn CGContextSetRGBFillColor(
@@ -155,6 +163,14 @@ pub mod macos {
             }
 
             unsafe {
+                CGContextSetAllowsFontSmoothing(context_raw, true);
+                CGContextSetShouldSmoothFonts(context_raw, false);
+                CGContextSetAllowsFontSubpixelPositioning(context_raw, true);
+                CGContextSetShouldSubpixelPositionFonts(context_raw, true);
+                CGContextSetAllowsFontSubpixelQuantization(context_raw, false);
+                CGContextSetShouldSubpixelQuantizeFonts(context_raw, false);
+                CGContextSetAllowsAntialiasing(context_raw, true);
+                CGContextSetShouldAntialias(context_raw, true);
                 CGContextSetRGBFillColor(context_raw, 1.0, 1.0, 1.0, 1.0);
                 CGContextSetTextPosition(context_raw, pos_x, baseline_y);
                 CTLineDraw(&line, context_raw);

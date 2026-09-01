@@ -700,4 +700,129 @@ describe("workspaceRestore coordinator", () => {
     });
     unmount();
   });
+
+  it("preserves live backend session identity, agent metadata, and tab ownership without calling spawnTerminal", async () => {
+    const workspaceId = "ws-warm-live";
+    const persisted = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: workspaceId,
+      workspaces: {
+        [workspaceId]: {
+          workspaceId,
+          repoRoot: "/repo/test",
+          worktrees: [{ path: "/repo/test", branch: "main", head: "111", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/test",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [
+              {
+                id: "tab-1",
+                sessionId: "sess-1",
+                label: "agent-tab",
+                kind: "terminal" as const,
+                terminal: {
+                  paneTree: {
+                    type: "split" as const,
+                    direction: "horizontal" as const,
+                    first: { type: "leaf" as const, leafId: "leaf-1" },
+                    second: { type: "leaf" as const, leafId: "leaf-2" },
+                    ratio: 0.5,
+                  },
+                  activeLeafId: "leaf-2",
+                  expandedLeafId: null,
+                  sessionIdsByLeafId: {
+                    "leaf-1": "sess-1",
+                    "leaf-2": "sess-2",
+                  },
+                },
+              },
+            ],
+          },
+          terminalSessions: {
+            "sess-1": {
+              localSessionId: "sess-1",
+              backendSessionId: "backend-live-1",
+              daemonEpoch: "epoch-live",
+              lastOutputSequence: "350",
+              worktreePath: "/repo/test",
+              cwd: "/repo/test/packages/core",
+              agentType: "claude",
+              agentSessionId: "claude-session-uuid-1",
+              createdAt: Date.now(),
+            },
+            "sess-2": {
+              localSessionId: "sess-2",
+              backendSessionId: "backend-live-2",
+              daemonEpoch: "epoch-live",
+              lastOutputSequence: "720",
+              worktreePath: "/repo/test",
+              cwd: "/repo/test/packages/cli",
+              agentType: "omo",
+              agentSessionId: "omo-session-uuid-2",
+              createdAt: Date.now(),
+            },
+          },
+        },
+      },
+    };
+
+    const restoreWorkspace = vi.fn();
+    const loadSessionFn = vi.fn(async () => persisted);
+    const listLiveBackendSessionIdsFn = vi.fn(async () => [
+      { sessionId: "backend-live-1", daemonEpoch: "epoch-live" },
+      { sessionId: "backend-live-2", daemonEpoch: "epoch-live" },
+    ]);
+
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId,
+        recoveredFromHmr: false,
+        restoreWorkspace,
+        loadSessionFn,
+        listLiveBackendSessionIdsFn: listLiveBackendSessionIdsFn as any,
+      }),
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+    const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceState;
+
+    expect(restored.sessions["sess-1"]).toMatchObject({
+      id: "sess-1",
+      backendSessionId: "backend-live-1",
+      lifecycle: "working",
+      daemonEpoch: "epoch-live",
+      cwd: "/repo/test/packages/core",
+      agentType: "claude",
+      agentSessionId: "claude-session-uuid-1",
+    });
+
+    expect(restored.sessions["sess-2"]).toMatchObject({
+      id: "sess-2",
+      backendSessionId: "backend-live-2",
+      lifecycle: "working",
+      daemonEpoch: "epoch-live",
+      cwd: "/repo/test/packages/cli",
+      agentType: "omo",
+      agentSessionId: "omo-session-uuid-2",
+    });
+
+    const tabLayout = restored.layout.layoutsByTabId["tab-1"];
+    expect(tabLayout).toBeDefined();
+    expect(tabLayout.sessionIdsByLeafId).toEqual({
+      "leaf-1": "sess-1",
+      "leaf-2": "sess-2",
+    });
+
+    expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
+    unmount();
+  });
 });

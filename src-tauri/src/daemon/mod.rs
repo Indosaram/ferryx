@@ -2,6 +2,8 @@ pub mod agent_extension;
 pub mod client;
 pub mod launchd;
 pub mod protocol;
+pub mod relay_bridge;
+pub mod remote;
 pub mod server;
 
 pub use client::*;

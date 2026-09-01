@@ -18,10 +18,20 @@ pub struct PersistedWorktree {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct PersistedSshPane {
+    pub host_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedTerminalTabState {
     pub primary_session_id: String,
     pub pane_tree: serde_json::Value,
     pub session_ids_by_leaf_id: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub ssh_by_leaf_id: HashMap<String, PersistedSshPane>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_leaf_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,6 +374,113 @@ mod tests {
         assert!(!session_file.exists());
         let loaded = load_session_from_path(&session_file).unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn red_v3_session_round_trips_ssh_pane_fields() {
+        let dir = tempdir().unwrap();
+        let session_file = dir.path().join("session_state.json");
+
+        let mut ssh_by_leaf_id = HashMap::new();
+        ssh_by_leaf_id.insert(
+            "leaf-1".to_string(),
+            PersistedSshPane {
+                host_id: "h-box".to_string(),
+                remote_path: Some("/home/sook/proj".to_string()),
+            },
+        );
+
+        let session = PersistedWorkspaceSession {
+            version: 3,
+            timestamp: 1,
+            active_workspace_id: "default".to_string(),
+            workspaces: HashMap::from([(
+                "default".to_string(),
+                PersistedWorkspace {
+                    workspace_id: "default".to_string(),
+                    repo_root: PathBuf::from("/tmp/repo"),
+                    layout: PersistedLayout {
+                        split_mode: "none".to_string(),
+                        tabs: vec![PersistedTab {
+                            id: "tab-1".to_string(),
+                            label: "ssh".to_string(),
+                            terminal: Some(PersistedTerminalTabState {
+                                primary_session_id: "s1".to_string(),
+                                pane_tree: serde_json::json!({}),
+                                session_ids_by_leaf_id: HashMap::from([(
+                                    "leaf-1".to_string(),
+                                    "s1".to_string(),
+                                )]),
+                                ssh_by_leaf_id,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]),
+            extra: HashMap::new(),
+        };
+
+        save_session_to_path(&session_file, &session).unwrap();
+        let loaded = load_session_from_path(&session_file)
+            .unwrap()
+            .expect("v3 session loads");
+        assert_eq!(loaded.version, 3);
+        let tab = &loaded.workspaces["default"].layout.tabs[0];
+        let terminal = tab.terminal.as_ref().expect("terminal tab state");
+        let pane = terminal
+            .ssh_by_leaf_id
+            .get("leaf-1")
+            .expect("ssh pane fields survive a save/load cycle");
+        assert_eq!(pane.host_id, "h-box");
+        assert_eq!(pane.remote_path.as_deref(), Some("/home/sook/proj"));
+    }
+
+    #[test]
+    fn red_v2_session_without_ssh_fields_loads_with_empty_map() {
+        let dir = tempdir().unwrap();
+        let session_file = dir.path().join("session_state.json");
+        fs::write(
+            &session_file,
+            r#"{
+                "version": 2,
+                "timestamp": 1,
+                "activeWorkspaceId": "default",
+                "workspaces": {
+                    "default": {
+                        "workspaceId": "default",
+                        "repoRoot": "/tmp/repo",
+                        "layout": {
+                            "splitMode": "none",
+                            "tabs": [
+                                {
+                                    "id": "tab-1",
+                                    "label": "main",
+                                    "terminal": {
+                                        "primarySessionId": "s1",
+                                        "paneTree": {},
+                                        "sessionIdsByLeafId": {}
+                                    }
+                                }
+                            ]
+                        },
+                        "terminalSessions": {}
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_session_from_path(&session_file)
+            .unwrap()
+            .expect("v2 session still loads (backward compatible)");
+        assert_eq!(loaded.version, 2);
+        let tab = &loaded.workspaces["default"].layout.tabs[0];
+        let terminal = tab.terminal.as_ref().expect("terminal tab state");
+        assert!(terminal.ssh_by_leaf_id.is_empty());
     }
 
     #[test]

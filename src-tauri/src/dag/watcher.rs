@@ -54,7 +54,11 @@ async fn scan_and_emit(
                     };
                     if is_updated {
                         cache.insert(snapshot.run_id.clone(), snapshot.clone());
-                        if sink.send((project_path.to_string(), snapshot)).await.is_err() {
+                        if sink
+                            .send((project_path.to_string(), snapshot))
+                            .await
+                            .is_err()
+                        {
                             return false;
                         }
                     }
@@ -92,10 +96,12 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
     );
 
     let (polling_mode, mut _watcher_guard) = match watcher_res {
-        Ok(mut watcher) if watch_target.exists() => match watcher.watch(&watch_target, RecursiveMode::Recursive) {
-            Ok(()) => (false, Some(watcher)),
-            Err(_) => (true, None),
-        },
+        Ok(mut watcher) if watch_target.exists() => {
+            match watcher.watch(&watch_target, RecursiveMode::Recursive) {
+                Ok(()) => (false, Some(watcher)),
+                Err(_) => (true, None),
+            }
+        }
         _ => (true, None),
     };
 
@@ -168,10 +174,8 @@ mod tests {
         std::fs::create_dir_all(&runs_dir).expect("create runs dir");
 
         let file_path = runs_dir.join("dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.json");
-        let initial_json = FIXTURE_F107_JSON.replace(
-            "\"status\":\"cancelled\"",
-            "\"status\":\"running\"",
-        );
+        let initial_json =
+            FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"running\"");
         std::fs::write(&file_path, &initial_json).expect("write initial json");
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
@@ -182,13 +186,14 @@ mod tests {
             .expect("first snapshot receive must not time out")
             .expect("first snapshot must be received");
         let (tagged_project, first) = first;
-        assert_eq!(tagged_project, temp_dir.path().to_string_lossy().to_string());
+        assert_eq!(
+            tagged_project,
+            temp_dir.path().to_string_lossy().to_string()
+        );
         assert_eq!(first.status, DagRunStatus::Running);
 
-        let updated_json = FIXTURE_F107_JSON.replace(
-            "\"status\":\"cancelled\"",
-            "\"status\":\"completed\"",
-        );
+        let updated_json =
+            FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"completed\"");
         std::fs::write(&file_path, &updated_json).expect("write updated json");
 
         let second = tokio::time::timeout(Duration::from_secs(5), rx.recv())

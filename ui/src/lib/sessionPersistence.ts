@@ -3,6 +3,7 @@ import { collectLeafIds, createLeafNode, removeLeaf, type PaneNode } from "../st
 import type { WorkspaceState } from "../state/workspaceStore";
 import type { TerminalActivity } from "./activity";
 import { loadBrowserSettings, resolveSupportedBrowserProfileId, supportedBrowserProfiles } from "./browserSettings";
+import { normalizeSessionId, providerSessionKeyForAgent } from "./agentResume";
 import {
   createBrowserPaneContent,
   createDagPaneContent,
@@ -13,6 +14,7 @@ import {
   type LayoutState,
   type PaneContent,
   type PersistedLayout,
+  type PersistedSshPane,
   type PersistedTab,
   type PersistedTerminalSession,
   type PersistedWorkspace,
@@ -26,7 +28,29 @@ import {
   type Worktree,
 } from "./types";
 
-export const WORKSPACE_SESSION_VERSION = 2;
+export const WORKSPACE_SESSION_VERSION = 3;
+
+export type PersistedRemotePtyLease = {
+  sessionId: string;
+  targetId: string;
+  leafId?: string | null;
+  state: "attached" | "detached" | "terminated" | "expired";
+  pendingKill: boolean;
+  createdAt: number;
+  updatedAt: number;
+  detachedAt?: number | null;
+  terminatedAt?: number | null;
+  expiresAt?: number | null;
+  clientInstanceId: string;
+  generation: number;
+};
+
+declare module "./types" {
+  interface PersistedTerminalSession {
+    /** Remote daemon lease mirror. Optional so existing v3 payloads remain valid. */
+    remoteLease?: PersistedRemotePtyLease | null;
+  }
+}
 
 export function serializeWorkspaceState(
   workspaceId: string,
@@ -93,6 +117,7 @@ export function serializeWorkspaceState(
       const leafIds = collectLeafIds(effectiveRoot);
       const contentsByLeafId: Record<string, PaneContent> = {};
       const sessionIdsByLeafId: Record<string, string> = {};
+      const sshByLeafId: Record<string, PersistedSshPane> = {};
 
       for (const leafId of leafIds) {
         const content = effectiveContents?.[leafId];
@@ -119,8 +144,15 @@ export function serializeWorkspaceState(
             });
             sessionIdsByLeafId[leafId] = "";
           } else {
-            contentsByLeafId[leafId] = createTerminalPaneContent(content.sessionId);
+            const sessSsh = state.sessions?.[content.sessionId]?.ssh ?? null;
+            contentsByLeafId[leafId] = createTerminalPaneContent(
+              content.sessionId,
+              sessSsh ? { hostId: sessSsh.hostId, remotePath: sessSsh.remotePath } : undefined,
+            );
             sessionIdsByLeafId[leafId] = content.sessionId;
+            if (sessSsh) {
+              sshByLeafId[leafId] = { hostId: sessSsh.hostId, remotePath: sessSsh.remotePath };
+            }
           }
         } else {
           const sessId = tabLayout?.sessionIdsByLeafId?.[leafId] ?? tab.sessionId;
@@ -148,6 +180,7 @@ export function serializeWorkspaceState(
           paneTree: effectiveRoot,
           sessionIdsByLeafId,
           contentsByLeafId,
+          ...(Object.keys(sshByLeafId).length > 0 ? { sshByLeafId } : {}),
           activeLeafId,
           expandedLeafId,
         },
@@ -222,6 +255,9 @@ export function serializeWorkspaceState(
       lastOutputSequence: sess.lastOutputSequence != null ? String(sess.lastOutputSequence) : null,
       agentType: sess.agentType ?? null,
       agentSessionId: sess.agentSessionId ?? null,
+      providerSession: sess.providerSession ?? null,
+      ssh: sess.ssh ?? null,
+      remoteLease: (sess as TerminalSession & { remoteLease?: PersistedRemotePtyLease | null }).remoteLease ?? null,
       createdAt,
     };
   }
@@ -396,7 +432,14 @@ export function deserializeWorkspaceState(
     const matchingWorktree = worktrees.find((wt) => wt.path === worktreePath);
     const agentType = sess.agentType ?? null;
     const agentSessionId = sess.agentSessionId ?? null;
-    sessions[localSessionId] = {
+    const legacyProviderKey = agentType ? providerSessionKeyForAgent(agentType) : null;
+    const normalizedLegacyId = agentSessionId ? normalizeSessionId(agentSessionId) : null;
+    const providerSession = sess.providerSession ?? (
+      legacyProviderKey && normalizedLegacyId
+        ? { key: legacyProviderKey, id: normalizedLegacyId }
+        : null
+    );
+    const restoredSession: TerminalSession & { remoteLease?: PersistedRemotePtyLease | null } = {
       id: localSessionId,
       cwd: sess.cwd || worktreePath,
       worktreePath,
@@ -408,7 +451,14 @@ export function deserializeWorkspaceState(
       lastOutputSequence,
       agentType,
       agentSessionId,
+      providerSession,
+      ssh: sess.ssh ?? null,
+      remoteLease: sess.remoteLease ?? null,
+      reconnectLifecycle: "idle",
+      reconnectError: null,
+      reconnectRequestId: null,
     };
+    sessions[localSessionId] = restoredSession;
   }
 
   function deserializeLayout(persistedLayout: PersistedLayout | undefined): LayoutState {
@@ -537,12 +587,22 @@ export function deserializeWorkspaceState(
             sessionIdsByLeafId[leafId] = "";
           } else {
             const sessId = rawContent.sessionId || persistedMapping?.[leafId] || primarySessionId;
-            contentsByLeafId[leafId] = createTerminalPaneContent(sessId);
+            const rawSsh = rawContent.ssh;
+            contentsByLeafId[leafId] = createTerminalPaneContent(
+              sessId,
+              rawSsh ? { hostId: rawSsh.hostId, remotePath: rawSsh.remotePath ?? null } : undefined,
+            );
             sessionIdsByLeafId[leafId] = sessId;
           }
         } else {
           const sessId = persistedMapping?.[leafId] || primarySessionId;
-          contentsByLeafId[leafId] = createTerminalPaneContent(sessId);
+          const persistedSsh = terminal?.sshByLeafId?.[leafId];
+          contentsByLeafId[leafId] = createTerminalPaneContent(
+            sessId,
+            persistedSsh
+              ? { hostId: persistedSsh.hostId, remotePath: persistedSsh.remotePath ?? null }
+              : undefined,
+          );
           sessionIdsByLeafId[leafId] = sessId;
         }
       }

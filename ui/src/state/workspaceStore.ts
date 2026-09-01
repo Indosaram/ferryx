@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import {
@@ -11,15 +12,19 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { loadSshHosts, sshPaneTitle } from "../lib/sshHosts";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import { worktreeIdentity } from "../lib/types";
 import type {
+  AgentProviderSession,
   ActiveAgent,
   BrowserTab,
   LayoutState,
   PaneContent,
+  ReconnectLifecycle,
+  StructuredIpcError,
   TerminalLifecycle,
   TerminalLifecyclePayload,
   TerminalSession,
@@ -27,12 +32,41 @@ import type {
   WorkspaceTab,
   Worktree,
   WorktreeIdentity,
+  SshHost,
+  TerminalSessionSsh,
 } from "../lib/types";
 import { createLayoutState, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
 import { collectLeafIds, type PaneDirection } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
+
+export type SshSpawnOptions = {
+  host: SshHost;
+  remotePath: string | null;
+  worktreePath: string;
+};
+
+export function sshWorktreePath(hostId: string, remotePath: string | null): string {
+  return remotePath ? `ssh://${hostId}/${remotePath}` : `ssh://${hostId}`;
+}
+
+function sshSessionMeta(host: SshHost, remotePath: string | null): TerminalSessionSsh {
+  return {
+    hostId: host.id,
+    remotePath,
+    title: host.username ? `${host.username}@${host.hostname}` : host.hostname,
+  };
+}
+
+async function resolveSshHostForRespawn(hostId: string): Promise<SshHost | null> {
+  try {
+    const hosts = await loadSshHosts();
+    return hosts.find((candidate) => candidate.id === hostId) ?? null;
+  } catch {
+    return null;
+  }
+}
 
 type WorkspaceTerminalActivity = TerminalActivity & {
   agentSource?: "screen" | "title";
@@ -58,6 +92,7 @@ export type WorkspaceServices = {
     worktree: WorktreeIdentity | null;
     cwd?: string | null;
     clientRequestId?: string | null;
+    startup?: { kind: "ssh"; host: SshHost } | null;
   }) => Promise<string>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
   closeTerminal: (sessionId: string) => Promise<void>;
@@ -140,7 +175,16 @@ export type WorkspaceAction =
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
-  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string }
+  | { type: "CONNECTION_STATUS"; backendSessionId: string; status: import("../lib/types").ConnectionStatusPayload }
+  | {
+      type: "SET_RECONNECT_LIFECYCLE";
+      sessionId: string;
+      lifecycle: ReconnectLifecycle;
+      error?: StructuredIpcError | null;
+      requestId?: string | null;
+    }
+  | { type: "APPLY_PROVIDER_SESSION_IF_MISSING"; sessionId: string; providerSession: AgentProviderSession }
+  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
   | {
       type: "SESSION_SCREEN_ACTIVITY";
@@ -149,6 +193,7 @@ export type WorkspaceAction =
       state: "working" | "blocked" | "idle";
       ruleId: string;
       manifestId?: string;
+      providerSession?: AgentProviderSession | null;
     }
   | { type: "MARK_TAB_UNREAD"; tabId: string }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
@@ -248,6 +293,13 @@ export function useWorkspaceStore({
         lifecycle: mapBackendLifecycle(payload),
       });
     });
+    const unsubscribeConnectionStatus = terminalEventBus.subscribeConnectionStatus((payload) => {
+      dispatch({
+        type: "CONNECTION_STATUS",
+        backendSessionId: payload.sessionId,
+        status: payload,
+      });
+    });
 
     // Native title and bell events carry the BACKEND session id and are emitted by the daemon
     // stream pump, so they arrive for every attached session -- including background tabs whose
@@ -294,6 +346,7 @@ export function useWorkspaceStore({
     let unlistenTitle: (() => void) | undefined;
     let unlistenBell: (() => void) | undefined;
     let unlistenAgentState: (() => void) | undefined;
+    const fallbackAttemptedAgents = new Map<string, Set<string>>();
     let subscribed = true;
 
     void onNativeTerminalTitle((payload) => {
@@ -336,6 +389,7 @@ export function useWorkspaceStore({
           state: payload.state,
           ruleId: payload.ruleId,
           manifestId: payload.manifestId,
+          providerSession: payload.providerSession,
         }));
         return;
       }
@@ -346,7 +400,31 @@ export function useWorkspaceStore({
         state: payload.state,
         ruleId: payload.ruleId,
         manifestId: payload.manifestId,
+        providerSession: payload.providerSession,
       });
+      if (
+        !payload.providerSession
+        && payload.manifestId
+        && ["claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc"].includes(payload.manifestId)
+      ) {
+        const discoveryAgent = payload.manifestId === "cursor-agent" ? "cursor" : payload.manifestId;
+        // A pane can surface several manifest ids over its lifetime (shared TUI
+        // patterns across pi-family agents), so track attempts per agent id: a
+        // failed probe under one id must not block a more specific id later.
+        const attempted = fallbackAttemptedAgents.get(resolved.sessionId) ?? new Set<string>();
+        if (!attempted.has(discoveryAgent)) {
+          attempted.add(discoveryAgent);
+          fallbackAttemptedAgents.set(resolved.sessionId, attempted);
+          void discoverAgentProviderSession(payload.sessionId, discoveryAgent).then((id) => {
+            if (!id) return;
+            dispatch({
+              type: "APPLY_PROVIDER_SESSION_IF_MISSING",
+              sessionId: resolved.sessionId,
+              providerSession: { key: "session_id", id },
+            });
+          });
+        }
+      }
     })
       .then((unlisten) => {
         if (subscribed) unlistenAgentState = unlisten;
@@ -357,6 +435,7 @@ export function useWorkspaceStore({
     return () => {
       subscribed = false;
       unsubscribeLifecycle();
+      unsubscribeConnectionStatus();
       unlistenTitle?.();
       unlistenBell?.();
       unlistenAgentState?.();
@@ -364,25 +443,32 @@ export function useWorkspaceStore({
   }, [dispatch]);
 
   const createSpawnedTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string) => {
+    async (
+      worktree: Worktree,
+      label?: string,
+      backendSessionIdOverride?: string,
+      ssh?: SshSpawnOptions | null,
+    ) => {
       await services.ensureTerminalEvents();
       const backendSessionId =
         backendSessionIdOverride ??
         (await spawnTerminalForLogicalAction(services, {
           workspaceId,
-          worktree: worktreeIdentity(worktree),
-          cwd: worktree.path,
+          worktree: ssh ? null : worktreeIdentity(worktree),
+          cwd: ssh ? (ssh.remotePath ?? undefined) : worktree.path,
+          startup: ssh ? { kind: "ssh", host: ssh.host } : undefined,
         }));
       const sessionId = createId("session");
       const tabId = createId("tab");
       const session: TerminalSession = {
         id: sessionId,
-        cwd: worktree.path,
+        cwd: ssh ? (ssh.remotePath ?? "") : worktree.path,
         worktreePath: worktree.path,
         workspaceId,
-        worktree: worktreeIdentity(worktree),
+        worktree: ssh ? null : worktreeIdentity(worktree),
         backendSessionId,
         lifecycle: "working",
+        ssh: ssh ? sshSessionMeta(ssh.host, ssh.remotePath) : undefined,
       };
       const tab: TerminalTab = {
         id: tabId,
@@ -395,7 +481,12 @@ export function useWorkspaceStore({
   );
 
   const openTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string) => {
+    async (
+      worktree: Worktree,
+      label?: string,
+      backendSessionIdOverride?: string,
+      ssh?: SshSpawnOptions | null,
+    ) => {
       const capturedWorktreePath = worktree.path;
       switchDebug("terminal.open.start", {
         workspaceId,
@@ -404,7 +495,7 @@ export function useWorkspaceStore({
         sessionCount: Object.keys(stateRef.current.sessions).length,
         backendOverride: backendSessionIdOverride ?? null,
       });
-      const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride);
+      const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride, ssh);
       // The active project can change while the spawn is in flight; landing this
       // tab now would inject one project's worktree into another's state, and
       // dropping it silently would orphan the backend PTY we just created.
@@ -443,6 +534,9 @@ export function useWorkspaceStore({
       const targets = sessionIds.filter((sessionId) => {
         const session = stateRef.current.sessions[sessionId];
         if (!session || session.backendSessionId != null) return false;
+        if (session.lifecycle === "exited" && (session.agentType || session.providerSession || session.agentSessionId)) {
+          return false;
+        }
         if (spawningSessionIdsRef.current.has(sessionId)) return false;
         return true;
       });
@@ -458,11 +552,25 @@ export function useWorkspaceStore({
             const session = stateRef.current.sessions[sessionId];
             if (!session || session.backendSessionId != null) return;
             await services.ensureTerminalEvents();
-            const backendSessionId = await services.spawnTerminal({
+            let spawnRequest: Parameters<typeof services.spawnTerminal>[0] = {
               workspaceId,
               worktree: session.worktree,
               cwd: session.cwd ?? session.worktreePath,
-            });
+            };
+            if (session.ssh) {
+              const host = await resolveSshHostForRespawn(session.ssh.hostId);
+              if (!host) {
+                console.warn(`ssh host ${session.ssh.hostId} no longer exists; skipping respawn`);
+                return;
+              }
+              spawnRequest = {
+                workspaceId,
+                worktree: null,
+                cwd: session.ssh.remotePath ?? undefined,
+                startup: { kind: "ssh", host },
+              };
+            }
+            const backendSessionId = await services.spawnTerminal(spawnRequest);
             // Recovery spawns can outlive a project switch; rebinding now would
             // point another project's session at this PTY.
             if (mountedWorkspaceIdRef.current !== workspaceId) {
@@ -578,6 +686,32 @@ export function useWorkspaceStore({
     [dispatch, openTab, workspaceId],
   );
 
+  const openSshHostTerminal = useCallback(
+    async (
+      host: SshHost,
+      remote?: { path: string | null; head?: string | null; branch?: string | null },
+    ): Promise<string | null> => {
+      const remotePath = remote?.path ?? null;
+      const worktreePath = sshWorktreePath(host.id, remotePath);
+      const worktree: Worktree = {
+        path: worktreePath,
+        branch: remote?.branch ?? null,
+        head: remote?.head ?? "",
+        bare: false,
+        detached: false,
+        locked: null,
+        prunable: null,
+      };
+      return openTab(
+        worktree,
+        remote ? sshPaneTitle({ title: host.label, remotePath }) : host.label,
+        undefined,
+        { host, remotePath, worktreePath },
+      );
+    },
+    [openTab],
+  );
+
   const splitPane = useCallback(
     async (
       tabId: string,
@@ -595,6 +729,12 @@ export function useWorkspaceStore({
       const sourceSession = snapshot.sessions[sourceLocalSessionId];
       if (!sourceSession) return;
 
+      let sshHost: SshHost | null = null;
+      if (sourceSession.ssh) {
+        sshHost = await resolveSshHostForRespawn(sourceSession.ssh.hostId);
+        if (!sshHost) return;
+      }
+
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
       const session: TerminalSession = {
@@ -605,6 +745,7 @@ export function useWorkspaceStore({
         worktree: sourceSession.worktree,
         backendSessionId: null,
         lifecycle: "working",
+        ssh: sshHost && sourceSession.ssh ? { ...sourceSession.ssh, hostId: sshHost.id } : undefined,
       };
 
       dispatch({
@@ -634,11 +775,21 @@ export function useWorkspaceStore({
           }
         }
 
-        backendSessionId = await spawnTerminalForLogicalAction(services, {
-          workspaceId,
-          worktree: sourceSession.worktree,
-          cwd: inheritedCwd,
-        });
+        backendSessionId = await spawnTerminalForLogicalAction(
+          services,
+          sshHost && sourceSession.ssh
+            ? {
+                workspaceId,
+                worktree: null,
+                cwd: sourceSession.ssh.remotePath ?? undefined,
+                startup: { kind: "ssh", host: sshHost },
+              }
+            : {
+                workspaceId,
+                worktree: sourceSession.worktree,
+                cwd: inheritedCwd,
+              },
+        );
 
         if (stateRef.current.sessions[localSessionId]) {
           dispatch({
@@ -844,6 +995,12 @@ export function useWorkspaceStore({
     [dispatch],
   );
 
+  const retrySshConnection = useCallback(async (sessionId: string) => {
+    const session = stateRef.current.sessions[sessionId];
+    if (!session?.ssh || !session.backendSessionId) return;
+    if (isTauri()) await invoke<void>("cmd_terminal_retry", { sessionId: session.backendSessionId });
+  }, []);
+
   const updateSessionTitleActivity = useCallback(
     (tabId: string, title: string, explicitSessionId?: string) => {
       const snapshot = stateRef.current;
@@ -992,8 +1149,10 @@ export function useWorkspaceStore({
     navigateBrowserTab: navigateBrowserTabAction,
     reloadBrowserTab: reloadBrowserTabAction,
     ensureTabForWorktree,
+    openSshHostTerminal,
     openWorkspacePortInBrowser,
     ensureSessionBackends,
+    dispatchWorkspaceAction: dispatch,
     closeTab,
     closeOtherTabs,
     closeTabsToRight,
@@ -1013,6 +1172,7 @@ export function useWorkspaceStore({
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
+    retrySshConnection,
     updateSessionTitleActivity,
     subscribeTerminalBell,
     markTabUnread: (tabId: string) => dispatch({ type: "MARK_TAB_UNREAD", tabId }),
@@ -1606,7 +1766,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         Object.entries(state.sessions).map(([id, session]) => {
           if (session.backendSessionId !== action.backendSessionId) return [id, session];
           matchedSessionIds.push(id);
-          return [id, { ...session, lifecycle: action.lifecycle }];
+          return [
+            id,
+            {
+              ...session,
+              lifecycle: action.lifecycle,
+              reconnectLifecycle: action.lifecycle === "exited" ? "idle" : session.reconnectLifecycle,
+            },
+          ];
         }),
       ) as Record<string, TerminalSession>;
       let nextState: WorkspaceState = { ...state, sessions };
@@ -1621,6 +1788,44 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
       return nextState;
     }
+    case "CONNECTION_STATUS": {
+      const sessions = Object.fromEntries(
+        Object.entries(state.sessions).map(([id, session]) => [
+          id,
+          session.backendSessionId === action.backendSessionId && session.ssh
+            ? { ...session, connectionStatus: action.status }
+            : session,
+        ]),
+      ) as Record<string, TerminalSession>;
+      return { ...state, sessions };
+    }
+    case "SET_RECONNECT_LIFECYCLE": {
+      const session = state.sessions[action.sessionId];
+      if (!session) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [action.sessionId]: {
+            ...session,
+            reconnectLifecycle: action.lifecycle,
+            reconnectError: action.error ?? null,
+            reconnectRequestId: action.requestId ?? session.reconnectRequestId ?? null,
+          },
+        },
+      };
+    }
+    case "APPLY_PROVIDER_SESSION_IF_MISSING": {
+      const session = state.sessions[action.sessionId];
+      if (!session || session.providerSession) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [action.sessionId]: { ...session, providerSession: action.providerSession },
+        },
+      };
+    }
     case "REBIND_SESSION_BACKEND": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
@@ -1632,7 +1837,12 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...session,
             backendSessionId: action.backendSessionId,
             cwd: action.cwd ?? session.cwd,
+            daemonEpoch: action.daemonEpoch ?? null,
+            lastOutputSequence: null,
             lifecycle: "running",
+            reconnectLifecycle: "idle",
+            reconnectError: null,
+            reconnectRequestId: null,
           },
         },
       };
@@ -1653,12 +1863,21 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         return state;
       }
 
+      const authoritativeAgentType = state.sessions[action.sessionId]?.agentType ?? null;
       const normalizedManifestId = action.manifestId?.trim().toLowerCase();
       const isSupportedManifest = Boolean(normalizedManifestId && resolveAgentLogo(normalizedManifestId));
       const prevActivity = previous as WorkspaceTerminalActivity | undefined;
-      const agentType = isSupportedManifest ? normalizedManifestId : prevActivity?.agentType;
-      const isAgent = isSupportedManifest ? true : (prevActivity?.isAgent ?? false);
-      const agentSource = isSupportedManifest ? "screen" : prevActivity?.agentSource;
+      const agentType = authoritativeAgentType
+        ? authoritativeAgentType
+        : isSupportedManifest
+          ? normalizedManifestId
+          : prevActivity?.agentType;
+      const isAgent = authoritativeAgentType ? true : isSupportedManifest ? true : (prevActivity?.isAgent ?? false);
+      const agentSource = authoritativeAgentType
+        ? prevActivity?.agentSource
+        : isSupportedManifest
+          ? "screen"
+          : prevActivity?.agentSource;
 
       const activity: WorkspaceTerminalActivity = {
         state: mappedState,
@@ -1668,7 +1887,20 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         source: "screen",
         agentSource,
       };
-      return applySessionActivity(state, action.tabId, action.sessionId, activity);
+      const nextState = applySessionActivity(state, action.tabId, action.sessionId, activity);
+      if (!action.providerSession) return nextState;
+      const session = nextState.sessions[action.sessionId];
+      if (!session) return nextState;
+      return {
+        ...nextState,
+        sessions: {
+          ...nextState.sessions,
+          [action.sessionId]: {
+            ...session,
+            providerSession: action.providerSession,
+          },
+        },
+      };
     }
     case "SESSION_TITLE_ACTIVITY": {
       const previous = state.activityBySessionId?.[action.sessionId];
@@ -1917,7 +2149,12 @@ function clearWorktreeUnreadWhenRead(
 
 async function spawnTerminalForLogicalAction(
   services: WorkspaceServices,
-  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null },
+  request: {
+    workspaceId: string;
+    worktree: WorktreeIdentity | null;
+    cwd?: string | null;
+    startup?: { kind: "ssh"; host: SshHost } | null;
+  },
 ): Promise<string> {
   const clientRequestId = createClientRequestId();
   const stableRequest = { ...request, clientRequestId };

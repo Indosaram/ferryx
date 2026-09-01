@@ -16,9 +16,31 @@ const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TERM_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Decides a UTF-8 `LANG` override for PTY children whose inherited environment selects
+/// no character-type locale at all (e.g. a launchd-spawned GUI daemon without LANG).
+/// Returns `None` when the child already receives an explicit locale via `LC_ALL`,
+/// `LC_CTYPE`, or a non-empty `LANG`; explicit settings are never overridden.
+pub fn utf8_locale_override<E>(get_env: E) -> Option<(&'static str, &'static str)>
+where
+    E: Fn(&'static str) -> Option<std::ffi::OsString>,
+{
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if get_env(key).map(|v| !v.is_empty()).unwrap_or(false) {
+            return None;
+        }
+    }
+    let locale = if cfg!(target_os = "macos") {
+        "en_US.UTF-8"
+    } else {
+        "C.UTF-8"
+    };
+    Some(("LANG", locale))
+}
+
 #[derive(Clone)]
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    last_exit_codes: Arc<Mutex<HashMap<String, i32>>>,
     pty_system: Arc<Mutex<Box<dyn PtySystem + Send>>>,
 }
 
@@ -32,6 +54,7 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            last_exit_codes: Arc::new(Mutex::new(HashMap::new())),
             pty_system: Arc::new(Mutex::new(native_pty_system())),
         }
     }
@@ -93,6 +116,31 @@ impl PtyManager {
         self.spawn_with_id_and_worktree(session_id.into(), cmd, cols, rows, None)
     }
 
+    /// Respawn a worktree-owned PTY under an existing logical session identity.
+    ///
+    /// The previous process must already have left the registry. This is used by
+    /// reconnectable transports whose pane and output history outlive one PTY child.
+    pub fn spawn_with_id_in_worktree(
+        &self,
+        session_id: impl Into<String>,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        worktree_manager: &WorktreeManager,
+        worktree_path: &Path,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
+        let canonical_worktree = worktree_manager
+            .canonical_allowed_path(worktree_path)
+            .map_err(|error| PtyError::Other(error.to_string()))?;
+        self.spawn_with_id_and_worktree(
+            session_id.into(),
+            cmd,
+            cols,
+            rows,
+            Some(canonical_worktree),
+        )
+    }
+
     fn spawn_with_id_and_worktree(
         &self,
         session_id: String,
@@ -106,6 +154,7 @@ impl PtyManager {
                 "PTY session '{session_id}' already exists"
             )));
         }
+        self.last_exit_codes.lock().remove(&session_id);
 
         // The agent extension reports state for the pane it runs in, so it needs the session
         // identity here: this is the first point where the id exists and the child is not yet
@@ -121,6 +170,13 @@ impl PtyManager {
         // terminal, so it must advertise one.
         if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(true) {
             cmd.env("TERM", "xterm-256color");
+        }
+
+        // A Dock/launchd-launched daemon inherits no LANG/LC_* at all: PTY children then run
+        // in the "C" locale and compute CJK widths per byte, which desyncs line editors
+        // (zsh/bash) from the terminal grid while typing CJK text. Any UTF-8 locale fixes it.
+        if let Some((key, value)) = utf8_locale_override(std::env::var_os) {
+            cmd.env(key, value);
         }
 
         // TERM=xterm-256color only claims 256 indexed colors. Truecolor-capable agent TUIs read
@@ -250,6 +306,9 @@ impl PtyManager {
         let Some(session) = self.get_session(session_id) else {
             return;
         };
+        self.last_exit_codes
+            .lock()
+            .insert(session_id.to_string(), code);
         if !session.begin_closing() {
             return;
         }
@@ -437,6 +496,10 @@ impl PtyManager {
         self.sessions.read().get(session_id).cloned()
     }
 
+    pub fn take_last_exit_code(&self, session_id: &str) -> Option<i32> {
+        self.last_exit_codes.lock().remove(session_id)
+    }
+
     pub fn has_session(&self, session_id: &str) -> bool {
         self.sessions.read().contains_key(session_id)
     }
@@ -527,5 +590,53 @@ mod tests {
 
         assert!(session.is_reaped(), "closed shell must be reaped");
         assert!(!manager.has_session(&session_id));
+    }
+
+    #[test]
+    fn utf8_locale_override_injected_when_environment_selects_no_locale() {
+        let empty: fn(&str) -> Option<std::ffi::OsString> = |_| None;
+        let (key, value) = utf8_locale_override(empty).expect("override must be produced");
+        assert_eq!(key, "LANG");
+        assert!(value.ends_with("UTF-8"), "locale must be UTF-8: {value}");
+        if cfg!(target_os = "macos") {
+            assert_eq!(value, "en_US.UTF-8");
+        }
+    }
+
+    #[test]
+    fn utf8_locale_override_respects_explicit_locale_variables() {
+        let cases: [(&str, &str); 3] = [
+            ("LANG", "ko_KR.UTF-8"),
+            ("LC_ALL", "en_US.UTF-8"),
+            ("LC_CTYPE", "UTF-8"),
+        ];
+        for (set_key, set_value) in cases {
+            let lookup = move |k: &str| {
+                if k == set_key {
+                    Some(std::ffi::OsString::from(set_value))
+                } else {
+                    None
+                }
+            };
+            assert!(
+                utf8_locale_override(lookup).is_none(),
+                "explicit {set_key} must suppress the override"
+            );
+        }
+    }
+
+    #[test]
+    fn utf8_locale_override_treats_empty_locale_variables_as_unset() {
+        let lookup = |k: &str| {
+            if k == "LANG" {
+                Some(std::ffi::OsString::new())
+            } else {
+                None
+            }
+        };
+        assert!(
+            utf8_locale_override(lookup).is_some(),
+            "empty LANG must not suppress the override"
+        );
     }
 }

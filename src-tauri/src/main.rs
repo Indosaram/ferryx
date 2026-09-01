@@ -13,6 +13,7 @@ use ferryx_lib::ipc::browser_cli::{
 pub enum LaunchMode {
     Gui,
     Daemon,
+    RelayBridge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,8 +192,10 @@ where
     T: AsRef<str>,
 {
     for arg in args {
-        if arg.as_ref() == "--daemon" {
-            return LaunchMode::Daemon;
+        match arg.as_ref() {
+            "--daemon" => return LaunchMode::Daemon,
+            "--relay-bridge" => return LaunchMode::RelayBridge,
+            _ => {}
         }
     }
     LaunchMode::Gui
@@ -260,6 +263,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        LaunchMode::RelayBridge => {
+            if let Err(e) = ferryx_lib::daemon::relay_bridge::run_relay_bridge() {
+                eprintln!("Ferryx relay bridge error: {e}");
+                std::process::exit(1);
+            }
+        }
         LaunchMode::Gui => {
             ferryx_lib::run();
         }
@@ -289,6 +298,12 @@ mod tests {
     fn test_parse_launch_mode_detects_daemon_flag() {
         let args = vec!["ferryx".to_string(), "--daemon".to_string()];
         assert_eq!(parse_launch_mode(&args), LaunchMode::Daemon);
+    }
+
+    #[test]
+    fn test_parse_launch_mode_detects_relay_bridge_flag() {
+        let args = vec!["ferryx".to_string(), "--relay-bridge".to_string()];
+        assert_eq!(parse_launch_mode(&args), LaunchMode::RelayBridge);
     }
 
     #[test]

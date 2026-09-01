@@ -18,7 +18,7 @@ import {
   onNativeTerminalScrollbar,
 } from "../lib/tauri";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
-import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
+import type { ConnectionStatusPayload, NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
 
 export interface TerminalBounds {
   x: number;
@@ -84,6 +84,16 @@ interface NativeCellSize {
   readonly height: number;
 }
 
+interface NativeMouseEvent {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly shiftKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly getModifierState: (key: "CapsLock" | "NumLock") => boolean;
+}
+
 interface NativeKeyInput {
   readonly keyEvent: {
     readonly key: string;
@@ -112,6 +122,7 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_detach"
   | "cmd_native_terminal_set_bounds"
   | "cmd_native_terminal_set_focus"
+  | "cmd_native_terminal_set_preedit"
   | "cmd_native_terminal_send_input"
   | "cmd_native_terminal_scroll"
   | "cmd_native_terminal_scrollbar"
@@ -337,6 +348,64 @@ export function resetNativeTerminalPaneForTest(): void {
   lastFocusedNativeTerminalSessionId = null;
 }
 
+export function SshConnectionStatusBadge({
+  status,
+  sessionId,
+}: {
+  status?: ConnectionStatusPayload;
+  sessionId: string | null;
+}): ReactElement | null {
+  const [retrying, setRetrying] = useState(false);
+  if (!status || status.state === "connected") return null;
+
+  const retry = async () => {
+    if (!sessionId || retrying) return;
+    setRetrying(true);
+    try {
+      if (isTauri()) await invoke<void>("cmd_terminal_retry", { sessionId });
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  return (
+    <div
+      role="status"
+      data-testid="ssh-connection-status"
+      className="absolute right-5 top-1 z-10 flex items-center gap-1.5 rounded-md border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground shadow-sm"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {status.state === "reconnecting" ? (
+        <span>Reconnecting...</span>
+      ) : status.state === "daemon-gone" || status.kind === "daemon-gone" ? (
+        <>
+          <span>Remote daemon unavailable</span>
+          <button
+            type="button"
+            className="rounded border border-border bg-background px-1.5 py-0.5 text-foreground hover:bg-accent disabled:opacity-50"
+            disabled={retrying}
+            onClick={() => void retry()}
+          >
+            Enable / redeploy
+          </button>
+        </>
+      ) : (
+        <>
+          <span>Failed</span>
+          <button
+            type="button"
+            className="rounded border border-border bg-background px-1.5 py-0.5 text-foreground hover:bg-accent disabled:opacity-50"
+            disabled={retrying}
+            onClick={() => void retry()}
+          >
+            Retry
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function NativeTerminalPane({
   sessionId,
   session,
@@ -350,6 +419,16 @@ export function NativeTerminalPane({
   const isComposingRef = useRef(false);
   const scrollbarDragRef = useRef<ScrollbarDrag | null>(null);
   const pointerDragRef = useRef<TerminalPointerDrag | null>(null);
+  const pendingMotionRef = useRef<{
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    shiftKey: boolean;
+    ctrlKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+  } | null>(null);
+  const motionFrameRef = useRef<number | null>(null);
   const scaleFactorRef = useRef(1);
   const cellSizeRef = useRef<NativeCellSize | null>(null);
   const contextVisible = useNativeTerminalVisibility();
@@ -362,6 +441,12 @@ export function NativeTerminalPane({
   // supply `sessionId` without a `session` object, fall back safely to `sessionId``.
   // When a `session` object is provided, require `backendSessionId` so we never attach with local frontend ID.
   const targetSessionId = session ? (session.backendSessionId ?? null) : (sessionId ?? null);
+  const previousTargetSessionIdRef = useRef(targetSessionId);
+  const isBackendRebind = previousTargetSessionIdRef.current === null && targetSessionId !== null;
+
+  useEffect(() => {
+    previousTargetSessionIdRef.current = targetSessionId;
+  }, [targetSessionId]);
 
   const updateImeAnchor = (receipt: NativeTerminalReceipt | undefined) => {
     if (!receipt) {
@@ -479,6 +564,19 @@ export function NativeTerminalPane({
     }
   }, [visible]);
 
+  const setPreedit = useCallback((preedit: string | null) => {
+    if (!visible || !isTauri() || !targetSessionId) {
+      return;
+    }
+
+    void invoke("cmd_native_terminal_set_preedit", {
+      sessionId: targetSessionId,
+      preedit,
+    }).catch((error: unknown) => {
+      reportNativeTerminalIpcFailure("cmd_native_terminal_set_preedit", error);
+    });
+  }, [targetSessionId, visible]);
+
   const sendInput = useCallback((input: NativeTerminalInput) => {
     if (!visible || !isTauri() || !targetSessionId) {
       switchDebug("terminal.surface.input.dropped", {
@@ -579,21 +677,12 @@ export function NativeTerminalPane({
   );
 
   const sendImagePasteShortcut = useCallback(() => {
-    sendInput({
-      keyEvent: {
-        key: "v",
-        action: "Press",
-        modifiers: {
-          shift: false,
-          ctrl: true,
-          alt: false,
-          superKey: false,
-          capsLock: false,
-          numLock: false,
-        },
-        utf8: null,
-      },
-    });
+    // Send the raw 0x16 byte instead of a synthesized ctrl+v key event. The key event
+    // goes through the ghostty key encoder, which mangles ctrl+letter chords to a plain
+    // character once the agent pushes Kitty keyboard protocol flags (omo/pi-tui does at
+    // startup), so the agent would receive a literal "v" instead of the paste chord.
+    // Raw bytes bypass the encoder and reach every agent identically.
+    sendInput({ text: "\u0016" });
   }, [sendInput]);
 
   const suppressNextPasteRef = useRef(false);
@@ -631,25 +720,21 @@ export function NativeTerminalPane({
   }, [sendImagePasteShortcut, sendPaste, targetSessionId, visible]);
 
   const sendMouse = useCallback((
-    event: PointerEvent | React.PointerEvent<HTMLDivElement>,
+    event: NativeMouseEvent,
     action: "Press" | "Motion" | "Release",
     button: "Left" | null,
   ) => {
     const viewport = viewportRef.current;
     if (!visible || !isTauri() || !targetSessionId || !viewport) return;
-
     const rect = viewport.getBoundingClientRect();
-    const scaleFactor = scaleFactorRef.current;
-    const cellSize = cellSizeRef.current;
-    if (!cellSize) return;
-    void invoke<{ readonly receipt?: NativeTerminalReceipt }>("cmd_native_terminal_mouse", {
+    void invoke<{ readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt }>("cmd_native_terminal_mouse", {
       sessionId: targetSessionId,
       event: {
         action,
         button,
         position: {
-          x: (event.clientX - rect.left) * scaleFactor,
-          y: (event.clientY - rect.top) * scaleFactor,
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top,
         },
         modifiers: {
           shift: event.shiftKey,
@@ -659,20 +744,12 @@ export function NativeTerminalPane({
           capsLock: event.getModifierState("CapsLock"),
           numLock: event.getModifierState("NumLock"),
         },
-        size: {
-          screenWidth: Math.round(rect.width * scaleFactor),
-          screenHeight: Math.round(rect.height * scaleFactor),
-          cellWidth: cellSize.width,
-          cellHeight: cellSize.height,
-          paddingTop: 0,
-          paddingBottom: 0,
-          paddingRight: 0,
-          paddingLeft: 0,
-        },
       },
     })
-      .then((receipt: { readonly receipt?: NativeTerminalReceipt } | undefined) => {
-        updateImeAnchor(receipt?.receipt);
+      .then((receipt: { readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt } | undefined) => {
+        if (action !== "Motion") {
+          updateImeAnchor(receipt?.receipt);
+        }
       })
       .catch((error: unknown) => {
         reportNativeTerminalIpcFailure("cmd_native_terminal_mouse", error);
@@ -739,7 +816,27 @@ export function NativeTerminalPane({
         return;
       }
       if (pointerDragRef.current?.pointerId === event.pointerId) {
-        sendMouse(event, "Motion", null);
+        pendingMotionRef.current = {
+          pointerId: event.pointerId,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          shiftKey: event.shiftKey,
+          ctrlKey: event.ctrlKey,
+          altKey: event.altKey,
+          metaKey: event.metaKey,
+        };
+        if (motionFrameRef.current === null) {
+          motionFrameRef.current = requestAnimationFrame(() => {
+            const data = pendingMotionRef.current;
+            pendingMotionRef.current = null;
+            motionFrameRef.current = null;
+            if (!data || pointerDragRef.current?.pointerId !== data.pointerId) return;
+            sendMouse({
+              ...data,
+              getModifierState: () => false,
+            }, "Motion", null);
+          });
+        }
       }
     };
     const finish = (event: PointerEvent) => {
@@ -749,6 +846,11 @@ export function NativeTerminalPane({
         refreshScrollbar();
       }
       if (pointerDragRef.current?.pointerId === event.pointerId) {
+        if (motionFrameRef.current !== null) {
+          cancelAnimationFrame(motionFrameRef.current);
+          motionFrameRef.current = null;
+        }
+        pendingMotionRef.current = null;
         pointerDragRef.current = null;
         sendMouse(event, "Release", null);
       }
@@ -760,6 +862,11 @@ export function NativeTerminalPane({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
+      if (motionFrameRef.current !== null) {
+        cancelAnimationFrame(motionFrameRef.current);
+        motionFrameRef.current = null;
+      }
+      pendingMotionRef.current = null;
       document.body.style.cursor = "";
     };
   }, [refreshScrollbar, scrollToTrackPosition, sendMouse]);
@@ -1239,7 +1346,11 @@ export function NativeTerminalPane({
         setError(null);
         refreshScrollbar();
         reportBounds();
-        restoreFocusIfLost();
+        if (isBackendRebind) {
+          inputRef.current?.focus();
+        } else {
+          restoreFocusIfLost();
+        }
 
         if (typeof ResizeObserver !== "undefined" && !observer) {
           observer = new ResizeObserver(() => {
@@ -1309,7 +1420,7 @@ export function NativeTerminalPane({
           reportNativeTerminalIpcFailure("cmd_native_terminal_detach", error);
         });
     };
-  }, [measureGeometry, performAttach, refreshScrollbar, sessionId, targetSessionId, visible]);
+  }, [isBackendRebind, measureGeometry, performAttach, refreshScrollbar, sessionId, targetSessionId, visible]);
 
   const thumb = nativeScrollbarThumb(scrollbar);
 
@@ -1326,6 +1437,18 @@ export function NativeTerminalPane({
       }}
       onPointerDown={(event) => {
         if (!visible) return;
+        const geoViewport = viewportRef.current;
+        if (geoViewport) {
+          const geoRect = geoViewport.getBoundingClientRect();
+          switchDebug("terminal.mouse.pressGeo", {
+            rect: { left: geoRect.left, top: geoRect.top, width: geoRect.width, height: geoRect.height },
+            scaleFactor: scaleFactorRef.current,
+            cellSize: cellSizeRef.current,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            devicePixelRatio: window.devicePixelRatio,
+          });
+        }
         inputRef.current?.focus();
         if (event.button === 0) {
           pointerDragRef.current = { pointerId: event.pointerId };
@@ -1378,6 +1501,7 @@ export function NativeTerminalPane({
               composing: isComposingRef.current,
             });
             isComposingRef.current = false;
+            setPreedit(null);
             event.currentTarget.value = "";
             sendFocus(false);
           }}
@@ -1461,7 +1585,11 @@ export function NativeTerminalPane({
               backendSessionId: targetSessionId,
             });
           }}
+          onCompositionUpdate={(event) => {
+            setPreedit(event.data || null);
+          }}
           onCompositionEnd={(event) => {
+            setPreedit(null);
             isComposingRef.current = false;
             const text = event.data || event.currentTarget.value;
             switchDebug("terminal.surface.composition.end", {
@@ -1548,6 +1676,10 @@ export function NativeTerminalPane({
           />
         ) : null}
       </div>
+      <SshConnectionStatusBadge
+        status={session?.ssh ? session.connectionStatus : undefined}
+        sessionId={targetSessionId}
+      />
       {error ? (
         <div
           role="alert"

@@ -405,11 +405,8 @@ fn test_resolve_dist_dir_packaged_macos_bundle_layout() {
     let isolated_cwd = dir.path().join("isolated_cwd");
     std::fs::create_dir_all(&isolated_cwd).unwrap();
 
-    let resolved = crate::remote::server::resolve_dist_dir_from(
-        Some(&isolated_cwd),
-        Some(&exe_path),
-        None,
-    );
+    let resolved =
+        crate::remote::server::resolve_dist_dir_from(Some(&isolated_cwd), Some(&exe_path), None);
     let expected = resources_ui_dist.canonicalize().unwrap();
     assert_eq!(resolved.as_deref(), Some(expected.as_path()));
 }
@@ -430,11 +427,8 @@ fn test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout() {
     let isolated_cwd = dir.path().join("isolated_cwd");
     std::fs::create_dir_all(&isolated_cwd).unwrap();
 
-    let resolved = crate::remote::server::resolve_dist_dir_from(
-        Some(&isolated_cwd),
-        Some(&exe_path),
-        None,
-    );
+    let resolved =
+        crate::remote::server::resolve_dist_dir_from(Some(&isolated_cwd), Some(&exe_path), None);
     let expected = resources_ui_dist.canonicalize().unwrap();
     assert_eq!(resolved.as_deref(), Some(expected.as_path()));
 }

@@ -21,6 +21,7 @@ export type {
 };
 
 import type {
+  AgentProviderSession,
   AttachTerminalRequest,
   AttachTerminalResponse,
   BranchDeletionPreview,
@@ -32,6 +33,9 @@ import type {
   NativeTerminalTitlePayload,
   NotificationBadgeResult,
   SetBadgeCountResult,
+  RemoteWorktree,
+  SshHost,
+  SshTargetSummary,
   StructuredIpcError,
   TerminalLifecyclePayload,
   TerminalOutputPayload,
@@ -49,6 +53,10 @@ export type RegisteredProject = {
   workspaceId: string;
   repoRoot: string;
   gitRoot?: string | null;
+  /** Set when this project entry is a per-host clone of a remote machine. */
+  hostId?: string | null;
+  /** Reserved for the Orca-style two-tier model (logical project grouping). */
+  logicalProjectId?: string | null;
 };
 
 export type LocalBranch = {
@@ -109,6 +117,28 @@ export type SpawnTerminalRequest = {
   cwd?: string | null;
   clientRequestId?: string | null;
   shell?: string | null;
+  startup?: (
+    | {
+        kind: "agentResume";
+        agentType: string;
+        providerSession: AgentProviderSession;
+      }
+    | { kind: "ssh"; host: SshHost }
+  ) | null;
+};
+
+export type SpawnTerminalResult = {
+  sessionId: string;
+  daemonEpoch: string;
+  session: {
+    sessionId: string;
+    workspaceId?: string | null;
+    worktree?: WorktreeIdentity | null;
+    cwd?: string | null;
+    cols: number;
+    rows: number;
+    running: boolean;
+  };
 };
 
 export function isTauriRuntime() {
@@ -247,17 +277,71 @@ export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) 
   });
 }
 
-export async function spawnTerminal(request: SpawnTerminalRequest) {
-  if (!isTauri()) return `preview:${request.workspaceId}:${request.worktree?.slug ?? "root"}:${crypto.randomUUID()}`;
-  const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", {
+export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Promise<SpawnTerminalResult> {
+  if (!isTauri()) {
+    throw {
+      code: "INTERNAL_ERROR",
+      message: "Terminal spawning is available only in the Ferryx desktop runtime",
+      details: { runtime: "web" },
+    } satisfies StructuredIpcError;
+  }
+  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", {
     request: {
       ...request,
       cwd: request.cwd ?? null,
       clientRequestId: request.clientRequestId ?? null,
       shell: request.shell ?? null,
+      startup: request.startup ?? null,
     },
   });
-  return response.sessionId;
+}
+
+export async function spawnTerminal(request: SpawnTerminalRequest): Promise<string> {
+  return (await spawnTerminalDetailed(request)).sessionId;
+}
+
+export async function listSshHosts(): Promise<SshHost[]> {
+  return invokeCommand<SshHost[]>("cmd_ssh_list_hosts", {});
+}
+
+export async function importSshConfig(configText?: string | null): Promise<SshHost[]> {
+  return invokeCommand<SshHost[]>("cmd_ssh_import_config", { configText: configText ?? null });
+}
+
+export async function updateSshHost(host: SshHost): Promise<SshHost[]> {
+  return invokeCommand<SshHost[]>("cmd_ssh_update_host", { host });
+}
+
+export async function deleteSshHost(id: string): Promise<SshHost[]> {
+  return invokeCommand<SshHost[]>("cmd_ssh_delete_host", { id });
+}
+
+export async function testSshConnection(host: SshHost): Promise<SshTargetSummary> {
+  return invokeCommand<SshTargetSummary>("cmd_ssh_test_connection", { host });
+}
+
+export async function listRemoteWorktrees(host: SshHost): Promise<RemoteWorktree[]> {
+  return invokeCommand<RemoteWorktree[]>("cmd_ssh_list_remote_worktrees", { host });
+}
+
+export async function createRemoteWorktree(
+  host: SshHost,
+  path: string,
+  wsId: string,
+  slug: string,
+  baseRef?: string | null,
+): Promise<void> {
+  return invokeCommand<void>("cmd_ssh_create_remote_worktree", {
+    host,
+    path,
+    wsId,
+    slug,
+    baseRef: baseRef ?? null,
+  });
+}
+
+export async function deleteRemoteWorktree(host: SshHost, path: string): Promise<void> {
+  return invokeCommand<void>("cmd_ssh_delete_remote_worktree", { host, path });
 }
 
 export async function attachTerminal(
@@ -468,6 +552,14 @@ export type AgentDetection = {
 export async function detectAgents(names: string[]): Promise<AgentDetection[]> {
   if (!isTauri()) return names.map((name) => ({ name, available: false }));
   return invokeCommand<AgentDetection[]>("cmd_agents_detect", { names });
+}
+
+export async function discoverAgentProviderSession(sessionId: string, agentType: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<string | null>("cmd_agent_session_discover", {
+    sessionId,
+    agentType,
+  });
 }
 
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale";

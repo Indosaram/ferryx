@@ -50,7 +50,39 @@ export type TerminalSessionSummary = {
   daemonEpoch?: string | null;
 };
 
+export type AgentProviderSessionKey = "session_id" | "conversation_id";
+
+export type AgentProviderSession = {
+  readonly key: AgentProviderSessionKey;
+  readonly id: string;
+  readonly transcriptPath?: string;
+};
+
 export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed" | "running";
+
+export type SshConnectionState =
+  | "connected"
+  | "reconnecting"
+  | "reconnection-failed"
+  | "auth-failed"
+  | "daemon-gone"
+  | "error";
+
+export type ConnectionStatusPayload = {
+  sessionId: string;
+  state: SshConnectionState;
+  kind?: string | null;
+  attempt: number;
+};
+
+export type ReconnectLifecycle = "idle" | "validating" | "spawning" | "binding" | "failed";
+
+export type TerminalSessionSsh = {
+  hostId: string;
+  remotePath: string | null;
+  /** Precomputed `user@host` for pane titles. */
+  title: string;
+};
 
 export type TerminalSession = {
   /** Frontend-local stable identity used by pane leaves and terminal renderer ownership. */
@@ -71,6 +103,17 @@ export type TerminalSession = {
   agentType?: string | null;
   /** Session id the AGENT ITSELF generated. Ferryx never mints this. */
   agentSessionId?: string | null;
+  /** Authoritative provider session reference. Never minted by Ferryx. */
+  providerSession?: AgentProviderSession | null;
+  /** Transient reconnect lifecycle state (idle | validating | spawning | binding | failed). Never persisted. */
+  reconnectLifecycle?: ReconnectLifecycle;
+  /** Transient structured error when reconnect fails. Never persisted. */
+  reconnectError?: StructuredIpcError | null;
+  reconnectRequestId?: string | null;
+  /** Set when the pane is an ssh remote session. Never minted hosts; hostId references the sshHosts store. */
+  ssh?: TerminalSessionSsh | null;
+  /** Transient daemon-reported ssh continuity state. Never persisted. */
+  connectionStatus?: ConnectionStatusPayload;
 };
 
 export type TerminalTab = {
@@ -203,9 +246,15 @@ export type NestedSplit = {
   tabId: string;
 };
 
+export type SshPaneMeta = {
+  readonly hostId: string;
+  readonly remotePath?: string | null;
+};
+
 export type TerminalPaneContent = {
   readonly kind: "terminal";
   readonly sessionId: string;
+  readonly ssh?: SshPaneMeta;
 };
 
 export type BrowserPaneState = {
@@ -248,6 +297,42 @@ export type DagPaneContent = {
   readonly runId?: string | null;
 };
 
+export type SshHostSource = "config" | "manual";
+export type SshAuthMethod = "agent" | "key";
+export type RemoteContinuity = "auto" | "off" | "on";
+
+export type SshHost = {
+  id: string;
+  label: string;
+  hostname: string;
+  username?: string | null;
+  port?: number | null;
+  identityFile?: string | null;
+  jumpHost?: string | null;
+  source: SshHostSource;
+  authMethod: SshAuthMethod;
+  disabled?: boolean | null;
+  /** Remote repository root; scopes `git -C` for worktree listing/creation. */
+  repoRoot?: string | null;
+  /** Resident-daemon continuity policy. Missing persisted values deserialize as auto. */
+  remoteContinuity?: RemoteContinuity;
+};
+
+export type SshTargetSummary = {
+  host: SshHost;
+  reachable: boolean;
+  lastError?: string | null;
+  checkedAt: number;
+};
+
+export type RemoteWorktree = {
+  path: string;
+  head?: string | null;
+  branch?: string | null;
+  bare: boolean;
+  detached: boolean;
+};
+
 export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent;
 
 export function createDagPaneContent(dag?: DagPaneState | { runId?: string | null }): DagPaneContent {
@@ -287,11 +372,8 @@ export function createBrowserPaneContent(browser: BrowserPaneState): BrowserPane
   return content;
 }
 
-export function createTerminalPaneContent(sessionId: string): TerminalPaneContent {
-  return {
-    kind: "terminal",
-    sessionId,
-  };
+export function createTerminalPaneContent(sessionId: string, ssh?: SshPaneMeta): TerminalPaneContent {
+  return ssh ? { kind: "terminal", sessionId, ssh } : { kind: "terminal", sessionId };
 }
 
 /**
@@ -400,6 +482,7 @@ export type NativeTerminalAgentStatePayload = {
   state: "working" | "blocked" | "idle";
   ruleId: string;
   manifestId: string;
+  providerSession?: AgentProviderSession | null;
 };
 
 export type NativeTerminalBellPayload = {
@@ -506,11 +589,18 @@ export interface PersistedWorktree {
 }
 
 /** Version-2 terminal tab payload. All IDs in pane mappings are frontend-local session IDs. */
+export interface PersistedSshPane {
+  hostId: string;
+  remotePath?: string | null;
+}
+
+/** Version-3 adds `sshByLeafId`; v2 files load without it. */
 export interface PersistedTerminalTabState {
   primarySessionId: string;
   paneTree: PaneNode;
   sessionIdsByLeafId: Record<string, string>;
   contentsByLeafId?: Record<string, PaneContent>;
+  sshByLeafId?: Record<string, PersistedSshPane>;
   activeLeafId: string | null;
   expandedLeafId: string | null;
 }
@@ -587,6 +677,10 @@ export interface PersistedTerminalSession {
   agentType?: string | null;
   /** Session id the AGENT ITSELF generated. Ferryx never mints this. */
   agentSessionId?: string | null;
+  /** Authoritative provider session reference. Never minted by Ferryx. */
+  providerSession?: AgentProviderSession | null;
+  /** Remote ssh pane metadata. Carried through the Rust extra-flatten map. */
+  ssh?: TerminalSessionSsh | null;
 }
 
 export interface PersistedWorkspace {

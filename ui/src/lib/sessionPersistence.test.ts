@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-
 import { getGroupForTab, layoutReducer, normalizeLayout } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
 import { saveBrowserSettings } from "./browserSettings";
@@ -93,7 +92,8 @@ describe("sessionPersistence v2 serialization and migration", () => {
     const serialized = serializeWorkspaceState("default", "/workspace/main", workspaceState());
 
     expect(serialized.version).toBe(WORKSPACE_SESSION_VERSION);
-    expect(serialized.version).toBe(2);
+    // v3: adds sshByLeafId alongside the v2 terminal tab payload.
+    expect(serialized.version).toBe(3);
     const workspace = serialized.workspaces.default;
     expect(workspace.repoRoot).toBe("/workspace/main");
     expect(workspace.layout.activeTabId).toBe("tab-1");
@@ -111,6 +111,42 @@ describe("sessionPersistence v2 serialization and migration", () => {
       backendSessionId: "backend-1",
       worktreePath: "/workspace/main",
       cwd: "/workspace/main/packages/api",
+    });
+  });
+
+  it("round-trips ssh pane metadata through v3 sshByLeafId and terminal content ssh", () => {
+    const state = workspaceState();
+    state.sessions["sess-2"] = {
+      ...state.sessions["sess-2"],
+      ssh: { hostId: "h-box", remotePath: "/home/sook/proj", title: "sook@box" },
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    expect(serialized.version).toBe(3);
+    const savedTab = serialized.workspaces.default.layout.tabs[1];
+    expect(savedTab.terminal?.sshByLeafId?.["leaf-feature"]).toEqual({
+      hostId: "h-box",
+      remotePath: "/home/sook/proj",
+    });
+    // Local panes never grow ssh metadata.
+    const savedLocalTab = serialized.workspaces.default.layout.tabs[0];
+    expect(savedLocalTab.terminal?.sshByLeafId).toBeUndefined();
+
+    const restored = deserializeWorkspaceState("default", serialized);
+    expect(restored).not.toBeNull();
+    const restoredSession = restored!.sessions["sess-2"];
+    expect(restoredSession.ssh).toEqual({
+      hostId: "h-box",
+      remotePath: "/home/sook/proj",
+      title: "sook@box",
+    });
+    const restoredContent = restored!.layout.layoutsByTabId["tab-2"]?.contentsByLeafId?.[
+      "leaf-feature"
+    ];
+    expect(restoredContent?.kind).toBe("terminal");
+    expect(restoredContent && restoredContent.kind === "terminal" ? restoredContent.ssh : undefined).toEqual({
+      hostId: "h-box",
+      remotePath: "/home/sook/proj",
     });
   });
 
@@ -1034,6 +1070,10 @@ describe("sessionPersistence v2 serialization and migration", () => {
     // But agentType and agentSessionId MUST survive so the agent conversation can be resumed
     expect(restored.sessions["sess-1"].agentType).toBe("claude");
     expect(restored.sessions["sess-1"].agentSessionId).toBe("claude-session-uuid-9999");
+    expect(restored.sessions["sess-1"].providerSession).toEqual({
+      key: "session_id",
+      id: "claude-session-uuid-9999",
+    });
   });
 
   it("loads legacy save files without agent fields without throwing and sets agentType/agentSessionId to null", () => {
@@ -1090,5 +1130,115 @@ describe("sessionPersistence v2 serialization and migration", () => {
     expect(restored.sessions["sess-1"]).toBeDefined();
     expect(restored.sessions["sess-1"].agentType).toBeNull();
     expect(restored.sessions["sess-1"].agentSessionId).toBeNull();
+  });
+
+  it("keeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore", () => {
+    // Given: a persisted workspace state containing live daemon PTYs with backendSessionId, daemonEpoch,
+    // lastOutputSequence, CWD, agent metadata, and tab/leaf ownership in layoutsByTabId.
+    const state = workspaceState();
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      daemonEpoch: "1700000000",
+      lastOutputSequence: "450",
+      agentType: "claude",
+      agentSessionId: "claude-session-uuid-1234",
+    };
+    state.sessions["sess-3"] = {
+      ...state.sessions["sess-3"],
+      daemonEpoch: "1700000000",
+      lastOutputSequence: "820",
+      agentType: "omo",
+      agentSessionId: "omo-session-uuid-5678",
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    const liveSessions = [
+      { sessionId: "backend-1", daemonEpoch: "1700000000" },
+      { sessionId: "backend-3", daemonEpoch: "1700000000" },
+    ];
+
+    // When: deserializing with live backend sessions matching the current daemon epoch
+    const restored = deserializeWorkspaceState("default", serialized, liveSessions);
+
+    // Then: live backend identity, local session id, CWD, leaf ownership, agent metadata, and sequence are preserved
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    expect(restored.sessions["sess-1"]).toMatchObject({
+      id: "sess-1",
+      backendSessionId: "backend-1",
+      lifecycle: "working",
+      cwd: "/workspace/main/packages/api",
+      worktreePath: "/workspace/main",
+      daemonEpoch: "1700000000",
+      lastOutputSequence: "450",
+      agentType: "claude",
+      agentSessionId: "claude-session-uuid-1234",
+    });
+
+    expect(restored.sessions["sess-3"]).toMatchObject({
+      id: "sess-3",
+      backendSessionId: "backend-3",
+      lifecycle: "working",
+      cwd: "/workspace/main/packages/web",
+      worktreePath: "/workspace/main",
+      daemonEpoch: "1700000000",
+      lastOutputSequence: "820",
+      agentType: "omo",
+      agentSessionId: "omo-session-uuid-5678",
+    });
+
+    // sess-2 was not in liveSessions, so its backendSessionId is nulled and lifecycle is exited
+    expect(restored.sessions["sess-2"].backendSessionId).toBeNull();
+    expect(restored.sessions["sess-2"].lifecycle).toBe("exited");
+
+    // Layout tab and leaf ownership are preserved
+    const tab1Layout = restored.layout.layoutsByTabId["tab-1"];
+    expect(tab1Layout).toBeDefined();
+    expect(tab1Layout.sessionIdsByLeafId).toEqual({
+      "leaf-1": "sess-1",
+      "leaf-2": "sess-3",
+    });
+    expect(tab1Layout.activeLeafId).toBe("leaf-2");
+    expect(tab1Layout.expandedLeafId).toBe("leaf-2");
+  });
+
+  it("persists providerSession and never serializes transient reconnect locks or in-flight state", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      agentType: "claude",
+      agentSessionId: "c18f-uuid-456",
+      providerSession: { key: "session_id", id: "c18f-uuid-456" },
+      reconnectLifecycle: "spawning",
+      reconnectError: { code: "SOME_ERROR", message: "temporary error" },
+      reconnectRequestId: "transient-request-id",
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    const persistedSession = serialized.workspaces["default"]?.terminalSessions["sess-1"];
+    expect(persistedSession).toBeDefined();
+    expect(persistedSession?.providerSession).toEqual({ key: "session_id", id: "c18f-uuid-456" });
+    expect(persistedSession?.agentType).toBe("claude");
+    expect(persistedSession?.agentSessionId).toBe("c18f-uuid-456");
+
+    // Serialization must NOT contain transient reconnect locks, request IDs, or errors
+    const rawJson = JSON.stringify(serialized);
+    expect(rawJson).not.toContain("reconnectLifecycle");
+    expect(rawJson).not.toContain("reconnectError");
+    expect(rawJson).not.toContain("spawning");
+    expect(rawJson).not.toContain("clientRequestId");
+    expect(rawJson).not.toContain("reconnectRequestId");
+
+    // Deserialization on cold loss initializes transient reconnect state to idle and null error
+    const restored = deserializeWorkspaceState("default", serialized, []);
+    expect(restored).not.toBeNull();
+    const restoredSession = restored?.sessions["sess-1"];
+    expect(restoredSession?.providerSession).toEqual({ key: "session_id", id: "c18f-uuid-456" });
+    expect(restoredSession?.reconnectLifecycle).toBe("idle");
+    expect(restoredSession?.reconnectError).toBeNull();
+    expect(restoredSession?.reconnectRequestId).toBeNull();
+    expect(restoredSession?.lifecycle).toBe("exited");
+    expect(restoredSession?.backendSessionId).toBeNull();
   });
 });

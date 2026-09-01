@@ -65,10 +65,12 @@ pub mod macos {
         UNUserNotificationCenter,
     };
     use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
     const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
+    static SUBMISSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     pub fn map_authorization_status(status: UNAuthorizationStatus) -> NotificationAuthorization {
         match status {
@@ -100,7 +102,11 @@ pub mod macos {
             return Err("notifications require a bundled .app".into());
         }
 
-        let identifier = format!("ferryx-{}", std::process::id());
+        let identifier = format!(
+            "ferryx-{}-{}",
+            std::process::id(),
+            SUBMISSION_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
             let native = unsafe { UNMutableNotificationContent::new() };
             unsafe {

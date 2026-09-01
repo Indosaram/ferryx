@@ -14,7 +14,8 @@ import { workspaceName } from "./lib/branchFilter";
 import { newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, type BrowserShortcutAction } from "./lib/browserTauri";
 import { useGeneralSettings } from "./lib/generalSettings";
-import { NotificationCoordinator } from "./lib/notificationCoordinator";
+import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
+import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import type { TerminalActivityState } from "./lib/activity";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
@@ -56,6 +57,11 @@ import {
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
+import { reconnectAgentSession } from "./lib/agentReconnect";
+import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
+import { replaceExitedShellSession } from "./lib/shellReplacement";
+import { enqueueStrictPersistence } from "./lib/persistenceQueue";
+import { workspaceReducer } from "./state/workspaceStore";
 import { dagStore } from "./state/dagStore";
 import type { PersistedWorkspaceSession } from "./lib/types";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
@@ -66,6 +72,7 @@ import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
   worktreeIdentity,
   type DirtyState,
+  type SshHost,
   type StructuredIpcError,
   type WorkspaceTab,
   type Worktree,
@@ -380,6 +387,10 @@ function WorkspaceApp({
 }) {
   const [projects, setProjects] = useState<RegisteredProject[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState(initialActiveProjectId);
+
+  useEffect(() => {
+    startNativeWindowFocusTracking();
+  }, []);
   const [registeredProjectId, setRegisteredProjectId] = useState<string | null>(null);
   const [registrationAttempt, setRegistrationAttempt] = useState(0);
   const registeredProjectIdRef = useRef<string | null>(null);
@@ -474,6 +485,8 @@ function WorkspaceApp({
     syncWorktrees,
     restoreWorkspace,
     ensureSessionBackends,
+    dispatchWorkspaceAction,
+    openSshHostTerminal,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
   useBrowserSessionHydration(state, activeProject.workspaceId);
 
@@ -490,6 +503,7 @@ function WorkspaceApp({
     coordinatorRef.current = new NotificationCoordinator({
       onMarkTabUnread: (tabId) => markTabUnreadRef.current?.(tabId),
       onMarkWorktreeUnread: (path) => markWorktreeUnreadRef.current?.(path),
+      isWindowFocused: () => getNativeWindowFocused() ?? isWindowForegroundFocused(),
     });
   }
 
@@ -767,6 +781,7 @@ function WorkspaceApp({
         workspaceId: activeProjectRef.current.workspaceId,
         sessionIds: Object.values(restoredState.sessions)
           .filter((session) => session.backendSessionId === null)
+          .filter((session) => !(session.lifecycle === "exited" && (session.agentType || session.providerSession || session.agentSessionId)))
           .map((session) => session.id),
       });
     },
@@ -792,9 +807,8 @@ function WorkspaceApp({
   }, [activeProject.workspaceId, ensureSessionBackends, pendingBackendRecovery, registeredProjectId, reportRuntimeError]);
 
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
-  const persistSession = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
-    saveChainRef.current = saveChainRef.current
-      .then(async () => {
+  const persistSessionStrict = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
+    return enqueueStrictPersistence(saveChainRef, async () => {
         const existing = await loadSession().catch(() => null);
         const session = serializeWorkspaceState(
           workspaceId,
@@ -803,12 +817,13 @@ function WorkspaceApp({
           existing,
         );
         await saveSession(session);
-      })
-      .catch((error) => {
-        console.error("Failed to save workspace session:", error);
-      });
-    return saveChainRef.current;
+    });
   }, []);
+  const persistSession = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
+    return persistSessionStrict(workspaceId, repoRoot, currentState).catch((error) => {
+      console.error("Failed to save workspace session:", error);
+    });
+  }, [persistSessionStrict]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
@@ -930,6 +945,29 @@ function WorkspaceApp({
     [],
   );
 
+  const handleReorderProjects = useCallback((orderedWorkspaceIds: string[]) => {
+    setProjects((current) => {
+      const byId = new Map(current.map((project) => [project.workspaceId, project]));
+      const seen = new Set<string>();
+      const next: RegisteredProject[] = [];
+      for (const workspaceId of orderedWorkspaceIds) {
+        const project = byId.get(workspaceId);
+        if (!project || seen.has(workspaceId)) continue;
+        seen.add(workspaceId);
+        next.push(project);
+      }
+      for (const project of current) {
+        if (seen.has(project.workspaceId)) continue;
+        seen.add(project.workspaceId);
+        next.push(project);
+      }
+      if (next.every((project, index) => project === current[index])) return current;
+      projectsRef.current = next;
+      persistProjects(next);
+      return next;
+    });
+  }, []);
+
   const handleRegisteredProject = useCallback((project: RegisteredProject) => {
     setProjects((current) => {
       const next = [...current.filter((candidate) => candidate.workspaceId !== project.workspaceId), project];
@@ -940,6 +978,13 @@ function WorkspaceApp({
     persistActiveProjectId(project.workspaceId);
     setWorktreeStatuses({});
   }, []);
+
+  const handleOpenRemoteWorktree = useCallback(
+    (host: SshHost, remote: { path: string | null; head?: string | null; branch?: string | null }) => {
+      void openSshHostTerminal(host, remote).catch(reportRuntimeError);
+    },
+    [openSshHostTerminal, reportRuntimeError],
+  );
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
@@ -1521,7 +1566,9 @@ function WorkspaceApp({
           unreadWorktreePaths={state.unreadWorktreePaths}
           activityByWorktreePath={worktreeActivity}
           onSelectProject={handleSelectProject}
+          onReorderProjects={handleReorderProjects}
           onAddProject={handleOpenAddProject}
+          onOpenRemoteWorktree={handleOpenRemoteWorktree}
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
@@ -1582,6 +1629,41 @@ function WorkspaceApp({
             onFocusPane={focusPane}
             searchLeafId={searchLeafId}
             onCloseSearch={handleCloseSearch}
+            onReconnectAgentSession={(sessionId) => {
+              void reconnectAgentSession(sessionId, createAppReconnectDependencies({
+                getSessions: () => stateRef.current.sessions,
+                dispatch: dispatchWorkspaceAction,
+                persist: async (result, localSession) => {
+                  const current = stateRef.current;
+                  const nextState = workspaceReducer(current, {
+                    type: "REBIND_SESSION_BACKEND",
+                    sessionId: localSession.id,
+                    backendSessionId: result.sessionId,
+                    cwd: result.session.cwd ?? localSession.cwd,
+                    daemonEpoch: result.daemonEpoch,
+                  });
+                  await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+                },
+              })).catch(reportRuntimeError);
+            }}
+            onOpenNewShell={(sessionId) => replaceExitedShellSession(sessionId, {
+              getSessions: () => stateRef.current.sessions,
+              dispatch: dispatchWorkspaceAction,
+              persist: async (result, localSession) => {
+                const current = stateRef.current;
+                const nextState = workspaceReducer(current, {
+                  type: "REBIND_SESSION_BACKEND",
+                  sessionId: localSession.id,
+                  backendSessionId: result.sessionId,
+                  cwd: result.session.cwd ?? localSession.cwd,
+                  daemonEpoch: result.daemonEpoch,
+                });
+                await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+              },
+            }).then(() => undefined).catch((error) => {
+              reportRuntimeError(error);
+              throw error;
+            })}
             leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
           />
         ) : (

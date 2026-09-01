@@ -3,6 +3,7 @@ export const ACTIVE_PROJECT_STORAGE_KEY = "ferryx.active-project";
 export const SIDEBAR_OPEN_STORAGE_KEY = "ferryx.sidebar.open";
 export const SIDEBAR_WIDTH_STORAGE_KEY = "ferryx.sidebar.width";
 export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedProjects";
+export const SIDEBAR_WORKTREE_ORDER_STORAGE_KEY = "ferryx.sidebar.worktreeOrder";
 export const TERMINAL_SETTINGS_STORAGE_KEY = "ferryx.terminal.settings";
 export const NOTIFICATION_SETTINGS_STORAGE_KEY = "ferryx.settings.notifications:v1";
 export const APPEARANCE_SETTINGS_STORAGE_KEY = "ferryx.settings.appearance";

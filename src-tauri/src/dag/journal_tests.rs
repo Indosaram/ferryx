@@ -1,9 +1,12 @@
 use super::journal::*;
 use std::path::Path;
 
-const FIXTURE_F107_JSON: &str = include_str!("testdata/dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.json");
-const FIXTURE_081E_JSON: &str = include_str!("testdata/dag_081e597f-0aa8-4a20-a826-4e3d045aacef.json");
-const FIXTURE_F107_JSONL: &str = include_str!("testdata/dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.jsonl");
+const FIXTURE_F107_JSON: &str =
+    include_str!("testdata/dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.json");
+const FIXTURE_081E_JSON: &str =
+    include_str!("testdata/dag_081e597f-0aa8-4a20-a826-4e3d045aacef.json");
+const FIXTURE_F107_JSONL: &str =
+    include_str!("testdata/dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.jsonl");
 
 #[test]
 fn test_parse_run_checkpoint_f107_real_fixture() {
@@ -58,10 +61,8 @@ fn test_parse_run_checkpoint_081e_real_fixture() {
 
 #[test]
 fn test_state_tolerance_fallback_variant() {
-    let mutated = FIXTURE_081E_JSON.replace(
-        "\"state\":\"completed\"",
-        "\"state\":\"zombie-state\"",
-    );
+    let mutated =
+        FIXTURE_081E_JSON.replace("\"state\":\"completed\"", "\"state\":\"zombie-state\"");
     let snapshot = parse_run_checkpoint(&mutated).expect("parse mutated checkpoint");
     let arch_node = snapshot
         .nodes
@@ -80,7 +81,10 @@ fn test_waves_unknown_node_id_fails_with_typed_error() {
     );
     let result = parse_run_checkpoint(&mutated);
     match result {
-        Err(DagJournalError::UnknownWaveNode { node_id, wave_index }) => {
+        Err(DagJournalError::UnknownWaveNode {
+            node_id,
+            wave_index,
+        }) => {
             assert_eq!(node_id, "non-existent-node");
             assert_eq!(wave_index, 0);
         }
@@ -106,7 +110,9 @@ fn test_parse_events_jsonl_stream() {
 
     let transition_event = events
         .iter()
-        .find(|e| e.event_type == "dag.node.transitioned" && e.node_id.as_deref() == Some("extract"))
+        .find(|e| {
+            e.event_type == "dag.node.transitioned" && e.node_id.as_deref() == Some("extract")
+        })
         .expect("transitioned event found for extract");
 
     assert_eq!(transition_event.from, Some(DagNodeState::Pending));
@@ -123,6 +129,9 @@ fn test_list_run_summaries_from_testdata_dir() {
     for pair in summaries.windows(2) {
         let a = pair[0].updated_at.as_deref().unwrap_or("");
         let b = pair[1].updated_at.as_deref().unwrap_or("");
-        assert!(a >= b, "summaries must be sorted by updatedAt desc: {a} >= {b}");
+        assert!(
+            a >= b,
+            "summaries must be sorted by updatedAt desc: {a} >= {b}"
+        );
     }
 }

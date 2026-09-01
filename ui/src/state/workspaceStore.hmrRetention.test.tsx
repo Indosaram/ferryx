@@ -113,6 +113,8 @@ function buildTestWorkspaceState(workspaceId = "ws-1"): WorkspaceState {
       lifecycle: "working",
       daemonEpoch: "1700000000",
       lastOutputSequence: "100",
+      agentType: "claude",
+      agentSessionId: "claude-session-uuid-hmr-1",
     },
     "session-main-2": {
       id: "session-main-2",
@@ -124,6 +126,8 @@ function buildTestWorkspaceState(workspaceId = "ws-1"): WorkspaceState {
       lifecycle: "working",
       daemonEpoch: "1700000000",
       lastOutputSequence: "250",
+      agentType: "omo",
+      agentSessionId: "omo-session-uuid-hmr-2",
     },
     "session-feature-1": {
       id: "session-feature-1",
@@ -323,6 +327,8 @@ describe("HMR session retention boundary", () => {
       lifecycle: "working",
       daemonEpoch: "1700000000",
       lastOutputSequence: "100",
+      agentType: "claude",
+      agentSessionId: "claude-session-uuid-hmr-1",
     });
 
     expect(finalState.sessions["session-main-2"]).toEqual({
@@ -335,6 +341,8 @@ describe("HMR session retention boundary", () => {
       lifecycle: "working",
       daemonEpoch: "1700000000",
       lastOutputSequence: "250",
+      agentType: "omo",
+      agentSessionId: "omo-session-uuid-hmr-2",
     });
 
     expect(finalState.sessions["session-feature-1"]).toEqual({

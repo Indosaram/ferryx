@@ -27,9 +27,7 @@ pub fn no_window_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process:
     c
 }
 
-pub fn no_window_tokio_command<S: AsRef<std::ffi::OsStr>>(
-    program: S,
-) -> tokio::process::Command {
+pub fn no_window_tokio_command<S: AsRef<std::ffi::OsStr>>(program: S) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(program);
     configure_tokio_no_window(&mut c);
     c

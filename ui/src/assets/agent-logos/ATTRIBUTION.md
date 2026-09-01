@@ -27,9 +27,12 @@ adaptive below so they invert for dark chrome. Never hand-tint a brand logo.
 | `aider.png` | Aider | [Aider-AI/aider `android-chrome-192x192.png`](https://github.com/Aider-AI/aider/blob/main/aider/website/assets/icons/android-chrome-192x192.png), Apache-2.0 | brand color |
 | `crush.png` | Charm Crush | [charmbracelet/crush `crush-icon-solo.png`](https://github.com/charmbracelet/crush/blob/main/internal/ui/notification/crush-icon-solo.png), MIT | brand color |
 | `droid.svg` | Factory Droid | [factory.ai `favicon.svg`](https://factory.ai/favicon.svg) | adaptive monochrome (backing plate removed) |
+| `gjc.png` | Gajae-Code (GJC) | [Yeachan-Heo/gajae-code `assets/character.png`](https://github.com/Yeachan-Heo/gajae-code/blob/main/assets/character.png), MIT | brand color |
 
 `aider.png` and `crush.png` are raster because neither project publishes a vector mark;
-both are downscaled to 128x128 from the official artwork.
+both are downscaled to 128x128 from the official artwork. `gjc.png` is the official
+character mark with the bundled wordmark band cropped away, fitted to 128x128 on a
+transparent canvas.
 
 Do not add a logo here unless its source and license are recorded above. Agent types
 without a vetted local logo deliberately use the terminal icon.

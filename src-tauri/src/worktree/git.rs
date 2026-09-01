@@ -311,7 +311,14 @@ pub fn git_worktree_add(
         validate_base_ref(repo_root, base)?;
     }
 
-    let mut args = vec!["worktree", "add", "-b", branch_name, "--", path_str.as_str()];
+    let mut args = vec![
+        "worktree",
+        "add",
+        "-b",
+        branch_name,
+        "--",
+        path_str.as_str(),
+    ];
     if let Some(base) = base_ref {
         args.push(base);
     }
@@ -412,31 +419,46 @@ mod tests {
     #[test]
     fn git_path_argument_normalization_strips_windows_verbatim_prefixes() {
         assert_eq!(
-            validate_git_path_argument(Path::new(r"\\?\C:\Users\orca\repo\.orca-worktrees\ws\task")).unwrap(),
+            validate_git_path_argument(Path::new(
+                r"\\?\C:\Users\orca\repo\.orca-worktrees\ws\task"
+            ))
+            .unwrap(),
             r"C:\Users\orca\repo\.orca-worktrees\ws\task"
         );
         assert_eq!(
-            validate_git_path_argument(Path::new("//?/C:/Users/orca/repo/.orca-worktrees/ws/task")).unwrap(),
+            validate_git_path_argument(Path::new("//?/C:/Users/orca/repo/.orca-worktrees/ws/task"))
+                .unwrap(),
             "C:/Users/orca/repo/.orca-worktrees/ws/task"
         );
         assert_eq!(
-            validate_git_path_argument(Path::new(r"\\?\UNC\server\share\repo\.orca-worktrees\ws\task")).unwrap(),
+            validate_git_path_argument(Path::new(
+                r"\\?\UNC\server\share\repo\.orca-worktrees\ws\task"
+            ))
+            .unwrap(),
             r"\\server\share\repo\.orca-worktrees\ws\task"
         );
         assert_eq!(
-            validate_git_path_argument(Path::new("//?/UNC/server/share/repo/.orca-worktrees/ws/task")).unwrap(),
+            validate_git_path_argument(Path::new(
+                "//?/UNC/server/share/repo/.orca-worktrees/ws/task"
+            ))
+            .unwrap(),
             "//server/share/repo/.orca-worktrees/ws/task"
         );
         assert_eq!(
-            validate_git_path_argument(Path::new(r"\\.\C:\Users\orca\repo\.orca-worktrees\ws\task")).unwrap(),
+            validate_git_path_argument(Path::new(
+                r"\\.\C:\Users\orca\repo\.orca-worktrees\ws\task"
+            ))
+            .unwrap(),
             r"C:\Users\orca\repo\.orca-worktrees\ws\task"
         );
         assert_eq!(
-            validate_git_path_argument(Path::new(r"C:\Users\orca\repo\.orca-worktrees\ws\task")).unwrap(),
+            validate_git_path_argument(Path::new(r"C:\Users\orca\repo\.orca-worktrees\ws\task"))
+                .unwrap(),
             r"C:\Users\orca\repo\.orca-worktrees\ws\task"
         );
         assert_eq!(
-            validate_git_path_argument(Path::new("/Users/orca/repo/.orca-worktrees/ws/task")).unwrap(),
+            validate_git_path_argument(Path::new("/Users/orca/repo/.orca-worktrees/ws/task"))
+                .unwrap(),
             "/Users/orca/repo/.orca-worktrees/ws/task"
         );
         assert!(validate_git_path_argument(Path::new("-bad-path")).is_err());

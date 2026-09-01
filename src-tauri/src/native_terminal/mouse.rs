@@ -28,6 +28,7 @@ pub enum MouseButton {
 
 /// Mouse surface-space position in pixels.
 #[derive(Copy, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MousePosition {
     pub x: f32,
     pub y: f32,
@@ -35,6 +36,7 @@ pub struct MousePosition {
 
 /// Renderer dimensions and cell geometry context for mouse coordinate calculation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MouseRendererSize {
     pub screen_width: u32,
     pub screen_height: u32,
@@ -48,10 +50,37 @@ pub struct MouseRendererSize {
 
 /// A complete mouse input event.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MouseEvent {
     pub action: MouseAction,
     pub button: Option<MouseButton>,
     pub position: MousePosition,
     pub modifiers: KeyModifiers,
     pub size: Option<MouseRendererSize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_event_deserializes_from_camel_case_wire_json() {
+        let json = r#"{
+            "action": "Press",
+            "button": "Left",
+            "position": { "x": 12.5, "y": 6.0 },
+            "modifiers": { "shift": false, "ctrl": false, "alt": false, "superKey": true, "capsLock": false, "numLock": false },
+            "size": { "screenWidth": 1000, "screenHeight": 500, "cellWidth": 10, "cellHeight": 20, "paddingTop": 0, "paddingBottom": 0, "paddingRight": 0, "paddingLeft": 0 }
+        }"#;
+
+        let event: MouseEvent =
+            serde_json::from_str(json).expect("deserialize camelCase mouse event");
+        assert_eq!(event.action, MouseAction::Press);
+        assert_eq!(event.button, Some(MouseButton::Left));
+        assert_eq!(event.position.x, 12.5);
+        assert_eq!(event.modifiers.super_key, true);
+        let size = event.size.expect("mouse renderer size");
+        assert_eq!(size.screen_width, 1000);
+        assert_eq!(size.cell_height, 20);
+    }
 }

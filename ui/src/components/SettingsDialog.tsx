@@ -7,6 +7,7 @@ import {
   Keyboard,
   Palette,
   Radio,
+  Server,
   Settings2,
   TerminalSquare,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
 import { RemoteAccessSection } from "./settings/RemoteAccessSection";
 import { ShortcutsSection } from "./settings/ShortcutsSection";
+import { SshSection } from "./settings/SshSection";
 import { TerminalSection } from "./settings/TerminalSection";
 import type { SectionId } from "./settings/types";
 
@@ -120,6 +122,7 @@ function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
             <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
             <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote Access" onClick={() => setSection("remote")} />
+            <NavButton active={section === "ssh"} icon={<Server />} label="SSH" onClick={() => setSection("ssh")} />
           </nav>
         </div>
       </aside>
@@ -152,6 +155,7 @@ function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "remote" ? <RemoteAccessSection /> : null}
+          {section === "ssh" ? <SshSection /> : null}
         </div>
       </main>
     </div>

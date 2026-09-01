@@ -1,8 +1,12 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 use crate::daemon::protocol::{
-    AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse,
-    DaemonSessionDetails, DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
+    AgentProviderSessionKey, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus,
+    DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire,
+    TerminalStartup, DAEMON_PROTOCOL_VERSION,
 };
+use crate::daemon::remote::lease::RemoteLeaseStore;
+use crate::daemon::remote::routing::dispatch_spawn;
+use crate::daemon::remote::transport::{SshRelayConfig, SshRelayTransport};
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode};
@@ -28,6 +32,97 @@ use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
+/// Returns the compile-time development profile. Debug builds isolate session state and daemon
+/// endpoints so a release GUI cannot attach to a dev daemon; release paths remain byte-identical.
+pub(crate) fn is_dev_runtime() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Returns the QA and multi-instance session directory override. See
+/// `docs/SESSION_STATE_WIPE_2026-08-31.md`; release defaults intentionally remain byte-identical.
+pub(crate) fn session_dir_override() -> Option<PathBuf> {
+    std::env::var_os("FERRYX_SESSION_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+}
+
+pub(crate) fn resolve_session_path(
+    env_dir: Option<&Path>,
+    is_dev: bool,
+    release_path: &Path,
+    dev_path: &Path,
+) -> PathBuf {
+    env_dir
+        .map(|dir| dir.join("session_state.json"))
+        .unwrap_or_else(|| {
+            if is_dev {
+                dev_path.to_path_buf()
+            } else {
+                release_path.to_path_buf()
+            }
+        })
+}
+
+#[cfg(test)]
+mod session_path_tests {
+    use super::resolve_session_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn session_path_override_wins_for_release() {
+        assert_eq!(
+            resolve_session_path(
+                Some(Path::new("/qa/session")),
+                false,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/qa/session/session_state.json")
+        );
+    }
+
+    #[test]
+    fn session_path_dev_uses_isolated_path_without_override() {
+        assert_eq!(
+            resolve_session_path(
+                None,
+                true,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/app/rorca-dev/session_state.json")
+        );
+    }
+
+    #[test]
+    fn session_path_release_preserves_existing_path_without_override() {
+        assert_eq!(
+            resolve_session_path(
+                None,
+                false,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/app/rorca/session_state.json")
+        );
+    }
+
+    #[test]
+    fn session_path_override_wins_for_dev() {
+        assert_eq!(
+            resolve_session_path(
+                Some(Path::new("/qa/session")),
+                true,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/qa/session/session_state.json")
+        );
+    }
+}
+
+/// Returns the daemon runtime directory. Debug builds use a separate directory to prevent
+/// dev and release daemons from sharing endpoints; release paths intentionally remain unchanged.
 #[cfg(unix)]
 pub fn get_runtime_dir() -> PathBuf {
     // SAFETY:
@@ -35,7 +130,8 @@ pub fn get_runtime_dir() -> PathBuf {
     // Invariant: `libc::getuid` is a stateless, side-effect-free POSIX syscall wrapper that
     // takes no arguments, dereferences no pointers, and always returns the current process's UID.
     let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/rorca-{uid}"))
+    let suffix = if is_dev_runtime() { "-dev" } else { "" };
+    PathBuf::from(format!("/tmp/rorca-{uid}{suffix}"))
 }
 
 #[cfg(not(unix))]
@@ -45,7 +141,11 @@ pub fn get_runtime_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
         .join("Ferryx")
-        .join("runtime")
+        .join(if is_dev_runtime() {
+            "runtime-dev"
+        } else {
+            "runtime"
+        })
 }
 
 #[cfg(unix)]
@@ -84,17 +184,51 @@ fn get_persistent_lock_path() -> Option<PathBuf> {
                 std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx"))
             }
         })
-        .map(|base| base.join("locks").join("daemon.lock"))
+        .map(|base| {
+            base.join("locks").join(if is_dev_runtime() {
+                "daemon-dev.lock"
+            } else {
+                "daemon.lock"
+            })
+        })
 }
 
 pub fn get_default_session_path() -> PathBuf {
-    if let Some(mut base) = dirs_next().or_else(dirs_fallback) {
-        base.push("rorca");
-        let _ = fs::create_dir_all(&base);
-        base.join("session_state.json")
-    } else {
-        get_runtime_dir().join("session_state.json")
+    let override_dir = session_dir_override();
+    let is_dev = is_dev_runtime();
+    if override_dir.is_some() {
+        let path = resolve_session_path(
+            override_dir.as_deref(),
+            is_dev,
+            Path::new(""),
+            Path::new(""),
+        );
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        return path;
     }
+
+    let path = if let Some(base) = dirs_next().or_else(dirs_fallback) {
+        resolve_session_path(
+            override_dir.as_deref(),
+            is_dev,
+            &base.join("rorca").join("session_state.json"),
+            &base.join("rorca-dev").join("session_state.json"),
+        )
+    } else {
+        let runtime_dir = get_runtime_dir();
+        resolve_session_path(
+            override_dir.as_deref(),
+            is_dev,
+            &runtime_dir.join("session_state.json"),
+            &runtime_dir.join("session_state.dev.json"),
+        )
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    path
 }
 
 fn dirs_next() -> Option<PathBuf> {
@@ -497,6 +631,7 @@ const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 struct SpawnCacheEntry {
     session_id: String,
     created_at: Instant,
+    fingerprint: SpawnRequestFingerprint,
 }
 
 #[derive(Clone)]
@@ -505,6 +640,88 @@ struct StoredSessionMeta {
     workspace_id: String,
     worktree: Option<WorktreeIdentity>,
     cwd: PathBuf,
+    provider_claim: Option<ProviderSessionClaimKey>,
+    spawn_fingerprint: SpawnRequestFingerprint,
+    ssh_host_id: Option<String>,
+    remote_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SpawnRequestFingerprint {
+    workspace_id: String,
+    worktree: Option<WorktreeIdentity>,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+    shell: Option<String>,
+    provider_claim: Option<ProviderSessionClaimKey>,
+    startup: Option<TerminalStartup>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ProviderSessionClaimKey {
+    agent_type: String,
+    provider_key: AgentProviderSessionKey,
+    provider_id: String,
+    transcript_path: Option<String>,
+}
+
+impl ProviderSessionClaimKey {
+    fn from_startup(startup: Option<&TerminalStartup>) -> Option<Self> {
+        let (agent_type, provider_session) = match startup? {
+            TerminalStartup::AgentResume {
+                agent_type,
+                provider_session,
+            } => (agent_type, provider_session),
+            TerminalStartup::Ssh { .. } => return None,
+        };
+        let agent_type = agent_type.trim().to_ascii_lowercase();
+        let transcript_path = if matches!(agent_type.as_str(), "pi" | "prime-agent") {
+            provider_session
+                .transcript_path
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        Some(Self {
+            agent_type,
+            provider_key: provider_session.key,
+            provider_id: provider_session.id.trim().to_string(),
+            transcript_path,
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SpawnError {
+    #[error(
+        "AgentSessionConflict: {agent_type} {provider_key:?} '{provider_id}' is already owned by session '{existing_session_id}'"
+    )]
+    AgentSessionConflict {
+        agent_type: String,
+        provider_key: AgentProviderSessionKey,
+        provider_id: String,
+        existing_session_id: String,
+    },
+    #[error("{0}")]
+    InvalidAgentResume(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl SpawnError {
+    #[cfg(test)]
+    fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
+
+impl From<String> for SpawnError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
 }
 
 pub fn get_agent_state_socket_path() -> PathBuf {
@@ -547,8 +764,33 @@ pub struct DaemonServer {
     spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
     spawn_lock: tokio::sync::Mutex<()>,
     session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
-    agent_state_tx: broadcast::Sender<(String, String, Option<String>)>,
+    provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+    agent_state_tx: broadcast::Sender<(
+        String,
+        String,
+        Option<String>,
+        Option<crate::daemon::protocol::AgentProviderSession>,
+    )>,
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
+    ssh_reconnect_cancellations: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    remote_leases: Arc<Mutex<RemoteLeaseStore>>,
+    remote_transports: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<SshRelayTransport>>>>>,
+    /// Test-only ssh binary override; production always resolves to "ssh".
+    ssh_program: Option<&'static str>,
+}
+
+struct RemoteContinuitySpawnRequest {
+    client_request_id: String,
+    workspace_id: String,
+    worktree: Option<WorktreeIdentity>,
+    remote_path: Option<String>,
+    cols: u16,
+    rows: u16,
+    shell: Option<String>,
+    host: crate::ssh::SshHost,
+    local_metadata_cwd: PathBuf,
+    spawn_fingerprint: SpawnRequestFingerprint,
+    now: Instant,
 }
 
 impl Default for DaemonServer {
@@ -620,7 +862,72 @@ impl DaemonServer {
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
             spawn_lock: tokio::sync::Mutex::new(()),
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
+            provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
+            ssh_reconnect_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            remote_leases: Arc::new(Mutex::new(RemoteLeaseStore::default())),
+            remote_transports: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            ssh_program: None,
         }
+    }
+
+    #[cfg(test)]
+    fn set_ssh_program_for_test(&mut self, program: &'static str) {
+        self.ssh_program = Some(program);
+    }
+
+    fn ssh_program(&self) -> &str {
+        self.ssh_program.unwrap_or("ssh")
+    }
+
+    fn remote_platform() -> crate::ssh::remote_deploy::RemotePlatform {
+        #[cfg(target_os = "windows")]
+        { crate::ssh::remote_deploy::RemotePlatform::Windows }
+        #[cfg(target_os = "macos")]
+        { crate::ssh::remote_deploy::RemotePlatform::Macos }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        { crate::ssh::remote_deploy::RemotePlatform::Linux }
+    }
+
+    async fn resident_daemon_live(host: crate::ssh::SshHost) -> bool {
+        crate::ipc::run_blocking(move || {
+            crate::ssh::remote_deploy::probe_resident_blocking(
+                &host,
+                Self::remote_platform(),
+                env!("CARGO_PKG_VERSION"),
+            )
+            .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    async fn deploy_resident_daemon(host: crate::ssh::SshHost) -> Result<(), SpawnError> {
+        let binary = std::env::current_exe()
+            .map_err(|error| SpawnError::Other(format!("resolve Ferryx binary for remote deploy: {error}")))?;
+        crate::ipc::run_blocking(move || {
+            let bytes = std::fs::read(&binary)
+                .map_err(|error| crate::ipc::IpcError::internal(format!("read Ferryx binary: {error}")))?;
+            crate::ssh::remote_deploy::deploy_then_ready_blocking(
+                &host,
+                Self::remote_platform(),
+                env!("CARGO_PKG_VERSION"),
+                &bytes,
+            )
+            .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))
+        })
+        .await
+        .map_err(|error| SpawnError::Other(error.to_string()))
+    }
+
+    async fn remote_request(&self, session_id: &str, request: DaemonRequest) -> Option<Result<DaemonResponse, String>> {
+        let transport = self.remote_transports.lock().await.get(session_id).cloned()?;
+        let result = transport
+            .lock()
+            .await
+            .request(request)
+            .await
+            .map_err(|error| error.to_string());
+        Some(result)
     }
 
     pub fn epoch(&self) -> u64 {
@@ -641,12 +948,29 @@ impl DaemonServer {
 
     #[cfg(unix)]
     /// Parses one newline-delimited extension report, rejecting states the UI cannot render.
-    fn parse_agent_state_report(line: &str) -> Option<(String, String, Option<String>)> {
-        let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
+    fn parse_agent_state_report(
+        line: &str,
+    ) -> Option<(
+        String,
+        String,
+        Option<String>,
+        Option<crate::daemon::protocol::AgentProviderSession>,
+    )> {
+        let mut report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
         if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
             return None;
         }
-        Some((report.session_id, report.state, report.agent))
+        let provider_session = report.provider_session.filter(|provider| {
+            report.agent.as_deref().is_some_and(|agent| {
+                crate::terminal::shell::resolve_agent_resume_plan(agent, provider).is_ok()
+            })
+        });
+        Some((
+            report.session_id,
+            report.state,
+            report.agent,
+            provider_session,
+        ))
     }
 
     #[cfg(unix)]
@@ -780,6 +1104,7 @@ impl DaemonServer {
                             received_version: version,
                         }
                     } else {
+                        self.replay_pending_terminations().await;
                         DaemonResponse::HandshakeOk {
                             version: DAEMON_PROTOCOL_VERSION,
                             pid: std::process::id(),
@@ -803,6 +1128,7 @@ impl DaemonServer {
                     cols,
                     rows,
                     shell,
+                    startup,
                 }) => {
                     let res = self
                         .handle_spawn(
@@ -813,51 +1139,114 @@ impl DaemonServer {
                             cols,
                             rows,
                             shell,
+                            startup,
                         )
                         .await;
                     match res {
-                        Ok(session_id) => DaemonResponse::SpawnOk { session_id },
-                        Err(e) => DaemonResponse::Error { message: e },
+                        Ok(session_id) => match self.handle_describe_session(&session_id) {
+                            DaemonResponse::DescribeSessionOk { session } => {
+                                DaemonResponse::SpawnOk {
+                                    session_id,
+                                    epoch: self.epoch,
+                                    session,
+                                }
+                            }
+                            DaemonResponse::Error { message } => DaemonResponse::Error { message },
+                            _ => DaemonResponse::Error {
+                                message: "Failed to describe spawned session".to_string(),
+                            },
+                        },
+                        Err(SpawnError::AgentSessionConflict {
+                            agent_type,
+                            provider_key,
+                            provider_id,
+                            existing_session_id,
+                        }) => DaemonResponse::AgentSessionConflict {
+                            agent_type,
+                            provider_key,
+                            provider_id,
+                            existing_session_id,
+                        },
+                        Err(SpawnError::InvalidAgentResume(message)) => {
+                            DaemonResponse::AgentResumeInvalid { message }
+                        }
+                        Err(e) => DaemonResponse::Error {
+                            message: e.to_string(),
+                        },
                     }
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     self.handle_describe_session(&session_id)
                 }
-                Ok(DaemonRequest::Write { session_id, data }) => {
-                    match self.terminal_service.write_input(&session_id, &data) {
-                        Ok(()) => DaemonResponse::WriteOk,
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
+                Ok(DaemonRequest::DiscoverAgentSession {
+                    session_id,
+                    agent_type,
+                }) => {
+                    let provider_session_id = self
+                        .terminal_service
+                        .get_session(&session_id)
+                        .and_then(|session| session.pid())
+                        .and_then(|pid| {
+                            crate::ipc::agents::discover_agent_session_id(pid, &agent_type)
+                        });
+                    DaemonResponse::DiscoverAgentSessionOk {
+                        provider_session_id,
                     }
                 }
-                Ok(DaemonRequest::Resize {
-                    session_id,
-                    cols,
-                    rows,
-                }) => match self.terminal_service.resize(&session_id, cols, rows) {
-                    Ok(()) => DaemonResponse::ResizeOk,
-                    Err(e) => DaemonResponse::Error {
-                        message: e.to_string(),
-                    },
+                Ok(DaemonRequest::Write { session_id, data }) => {
+                    if self.remote_leases.lock().get(&session_id).is_some() {
+                        self.remote_request(&session_id, DaemonRequest::Write { session_id: session_id.clone(), data })
+                            .await
+                            .expect("remote transport registered")
+                            .unwrap_or_else(|message| DaemonResponse::Error { message })
+                    } else {
+                        match self.terminal_service.write_input(&session_id, &data) {
+                            Ok(()) => DaemonResponse::WriteOk,
+                            Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        }
+                    }
+                }
+                Ok(DaemonRequest::Resize { session_id, cols, rows }) => {
+                    if let Some(result) = self
+                        .remote_request(&session_id, DaemonRequest::Resize { session_id: session_id.clone(), cols, rows })
+                        .await
+                    {
+                        if matches!(result, Ok(DaemonResponse::ResizeOk)) {
+                            self.terminal_service.output_hub().record_resize(&session_id, cols, rows);
+                        }
+                        result.unwrap_or_else(|message| DaemonResponse::Error { message })
+                    } else {
+                        match self.terminal_service.resize(&session_id, cols, rows) {
+                            Ok(()) => DaemonResponse::ResizeOk,
+                            Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        }
+                    }
                 },
                 Ok(DaemonRequest::Signal { session_id, signal }) => {
-                    match self.terminal_service.signal(&session_id, signal) {
-                        Ok(()) => DaemonResponse::SignalOk,
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
+                    if let Some(result) = self
+                        .remote_request(&session_id, DaemonRequest::Signal { session_id: session_id.clone(), signal })
+                        .await
+                    {
+                        result.unwrap_or_else(|message| DaemonResponse::Error { message })
+                    } else {
+                        match self.terminal_service.signal(&session_id, signal) {
+                            Ok(()) => DaemonResponse::SignalOk,
+                            Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        }
                     }
                 }
                 Ok(DaemonRequest::Close { session_id }) => {
-                    self.session_metadata.write().remove(&session_id);
-                    match self.terminal_service.close_session(&session_id).await {
+                    match self.handle_close(&session_id).await {
                         Ok(()) => DaemonResponse::CloseOk,
                         Err(e) => DaemonResponse::Error {
                             message: e.to_string(),
                         },
                     }
                 }
+                Ok(DaemonRequest::Retry { session_id }) => match self.handle_retry(&session_id) {
+                    Ok(()) => DaemonResponse::RetryOk,
+                    Err(e) => DaemonResponse::Error { message: e },
+                },
                 Ok(DaemonRequest::ListSessions) => {
                     let sessions = self.terminal_service.list_sessions();
                     DaemonResponse::ListSessionsOk {
@@ -874,7 +1263,23 @@ impl DaemonServer {
                         .attach_with_sequence(&session_id, after_sequence)
                     {
                         Ok(attachment) => {
+                            let (pty_cols, pty_rows) = self
+                                .terminal_service
+                                .get_session(&session_id)
+                                .map(|s| s.get_size())
+                                .map(|(c, r)| (Some(c), Some(r)))
+                                .unwrap_or((None, None));
                             let hub = Arc::clone(self.terminal_service.output_hub());
+                            let history_segments = attachment
+                                .snapshot
+                                .history_segments
+                                .iter()
+                                .map(|seg| HistorySegmentWire {
+                                    cols: seg.cols,
+                                    rows: seg.rows,
+                                    bytes: seg.bytes.clone(),
+                                })
+                                .collect();
                             let resp = DaemonResponse::AttachOk {
                                 epoch: self.epoch,
                                 session_id: session_id.clone(),
@@ -882,6 +1287,9 @@ impl DaemonServer {
                                 end_sequence: attachment.snapshot.history_end_sequence,
                                 gap: attachment.snapshot.gap,
                                 history: attachment.snapshot.history,
+                                pty_cols,
+                                pty_rows,
+                                history_segments,
                             };
                             let mut resp_json = serde_json::to_string(&resp).unwrap();
                             resp_json.push('\n');
@@ -1119,47 +1527,60 @@ impl DaemonServer {
         cols: u16,
         rows: u16,
         shell: Option<String>,
-    ) -> Result<String, String> {
+        startup: Option<TerminalStartup>,
+    ) -> Result<String, SpawnError> {
         if client_request_id.trim().is_empty() {
-            return Err("clientRequestId cannot be empty".into());
+            return Err(SpawnError::Other("clientRequestId cannot be empty".into()));
         }
 
         let _spawn_guard = self.spawn_lock.lock().await;
 
         let now = Instant::now();
+        let provider_claim = ProviderSessionClaimKey::from_startup(startup.as_ref());
+        let spawn_fingerprint = SpawnRequestFingerprint {
+            workspace_id: workspace_id.to_string(),
+            worktree: worktree.clone(),
+            cwd: cwd.clone(),
+            cols,
+            rows,
+            shell: shell.clone(),
+            provider_claim: provider_claim.clone(),
+            startup: startup.clone(),
+        };
+        self.prune_dead_spawn_ownership(now);
         {
             let mut cache = self.spawn_idempotency_cache.lock();
-            cache.retain(|_, entry| {
-                now.duration_since(entry.created_at) <= SPAWN_REQUEST_TTL
-                    && self
-                        .terminal_service
-                        .get_session(&entry.session_id)
-                        .is_some()
-            });
             if let Some(entry) = cache.get_mut(client_request_id) {
+                if entry.fingerprint != spawn_fingerprint {
+                    return Err(SpawnError::Other(format!(
+                        "clientRequestId '{client_request_id}' was reused with a different spawn request"
+                    )));
+                }
                 entry.created_at = now;
                 return Ok(entry.session_id.clone());
             }
         }
 
-        self.session_metadata
-            .write()
-            .retain(|session_id, _| self.terminal_service.get_session(session_id).is_some());
-        if let Some(live_session_id) = self
+        let existing_request = self
             .session_metadata
             .read()
             .iter()
             .find(|(session_id, meta)| {
-                meta.client_request_id == client_request_id
-                    && self.terminal_service.get_session(session_id).is_some()
+                meta.client_request_id == client_request_id && self.session_is_live(session_id)
             })
-            .map(|(session_id, _)| session_id.clone())
-        {
+            .map(|(session_id, meta)| (session_id.clone(), meta.spawn_fingerprint.clone()));
+        if let Some((live_session_id, existing_fingerprint)) = existing_request {
+            if existing_fingerprint != spawn_fingerprint {
+                return Err(SpawnError::Other(format!(
+                    "clientRequestId '{client_request_id}' was reused with a different spawn request"
+                )));
+            }
             self.spawn_idempotency_cache.lock().insert(
                 client_request_id.to_string(),
                 SpawnCacheEntry {
                     session_id: live_session_id.clone(),
                     created_at: now,
+                    fingerprint: spawn_fingerprint.clone(),
                 },
             );
             return Ok(live_session_id);
@@ -1169,40 +1590,115 @@ impl DaemonServer {
         let (mgr, default_cwd) = self
             .workspace_registry
             .resolve_terminal_target(workspace_id, worktree.as_ref())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SpawnError::Other(e.to_string()))?;
 
-        let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {
+        // Remote (ssh) panes carry a remote path in `cwd`; it is display
+        // metadata and must never be validated against the local filesystem.
+        let (ssh_host_id, remote_path) = match startup.as_ref() {
+            Some(TerminalStartup::Ssh { host }) => (Some(host.id.clone()), cwd.clone()),
+            _ => (None, None),
+        };
+        let resolved_cwd = if matches!(startup.as_ref(), Some(TerminalStartup::Ssh { .. })) {
+            default_cwd
+        } else if let Some(ref custom_cwd_str) = cwd {
             let custom_path = PathBuf::from(custom_cwd_str);
             if !custom_path.exists() {
-                return Err(format!("CWD does not exist: {custom_cwd_str}"));
+                return Err(SpawnError::Other(format!(
+                    "CWD does not exist: {custom_cwd_str}"
+                )));
             }
             if !custom_path.is_dir() {
-                return Err(format!("CWD is not a directory: {custom_cwd_str}"));
+                return Err(SpawnError::Other(format!(
+                    "CWD is not a directory: {custom_cwd_str}"
+                )));
             }
-            let canonical = fs::canonicalize(&custom_path)
-                .map_err(|e| format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))?;
-            let allowed = mgr
-                .canonical_allowed_path(&canonical)
-                .map_err(|e| format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))?;
+            let canonical = fs::canonicalize(&custom_path).map_err(|e| {
+                SpawnError::Other(format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))
+            })?;
+            let allowed = mgr.canonical_allowed_path(&canonical).map_err(|e| {
+                SpawnError::Other(format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))
+            })?;
             if allowed != default_cwd && !allowed.starts_with(&default_cwd) {
-                return Err(format!(
+                return Err(SpawnError::Other(format!(
                     "CWD '{custom_cwd_str}' is outside the resolved workspace/worktree root '{}'",
                     default_cwd.display()
-                ));
+                )));
             }
             allowed
         } else {
             default_cwd
         };
 
-        let mut cmd = crate::terminal::shell::resolve_shell_command(shell.as_deref());
+        if let Some(TerminalStartup::Ssh { host }) = startup.as_ref() {
+            let daemon_live = if host.remote_continuity == crate::ssh::RemoteContinuity::Off {
+                false
+            } else {
+                Self::resident_daemon_live(host.clone()).await
+            };
+            let dispatch = dispatch_spawn(host.remote_continuity, daemon_live);
+            if dispatch.deploy {
+                Self::deploy_resident_daemon(host.clone()).await?;
+            }
+            if dispatch.start_session {
+                return self
+                    .spawn_remote_continuity_session(RemoteContinuitySpawnRequest {
+                        client_request_id: client_request_id.to_string(),
+                        workspace_id: workspace_id.to_string(),
+                        worktree,
+                        remote_path: cwd,
+                        cols,
+                        rows,
+                        shell,
+                        host: host.clone(),
+                        local_metadata_cwd: resolved_cwd,
+                        spawn_fingerprint,
+                        now,
+                    })
+                    .await;
+            }
+            if dispatch.emit_enable_action {
+                let _ = self.remote_event_tx.send(DaemonRemoteEvent {
+                    event: "remote-continuity-enable".to_string(),
+                    payload: serde_json::json!({ "hostId": host.id, "action": "enable" }),
+                });
+            }
+        }
+
+        let mut cmd = match crate::terminal::shell::resolve_startup_command_with_program(
+            shell.as_deref(),
+            startup.as_ref(),
+            self.ssh_program(),
+        ) {
+            Ok(cmd) => cmd,
+            Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
+        };
+        if let Some(claim) = provider_claim.as_ref() {
+            if let Some(existing_session_id) = self.provider_session_claims.lock().get(claim) {
+                return Err(SpawnError::AgentSessionConflict {
+                    agent_type: claim.agent_type.clone(),
+                    provider_key: claim.provider_key,
+                    provider_id: claim.provider_id.clone(),
+                    existing_session_id: existing_session_id.clone(),
+                });
+            }
+        }
         cmd.env("PROMPT_EOL_MARK", "");
         cmd.cwd(normalize_process_cwd(&resolved_cwd));
 
-        let (session_id, _) = self
-            .terminal_service
-            .spawn_in_worktree(cmd, cols, rows, &mgr, &resolved_cwd)
-            .map_err(|e| e.to_string())?;
+        let is_ssh = matches!(startup.as_ref(), Some(TerminalStartup::Ssh { .. }));
+        let (session_id, mut lifecycle_rx, ssh_ended_rx) = if is_ssh {
+            let (id, rx, ended) = self
+                .terminal_service
+                .spawn_reconnectable_in_worktree(cmd, cols, rows, &mgr, &resolved_cwd)
+                .map_err(|e| SpawnError::Other(e.to_string()))?;
+            (id, rx, Some(ended))
+        } else {
+            let (id, rx) = self
+                .terminal_service
+                .spawn_in_worktree(cmd, cols, rows, &mgr, &resolved_cwd)
+                .map_err(|e| SpawnError::Other(e.to_string()))?;
+            (id, rx, None)
+        };
 
         // Store idempotency entry and session metadata before releasing the request lock.
         self.spawn_idempotency_cache.lock().insert(
@@ -1210,6 +1706,7 @@ impl DaemonServer {
             SpawnCacheEntry {
                 session_id: session_id.clone(),
                 created_at: now,
+                fingerprint: spawn_fingerprint.clone(),
             },
         );
         self.session_metadata.write().insert(
@@ -1218,11 +1715,650 @@ impl DaemonServer {
                 client_request_id: client_request_id.to_string(),
                 workspace_id: workspace_id.to_string(),
                 worktree,
-                cwd: resolved_cwd,
+                cwd: resolved_cwd.clone(),
+                provider_claim: provider_claim.clone(),
+                spawn_fingerprint,
+                ssh_host_id,
+                remote_path,
             },
         );
+        if let Some(claim) = provider_claim {
+            self.provider_session_claims
+                .lock()
+                .insert(claim, session_id.clone());
+        }
+        if let Some(target_id) = self
+            .session_metadata
+            .read()
+            .get(&session_id)
+            .and_then(|meta| meta.ssh_host_id.clone())
+        {
+            self.remote_leases.lock().bind(
+                session_id.clone(),
+                target_id,
+                None,
+                self.epoch.to_string(),
+                1,
+                Self::lease_now(),
+            );
+        }
+
+        if let Some(ended_rx) = ssh_ended_rx {
+            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            self.ssh_reconnect_cancellations
+                .lock()
+                .insert(session_id.clone(), cancel_tx);
+            self.start_ssh_reconnect_task(
+                session_id.clone(),
+                mgr,
+                resolved_cwd,
+                cols,
+                rows,
+                shell,
+                startup.expect("ssh startup is present"),
+                ended_rx,
+                cancel_rx,
+            );
+        } else {
+            let cleanup_session_id = session_id.clone();
+            let cleanup_cache = Arc::clone(&self.spawn_idempotency_cache);
+            let cleanup_metadata = Arc::clone(&self.session_metadata);
+            let cleanup_claims = Arc::clone(&self.provider_session_claims);
+            tokio::spawn(async move {
+                loop {
+                    match lifecycle_rx.recv().await {
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                cleanup_cache
+                    .lock()
+                    .retain(|_, entry| entry.session_id != cleanup_session_id);
+                if let Some(meta) = cleanup_metadata.write().remove(&cleanup_session_id) {
+                    if let Some(claim) = meta.provider_claim {
+                        cleanup_claims
+                            .lock()
+                            .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
+                    }
+                }
+            });
+        }
 
         Ok(session_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_remote_continuity_session(
+        &self,
+        request: RemoteContinuitySpawnRequest,
+    ) -> Result<String, SpawnError> {
+        let RemoteContinuitySpawnRequest {
+            client_request_id,
+            workspace_id,
+            worktree,
+            remote_path,
+            cols,
+            rows,
+            shell,
+            host,
+            local_metadata_cwd,
+            spawn_fingerprint,
+            now,
+        } = request;
+        let version = env!("CARGO_PKG_VERSION");
+        let remote_bin = crate::ssh::remote_deploy::remote_binary_path(Self::remote_platform(), version);
+        let control_path = get_runtime_dir().join(format!("ssh-{}.sock", host.id));
+        let config = SshRelayConfig {
+            target: host.target(),
+            remote_bin,
+            control_path,
+        };
+        let (loss_tx, mut loss_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let leases = Arc::clone(&self.remote_leases);
+        let detached_tx = loss_tx.clone();
+        let mut transport = SshRelayTransport::new(
+            config.clone(),
+            move |session_id| {
+                let _ = leases.lock().detach(session_id, Self::lease_now());
+                let _ = detached_tx.send(session_id.to_string());
+            },
+            || {},
+        );
+        transport.connect().await.map_err(|error| SpawnError::Other(error.to_string()))?;
+        let generation = transport.generation().unwrap_or(1);
+        let details = transport
+            .start_session(crate::daemon::remote::transport::StartSessionRequest {
+                client_request_id: client_request_id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                worktree: worktree.clone(),
+                remote_path: remote_path.clone(),
+                cols,
+                rows,
+                shell,
+            })
+            .await
+            .map_err(|error| SpawnError::Other(error.to_string()))?;
+        let session_id = details.session_id;
+        let frames = transport.register_session(session_id.clone());
+        let output_hub = Arc::clone(self.terminal_service.output_hub());
+        output_hub.register_session(&session_id);
+        output_hub.record_initial_size(&session_id, cols, rows);
+        Self::pump_remote_frames(session_id.clone(), frames, Arc::clone(&output_hub));
+        self.remote_leases.lock().bind(
+            session_id.clone(),
+            host.id.clone(),
+            None,
+            "local-daemon",
+            generation,
+            Self::lease_now(),
+        );
+        self.session_metadata.write().insert(
+            session_id.clone(),
+            StoredSessionMeta {
+                client_request_id: client_request_id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                worktree,
+                cwd: local_metadata_cwd,
+                provider_claim: None,
+                spawn_fingerprint: spawn_fingerprint.clone(),
+                ssh_host_id: Some(host.id.clone()),
+                remote_path,
+            },
+        );
+        self.spawn_idempotency_cache.lock().insert(
+            client_request_id.to_string(),
+            SpawnCacheEntry {
+                session_id: session_id.clone(),
+                created_at: now,
+                fingerprint: spawn_fingerprint,
+            },
+        );
+        self.remote_transports
+            .lock()
+            .await
+            .insert(session_id.clone(), Arc::new(tokio::sync::Mutex::new(transport)));
+
+        let transports = Arc::clone(&self.remote_transports);
+        let reconnect_leases = Arc::clone(&self.remote_leases);
+        let reconnect_events = self.remote_event_tx.clone();
+        let reconnect_hub = Arc::clone(&output_hub);
+        tokio::spawn(async move {
+            while let Some(lost_session) = loss_rx.recv().await {
+                let mut ladder = crate::daemon::remote::reconnect::LadderState::default();
+                let mut last_kind = crate::daemon::remote::reconnect::Kind::Unknown("relay channel closed".into());
+                loop {
+                    let Some(delay) = ladder.next() else {
+                        Self::emit_connection_status(
+                            &reconnect_events,
+                            &lost_session,
+                            "reconnection-failed",
+                            Some(last_kind.event_kind()),
+                            ladder.attempt,
+                        );
+                        break;
+                    };
+                    Self::emit_connection_status(
+                        &reconnect_events,
+                        &lost_session,
+                        "reconnecting",
+                        Some(last_kind.event_kind()),
+                        ladder.attempt,
+                    );
+                    tokio::time::sleep(delay).await;
+                    let leases_for_callback = Arc::clone(&reconnect_leases);
+                    let loss_for_callback = loss_tx.clone();
+                    let mut replacement = SshRelayTransport::new(
+                        config.clone(),
+                        move |id| {
+                            let _ = leases_for_callback.lock().detach(id, Self::lease_now());
+                            let _ = loss_for_callback.send(id.to_string());
+                        },
+                        || {},
+                    );
+                    if let Err(error) = replacement.connect().await {
+                        let text = error.to_string();
+                        let kind = crate::daemon::remote::reconnect::classify(
+                            crate::daemon::remote::reconnect::Inputs {
+                                exit_code: None,
+                                stderr: &text,
+                                daemon_missing: text.contains("daemon") || text.contains("No such file"),
+                            },
+                        );
+                        if matches!(kind, crate::daemon::remote::reconnect::Kind::Auth) {
+                            Self::emit_connection_status(
+                                &reconnect_events,
+                                &lost_session,
+                                "auth-failed",
+                                Some(kind.event_kind()),
+                                ladder.attempt,
+                            );
+                            break;
+                        }
+                        if matches!(kind, crate::daemon::remote::reconnect::Kind::DaemonGone) {
+                            Self::emit_connection_status(
+                                &reconnect_events,
+                                &lost_session,
+                                "daemon-gone",
+                                Some(kind.event_kind()),
+                                ladder.attempt,
+                            );
+                            let _ = reconnect_events.send(DaemonRemoteEvent {
+                                event: "redeploy-prompt".into(),
+                                payload: serde_json::json!({ "sessionId": lost_session, "kind": kind.event_kind() }),
+                            });
+                            break;
+                        }
+                        last_kind = kind;
+                        continue;
+                    }
+                    let after_sequence = reconnect_hub.session_sequence_range(&lost_session).and_then(|(_, end)| end);
+                    match replacement.attach_session(&lost_session, after_sequence).await {
+                        Ok(DaemonResponse::AttachOk { history, .. }) => {
+                            if !history.is_empty() {
+                                reconnect_hub.publish(&lost_session, history);
+                            }
+                            let frames = replacement.register_session(lost_session.clone());
+                            Self::pump_remote_frames(lost_session.clone(), frames, Arc::clone(&reconnect_hub));
+                            let generation = replacement.generation().unwrap_or(1);
+                            let _ = reconnect_leases.lock().attach(&lost_session, "local-daemon", generation, Self::lease_now());
+                            transports.lock().await.insert(lost_session.clone(), Arc::new(tokio::sync::Mutex::new(replacement)));
+                            Self::emit_connection_status(&reconnect_events, &lost_session, "connected", None, ladder.attempt);
+                            break;
+                        }
+                        Ok(_) | Err(_) => continue,
+                    }
+                }
+            }
+        });
+        Ok(session_id)
+    }
+
+    fn pump_remote_frames(
+        session_id: String,
+        mut frames: tokio::sync::mpsc::Receiver<DaemonStreamMessage<'static>>,
+        output_hub: Arc<TerminalOutputHub>,
+    ) {
+        tokio::spawn(async move {
+            while let Some(frame) = frames.recv().await {
+                match frame {
+                    DaemonStreamMessage::Output { data, .. } => {
+                        output_hub.publish(&session_id, data.into_owned());
+                    }
+                    DaemonStreamMessage::Lagged { history, .. } => {
+                        output_hub.publish(&session_id, history.into_owned());
+                    }
+                    DaemonStreamMessage::Exit { .. } => break,
+                    DaemonStreamMessage::Gap { .. } | DaemonStreamMessage::AgentState { .. } => {}
+                }
+            }
+        });
+    }
+
+    fn emit_connection_status(
+        events: &broadcast::Sender<DaemonRemoteEvent>,
+        session_id: &str,
+        state: &str,
+        kind: Option<&str>,
+        attempt: usize,
+    ) {
+        let mut payload = serde_json::json!({
+            "sessionId": session_id,
+            "state": state,
+            "attempt": attempt,
+        });
+        if let Some(kind) = kind {
+            payload["kind"] = serde_json::Value::String(kind.to_string());
+        }
+        let _ = events.send(DaemonRemoteEvent {
+            event: "connection_status".to_string(),
+            payload,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_ssh_reconnect_task(
+        &self,
+        session_id: String,
+        manager: WorktreeManager,
+        cwd: PathBuf,
+        cols: u16,
+        rows: u16,
+        shell: Option<String>,
+        startup: TerminalStartup,
+        mut ended: tokio::sync::oneshot::Receiver<()>,
+        mut cancelled: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let terminal_service = Arc::clone(&self.terminal_service);
+        let events = self.remote_event_tx.clone();
+        let cancellations = Arc::clone(&self.ssh_reconnect_cancellations);
+        let ssh_program = self.ssh_program().to_string();
+        tokio::spawn(async move {
+            let mut ladder = crate::daemon::remote::reconnect::LadderState::default();
+            loop {
+                tokio::select! {
+                    _ = &mut ended => {}
+                    changed = cancelled.changed() => {
+                        if changed.is_err() || *cancelled.borrow() { break; }
+                        continue;
+                    }
+                }
+                if *cancelled.borrow() {
+                    break;
+                }
+
+                let exit_code = terminal_service.take_last_exit_code(&session_id);
+                let trailing = terminal_service
+                    .output_hub()
+                    .trailing_output(&session_id, 16 * 1024)
+                    .unwrap_or_default();
+                let stderr = String::from_utf8_lossy(&trailing);
+                let daemon_missing = stderr.contains("daemon endpoint")
+                    || stderr.contains("resident daemon")
+                    || stderr.contains("No such file or directory");
+                let reconnect_kind = crate::daemon::remote::reconnect::classify(
+                    crate::daemon::remote::reconnect::Inputs {
+                        exit_code,
+                        stderr: &stderr,
+                        daemon_missing,
+                    },
+                );
+                let kind = match &reconnect_kind {
+                    crate::daemon::remote::reconnect::Kind::Auth => "auth",
+                    crate::daemon::remote::reconnect::Kind::Network => "network",
+                    crate::daemon::remote::reconnect::Kind::RemoteCmd(_) => "remote-command",
+                    crate::daemon::remote::reconnect::Kind::DaemonGone => "daemon-gone",
+                    crate::daemon::remote::reconnect::Kind::Unknown(_) => "unknown",
+                };
+                match reconnect_kind {
+                    crate::daemon::remote::reconnect::Kind::Auth => {
+                        Self::emit_connection_status(
+                            &events,
+                            &session_id,
+                            "auth-failed",
+                            Some(kind),
+                            ladder.attempt,
+                        );
+                        break;
+                    }
+                    crate::daemon::remote::reconnect::Kind::DaemonGone => {
+                        let _ = events.send(DaemonRemoteEvent {
+                            event: "redeploy-prompt".to_string(),
+                            payload: serde_json::json!({
+                                "sessionId": &session_id,
+                                "kind": kind,
+                            }),
+                        });
+                        Self::emit_connection_status(
+                            &events,
+                            &session_id,
+                            "daemon-gone",
+                            Some(kind),
+                            ladder.attempt,
+                        );
+                        break;
+                    }
+                    crate::daemon::remote::reconnect::Kind::Network
+                    | crate::daemon::remote::reconnect::Kind::RemoteCmd(_)
+                    | crate::daemon::remote::reconnect::Kind::Unknown(_) => {}
+                }
+
+                let Some(delay) = ladder.next() else {
+                    Self::emit_connection_status(
+                        &events,
+                        &session_id,
+                        "reconnection-failed",
+                        Some(kind),
+                        ladder.attempt,
+                    );
+                    break;
+                };
+                Self::emit_connection_status(
+                    &events,
+                    &session_id,
+                    "reconnecting",
+                    Some(kind),
+                    ladder.attempt,
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    changed = cancelled.changed() => {
+                        if changed.is_err() || *cancelled.borrow() { break; }
+                        continue;
+                    }
+                }
+                if *cancelled.borrow() {
+                    break;
+                }
+
+                let mut cmd = match crate::terminal::shell::resolve_startup_command_with_program(
+                    shell.as_deref(),
+                    Some(&startup),
+                    &ssh_program,
+                ) {
+                    Ok(cmd) => cmd,
+                    Err(error) => {
+                        Self::emit_connection_status(
+                            &events,
+                            &session_id,
+                            "error",
+                            Some(&error.to_string()),
+                            ladder.attempt,
+                        );
+                        continue;
+                    }
+                };
+                cmd.env("PROMPT_EOL_MARK", "");
+                cmd.cwd(normalize_process_cwd(&cwd));
+                match terminal_service.respawn_in_worktree(
+                    &session_id,
+                    cmd,
+                    cols,
+                    rows,
+                    &manager,
+                    &cwd,
+                ) {
+                    Ok(next_ended) => {
+                        ended = next_ended;
+                        Self::emit_connection_status(
+                            &events,
+                            &session_id,
+                            "connected",
+                            None,
+                            ladder.attempt,
+                        );
+                    }
+                    Err(error) => {
+                        Self::emit_connection_status(
+                            &events,
+                            &session_id,
+                            "error",
+                            Some(&error.to_string()),
+                            ladder.attempt,
+                        );
+                    }
+                }
+            }
+            cancellations.lock().remove(&session_id);
+        });
+    }
+
+    fn handle_retry(&self, session_id: &str) -> Result<(), String> {
+        if self.remote_leases.lock().get(session_id).is_some() {
+            return Err(
+                "Remote continuity reconnect is managed by the resident transport; redeploy from the SSH host settings when the daemon is unavailable"
+                    .to_string(),
+            );
+        }
+        let meta = self
+            .session_metadata
+            .read()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| format!("Terminal session not found: {session_id}"))?;
+        let startup = meta
+            .spawn_fingerprint
+            .startup
+            .clone()
+            .filter(|startup| matches!(startup, TerminalStartup::Ssh { .. }))
+            .ok_or_else(|| "Terminal session is not an ssh connection".to_string())?;
+        let (manager, _) = self
+            .workspace_registry
+            .resolve_terminal_target(&meta.workspace_id, meta.worktree.as_ref())
+            .map_err(|error| error.to_string())?;
+        let (cols, rows) = self
+            .terminal_service
+            .get_session(session_id)
+            .map(|session| session.get_size())
+            .unwrap_or((80, 24));
+        let shell = meta.spawn_fingerprint.shell.clone();
+        let mut cmd = crate::terminal::shell::resolve_startup_command_with_program(
+            shell.as_deref(),
+            Some(&startup),
+            self.ssh_program(),
+        )
+        .map_err(|error| error.to_string())?;
+        cmd.env("PROMPT_EOL_MARK", "");
+        cmd.cwd(normalize_process_cwd(&meta.cwd));
+        let ended = self
+            .terminal_service
+            .respawn_in_worktree(session_id, cmd, cols, rows, &manager, &meta.cwd)
+            .map_err(|error| error.to_string())?;
+
+        if let Some(cancel) = self.ssh_reconnect_cancellations.lock().remove(session_id) {
+            let _ = cancel.send(true);
+        }
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        self.ssh_reconnect_cancellations
+            .lock()
+            .insert(session_id.to_string(), cancel_tx);
+        self.start_ssh_reconnect_task(
+            session_id.to_string(),
+            manager,
+            meta.cwd,
+            cols,
+            rows,
+            shell,
+            startup,
+            ended,
+            cancel_rx,
+        );
+        Self::emit_connection_status(&self.remote_event_tx, session_id, "connected", None, 0);
+        Ok(())
+    }
+
+    async fn handle_close(&self, session_id: &str) -> Result<(), crate::terminal::PtyError> {
+        if let Some(transport) = self.remote_transports.lock().await.remove(session_id) {
+            let _ = transport
+                .lock()
+                .await
+                .request(DaemonRequest::Close { session_id: session_id.to_string() })
+                .await;
+            self.remote_leases.lock().remove(session_id);
+            self.terminal_service.output_hub().remove_session(session_id);
+            self.release_session_ownership(session_id);
+            return Ok(());
+        }
+        if let Some(cancel) = self.ssh_reconnect_cancellations.lock().remove(session_id) {
+            let _ = cancel.send(true);
+        }
+        let remote_transport_down = self
+            .remote_leases
+            .lock()
+            .get(session_id)
+            .is_some_and(|lease| lease.state == crate::daemon::remote::lease::RemoteLeaseState::Detached);
+        if remote_transport_down {
+            let now = Self::lease_now();
+            let mut leases = self.remote_leases.lock();
+            let _ = leases.detach(session_id, now);
+            let _ = leases.queue_terminate(session_id, now);
+        } else {
+            self.terminal_service.close_session(session_id).await?;
+            self.remote_leases.lock().remove(session_id);
+        }
+        self.terminal_service
+            .output_hub()
+            .remove_session(session_id);
+        self.release_session_ownership(session_id);
+        Ok(())
+    }
+
+    async fn replay_pending_terminations(&self) {
+        let pending = self.remote_leases.lock().pending_terminations();
+        for session_id in pending {
+            let acknowledged = match self.terminal_service.close_session(&session_id).await {
+                Ok(()) | Err(crate::terminal::PtyError::SessionNotFound(_)) => true,
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "Failed to replay deferred remote PTY termination");
+                    false
+                }
+            };
+            if acknowledged {
+                self.remote_leases.lock().remove(&session_id);
+            }
+        }
+    }
+
+    fn lease_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn session_is_live(&self, session_id: &str) -> bool {
+        self.terminal_service
+            .get_session(session_id)
+            .is_some_and(|session| {
+                matches!(
+                    session.state(),
+                    PtySessionState::Starting | PtySessionState::Running
+                )
+            })
+            || self.remote_leases.lock().get(session_id).is_some_and(|lease| {
+                matches!(lease.state, crate::daemon::remote::lease::RemoteLeaseState::Attached | crate::daemon::remote::lease::RemoteLeaseState::Detached)
+            })
+    }
+
+    fn release_session_ownership(&self, session_id: &str) {
+        self.spawn_idempotency_cache
+            .lock()
+            .retain(|_, entry| entry.session_id != session_id);
+        if let Some(meta) = self.session_metadata.write().remove(session_id) {
+            if let Some(claim) = meta.provider_claim {
+                self.provider_session_claims
+                    .lock()
+                    .retain(|key, owner| key != &claim || owner != session_id);
+            }
+        }
+    }
+
+    fn prune_dead_spawn_ownership(&self, now: Instant) {
+        let dead_sessions: Vec<String> = self
+            .session_metadata
+            .read()
+            .keys()
+            .filter(|session_id| !self.session_is_live(session_id))
+            .cloned()
+            .collect();
+        for session_id in dead_sessions {
+            self.release_session_ownership(&session_id);
+        }
+        self.spawn_idempotency_cache.lock().retain(|_, entry| {
+            now.duration_since(entry.created_at) <= SPAWN_REQUEST_TTL
+                && self.session_is_live(&entry.session_id)
+        });
+        self.provider_session_claims
+            .lock()
+            .retain(|_, session_id| self.session_is_live(session_id));
+    }
+
+    #[cfg(test)]
+    fn session_meta_for_test(&self, session_id: &str) -> StoredSessionMeta {
+        self.session_metadata
+            .read()
+            .get(session_id)
+            .cloned()
+            .expect("session metadata stored")
     }
 
     #[cfg(test)]
@@ -1241,12 +2377,84 @@ impl DaemonServer {
         self.spawn_idempotency_cache.lock().len()
     }
 
+    #[cfg(test)]
+    fn provider_claim_len_for_test(&self) -> usize {
+        self.provider_session_claims.lock().len()
+    }
+
+    #[cfg(test)]
+    fn reserve_provider_claim_for_test(
+        &self,
+        client_request_id: &str,
+        session_id: &str,
+        startup: &TerminalStartup,
+    ) -> Result<String, SpawnError> {
+        let claim = ProviderSessionClaimKey::from_startup(Some(startup))
+            .expect("agent resume startup has a provider claim");
+        let mut claims = self.provider_session_claims.lock();
+        if let Some(existing_session_id) = claims.get(&claim) {
+            return Err(SpawnError::AgentSessionConflict {
+                agent_type: claim.agent_type,
+                provider_key: claim.provider_key,
+                provider_id: claim.provider_id,
+                existing_session_id: existing_session_id.clone(),
+            });
+        }
+        claims.insert(claim.clone(), session_id.to_string());
+        self.session_metadata.write().insert(
+            session_id.to_string(),
+            StoredSessionMeta {
+                client_request_id: client_request_id.to_string(),
+                workspace_id: "test".to_string(),
+                worktree: None,
+                cwd: PathBuf::from("/test"),
+                provider_claim: Some(claim),
+                ssh_host_id: None,
+                remote_path: None,
+                spawn_fingerprint: SpawnRequestFingerprint {
+                    workspace_id: "test".to_string(),
+                    worktree: None,
+                    cwd: None,
+                    cols: 80,
+                    rows: 24,
+                    shell: None,
+                    provider_claim: ProviderSessionClaimKey::from_startup(Some(startup)),
+                    startup: Some(startup.clone()),
+                },
+            },
+        );
+        Ok(session_id.to_string())
+    }
+
     fn handle_describe_session(&self, session_id: &str) -> DaemonResponse {
-        let Some(pty_session) = self.terminal_service.get_session(session_id) else {
+        let pty_session = self.terminal_service.get_session(session_id);
+        if pty_session.is_none() && self.remote_leases.lock().get(session_id).is_none() {
             return DaemonResponse::Error {
                 message: format!("Session '{session_id}' not found"),
             };
-        };
+        }
+        if pty_session.is_none() {
+            let meta = self.session_metadata.read().get(session_id).cloned().expect("remote session metadata");
+            let (start_sequence, end_sequence) = self
+                .terminal_service
+                .output_hub()
+                .session_sequence_range(session_id)
+                .unwrap_or((None, None));
+            return DaemonResponse::DescribeSessionOk {
+                session: DaemonSessionDetails {
+                    session_id: session_id.to_string(),
+                    workspace_id: Some(meta.workspace_id),
+                    worktree: meta.worktree,
+                    cwd: meta.remote_path,
+                    cols: meta.spawn_fingerprint.cols,
+                    rows: meta.spawn_fingerprint.rows,
+                    running: true,
+                    start_sequence,
+                    end_sequence,
+                },
+            };
+        }
+        let pty_session = pty_session.expect("checked above");
 
         let (cols, rows) = pty_session.get_size();
         let running = matches!(
@@ -1306,7 +2514,14 @@ impl DaemonServer {
         mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
         writer: W,
-        mut agent_state_rx: Option<broadcast::Receiver<(String, String, Option<String>)>>,
+        mut agent_state_rx: Option<
+            broadcast::Receiver<(
+                String,
+                String,
+                Option<String>,
+                Option<crate::daemon::protocol::AgentProviderSession>,
+            )>,
+        >,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -1318,12 +2533,13 @@ impl DaemonServer {
                 Some(state_rx) => tokio::select! {
                     output = rx.recv() => output,
                     report = state_rx.recv() => {
-                        if let Ok((reported_session_id, state, agent)) = report {
+                        if let Ok((reported_session_id, state, agent, provider_session)) = report {
                             if reported_session_id == session_id {
                                 let msg = DaemonStreamMessage::AgentState {
                                     session_id: Cow::Borrowed(&session_id),
                                     state: Cow::Borrowed(&state),
                                     agent: agent.as_deref().map(Cow::Borrowed),
+                                    provider_session,
                                 };
                                 let mut json = serde_json::to_string(&msg).unwrap();
                                 json.push('\n');
@@ -1378,6 +2594,16 @@ impl DaemonServer {
                             .map(|gap| gap.available_from_sequence)
                             .or(att.snapshot.history_start_sequence)
                             .unwrap_or_else(|| requested_after_sequence.saturating_add(1));
+                        let segments = att
+                            .snapshot
+                            .history_segments
+                            .iter()
+                            .map(|seg| HistorySegmentWire {
+                                cols: seg.cols,
+                                rows: seg.rows,
+                                bytes: seg.bytes.clone(),
+                            })
+                            .collect();
                         let msg = DaemonStreamMessage::Lagged {
                             session_id: Cow::Borrowed(&session_id),
                             requested_after_sequence,
@@ -1385,6 +2611,7 @@ impl DaemonServer {
                             start_sequence: att.snapshot.history_start_sequence,
                             end_sequence: att.snapshot.history_end_sequence,
                             history: Cow::Borrowed(&att.snapshot.history),
+                            segments,
                         };
                         let mut json = serde_json::to_string(&msg).unwrap();
                         json.push('\n');
@@ -1425,6 +2652,50 @@ mod tests {
             .current_dir(dir.path())
             .output();
         dir
+    }
+
+    #[test]
+    fn continuity_network_failure_status_preserves_classifier_kind() {
+        let (events, mut receiver) = broadcast::channel(4);
+        let kind = crate::daemon::remote::reconnect::classify(
+            crate::daemon::remote::reconnect::Inputs {
+                exit_code: Some(255),
+                stderr: "ssh: connect to host box port 22: Connection timed out",
+                daemon_missing: false,
+            },
+        );
+        DaemonServer::emit_connection_status(
+            &events,
+            "remote-session",
+            "reconnection-failed",
+            Some(kind.event_kind()),
+            6,
+        );
+        let event = receiver.try_recv().expect("connection status event");
+        assert_eq!(event.payload["kind"], "network");
+        assert_eq!(event.payload["state"], "reconnection-failed");
+    }
+
+    #[test]
+    fn continuity_daemon_gone_status_preserves_classifier_kind() {
+        let (events, mut receiver) = broadcast::channel(4);
+        let kind = crate::daemon::remote::reconnect::classify(
+            crate::daemon::remote::reconnect::Inputs {
+                exit_code: None,
+                stderr: "resident daemon endpoint missing",
+                daemon_missing: true,
+            },
+        );
+        DaemonServer::emit_connection_status(
+            &events,
+            "remote-session",
+            "daemon-gone",
+            Some(kind.event_kind()),
+            1,
+        );
+        let event = receiver.try_recv().expect("connection status event");
+        assert_eq!(event.payload["kind"], "daemon-gone");
+        assert_eq!(event.payload["state"], "daemon-gone");
     }
 
     #[tokio::test]
@@ -1490,7 +2761,7 @@ mod tests {
 
         // 1. Spawning before registration must fail explicitly (no GUI CWD fallback)
         let unreg_res = server
-            .handle_spawn("req-unreg-1", "ws-app", None, None, 80, 24, None)
+            .handle_spawn("req-unreg-1", "ws-app", None, None, 80, 24, None, None)
             .await;
         assert!(
             unreg_res.is_err(),
@@ -1511,7 +2782,7 @@ mod tests {
 
         // 3. Spawning in registered workspace succeeds
         let spawn_res = server
-            .handle_spawn("req-reg-1", "ws-app", None, None, 80, 24, None)
+            .handle_spawn("req-reg-1", "ws-app", None, None, 80, 24, None, None)
             .await;
         assert!(spawn_res.is_ok());
 
@@ -1539,8 +2810,8 @@ mod tests {
 
         let req_id = "spawn-req-idempotency-1".to_string();
         let (first, second) = tokio::join!(
-            server.handle_spawn(&req_id, "default", None, None, 80, 24, None),
-            server.handle_spawn(&req_id, "default", None, None, 80, 24, None),
+            server.handle_spawn(&req_id, "default", None, None, 80, 24, None, None),
+            server.handle_spawn(&req_id, "default", None, None, 80, 24, None, None),
         );
         let session1 = first.expect("first spawn succeeds");
         let session2 = second.expect("concurrent duplicate succeeds");
@@ -1557,18 +2828,416 @@ mod tests {
             .await
             .expect("close first session");
         let replacement = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24, None)
+            .handle_spawn(&req_id, "default", None, None, 80, 24, None, None)
             .await
             .expect("dead cached session is never returned");
         assert_ne!(session1, replacement);
 
         server.expire_spawn_request_for_test(&req_id);
         let after_ttl = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24, None)
+            .handle_spawn(&req_id, "default", None, None, 80, 24, None, None)
             .await
             .expect("a repeated id never creates a second live shell");
         assert_eq!(replacement, after_ttl);
         assert_eq!(server.spawn_cache_len_for_test(), 1);
+    }
+
+    #[cfg(unix)]
+    fn ssh_startup_for_test(host_id: &str) -> TerminalStartup {
+        use crate::ssh::{SshAuthMethod, SshHost, SshHostSource};
+        TerminalStartup::Ssh {
+            host: SshHost {
+                id: host_id.to_string(),
+                label: "test".to_string(),
+                hostname: "box.test".to_string(),
+                username: None,
+                port: None,
+                identity_file: None,
+                jump_host: None,
+                source: SshHostSource::Manual,
+                auth_method: SshAuthMethod::Agent,
+                disabled: None,
+                repo_root: None,
+                remote_continuity: crate::ssh::RemoteContinuity::Auto,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn red_ssh_spawn_skips_local_cwd_validation_and_stores_metadata() {
+        let mut server = DaemonServer::new();
+        server.set_ssh_program_for_test("/bin/cat");
+        let server = Arc::new(server);
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+
+        let remote_path = "/home/sook/proj/.orca-worktrees/wt-main";
+        let session = server
+            .handle_spawn(
+                "req-ssh-1",
+                "default",
+                None,
+                Some(remote_path.to_string()),
+                80,
+                24,
+                None,
+                Some(ssh_startup_for_test("h-box")),
+            )
+            .await
+            .expect("ssh spawn must not validate the remote path locally");
+        let meta = server.session_meta_for_test(&session);
+        assert_eq!(meta.ssh_host_id.as_deref(), Some("h-box"));
+        assert_eq!(meta.remote_path.as_deref(), Some(remote_path));
+
+        let again = server
+            .handle_spawn(
+                "req-ssh-1",
+                "default",
+                None,
+                Some(remote_path.to_string()),
+                80,
+                24,
+                None,
+                Some(ssh_startup_for_test("h-box")),
+            )
+            .await
+            .expect("ssh spawn idempotent retry");
+        assert_eq!(session, again);
+
+        server.handle_close(&session).await.ok();
+    }
+
+    #[tokio::test]
+    async fn detached_remote_close_marks_pending_kill() {
+        let server = DaemonServer::new();
+        server.remote_leases.lock().bind(
+            "remote-session",
+            "host-a",
+            Some("leaf-a".into()),
+            "client-a",
+            1,
+            10,
+        );
+        server
+            .remote_leases
+            .lock()
+            .detach("remote-session", 20)
+            .expect("transport detached");
+
+        server
+            .handle_close("remote-session")
+            .await
+            .expect("deferred close");
+
+        let lease = server
+            .remote_leases
+            .lock()
+            .get("remote-session")
+            .cloned()
+            .expect("lease retained until terminate ack");
+        assert!(lease.pending_kill);
+    }
+
+    #[tokio::test]
+    async fn reconnect_replays_pending_terminate_and_removes_lease() {
+        let server = DaemonServer::new();
+        server.remote_leases.lock().bind(
+            "remote-session",
+            "host-a",
+            Some("leaf-a".into()),
+            "client-a",
+            1,
+            10,
+        );
+        server
+            .remote_leases
+            .lock()
+            .detach("remote-session", 20)
+            .expect("transport detached");
+        server
+            .remote_leases
+            .lock()
+            .queue_terminate("remote-session", 30)
+            .expect("close queued");
+
+        server.replay_pending_terminations().await;
+
+        assert!(server.remote_leases.lock().get("remote-session").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn red_local_spawn_still_rejects_missing_cwd() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let err = server
+            .handle_spawn(
+                "req-local-1",
+                "default",
+                None,
+                Some("/definitely/not/a/local/dir".to_string()),
+                80,
+                24,
+                None,
+                None,
+            )
+            .await
+            .expect_err("local spawn must still validate cwd");
+        assert!(err.contains("CWD does not exist"));
+    }
+
+    fn claude_resume_startup(id: &str) -> TerminalStartup {
+        TerminalStartup::AgentResume {
+            agent_type: "claude".to_string(),
+            provider_session: crate::daemon::protocol::AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: id.to_string(),
+                transcript_path: None,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    fn test_agent_resume_startup(id: &str) -> TerminalStartup {
+        TerminalStartup::AgentResume {
+            agent_type: "ferryx-test-agent".to_string(),
+            provider_session: crate::daemon::protocol::AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: id.to_string(),
+                transcript_path: None,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_agent_resume_production_spawn_path_fences_duplicates_and_conflicts() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn = |request_id: &'static str, barrier: Arc<tokio::sync::Barrier>| {
+            let server = Arc::clone(&server);
+            async move {
+                barrier.wait().await;
+                server
+                    .handle_spawn(
+                        request_id,
+                        "default",
+                        None,
+                        None,
+                        80,
+                        24,
+                        None,
+                        Some(test_agent_resume_startup("production-provider")),
+                    )
+                    .await
+            }
+        };
+
+        let same_a = spawn("production-same", Arc::clone(&barrier));
+        let same_b = spawn("production-same", Arc::clone(&barrier));
+        let (_, same_a, same_b) = tokio::join!(barrier.wait(), same_a, same_b);
+        let owner = same_a.expect("first production spawn");
+        assert_eq!(owner, same_b.expect("idempotent production retry"));
+        assert_eq!(server.terminal_service().list_sessions().len(), 1);
+
+        let conflict = server
+            .handle_spawn(
+                "production-competing",
+                "default",
+                None,
+                None,
+                80,
+                24,
+                None,
+                Some(test_agent_resume_startup("production-provider")),
+            )
+            .await
+            .expect_err("competing production claim must fail");
+        assert!(matches!(conflict, SpawnError::AgentSessionConflict { .. }));
+        assert_eq!(server.terminal_service().list_sessions().len(), 1);
+
+        let reused_request = server
+            .handle_spawn(
+                "production-same",
+                "default",
+                None,
+                None,
+                100,
+                40,
+                None,
+                Some(test_agent_resume_startup("different-provider")),
+            )
+            .await
+            .expect_err("request id cannot be reused for a different spawn fingerprint");
+        assert!(reused_request
+            .to_string()
+            .contains("reused with a different spawn request"));
+        assert_eq!(server.terminal_service().list_sessions().len(), 1);
+
+        server.handle_close(&owner).await.expect("production close");
+        assert_eq!(server.provider_claim_len_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_idempotency_fingerprint_includes_full_startup_payload() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let startup = |transcript_path: &str| TerminalStartup::AgentResume {
+            agent_type: "ferryx-test-agent".to_string(),
+            provider_session: crate::daemon::protocol::AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: "same-provider-id".to_string(),
+                transcript_path: Some(transcript_path.to_string()),
+            },
+        };
+
+        let first = server
+            .handle_spawn(
+                "same-request",
+                "default",
+                None,
+                None,
+                80,
+                24,
+                None,
+                Some(startup("/tmp/pi-first.json")),
+            )
+            .await
+            .expect("first path-sensitive spawn");
+        let changed = server
+            .handle_spawn(
+                "same-request",
+                "default",
+                None,
+                None,
+                80,
+                24,
+                None,
+                Some(startup("/tmp/pi-second.json")),
+            )
+            .await
+            .expect_err("changed startup payload cannot reuse idempotency key");
+        assert!(changed
+            .to_string()
+            .contains("reused with a different spawn request"));
+
+        server
+            .handle_close(&first)
+            .await
+            .expect("close first session");
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_identical_request_is_one_spawn() {
+        let server = Arc::new(DaemonServer::new());
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn = |barrier: Arc<tokio::sync::Barrier>| {
+            let server = Arc::clone(&server);
+            async move {
+                barrier.wait().await;
+                let _guard = server.spawn_lock.lock().await;
+                if let Some(meta) = server
+                    .session_metadata
+                    .read()
+                    .iter()
+                    .find(|(_, meta)| meta.client_request_id == "resume-same-request")
+                    .map(|(session_id, _)| session_id.clone())
+                {
+                    return Ok(meta);
+                }
+                server.reserve_provider_claim_for_test(
+                    "resume-same-request",
+                    "session-one",
+                    &claude_resume_startup("provider-same"),
+                )
+            }
+        };
+        let first = spawn(Arc::clone(&barrier));
+        let second = spawn(Arc::clone(&barrier));
+        let (_, first, second) = tokio::join!(barrier.wait(), first, second);
+        let first = first.expect("first resume spawn");
+        let second = second.expect("duplicate resume spawn");
+        assert_eq!(first, second);
+        assert_eq!(server.session_metadata.read().len(), 1);
+        assert_eq!(server.provider_claim_len_for_test(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_competing_claim_conflicts_and_releases() {
+        let server = Arc::new(DaemonServer::new());
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn = |request_id: &'static str,
+                     session_id: &'static str,
+                     barrier: Arc<tokio::sync::Barrier>| {
+            let server = Arc::clone(&server);
+            async move {
+                barrier.wait().await;
+                let _guard = server.spawn_lock.lock().await;
+                server.reserve_provider_claim_for_test(
+                    request_id,
+                    session_id,
+                    &claude_resume_startup("provider-conflict"),
+                )
+            }
+        };
+        let first = spawn("resume-owner-a", "session-a", Arc::clone(&barrier));
+        let second = spawn("resume-owner-b", "session-b", Arc::clone(&barrier));
+        let (_, first, second) = tokio::join!(barrier.wait(), first, second);
+        let (owner, conflict) = match (first, second) {
+            (Ok(owner), Err(conflict)) | (Err(conflict), Ok(owner)) => (owner, conflict),
+            other => panic!("expected one owner and one conflict, got {other:?}"),
+        };
+        assert!(matches!(conflict, SpawnError::AgentSessionConflict { .. }));
+        assert_eq!(server.session_metadata.read().len(), 1);
+        assert_eq!(server.provider_claim_len_for_test(), 1);
+
+        server.release_session_ownership(&owner);
+        assert_eq!(
+            server.provider_claim_len_for_test(),
+            0,
+            "close/exit cleanup must make the provider reference immediately claimable"
+        );
+        assert!(
+            !server.provider_session_claims.lock().contains_key(
+                &ProviderSessionClaimKey::from_startup(Some(&claude_resume_startup(
+                    "provider-conflict"
+                )))
+                .expect("claim key")
+            ),
+            "released provider claim must not retain a stale owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_failed_spawn_does_not_leak_claim() {
+        let server = DaemonServer::new();
+        let invalid = crate::terminal::shell::resolve_startup_command(
+            None,
+            Some(&claude_resume_startup("--invalid")),
+        );
+        assert!(invalid.is_err());
+        assert_eq!(server.provider_claim_len_for_test(), 0);
+
+        let valid = server.reserve_provider_claim_for_test(
+            "resume-valid",
+            "session-valid",
+            &claude_resume_startup("provider-after-failure"),
+        );
+        assert!(valid.is_ok());
+        assert_eq!(server.provider_claim_len_for_test(), 1);
     }
 
     #[tokio::test]
@@ -1589,6 +3258,7 @@ mod tests {
                 80,
                 24,
                 None,
+                None,
             )
             .await;
         assert!(err_nonexistent.is_err());
@@ -1603,6 +3273,7 @@ mod tests {
                 Some(outside.path().to_string_lossy().into_owned()),
                 80,
                 24,
+                None,
                 None,
             )
             .await;
@@ -1622,6 +3293,7 @@ mod tests {
                 80,
                 24,
                 None,
+                None,
             )
             .await;
         assert!(
@@ -1640,6 +3312,7 @@ mod tests {
                 80,
                 24,
                 None,
+                None,
             )
             .await;
         assert!(ok_res.is_ok());
@@ -1655,6 +3328,43 @@ mod tests {
             }
             other => panic!("Expected DescribeSessionOk, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_runtime_paths_are_profile_aware() {
+        // SAFETY: `getuid` takes no arguments and returns the current process UID.
+        let uid = unsafe { libc::getuid() };
+        let expected = if cfg!(debug_assertions) {
+            PathBuf::from(format!("/tmp/rorca-{uid}-dev"))
+        } else {
+            PathBuf::from(format!("/tmp/rorca-{uid}"))
+        };
+        assert_eq!(get_runtime_dir(), expected);
+
+        let expected = if cfg!(debug_assertions) {
+            PathBuf::from(format!("/tmp/rorca-{uid}-dev/daemon.sock"))
+        } else {
+            PathBuf::from(format!("/tmp/rorca-{uid}/daemon.sock"))
+        };
+        assert_eq!(get_socket_path(), expected);
+        assert_eq!(get_lock_path(), get_runtime_dir().join("daemon.lock"));
+    }
+
+    #[test]
+    fn test_persistent_lock_filename_is_profile_aware() {
+        let expected = if cfg!(debug_assertions) {
+            "daemon-dev.lock"
+        } else {
+            "daemon.lock"
+        };
+        assert_eq!(
+            get_persistent_lock_path()
+                .expect("persistent daemon lock path")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(expected)
+        );
     }
 
     #[cfg(unix)]
@@ -2187,7 +3897,7 @@ mod tests {
             .unwrap();
 
         let session_id = server
-            .handle_spawn("req-seq-1", "default", None, None, 80, 24, None)
+            .handle_spawn("req-seq-1", "default", None, None, 80, 24, None, None)
             .await
             .unwrap();
 
@@ -2239,6 +3949,7 @@ mod tests {
                 other_session.clone(),
                 "working".to_string(),
                 Some("codex".to_string()),
+                None,
             ))
             .expect("send unrelated report");
         server
@@ -2247,6 +3958,7 @@ mod tests {
                 session_id.clone(),
                 "blocked".to_string(),
                 Some("omo".to_string()),
+                None,
             ))
             .expect("send own report");
 
@@ -2284,14 +3996,36 @@ mod tests {
             Some((
                 "s1".to_string(),
                 "working".to_string(),
-                Some("omo".to_string())
+                Some("omo".to_string()),
+                None,
             ))
+        );
+        let valid = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"working","agent":"omo","providerSession":{"key":"session_id","id":"omo-session"}}"#,
+        )
+        .expect("valid Omo provider report");
+        assert_eq!(valid.3.expect("provider reference").id, "omo-session");
+        let wrong_key = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"working","agent":"omo","providerSession":{"key":"conversation_id","id":"bad-key"}}"#,
+        )
+        .expect("activity report remains valid");
+        assert_eq!(
+            wrong_key.3, None,
+            "semantically invalid provider reference must be omitted"
+        );
+        let missing_required_path = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"working","agent":"pi","providerSession":{"key":"session_id","id":"pi-session"}}"#,
+        )
+        .expect("activity report remains valid");
+        assert_eq!(
+            missing_required_path.3, None,
+            "path-sensitive provider reference must validate fully"
         );
         assert_eq!(
             DaemonServer::parse_agent_state_report(
                 r#"{"type":"agentState","sessionId":"s1","state":"idle"}"#
             ),
-            Some(("s1".to_string(), "idle".to_string(), None)),
+            Some(("s1".to_string(), "idle".to_string(), None, None)),
             "agent is optional so older extension copies keep working"
         );
         for rejected in [

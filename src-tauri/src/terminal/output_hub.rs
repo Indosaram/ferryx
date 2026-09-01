@@ -6,6 +6,23 @@ use tokio::sync::broadcast;
 
 const DEFAULT_BUFFER_CAPACITY: usize = 512 * 1024; // 512 KiB
 const BROADCAST_CAPACITY: usize = 1024;
+const RESIZE_LEDGER_CAPACITY: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResizePoint {
+    pub sequence: u64,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HistorySegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    pub bytes: Vec<u8>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputChunk {
@@ -27,6 +44,8 @@ pub struct AttachmentSnapshot {
     pub history_start_sequence: Option<u64>,
     pub history_end_sequence: Option<u64>,
     pub history: Vec<u8>,
+    #[serde(default)]
+    pub history_segments: Vec<HistorySegment>,
     pub gap: Option<ReplayGap>,
 }
 
@@ -53,6 +72,12 @@ impl BoundedBuffer {
         }
     }
 
+    pub fn allocate_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        sequence
+    }
+
     pub fn push(&mut self, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
         self.push_with_read_timestamp(chunk_bytes, None)
     }
@@ -65,9 +90,19 @@ impl BoundedBuffer {
         if chunk_bytes.is_empty() {
             return None;
         }
+        let sequence = self.allocate_sequence();
+        self.push_at_sequence(chunk_bytes, sequence, metrics_read_unix_micros)
+    }
 
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
+    fn push_at_sequence(
+        &mut self,
+        chunk_bytes: Vec<u8>,
+        sequence: u64,
+        metrics_read_unix_micros: Option<u64>,
+    ) -> Option<OutputChunk> {
+        if chunk_bytes.is_empty() {
+            return None;
+        }
 
         let chunk = OutputChunk {
             sequence,
@@ -77,6 +112,7 @@ impl BoundedBuffer {
 
         self.current_size += chunk.bytes.len();
         self.chunks.push_back(chunk.clone());
+        self.next_sequence = self.next_sequence.max(sequence.saturating_add(1));
 
         while self.current_size > self.capacity && !self.chunks.is_empty() {
             if let Some(front) = self.chunks.pop_front() {
@@ -85,6 +121,17 @@ impl BoundedBuffer {
         }
 
         Some(chunk)
+    }
+
+    /// Merge the history accompanying a remote replay gap into this ring without
+    /// renumbering it as ordinary local output. The gap's first available sequence
+    /// fences subsequent live chunks so reconnect cannot reuse a remote sequence.
+    pub fn merge_replay_gap(&mut self, gap: &ReplayGap, history: Vec<u8>) -> Option<OutputChunk> {
+        if history.is_empty() {
+            self.next_sequence = self.next_sequence.max(gap.available_from_sequence);
+            return None;
+        }
+        self.push_at_sequence(history, gap.available_from_sequence, None)
     }
 
     pub fn start_sequence(&self) -> Option<u64> {
@@ -115,47 +162,165 @@ impl BoundedBuffer {
         &self,
         after_sequence: Option<u64>,
     ) -> (Vec<u8>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+        let (history, _, start, end, gap) = self.snapshot_after_segmented(after_sequence, &[]);
+        (history, start, end, gap)
+    }
+
+    pub fn snapshot_after_segmented(
+        &self,
+        after_sequence: Option<u64>,
+        ledger: &[ResizePoint],
+    ) -> (
+        Vec<u8>,
+        Vec<HistorySegment>,
+        Option<u64>,
+        Option<u64>,
+        Option<ReplayGap>,
+    ) {
         if self.chunks.is_empty() {
-            return (Vec::new(), None, None, None);
+            let segments = segment_history(&[], ledger, after_sequence);
+            return (Vec::new(), segments, None, None, None);
         }
 
         let first_seq = self.chunks.front().unwrap().sequence;
         let last_seq = self.chunks.back().unwrap().sequence;
 
         match after_sequence {
-            None => (self.snapshot(), Some(first_seq), Some(last_seq), None),
+            None => {
+                let chunk_refs: Vec<&OutputChunk> = self.chunks.iter().collect();
+                let segments = segment_history(&chunk_refs, ledger, after_sequence);
+                (
+                    self.snapshot(),
+                    segments,
+                    Some(first_seq),
+                    Some(last_seq),
+                    None,
+                )
+            }
             Some(req_seq) => {
                 if req_seq >= last_seq {
-                    (Vec::new(), None, Some(last_seq), None)
+                    let segments = segment_history(&[], ledger, Some(req_seq));
+                    (Vec::new(), segments, None, Some(last_seq), None)
                 } else if req_seq + 1 < first_seq {
                     // Eviction gap: requested sequence has been evicted
                     let gap = Some(ReplayGap {
                         requested_after_sequence: req_seq,
                         available_from_sequence: first_seq,
                     });
-                    (self.snapshot(), Some(first_seq), Some(last_seq), gap)
+                    let chunk_refs: Vec<&OutputChunk> = self.chunks.iter().collect();
+                    let segments = segment_history(&chunk_refs, ledger, after_sequence);
+                    (
+                        self.snapshot(),
+                        segments,
+                        Some(first_seq),
+                        Some(last_seq),
+                        gap,
+                    )
                 } else {
                     let mut history = Vec::new();
                     let mut start_seq = None;
+                    let mut included_chunks = Vec::new();
                     for chunk in &self.chunks {
                         if chunk.sequence > req_seq {
                             if start_seq.is_none() {
                                 start_seq = Some(chunk.sequence);
                             }
                             history.extend_from_slice(&chunk.bytes);
+                            included_chunks.push(chunk);
                         }
                     }
-                    (history, start_seq, Some(last_seq), None)
+                    let segments = segment_history(&included_chunks, ledger, after_sequence);
+                    (history, segments, start_seq, Some(last_seq), None)
                 }
             }
         }
     }
 }
 
+pub fn segment_history(
+    chunks: &[&OutputChunk],
+    ledger: &[ResizePoint],
+    after_sequence: Option<u64>,
+) -> Vec<HistorySegment> {
+    if chunks.is_empty() {
+        let relevant_points: Vec<&ResizePoint> = match after_sequence {
+            Some(req_seq) => ledger.iter().filter(|p| p.sequence > req_seq).collect(),
+            None => ledger.iter().collect(),
+        };
+        if let Some(last_point) = relevant_points.last() {
+            return vec![HistorySegment {
+                cols: Some(last_point.cols),
+                rows: Some(last_point.rows),
+                bytes: Vec::new(),
+            }];
+        }
+        return Vec::new();
+    }
+
+    let first_chunk = chunks[0];
+    let start_point = ledger
+        .iter()
+        .filter(|p| p.sequence <= first_chunk.sequence)
+        .last();
+
+    let mut current_size = (start_point.map(|p| p.cols), start_point.map(|p| p.rows));
+    let mut segments: Vec<HistorySegment> = Vec::new();
+    let mut current_bytes = first_chunk.bytes.clone();
+    let mut last_chunk_seq = first_chunk.sequence;
+
+    for chunk in &chunks[1..] {
+        let intermediate_points: Vec<&ResizePoint> = ledger
+            .iter()
+            .filter(|p| p.sequence > last_chunk_seq && p.sequence <= chunk.sequence)
+            .collect();
+
+        if let Some(last_point) = intermediate_points.last() {
+            let new_size = (Some(last_point.cols), Some(last_point.rows));
+            if new_size != current_size {
+                segments.push(HistorySegment {
+                    cols: current_size.0,
+                    rows: current_size.1,
+                    bytes: current_bytes,
+                });
+                current_bytes = Vec::new();
+                current_size = new_size;
+            }
+        }
+        current_bytes.extend_from_slice(&chunk.bytes);
+        last_chunk_seq = chunk.sequence;
+    }
+
+    segments.push(HistorySegment {
+        cols: current_size.0,
+        rows: current_size.1,
+        bytes: current_bytes,
+    });
+
+    let final_chunk_seq = chunks.last().unwrap().sequence;
+    let trailing_points: Vec<&ResizePoint> = ledger
+        .iter()
+        .filter(|p| p.sequence > final_chunk_seq)
+        .collect();
+
+    if let Some(last_point) = trailing_points.last() {
+        let trailing_size = (Some(last_point.cols), Some(last_point.rows));
+        if trailing_size != current_size {
+            segments.push(HistorySegment {
+                cols: trailing_size.0,
+                rows: trailing_size.1,
+                bytes: Vec::new(),
+            });
+        }
+    }
+
+    segments
+}
+
 struct SessionHub {
     buffer: BoundedBuffer,
     sender: broadcast::Sender<OutputChunk>,
     raw_sender: broadcast::Sender<Vec<u8>>,
+    resize_ledger: Vec<ResizePoint>,
 }
 
 #[derive(Clone)]
@@ -204,6 +369,7 @@ impl TerminalOutputHub {
             buffer: BoundedBuffer::new(self.capacity),
             sender: tx,
             raw_sender: raw_tx,
+            resize_ledger: Vec::new(),
         };
         self.sessions
             .write()
@@ -239,6 +405,46 @@ impl TerminalOutputHub {
         Some(chunk)
     }
 
+    pub fn record_initial_size(&self, session_id: &str, cols: u16, rows: u16) {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        };
+        let Some(session_hub) = session_hub else {
+            return;
+        };
+
+        let mut hub = session_hub.write();
+        if hub.resize_ledger.is_empty() {
+            hub.resize_ledger.push(ResizePoint {
+                sequence: 0,
+                cols,
+                rows,
+            });
+        }
+    }
+
+    pub fn record_resize(&self, session_id: &str, cols: u16, rows: u16) -> Option<u64> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+
+        let mut hub = session_hub.write();
+        // Accepted boundary fuzz: a few in-flight bytes produced just before SIGWINCH may carry
+        // sequences greater than the marker, identical to what the live pane experienced.
+        let sequence = hub.buffer.allocate_sequence();
+        if hub.resize_ledger.len() >= RESIZE_LEDGER_CAPACITY {
+            hub.resize_ledger.remove(0);
+        }
+        hub.resize_ledger.push(ResizePoint {
+            sequence,
+            cols,
+            rows,
+        });
+        Some(sequence)
+    }
+
     pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
@@ -266,14 +472,16 @@ impl TerminalOutputHub {
         // 1. Subscribe FIRST in the critical section
         let rx = hub.sender.subscribe();
         // 2. Snapshot within the same critical section
-        let (history, history_start_sequence, history_end_sequence, gap) =
-            hub.buffer.snapshot_after(after_sequence);
+        let (history, history_segments, history_start_sequence, history_end_sequence, gap) = hub
+            .buffer
+            .snapshot_after_segmented(after_sequence, &hub.resize_ledger);
 
         let snapshot = AttachmentSnapshot {
             session_id: session_id.to_string(),
             history_start_sequence,
             history_end_sequence,
             history,
+            history_segments,
             gap,
         };
 
@@ -289,6 +497,20 @@ impl TerminalOutputHub {
 
     pub fn has_session(&self, session_id: &str) -> bool {
         self.sessions.read().contains_key(session_id)
+    }
+
+    pub fn list_sessions(&self) -> Vec<String> {
+        self.sessions.read().keys().cloned().collect()
+    }
+
+    pub fn trailing_output(&self, session_id: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+        let snapshot = session_hub.read().buffer.snapshot();
+        let start = snapshot.len().saturating_sub(max_bytes);
+        Some(snapshot[start..].to_vec())
     }
 
     pub fn session_sequence_range(&self, session_id: &str) -> Option<(Option<u64>, Option<u64>)> {
@@ -505,5 +727,166 @@ mod tests {
             .expect("subscriber receives live chunk");
         assert_eq!(received.sequence, 3);
         assert_eq!(received.bytes, b"live-3;");
+    }
+
+    #[tokio::test]
+    async fn test_output_hub_resize_ledger_and_segmented_snapshot() {
+        let hub = TerminalOutputHub::new(1024);
+        let session_id = "resize-seq-session";
+        let _rx = hub.register_session(session_id);
+
+        let c1 = hub.publish(session_id, b"A".to_vec()).expect("publish A");
+        assert_eq!(c1.sequence, 1);
+
+        let resize_seq = hub
+            .record_resize(session_id, 120, 30)
+            .expect("record resize");
+        assert_eq!(resize_seq, 2);
+
+        let c2 = hub.publish(session_id, b"B".to_vec()).expect("publish B");
+        assert_eq!(c2.sequence, 3);
+        assert_eq!(c2.sequence, resize_seq + 1);
+
+        let attachment = hub
+            .subscribe_with_sequence(session_id, None)
+            .expect("attachment");
+
+        assert_eq!(attachment.snapshot.history, b"AB");
+        assert_eq!(
+            attachment.snapshot.history_segments,
+            vec![
+                HistorySegment {
+                    cols: None,
+                    rows: None,
+                    bytes: b"A".to_vec(),
+                },
+                HistorySegment {
+                    cols: Some(120),
+                    rows: Some(30),
+                    bytes: b"B".to_vec(),
+                },
+            ]
+        );
+
+        let concatenated: Vec<u8> = attachment
+            .snapshot
+            .history_segments
+            .iter()
+            .flat_map(|s| s.bytes.clone())
+            .collect();
+        assert_eq!(concatenated, attachment.snapshot.history);
+    }
+
+    #[tokio::test]
+    async fn test_output_hub_initial_size_and_eviction_segmented_snapshot() {
+        let hub = TerminalOutputHub::new(24);
+        let session_id = "initial-and-eviction-session";
+        let _rx = hub.register_session(session_id);
+
+        hub.record_initial_size(session_id, 80, 24);
+        // Repeated initial size call is no-op
+        hub.record_initial_size(session_id, 999, 999);
+
+        let _c1 = hub
+            .publish(session_id, b"1234567890".to_vec())
+            .expect("seq 1");
+        let _res1 = hub.record_resize(session_id, 100, 30).expect("seq 2");
+        let _c2 = hub
+            .publish(session_id, b"abcdefghij".to_vec())
+            .expect("seq 3");
+        let _res2 = hub.record_resize(session_id, 120, 40).expect("seq 4");
+        let _c3 = hub
+            .publish(session_id, b"klmnopqrst".to_vec())
+            .expect("seq 5");
+
+        // Bounded capacity 24 means seq 1 (10 bytes) is evicted when total exceeds 24 (10 + 10 + 10 = 30 > 24).
+        // Surviving chunks are seq 3 ("abcdefghij") and seq 5 ("klmnopqrst").
+        let attachment = hub
+            .subscribe_with_sequence(session_id, None)
+            .expect("attachment");
+
+        assert_eq!(attachment.snapshot.history, b"abcdefghijklmnopqrst");
+        assert_eq!(
+            attachment.snapshot.history_segments,
+            vec![
+                HistorySegment {
+                    cols: Some(100),
+                    rows: Some(30),
+                    bytes: b"abcdefghij".to_vec(),
+                },
+                HistorySegment {
+                    cols: Some(120),
+                    rows: Some(40),
+                    bytes: b"klmnopqrst".to_vec(),
+                },
+            ]
+        );
+
+        let concatenated: Vec<u8> = attachment
+            .snapshot
+            .history_segments
+            .iter()
+            .flat_map(|s| s.bytes.clone())
+            .collect();
+        assert_eq!(concatenated, attachment.snapshot.history);
+    }
+
+    #[tokio::test]
+    async fn test_output_hub_resize_with_no_output_after_produces_trailing_segment() {
+        let hub = TerminalOutputHub::new(1024);
+        let session_id = "trailing-resize-session";
+        let _rx = hub.register_session(session_id);
+
+        hub.record_initial_size(session_id, 80, 24);
+        let _c1 = hub
+            .publish(session_id, b"hello".to_vec())
+            .expect("publish hello");
+        let _res1 = hub.record_resize(session_id, 140, 50).expect("resize");
+
+        let attachment = hub
+            .subscribe_with_sequence(session_id, None)
+            .expect("attachment");
+
+        assert_eq!(attachment.snapshot.history, b"hello");
+        assert_eq!(
+            attachment.snapshot.history_segments,
+            vec![
+                HistorySegment {
+                    cols: Some(80),
+                    rows: Some(24),
+                    bytes: b"hello".to_vec(),
+                },
+                HistorySegment {
+                    cols: Some(140),
+                    rows: Some(50),
+                    bytes: Vec::new(),
+                },
+            ]
+        );
+
+        let concatenated: Vec<u8> = attachment
+            .snapshot
+            .history_segments
+            .iter()
+            .flat_map(|s| s.bytes.clone())
+            .collect();
+        assert_eq!(concatenated, attachment.snapshot.history);
+
+        // Also test pure resize with zero output chunks
+        let session_empty = "empty-resize-session";
+        let _rx_empty = hub.register_session(session_empty);
+        hub.record_resize(session_empty, 120, 30);
+        let empty_attachment = hub
+            .subscribe_with_sequence(session_empty, None)
+            .expect("empty attachment");
+        assert_eq!(empty_attachment.snapshot.history, b"");
+        assert_eq!(
+            empty_attachment.snapshot.history_segments,
+            vec![HistorySegment {
+                cols: Some(120),
+                rows: Some(30),
+                bytes: Vec::new(),
+            }]
+        );
     }
 }

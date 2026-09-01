@@ -8,6 +8,7 @@ import copilotLogo from "../assets/agent-logos/copilot.svg";
 import clineLogo from "../assets/agent-logos/cline.svg";
 import cursorLogo from "../assets/agent-logos/cursor.svg";
 import geminiLogo from "../assets/agent-logos/gemini.svg";
+import gjcLogo from "../assets/agent-logos/gjc.png";
 import grokLogo from "../assets/agent-logos/grok.svg";
 import kimiLogo from "../assets/agent-logos/kimi.svg";
 import omoLogo from "../assets/agent-logos/omo.svg";
@@ -19,6 +20,7 @@ export const SUPPORTED_AGENT_LOGOS = {
   claude: claudeLogo,
   codex: codexLogo,
   gemini: geminiLogo,
+  gjc: gjcLogo,
   opencode: opencodeLogo,
   pi: piLogo,
   copilot: copilotLogo,
@@ -36,6 +38,9 @@ export const SUPPORTED_AGENT_TYPES = Object.keys(SUPPORTED_AGENT_LOGOS) as reado
 
 // CLI binary names that differ from the agent type their logo is registered under.
 export const AGENT_LOGO_ALIASES: Record<string, keyof typeof SUPPORTED_AGENT_LOGOS> = {
+  // Herdr's original antigravity id is agy; its aliases must never fall through to another logo.
+  agy: "antigravity",
+  "antigravity-cli": "antigravity",
   "cursor-agent": "cursor",
 };
 

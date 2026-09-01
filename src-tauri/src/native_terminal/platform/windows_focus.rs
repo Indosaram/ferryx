@@ -72,9 +72,24 @@ unsafe extern "system" {
 }
 
 const CHROME_WIDGET_CLASS: &[u16] = &[
-    b'C' as u16, b'h' as u16, b'r' as u16, b'o' as u16, b'm' as u16, b'e' as u16,
-    b'_' as u16, b'W' as u16, b'i' as u16, b'd' as u16, b'g' as u16, b'e' as u16,
-    b't' as u16, b'W' as u16, b'i' as u16, b'n' as u16, b'_' as u16, b'1' as u16,
+    b'C' as u16,
+    b'h' as u16,
+    b'r' as u16,
+    b'o' as u16,
+    b'm' as u16,
+    b'e' as u16,
+    b'_' as u16,
+    b'W' as u16,
+    b'i' as u16,
+    b'd' as u16,
+    b'g' as u16,
+    b'e' as u16,
+    b't' as u16,
+    b'W' as u16,
+    b'i' as u16,
+    b'n' as u16,
+    b'_' as u16,
+    b'1' as u16,
     0,
 ];
 
@@ -84,7 +99,9 @@ unsafe extern "system" fn enum_child_find_chrome_widget(hwnd: Hwnd, lparam: isiz
     let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);
     if len > 0 {
         let target_len = CHROME_WIDGET_CLASS.len() - 1;
-        if len as usize == target_len && &class_buf[..target_len] == &CHROME_WIDGET_CLASS[..target_len] {
+        if len as usize == target_len
+            && &class_buf[..target_len] == &CHROME_WIDGET_CLASS[..target_len]
+        {
             *result = Some(hwnd);
             return 0;
         }
@@ -116,7 +133,9 @@ fn best_effort_focus_webview(root_hwnd: Hwnd) {
             tracing::debug!("Restored Win32 keyboard focus to WebView2 window {target:?}");
         } else {
             let _ = SetFocus(root_hwnd);
-            tracing::debug!("Chrome_WidgetWin_1 child not found; set focus to root window {root_hwnd:?}");
+            tracing::debug!(
+                "Chrome_WidgetWin_1 child not found; set focus to root window {root_hwnd:?}"
+            );
         }
     }
 }
@@ -130,11 +149,7 @@ struct MonitorState {
 static MONITOR_STATE: Mutex<Option<MonitorState>> = Mutex::new(None);
 static HOOK_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 
-unsafe extern "system" fn mouse_ll_hook_proc(
-    n_code: i32,
-    wparam: usize,
-    lparam: isize,
-) -> isize {
+unsafe extern "system" fn mouse_ll_hook_proc(n_code: i32, wparam: usize, lparam: isize) -> isize {
     if n_code >= HC_ACTION && wparam == WM_LBUTTONUP as usize && lparam != 0 {
         let hook_struct = &*(lparam as *const MSLLHOOKSTRUCT);
         let mut pt = hook_struct.pt;
@@ -148,8 +163,9 @@ unsafe extern "system" fn mouse_ll_hook_proc(
                     let logical_x = pt.x as f64 / dpi_scale;
                     let logical_y = pt.y as f64 / dpi_scale;
 
-                    if let Some(session_id) =
-                        state.surface_host.session_at_logical_point(logical_x, logical_y)
+                    if let Some(session_id) = state
+                        .surface_host
+                        .session_at_logical_point(logical_x, logical_y)
                     {
                         best_effort_focus_webview(root_hwnd);
                         (state.emit_focus)(session_id);
@@ -175,7 +191,9 @@ pub fn install_windows_terminal_focus_monitor<R: Runtime>(
     let window_handle = match window.window_handle() {
         Ok(h) => h,
         Err(e) => {
-            tracing::debug!("install_windows_terminal_focus_monitor: failed to get window handle: {e}");
+            tracing::debug!(
+                "install_windows_terminal_focus_monitor: failed to get window handle: {e}"
+            );
             return Ok(());
         }
     };
@@ -212,14 +230,7 @@ pub fn install_windows_terminal_focus_monitor<R: Runtime>(
 
     // SAFETY: Installing WH_MOUSE_LL hook on the current process module image.
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let hook = unsafe {
-        SetWindowsHookExW(
-            WH_MOUSE_LL,
-            Some(mouse_ll_hook_proc),
-            instance,
-            0,
-        )
-    };
+    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_hook_proc), instance, 0) };
 
     if hook.is_null() {
         tracing::warn!("install_windows_terminal_focus_monitor: SetWindowsHookExW failed");
