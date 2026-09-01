@@ -141,10 +141,8 @@ Linux and Windows support core terminal sessions and daemon communication, while
 You will not find benchmark charts claiming Ferryx is "10x faster than Warp" or "uses 50% less RAM than Cursor" on this site.
 
 Here is why:
-- We have performed **zero competitor benchmarks** under rigorous lab conditions (`PRODUCT.md:38`).
+- We have performed **zero competitor benchmarks** under rigorous lab conditions.
 - Synthetic microbenchmarks often distort real developer workflows.
 - Single-maintainer benchmark wars usually distract from building honest software.
 
-Every tool occupies a different trade-off space. `tmux` provides mature remote session persistence; visual workspaces and review queues address a different operating model. The diagnostic publishes those differences and the scoring data instead of turning this article into a product ranking.
-
-To find the environment that fits your exact workflow, explore our [Coding Agent Workflow Diagnostic](/diagnostic/).
+Every tool occupies a different trade-off space. `tmux` provides mature remote session persistence; visual workspaces and review queues address a different operating model.

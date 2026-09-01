@@ -4,6 +4,7 @@ export const AGENT_CANDIDATES = [
   "gemini",
   "opencode",
   "omo",
+  "gjc",
   "aider",
   "cursor-agent",
   "droid",

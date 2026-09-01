@@ -16,6 +16,7 @@ const COPILOT_STORE_RE = new RegExp(`(?:^|/)\\.copilot/session-state/(${UUID_PAT
 const CURSOR_STORE_RE = new RegExp(`(?:^|/)\\.cursor/chats/[^/]+/(${UUID_PATTERN})/store\\.db(?:-(?:wal|shm))?$`);
 const KIMI_STORE_RE = new RegExp(`(?:^|/)\\.kimi/sessions/[^/]+/(${UUID_PATTERN})(?:/|$)`);
 const OMO_STORE_RE = new RegExp(`(?:^|/)\\.omo/sessions/[^/]+/[^/]+_(${UUID_PATTERN})\\.jsonl$`);
+const GJC_STORE_RE = new RegExp(`(?:^|/)(?:\\.gjc/agent|gjc)(?:/profiles/[^/]+)?/sessions/[^/]+/[^/]+_([0-9a-fA-F-]{8,64})\\.jsonl$`);
 
 /**
  * Agent types whose session ID cannot be discovered via open-file inspection.
@@ -132,6 +133,10 @@ export function extractSessionIdFromPath(agentType: string, filePath: string): s
     }
     case "omo": {
       const match = OMO_STORE_RE.exec(normalizedPath);
+      return match ? match[1]! : null;
+    }
+    case "gjc": {
+      const match = GJC_STORE_RE.exec(normalizedPath);
       return match ? match[1]! : null;
     }
     default:

@@ -12,7 +12,9 @@ import {
 } from "./NativeTerminalPane";
 import { TerminalPane } from "./TerminalPane";
 
-const dagSnapshot = parseDagRunSnapshot(dagRunSampleJson)!;
+const parsedDagSnapshot = parseDagRunSnapshot(dagRunSampleJson);
+if (!parsedDagSnapshot) throw new TypeError("DAG test fixture is invalid");
+const dagSnapshot = parsedDagSnapshot;
 
 const agentActivity: TerminalActivity = {
   state: "working",
@@ -49,6 +51,17 @@ function createSession(id = "session-native"): TerminalSession {
     worktree: { wsId: "ws-main", slug: "main" },
     backendSessionId: `backend-${id}`,
     lifecycle: "working",
+  };
+}
+
+function createExitedSession(overrides: Partial<TerminalSession> = {}): TerminalSession {
+  return {
+    ...createSession("session-exited"),
+    backendSessionId: null,
+    lifecycle: "exited",
+    agentType: "omo",
+    providerSession: { key: "session_id", id: "provider-omo-1" },
+    ...overrides,
   };
 }
 
@@ -186,5 +199,175 @@ describe("TerminalPane native routing contract", () => {
     fireEvent.click(backdrop);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("calls reconnect once with the local session id and disables repeat activation while pending", () => {
+    // Given: an exited Omo session with an authoritative provider reference.
+    const onReconnect = vi.fn(() => new Promise<void>(() => undefined));
+    render(<TerminalPane session={createExitedSession()} active={true} onReconnect={onReconnect} />);
+
+    expect(screen.getByText("OMO", { exact: true })).toBeInTheDocument();
+    expect(screen.getByRole("presentation")).toHaveAttribute("src", expect.stringContaining("svg"));
+
+    // When: reconnect is activated by the keyboard-generated click contract, then clicked again.
+    const button = screen.getByRole("button", { name: /Reconnect OMO session/i });
+    fireEvent.click(button, { detail: 0 });
+    fireEvent.click(button);
+
+    // Then: one callback receives the frontend-local id and progress prevents repeats.
+    expect(onReconnect).toHaveBeenCalledOnce();
+    expect(onReconnect).toHaveBeenCalledWith("session-exited");
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(button).toHaveAccessibleName(/Reconnecting OMO session/i);
+    expect(screen.getByText("Reconnecting session...", { exact: true })).toBeInTheDocument();
+  });
+
+  it("renders deterministic conflict copy and never calls reconnect for a duplicate active claim", () => {
+    // Given: another live pane owns the same normalized provider session.
+    const exited = createExitedSession();
+    const live = createExitedSession({
+      id: "session-live-owner",
+      backendSessionId: "backend-live-owner",
+      lifecycle: "working",
+    });
+    const onReconnect = vi.fn();
+
+    // When: the exited pane derives its reconnect affordance from both sessions.
+    render(
+      <TerminalPane
+        session={exited}
+        sessions={{ [exited.id]: exited, [live.id]: live }}
+        active={true}
+        onReconnect={onReconnect}
+      />,
+    );
+
+    // Then: conflict copy explicitly identifies the other pane and no reconnect button exists.
+    expect(screen.getByText("This session is already active in another pane (session-live-owner).")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Reconnect OMO session/i })).toBeNull();
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
+  it("renders deterministic unavailable copy for missing and unsupported agent references with no action", () => {
+    // Given: exited panes that cannot produce a provider-native resume request.
+    const { rerender } = render(
+      <TerminalPane
+        session={createExitedSession({ providerSession: null, agentSessionId: null })}
+        active={true}
+        onReconnect={vi.fn()}
+      />,
+    );
+
+    // Then: a missing reference is distinguished from unsupported resume behavior and shows no action.
+    expect(screen.getByText("Session reference unavailable.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
+    rerender(
+      <TerminalPane
+        session={createExitedSession({ agentType: "unknown-agent" })}
+        active={true}
+        onReconnect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/sessions cannot be reconnected/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
+  });
+
+  it("shows deterministic typed failure copy and exposes retry", () => {
+    // Given: a reconnect attempt rejected an invalid provider reference.
+    const onReconnect = vi.fn();
+    render(
+      <TerminalPane
+        session={createExitedSession({
+          reconnectLifecycle: "failed",
+          reconnectError: { code: "AGENT_RESUME_INVALID", message: "backend wording is not UI copy" },
+        })}
+        active={true}
+        onReconnect={onReconnect}
+      />,
+    );
+
+    // When: retry is activated.
+    expect(screen.getByText("This session has an invalid reconnect reference.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Retry OMO session/i }));
+
+    // Then: retry targets the same frontend-local session.
+    expect(onReconnect).toHaveBeenCalledOnce();
+    expect(onReconnect).toHaveBeenCalledWith("session-exited");
+  });
+
+  it.each(["validating", "spawning", "binding"] as const)(
+    "shows disabled reconnect progress while %s",
+    (reconnectLifecycle) => {
+      // Given: the reconnect transaction is in a non-idle phase.
+      const onReconnect = vi.fn();
+      render(
+        <TerminalPane
+          session={createExitedSession({ reconnectLifecycle })}
+          active={true}
+          onReconnect={onReconnect}
+        />,
+      );
+
+      // Then: progress is announced and repeat activation is blocked.
+      const button = screen.getByRole("button", { name: /Reconnecting OMO session/i });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-busy", "true");
+      expect(screen.getByText("Reconnecting session...", { exact: true })).toBeInTheDocument();
+      fireEvent.click(button);
+      expect(onReconnect).not.toHaveBeenCalled();
+    },
+  );
+
+  it("never renders a reconnect surface over a live native terminal", () => {
+    // Given: a live backend session that can paint a native surface.
+    render(
+      <TerminalPane
+        session={{
+          ...createSession(),
+          agentType: "omo",
+          providerSession: { key: "session_id", id: "provider-live" },
+        }}
+        active={true}
+        onReconnect={vi.fn()}
+      />,
+    );
+
+    // Then: the native pane remains and no disconnected action overlays it.
+    expect(screen.getByTestId("native-terminal-pane")).toBeInTheDocument();
+    expect(screen.queryByText("Session disconnected")).toBeNull();
+    expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
+  });
+
+  it("distinguishes an exited shell replacement from agent resume", () => {
+    // Given: an ordinary shell whose backend exited.
+    const onOpenNewShell = vi.fn();
+    render(
+      <TerminalPane
+        session={createExitedSession({ agentType: null, providerSession: null })}
+        active={true}
+        onOpenNewShell={onOpenNewShell}
+      />,
+    );
+
+    // When: the user explicitly requests a fresh shell using keyboard activation.
+    fireEvent.click(screen.getByRole("button", { name: "Open new shell" }), { detail: 0 });
+
+    // Then: the callback receives the local pane session id and resume is never implied.
+    expect(onOpenNewShell).toHaveBeenCalledOnce();
+    expect(onOpenNewShell).toHaveBeenCalledWith("session-exited");
+    expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
+    expect(screen.getByText("Shell exited")).toBeInTheDocument();
+  });
+
+  it("keeps an exited shell action unavailable when the application did not wire replacement", () => {
+    render(
+      <TerminalPane
+        session={createExitedSession({ agentType: null, providerSession: null })}
+        active={true}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Open new shell" })).toBeDisabled();
   });
 });

@@ -401,4 +401,39 @@ describe("agentSessionDiscovery", () => {
       expect(UNSUPPORTED_DISCOVERY_AGENTS.has("omo")).toBe(false);
     });
   });
+
+  describe("gjc short-hex session stores", () => {
+    it("matches the gjc binary in the process tree", () => {
+      const snapshot: ProcessSnapshot = [
+        { pid: 300, ppid: 1, command: "zsh" },
+        { pid: 301, ppid: 300, command: "/usr/local/bin/gjc" },
+      ];
+      expect(findAgentPid(snapshot, 300, "gjc")).toBe(301);
+    });
+
+    it("extracts the session id from default and XDG gjc layouts", () => {
+      expect(
+        extractSessionIdFromPath(
+          "gjc",
+          "/Users/me/.gjc/agent/sessions/v2-scopeid/2026-02-16T10-20-30.000Z_1f9d2a6b9c0d1234.jsonl",
+        ),
+      ).toBe("1f9d2a6b9c0d1234");
+      expect(
+        extractSessionIdFromPath(
+          "gjc",
+          "/Users/me/.local/share/gjc/profiles/work/sessions/v2-scopeid/2026-02-16T10-20-30.000Z_1f9d2a6b9c0d1234.jsonl",
+        ),
+      ).toBe("1f9d2a6b9c0d1234");
+    });
+
+    it("returns null outside gjc session stores and for degenerate ids", () => {
+      expect(extractSessionIdFromPath("gjc", "/tmp/unrelated_1f9d2a6b9c0d1234.jsonl")).toBeNull();
+      expect(
+        extractSessionIdFromPath(
+          "gjc",
+          "/Users/me/.gjc/agent/sessions/v2-scopeid/2026-02-16T10-20-30.000Z_abcd.jsonl",
+        ),
+      ).toBeNull();
+    });
+  });
 });

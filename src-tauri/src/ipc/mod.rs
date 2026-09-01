@@ -14,6 +14,7 @@ pub mod preferences;
 pub mod project;
 pub mod remote;
 pub mod session;
+pub mod ssh;
 pub mod terminal;
 pub mod worktree;
 

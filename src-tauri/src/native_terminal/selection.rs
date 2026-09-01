@@ -287,16 +287,18 @@ pub fn apply_mouse_gesture(
     let cols = super::queries::query_cols(terminal)?;
     let rows = super::queries::query_rows(terminal)?;
 
-    let (cell_width, cell_height, padding_left, padding_top, screen_height) = match event.size {
-        Some(sz) => (
-            sz.cell_width.max(1),
-            sz.cell_height.max(1),
-            sz.padding_left,
-            sz.padding_top,
-            sz.screen_height.max(1),
-        ),
-        None => (10, 16, 0, 0, (u32::from(rows) * 16).max(1)),
-    };
+    let sz = event.size.ok_or_else(|| {
+        NativeTerminalError::InvalidValue(
+            "mouse gesture requires authoritative renderer size".to_string(),
+        )
+    })?;
+    let (cell_width, cell_height, padding_left, padding_top, screen_height) = (
+        sz.cell_width.max(1),
+        sz.cell_height.max(1),
+        sz.padding_left,
+        sz.padding_top,
+        sz.screen_height.max(1),
+    );
 
     let rel_x = (event.position.x.max(0.0) - padding_left as f32).max(0.0);
     let rel_y = (event.position.y.max(0.0) - padding_top as f32).max(0.0);
@@ -508,4 +510,33 @@ pub fn apply_mouse_gesture(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native_terminal::{MousePosition, NativeTerminal};
+
+    #[test]
+    fn mouse_gesture_without_authoritative_renderer_size_is_rejected() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        let event = MouseEvent {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            position: MousePosition { x: 10.0, y: 10.0 },
+            modifiers: Default::default(),
+            size: None,
+        };
+
+        let error = terminal
+            .handle_mouse_gesture(&event)
+            .expect_err("missing authoritative renderer size must fail");
+
+        assert_eq!(
+            error,
+            NativeTerminalError::InvalidValue(
+                "mouse gesture requires authoritative renderer size".to_string()
+            )
+        );
+    }
 }

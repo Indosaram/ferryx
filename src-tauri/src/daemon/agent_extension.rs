@@ -100,4 +100,23 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn bundled_extension_derives_provider_session_from_session_manager() {
+        // The real pi runtime never exposes ctx.providerSession; the agent's own
+        // session identity is only reachable via ctx.sessionManager.getSessionId().
+        // A regression to mock-only shapes silently disables provider capture.
+        assert!(
+            EXTENSION_SOURCE.contains("sessionManager"),
+            "extension must read the provider session from ctx.sessionManager"
+        );
+        assert!(
+            EXTENSION_SOURCE.contains("getSessionId"),
+            "extension must derive the provider session id via getSessionId"
+        );
+        assert!(
+            EXTENSION_SOURCE.contains("\"session_id\""),
+            "provider reference must use the daemon's session_id key"
+        );
+    }
 }

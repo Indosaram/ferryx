@@ -36,6 +36,8 @@ pub struct TerminalThemeColors {
     pub bright_cyan: String,
     pub bright_white: String,
     pub extended_ansi: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub palette_overrides: Vec<(u8, String)>,
 }
 
 impl Default for TerminalThemeColors {
@@ -64,6 +66,7 @@ impl Default for TerminalThemeColors {
             bright_cyan: "#70c0b1".to_string(),
             bright_white: "#eaeaea".to_string(),
             extended_ansi: Vec::new(),
+            palette_overrides: Vec::new(),
         }
     }
 }
@@ -192,6 +195,10 @@ impl TerminalPreferences {
             }
         }
         theme.extended_ansi = extended;
+
+        let mut palette_overrides: Vec<(u8, String)> = config.palette.into_iter().collect();
+        palette_overrides.sort_by_key(|(idx, _)| *idx);
+        theme.palette_overrides = palette_overrides;
 
         let cursor_style = match config.cursor_style.as_deref() {
             Some("bar") => "bar".to_string(),
@@ -429,6 +436,39 @@ fn theme_name_for_appearance(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn find_ghostty_binary_on_path() -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(if cfg!(windows) {
+            "ghostty.exe"
+        } else {
+            "ghostty"
+        });
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Ghostty theme lookup order: user theme dir, then the shipped resources theme dir.
 /// A theme name containing path separators is only honored when absolute.
 fn theme_config_candidates(name: &str) -> Vec<PathBuf> {
@@ -460,6 +500,25 @@ fn theme_config_candidates(name: &str) -> Vec<PathBuf> {
                 .join("themes")
                 .join(&name),
         );
+    }
+    if let Some(ghostty_bin) = find_ghostty_binary_on_path() {
+        if let Some(bin_dir) = ghostty_bin.parent() {
+            candidates.push(
+                bin_dir
+                    .join("..")
+                    .join("ghostty")
+                    .join("themes")
+                    .join(&name),
+            );
+            candidates.push(
+                bin_dir
+                    .join("..")
+                    .join("share")
+                    .join("ghostty")
+                    .join("themes")
+                    .join(&name),
+            );
+        }
     }
     if let Some(resources_dir) = env::var_os("GHOSTTY_RESOURCES_DIR") {
         candidates.push(PathBuf::from(resources_dir).join("themes").join(&name));
@@ -765,12 +824,99 @@ mod tests {
         assert_eq!(parsed.palette.get(&255), Some(&"#ffffff".to_string()));
 
         let mut prefs_config = GhosttyTerminalConfig::default();
+        prefs_config.palette.insert(1, "#ff0000".to_string());
         for idx in 16u8..=255u8 {
             prefs_config.palette.insert(idx, format!("#color_{}", idx));
         }
         let prefs = TerminalPreferences::imported(prefs_config, PathBuf::from("test"));
         assert_eq!(prefs.theme.extended_ansi.len(), 240);
         assert_eq!(prefs.theme.extended_ansi[0], "#color_16");
+        assert_eq!(prefs.theme.palette_overrides.len(), 241);
+        assert_eq!(prefs.theme.palette_overrides[0], (1, "#ff0000".to_string()));
+        assert_eq!(
+            prefs.theme.palette_overrides[1],
+            (16, "#color_16".to_string())
+        );
+        assert_eq!(
+            prefs.theme.palette_overrides[240],
+            (255, "#color_255".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_ghostty_binary_on_path_and_theme_candidates() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp_dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let ghostty_bin = bin_dir.join(if cfg!(windows) {
+            "ghostty.exe"
+        } else {
+            "ghostty"
+        });
+        fs::write(&ghostty_bin, b"#!/bin/sh\nexit 0\n").expect("write ghostty bin");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&ghostty_bin).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&ghostty_bin, perms).expect("set permissions");
+        }
+
+        struct EnvGuard {
+            key: &'static str,
+            orig: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                if let Some(orig) = &self.orig {
+                    env::set_var(self.key, orig);
+                } else {
+                    env::remove_var(self.key);
+                }
+            }
+        }
+
+        let _guard = EnvGuard {
+            key: "PATH",
+            orig: env::var_os("PATH"),
+        };
+
+        env::set_var("PATH", &bin_dir);
+
+        let found = find_ghostty_binary_on_path();
+        assert_eq!(found, Some(ghostty_bin.clone()));
+
+        let candidates = theme_config_candidates("tokyonight");
+        let expected_bundle = bin_dir
+            .join("..")
+            .join("ghostty")
+            .join("themes")
+            .join("tokyonight");
+        let expected_share = bin_dir
+            .join("..")
+            .join("share")
+            .join("ghostty")
+            .join("themes")
+            .join("tokyonight");
+
+        assert!(
+            candidates.contains(&expected_bundle),
+            "candidates {candidates:?} should contain {expected_bundle:?}"
+        );
+        assert!(
+            candidates.contains(&expected_share),
+            "candidates {candidates:?} should contain {expected_share:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&ghostty_bin).expect("metadata").permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(&ghostty_bin, perms).expect("set permissions");
+            assert_eq!(find_ghostty_binary_on_path(), None);
+        }
     }
 
     #[test]

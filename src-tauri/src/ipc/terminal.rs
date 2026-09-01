@@ -1,6 +1,6 @@
 // allow: SIZE_OK — IPC module bundling terminal commands, output batching, and macOS libproc CWD resolution within constrained write scope
 use crate::daemon::client::{DaemonAttachment, DaemonClient};
-use crate::daemon::protocol::DaemonStreamMessage;
+use crate::daemon::protocol::{DaemonStreamMessage, TerminalStartup};
 use crate::ipc::{run_blocking, IpcError};
 use crate::terminal::TerminalSignal;
 use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeIdentity};
@@ -315,12 +315,16 @@ pub struct SpawnTerminalRequest {
     pub client_request_id: Option<String>,
     #[serde(default)]
     pub shell: Option<String>,
+    #[serde(default)]
+    pub startup: Option<TerminalStartup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpawnTerminalResponse {
     pub session_id: String,
+    pub daemon_epoch: String,
+    pub session: crate::daemon::protocol::DaemonSessionDetails,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -643,12 +647,13 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let client_request_id = request
         .client_request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let effective_shell = request
-        .shell
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| crate::terminal::cached_terminal_preferences().default_shell.clone());
-    let session_id = match daemon_client
-        .spawn_terminal(
+    let effective_shell = request.shell.filter(|s| !s.trim().is_empty()).or_else(|| {
+        crate::terminal::cached_terminal_preferences()
+            .default_shell
+            .clone()
+    });
+    let spawn_result = match daemon_client
+        .spawn_terminal_with_startup(
             client_request_id,
             request.workspace_id,
             request.worktree,
@@ -656,10 +661,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             cols,
             rows,
             effective_shell,
+            request.startup,
         )
         .await
     {
-        Ok(session_id) => session_id,
+        Ok(result) => result,
         Err(err) => {
             eprintln!(
                 "[cmd_terminal_spawn] stage=daemon_spawn failed code={:?}",
@@ -669,6 +675,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         }
     };
 
+    let session_id = spawn_result.session_id.clone();
     let attachment = match daemon_client.attach(&session_id, None).await {
         Ok(attachment) => attachment,
         Err(err) => {
@@ -695,7 +702,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         )));
     }
 
-    Ok(SpawnTerminalResponse { session_id })
+    Ok(SpawnTerminalResponse {
+        session_id,
+        daemon_epoch: spawn_result.epoch.to_string(),
+        session: spawn_result.session,
+    })
 }
 
 #[tauri::command]

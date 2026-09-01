@@ -54,6 +54,8 @@ async fn rerender_native_sessions<R: Runtime>(
     daemon_client: &DaemonClient,
     state: &NativeTerminalSurfaceHostState,
 ) -> Result<(), IpcError> {
+    state.reapply_theme_to_sessions();
+
     let sessions: Vec<(String, LogicalBounds)> = state
         .registered_session_ids()
         .into_iter()

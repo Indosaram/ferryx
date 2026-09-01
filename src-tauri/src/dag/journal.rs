@@ -43,7 +43,9 @@ pub enum DagNodeState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DagRoute {
-    Category { category: String },
+    Category {
+        category: String,
+    },
     Agent {
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,7 +231,10 @@ struct RawCheckpoint {
 }
 
 pub fn derive_counts(nodes: &[DagNodeSnapshot]) -> Counts {
-    let mut counts = DagRunCounts { total: nodes.len(), ..Default::default() };
+    let mut counts = DagRunCounts {
+        total: nodes.len(),
+        ..Default::default()
+    };
     for node in nodes {
         match node.state {
             DagNodeState::Completed => counts.completed += 1,
@@ -264,7 +269,9 @@ pub fn parse_run_checkpoint(json: &str) -> Result<DagRunSnapshot, DagJournalErro
 
     Ok(DagRunSnapshot {
         counts: derive_counts(&raw.nodes),
-        amend_count: raw.amend_count.unwrap_or_else(|| raw.amend_history.as_ref().map_or(0, |h| h.len())),
+        amend_count: raw
+            .amend_count
+            .unwrap_or_else(|| raw.amend_history.as_ref().map_or(0, |h| h.len())),
         run_id: raw.run_id,
         run_key: raw.run_key,
         name: raw.name,

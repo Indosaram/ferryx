@@ -52,6 +52,7 @@ export type DagRunSnapshot = {
   readonly runId: string;
   readonly runKey: string;
   readonly name: string;
+  readonly rootSessionId?: string | null;
   readonly status: DagRunStatus;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -175,6 +176,7 @@ export function parseDagRunSnapshot(raw: unknown): DagRunSnapshot | null {
   }
   const statusStr = raw["status"];
   if (typeof statusStr !== "string" || !VALID_RUN_STATUSES.has(statusStr)) return null;
+  const rootSessionId = typeof raw["rootSessionId"] === "string" ? raw["rootSessionId"] : undefined;
 
   const startedAt = parseStrOrNull(raw["startedAt"]);
   const completedAt = parseStrOrNull(raw["completedAt"]);
@@ -207,6 +209,7 @@ export function parseDagRunSnapshot(raw: unknown): DagRunSnapshot | null {
     runId: raw["runId"],
     runKey: raw["runKey"],
     name: raw["name"],
+    rootSessionId,
     status: statusStr as DagRunStatus,
     startedAt,
     completedAt,

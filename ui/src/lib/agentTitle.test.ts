@@ -145,6 +145,21 @@ describe("agentTitle parser & normalizer", () => {
     });
   });
 
+  describe("GJC (gajae-code) agent parsing", () => {
+    it("detects gjc titles with agent branding and task extraction", () => {
+      const working = parseAgentTitle("⠋ gjc: refactoring the parser");
+      expect(working?.isAgent).toBe(true);
+      expect(working?.agentType).toBe("gjc");
+      expect(working?.name).toBe("Gajae Code");
+      expect(working?.task).toBe("refactoring the parser");
+      expect(working?.state).toBe("working");
+
+      const bare = parseAgentTitle("gjc");
+      expect(bare?.isAgent).toBe(true);
+      expect(bare?.agentType).toBe("gjc");
+    });
+  });
+
   describe("other agents & non-agent processes", () => {
     it("detects Claude Code, Codex, and other agents", () => {
       const claude = parseAgentTitle("✳ claude code - analyzing tests");

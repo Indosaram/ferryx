@@ -1,3 +1,4 @@
+import { useSortable } from "@dnd-kit/sortable";
 import { LockKeyhole, Trash2 } from "lucide-react";
 import { memo, useMemo } from "react";
 
@@ -5,6 +6,7 @@ import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity"
 import { workspaceName } from "../lib/branchFilter";
 import { cn } from "../lib/cn";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
+import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot, type StatusDotState } from "./ui/StatusDot";
 
@@ -17,10 +19,11 @@ type WorktreeListProps = {
   readonly activityByWorktreePath?: Record<string, ActivitySummary | undefined>;
   readonly onSelect: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
+  readonly sortableWorkspaceId?: string;
   readonly label?: string;
 };
 
-type WorktreeRowProps = {
+export type WorktreeRowProps = {
   readonly worktree: Worktree;
   readonly active: boolean;
   readonly agent: ActiveAgent | undefined;
@@ -59,9 +62,9 @@ export const WorktreeRow = memo(function WorktreeRow({
     aggregateIndicator ?? (activitySummary === undefined && agent ? agent.state : null);
 
   return (
-    <li
+    <div
       className={cn(
-        "group/worktree-row relative my-0.5 rounded-md border transition-colors",
+        "group/worktree-row relative my-0.5 w-full rounded-md border transition-colors",
         active
           ? "border-[#6c6c6c] bg-[#3f3f3f]"
           : "border-transparent bg-transparent hover:bg-white/[0.04]",
@@ -110,7 +113,37 @@ export const WorktreeRow = memo(function WorktreeRow({
           <Trash2 className="size-3" />
         </IconButton>
       </div>
-    </li>
+    </div>
+  );
+});
+
+type SortableWorktreeRowProps = WorktreeRowProps & {
+  readonly workspaceId: string;
+};
+
+const SortableWorktreeRow = memo(function SortableWorktreeRow({
+  workspaceId,
+  ...rowProps
+}: SortableWorktreeRowProps) {
+  const worktreePath = rowProps.worktree.path;
+  const sortable = useSortable({
+    id: worktreeSortableId(workspaceId, worktreePath),
+    data: { type: "sidebar-worktree", workspaceId, worktreePath },
+  });
+
+  return (
+    <SidebarDragRow
+      kind="worktree"
+      setNodeRef={sortable.setNodeRef}
+      setActivatorNodeRef={sortable.setActivatorNodeRef}
+      attributes={sortable.attributes}
+      listeners={sortable.listeners}
+      transform={sortable.transform}
+      transition={sortable.transition}
+      dragging={sortable.isDragging}
+    >
+      <WorktreeRow {...rowProps} />
+    </SidebarDragRow>
   );
 });
 
@@ -123,6 +156,7 @@ export function WorktreeList({
   activityByWorktreePath,
   onSelect,
   onDelete,
+  sortableWorkspaceId,
   label = "Worktrees",
 }: WorktreeListProps) {
   const agentsByPath = useMemo(() => {
@@ -136,7 +170,7 @@ export function WorktreeList({
   if (worktrees.length === 0) return null;
 
   return (
-    <ul aria-label={label} className="m-0 list-none p-0">
+    <div role="list" aria-label={label} className="m-0 p-0">
       {worktrees.map((worktree) => {
         const active = worktree.path === activePath;
         const agent = agentsByPath.get(worktree.path);
@@ -144,20 +178,29 @@ export function WorktreeList({
         const summary = activityByWorktreePath?.[worktree.path];
         const hasUnread = !active && Boolean(summary?.hasUnread || unreadWorktreePaths?.[worktree.path]);
 
-        return (
-          <WorktreeRow
-            key={worktree.path}
-            worktree={worktree}
-            active={active}
-            agent={agent}
-            status={status}
-            unread={hasUnread}
-            activitySummary={summary}
-            onSelect={onSelect}
-            onDelete={onDelete}
-          />
+        const rowProps: WorktreeRowProps = {
+          worktree,
+          active,
+          agent,
+          status,
+          unread: hasUnread,
+          activitySummary: summary,
+          onSelect,
+          onDelete,
+        };
+
+        return sortableWorkspaceId ? (
+          <SortableWorktreeRow key={worktree.path} workspaceId={sortableWorkspaceId} {...rowProps} />
+        ) : (
+          <div key={worktree.path} role="listitem">
+            <WorktreeRow {...rowProps} />
+          </div>
         );
       })}
-    </ul>
+    </div>
   );
+}
+
+export function worktreeSortableId(workspaceId: string, worktreePath: string) {
+  return `sidebar-worktree:${workspaceId}:${worktreePath}`;
 }

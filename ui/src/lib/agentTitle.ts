@@ -34,6 +34,7 @@ export interface KnownAgent {
 export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
   { pattern: /\b(?:agy|antigravity)\b/i, type: "antigravity", name: "Antigravity" },
   { pattern: /\bomo\b/i, type: "omo", name: "OMO" },
+  { pattern: /\bgjc\b/i, type: "gjc", name: "Gajae Code" },
   { pattern: /\b(?:claude code|claude)\b/i, type: "claude", name: "Claude Code" },
   { pattern: /\bcodex\b/i, type: "codex", name: "Codex" },
   { pattern: /\bopencode\b/i, type: "opencode", name: "OpenCode" },

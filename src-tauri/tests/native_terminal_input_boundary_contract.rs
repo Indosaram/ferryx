@@ -28,6 +28,9 @@ fn create_attachment(
         end_sequence: None,
         gap: None,
         history: Vec::new(),
+        history_segments: Vec::new(),
+        pty_cols: None,
+        pty_rows: None,
         messages: rx,
         stream_task,
     };

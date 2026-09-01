@@ -33,6 +33,23 @@ describe("DagRunSnapshot validator", () => {
     expect(snapshot.amendCount).toBe(1);
   });
 
+  it("parses a top-level rootSessionId string", () => {
+    const snapshot = parseDagRunSnapshot({
+      ...sampleJson,
+      rootSessionId: "01a055f9-a8de-7619-a1f5-81ca62e3d3b1",
+    });
+
+    expect(snapshot?.rootSessionId).toBe("01a055f9-a8de-7619-a1f5-81ca62e3d3b1");
+  });
+
+  it("leaves rootSessionId undefined when missing, null, or invalid", () => {
+    const { rootSessionId: _rootSessionId, ...withoutRootSessionId } = sampleJson;
+
+    expect(parseDagRunSnapshot(withoutRootSessionId)?.rootSessionId).toBeUndefined();
+    expect(parseDagRunSnapshot({ ...sampleJson, rootSessionId: null })?.rootSessionId).toBeUndefined();
+    expect(parseDagRunSnapshot({ ...sampleJson, rootSessionId: 42 })?.rootSessionId).toBeUndefined();
+  });
+
   it("returns null when nodes array is missing or deleted", () => {
     // Given: a snapshot payload with nodes field removed
     const { nodes: _deletedNodes, ...corrupted } = sampleJson;
