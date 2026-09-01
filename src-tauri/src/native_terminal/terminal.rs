@@ -38,6 +38,68 @@ use super::sys::types::{
     GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
     GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, GHOSTTY_TERMINAL_OPT_TITLE,
 };
+use crate::terminal::TerminalThemeColors;
+
+const ONE_DARK_DEFAULTS: [&str; 16] = [
+    "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
+    "#666666", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
+];
+
+pub(crate) fn full_palette(theme: &TerminalThemeColors) -> [ColorRgb; 256] {
+    let mut palette = [ColorRgb::default(); 256];
+
+    let named = [
+        &theme.black,
+        &theme.red,
+        &theme.green,
+        &theme.yellow,
+        &theme.blue,
+        &theme.magenta,
+        &theme.cyan,
+        &theme.white,
+        &theme.bright_black,
+        &theme.bright_red,
+        &theme.bright_green,
+        &theme.bright_yellow,
+        &theme.bright_blue,
+        &theme.bright_magenta,
+        &theme.bright_cyan,
+        &theme.bright_white,
+    ];
+
+    for (i, color_str) in named.iter().enumerate() {
+        palette[i] = ColorRgb::from_hex(color_str)
+            .or_else(|| ColorRgb::from_hex(ONE_DARK_DEFAULTS[i]))
+            .unwrap_or_default();
+    }
+
+    let mut idx = 16;
+    for r in 0..6u8 {
+        for g in 0..6u8 {
+            for b in 0..6u8 {
+                palette[idx] = ColorRgb::new(
+                    if r == 0 { 0 } else { r * 40 + 55 },
+                    if g == 0 { 0 } else { g * 40 + 55 },
+                    if b == 0 { 0 } else { b * 40 + 55 },
+                );
+                idx += 1;
+            }
+        }
+    }
+
+    for i in 232..=255 {
+        let gray = ((i - 232) as u8) * 10 + 8;
+        palette[i] = ColorRgb::new(gray, gray, gray);
+    }
+
+    for &(override_idx, ref hex) in &theme.palette_overrides {
+        if let Some(color) = ColorRgb::from_hex(hex) {
+            palette[override_idx as usize] = color;
+        }
+    }
+
+    palette
+}
 
 /// A Rust-owned virtual terminal instance backed by `libghostty-vt`.
 ///
@@ -138,6 +200,22 @@ impl NativeTerminal {
             )
         };
         NativeTerminalError::from_c_result(result, "ghostty_terminal_set(ColorPalette)")
+    }
+
+    pub fn apply_theme_preferences(
+        &mut self,
+        theme: &TerminalThemeColors,
+    ) -> Result<(), NativeTerminalError> {
+        if let Some(fg) = ColorRgb::from_hex(&theme.foreground) {
+            self.set_default_foreground(fg)?;
+        }
+        if let Some(bg) = ColorRgb::from_hex(&theme.background) {
+            self.set_default_background(bg)?;
+        }
+        if let Some(cursor) = ColorRgb::from_hex(&theme.cursor) {
+            self.set_default_cursor_color(cursor)?;
+        }
+        self.set_palette(full_palette(theme))
     }
 }
 
@@ -354,10 +432,66 @@ impl TerminalEngine for NativeTerminal {
 #[cfg(test)]
 mod tests {
     use super::NativeTerminal;
+    use crate::native_terminal::color::ColorRgb;
     use crate::native_terminal::engine::TerminalEngine;
+    use crate::native_terminal::terminal::full_palette;
     use crate::native_terminal::{
         MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize,
     };
+    use crate::terminal::TerminalThemeColors;
+
+    #[test]
+    fn test_full_palette_defaults_cube_grays_and_overrides() {
+        let default_theme = TerminalThemeColors::default();
+        let palette = full_palette(&default_theme);
+
+        // Cube values
+        assert_eq!(palette[16], ColorRgb::new(0, 0, 0)); // #000000
+        assert_eq!(palette[17], ColorRgb::new(0, 0, 0x5f)); // #00005f
+        assert_eq!(palette[57], ColorRgb::new(0x5f, 0, 0xff)); // #5f00ff
+        assert_eq!(palette[231], ColorRgb::new(255, 255, 255)); // #ffffff
+
+        // Gray ramp values
+        assert_eq!(palette[232], ColorRgb::new(8, 8, 8)); // #080808
+        assert_eq!(palette[255], ColorRgb::new(0xee, 0xee, 0xee)); // #eeeeee
+
+        // Override wins
+        let mut override_theme = TerminalThemeColors::default();
+        override_theme
+            .palette_overrides
+            .push((200, "#123456".to_string()));
+        let overridden_palette = full_palette(&override_theme);
+        assert_eq!(overridden_palette[200], ColorRgb::new(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn test_apply_theme_preferences_on_terminal() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        let mut theme = TerminalThemeColors::default();
+        theme.foreground = "#112233".to_string();
+        theme.background = "#445566".to_string();
+        theme.cursor = "#778899".to_string();
+        theme.palette_overrides.push((200, "#abcdef".to_string()));
+
+        terminal
+            .apply_theme_preferences(&theme)
+            .expect("apply theme preferences");
+
+        assert_eq!(
+            terminal.default_foreground().expect("foreground"),
+            ColorRgb::new(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            terminal.default_background().expect("background"),
+            ColorRgb::new(0x44, 0x55, 0x66)
+        );
+        assert_eq!(
+            terminal.default_cursor_color().expect("cursor"),
+            ColorRgb::new(0x77, 0x88, 0x99)
+        );
+        let palette = terminal.palette().expect("palette");
+        assert_eq!(palette[200], ColorRgb::new(0xab, 0xcd, 0xef));
+    }
 
     #[test]
     fn native_terminal_ffi_probe_osc_2_reports_title_change_and_value() {

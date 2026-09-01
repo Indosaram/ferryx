@@ -155,6 +155,8 @@ type TerminalSplitViewProps = {
   leadingSpacer?: number;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
+  onReconnectAgentSession?: (sessionId: string) => void;
+  onOpenNewShell?: (sessionId: string) => void;
 };
 
 type DragFocusSnapshot = {
@@ -199,6 +201,8 @@ export function TerminalSplitView({
   leadingSpacer = 0,
   searchLeafId,
   onCloseSearch,
+  onReconnectAgentSession,
+  onOpenNewShell,
 }: TerminalSplitViewProps) {
   const normalizedLayout = normalizeLayout(layout);
   const groups = normalizedLayout.tabGroups ?? {};
@@ -417,6 +421,8 @@ export function TerminalSplitView({
     activityBySessionId,
     searchLeafId,
     onCloseSearch,
+    onReconnectAgentSession,
+    onOpenNewShell,
     splitTerminalTab,
     browserPanesVisible: activeDrag === null,
     dropFeedbackLeafId,
@@ -577,6 +583,8 @@ type TabGroupViewProps = {
   activityBySessionId?: Record<string, TerminalActivity>;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
+  onReconnectAgentSession?: (sessionId: string) => void;
+  onOpenNewShell?: (sessionId: string) => void;
   splitTerminalTab: (tabId: string, direction: PaneDirection) => void;
   browserPanesVisible: boolean;
   dropFeedbackLeafId: string | null;
@@ -617,6 +625,8 @@ function TabGroupView({
   activityBySessionId,
   searchLeafId,
   onCloseSearch,
+  onReconnectAgentSession,
+  onOpenNewShell,
   splitTerminalTab,
   browserPanesVisible,
   dropFeedbackLeafId,
@@ -717,6 +727,8 @@ function TabGroupView({
             path=""
             searchLeafId={searchLeafId}
             onCloseSearch={onCloseSearch}
+            onReconnectAgentSession={onReconnectAgentSession}
+            onOpenNewShell={onOpenNewShell}
             onSplitPane={onSplitPane}
             onClosePane={onClosePane}
             onSetRatio={onSetRatio}
@@ -754,6 +766,8 @@ type PaneRendererProps = {
   path: string;
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
+  onReconnectAgentSession?: (sessionId: string) => void;
+  onOpenNewShell?: (sessionId: string) => void;
   onNavigateBrowserTab: (tabId: string, url: string) => void;
   onReloadBrowserTab: (tabId: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
@@ -786,6 +800,8 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         dropFeedbackLeafId={dropFeedbackLeafId}
         searchOpen={props.searchLeafId === node.leafId}
         onCloseSearch={props.onCloseSearch}
+        onReconnectAgentSession={props.onReconnectAgentSession}
+        onOpenNewShell={props.onOpenNewShell}
         onNavigateBrowserTab={onNavigateBrowserTab}
         onReloadBrowserTab={onReloadBrowserTab}
         onSplitPane={props.onSplitPane}
@@ -831,6 +847,8 @@ type PaneLeafViewProps = {
   dropFeedbackLeafId: string | null;
   searchOpen?: boolean;
   onCloseSearch?: () => void;
+  onReconnectAgentSession?: (sessionId: string) => void;
+  onOpenNewShell?: (sessionId: string) => void;
   onNavigateBrowserTab: (tabId: string, url: string) => void;
   onReloadBrowserTab: (tabId: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
@@ -850,6 +868,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
   dropFeedbackLeafId,
   searchOpen,
   onCloseSearch,
+  onReconnectAgentSession,
+  onOpenNewShell,
   onNavigateBrowserTab,
   onReloadBrowserTab,
   onSplitPane,
@@ -978,6 +998,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   activity={activity}
                   searchOpen={searchOpen}
                   onCloseSearch={onCloseSearch}
+                  onReconnect={onReconnectAgentSession}
+                  onOpenNewShell={onOpenNewShell}
                 />
               );
             case "browser": {

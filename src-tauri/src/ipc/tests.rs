@@ -1,3 +1,4 @@
+// allow: SIZE_OK — Tauri IPC integration tests for terminal, worktree, and daemon commands
 use crate::daemon::client::DaemonClient;
 use crate::daemon::server::DaemonServer;
 use crate::ipc::terminal::{get_cached_cwd, process_cwd};
@@ -118,6 +119,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
             rows: Some(24),
             client_request_id: None,
             shell: None,
+            startup: None,
         },
     )
     .await
@@ -200,6 +202,7 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
             rows: Some(24),
             client_request_id: None,
             shell: None,
+            startup: None,
         },
     )
     .await
@@ -378,6 +381,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
             rows: Some(24),
             client_request_id: None,
             shell: None,
+            startup: None,
         },
     )
     .await
@@ -454,6 +458,7 @@ async fn terminal_cwd_cache_and_resolution_contract() {
             rows: Some(24),
             client_request_id: None,
             shell: None,
+            startup: None,
         },
     )
     .await
@@ -512,6 +517,7 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
             rows: Some(24),
             client_request_id: None,
             shell: None,
+            startup: None,
         },
     )
     .await
@@ -651,6 +657,7 @@ async fn test_project_registration_then_daemon_spawn() {
             rows: Some(24),
             client_request_id: None,
             shell: None,
+            startup: None,
         },
     )
     .await
@@ -661,4 +668,221 @@ async fn test_project_registration_then_daemon_spawn() {
         .expect("close");
 
     server_task.abort();
+}
+
+#[tokio::test]
+async fn agent_resume_startup_validation_failure_before_pty_spawn() {
+    use crate::daemon::protocol::{AgentProviderSession, AgentProviderSessionKey, TerminalStartup};
+    use crate::ipc::terminal::cmd_terminal_spawn;
+
+    let (repo, registry) = setup_workspace();
+    let (_dir, daemon_client, server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-test", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
+
+    let app = tauri::test::mock_builder()
+        .manage(daemon_client.clone())
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let client_state = app.state::<Arc<DaemonClient>>();
+    let registry_state = app.state::<WorkspaceRegistry>();
+
+    // 1. Send invalid session ID starting with dash ("--new")
+    let invalid_id_req = SpawnTerminalRequest {
+        workspace_id: "workspace-test".into(),
+        worktree: None,
+        cwd: None,
+        cols: Some(80),
+        rows: Some(24),
+        client_request_id: Some("req-invalid-id".into()),
+        shell: None,
+        startup: Some(TerminalStartup::AgentResume {
+            agent_type: "claude".to_string(),
+            provider_session: AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: "--new".to_string(),
+                transcript_path: None,
+            },
+        }),
+    };
+
+    let err_id = cmd_terminal_spawn(
+        app.handle().clone(),
+        client_state.clone(),
+        registry_state.clone(),
+        invalid_id_req,
+    )
+    .await
+    .expect_err("must reject leading dash session ID before PTY spawn");
+
+    assert_eq!(err_id.code, crate::ipc::IpcErrorCode::AgentResumeInvalid);
+    assert!(
+        err_id.details.as_ref().is_some_and(|details| {
+            details
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| reason.contains("id cannot start with a dash"))
+        }),
+        "Unexpected error: {err_id:?}"
+    );
+
+    // 2. Send wrong provider session key (Claude with conversation_id)
+    let wrong_key_req = SpawnTerminalRequest {
+        workspace_id: "workspace-test".into(),
+        worktree: None,
+        cwd: None,
+        cols: Some(80),
+        rows: Some(24),
+        client_request_id: Some("req-wrong-key".into()),
+        shell: None,
+        startup: Some(TerminalStartup::AgentResume {
+            agent_type: "claude".to_string(),
+            provider_session: AgentProviderSession {
+                key: AgentProviderSessionKey::ConversationId,
+                id: "sess-valid-id".to_string(),
+                transcript_path: None,
+            },
+        }),
+    };
+
+    let err_key = cmd_terminal_spawn(
+        app.handle().clone(),
+        client_state.clone(),
+        registry_state.clone(),
+        wrong_key_req,
+    )
+    .await
+    .expect_err("must reject wrong provider key for Claude before PTY spawn");
+
+    assert_eq!(err_key.code, crate::ipc::IpcErrorCode::AgentResumeInvalid);
+    assert!(
+        err_key.details.as_ref().is_some_and(|details| {
+            details
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| reason.contains("expected SessionId"))
+        }),
+        "Unexpected error: {err_key:?}"
+    );
+
+    // Verify no PTY sessions were spawned on the daemon
+    let active_sessions = daemon_client.list_sessions().await.expect("list sessions");
+    assert_eq!(
+        active_sessions.len(),
+        0,
+        "No PTY sessions should be created on validation failure"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn agent_resume_startup_cwd_jail_enforcement() {
+    use crate::daemon::protocol::{AgentProviderSession, AgentProviderSessionKey, TerminalStartup};
+    use crate::ipc::terminal::cmd_terminal_spawn;
+
+    let (repo, registry) = setup_workspace();
+    let (_dir, daemon_client, server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-test", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
+
+    let app = tauri::test::mock_builder()
+        .manage(daemon_client.clone())
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let outside_dir = tempfile::tempdir().expect("outside tempdir");
+    let outside_path = outside_dir.path().to_path_buf();
+
+    let request_outside_cwd = SpawnTerminalRequest {
+        workspace_id: "workspace-test".into(),
+        worktree: None,
+        cwd: Some(outside_path),
+        cols: Some(80),
+        rows: Some(24),
+        client_request_id: Some("req-outside-cwd".into()),
+        shell: None,
+        startup: Some(TerminalStartup::AgentResume {
+            agent_type: "claude".to_string(),
+            provider_session: AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: "sess-valid-id".to_string(),
+                transcript_path: None,
+            },
+        }),
+    };
+
+    let err = cmd_terminal_spawn(
+        app.handle().clone(),
+        app.state::<Arc<DaemonClient>>(),
+        app.state::<WorkspaceRegistry>(),
+        request_outside_cwd,
+    )
+    .await
+    .expect_err("must enforce CWD jail for agent resume startup");
+
+    assert_eq!(err.code, IpcErrorCode::PathOutsideWorkspace);
+
+    server_task.abort();
+}
+
+#[test]
+fn test_spawn_terminal_request_serde_camelcase_roundtrip() {
+    use crate::daemon::protocol::{AgentProviderSessionKey, TerminalStartup};
+
+    let req_json = r#"{
+        "workspaceId": "ws-1",
+        "worktree": null,
+        "cwd": "/repo/path",
+        "cols": 120,
+        "rows": 40,
+        "clientRequestId": "req-123",
+        "shell": null,
+        "startup": {
+            "kind": "agentResume",
+            "agentType": "omo",
+            "providerSession": {
+                "key": "session_id",
+                "id": "omo-session-456",
+                "transcriptPath": null
+            }
+        }
+    }"#;
+
+    let req: SpawnTerminalRequest =
+        serde_json::from_str(req_json).expect("deserialize SpawnTerminalRequest");
+    assert_eq!(req.workspace_id, "ws-1");
+    assert_eq!(req.cwd, Some(PathBuf::from("/repo/path")));
+    assert_eq!(req.cols, Some(120));
+    assert_eq!(req.rows, Some(40));
+    assert_eq!(req.client_request_id, Some("req-123".to_string()));
+    assert_eq!(req.shell, None);
+
+    match req.startup.as_ref() {
+        Some(TerminalStartup::AgentResume {
+            agent_type,
+            provider_session,
+        }) => {
+            assert_eq!(agent_type, "omo");
+            assert_eq!(provider_session.key, AgentProviderSessionKey::SessionId);
+            assert_eq!(provider_session.id, "omo-session-456");
+            assert_eq!(provider_session.transcript_path, None);
+        }
+        _ => panic!("Expected AgentResume variant"),
+    }
+
+    // Verify serialization roundtrip preserves camelCase
+    let serialized = serde_json::to_string(&req).expect("serialize");
+    assert!(serialized.contains(r#""workspaceId":"ws-1""#));
+    assert!(serialized.contains(r#""clientRequestId":"req-123""#));
+    assert!(serialized.contains(r#""kind":"agentResume""#));
+    assert!(serialized.contains(r#""agentType":"omo""#));
+    assert!(serialized.contains(r#""sessionId""#) || serialized.contains(r#""session_id""#));
 }

@@ -1,6 +1,7 @@
+// allow: SIZE_OK — Daemon client UDS connection management, retries, and streaming channels
 use crate::daemon::protocol::{
     DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse, DaemonSessionDetails,
-    DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
+    DaemonStreamMessage, TerminalStartup, DAEMON_PROTOCOL_VERSION,
 };
 use crate::daemon::server::{get_socket_path, validate_runtime_socket_path};
 use crate::ipc::{IpcError, IpcErrorCode};
@@ -18,20 +19,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-#[cfg(unix)]
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-#[cfg(unix)]
-use tokio::net::UnixStream as DaemonStream;
-
 #[cfg(not(unix))]
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+#[cfg(unix)]
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 #[cfg(not(unix))]
 use tokio::net::TcpStream as DaemonStream;
-
+#[cfg(unix)]
+use tokio::net::UnixStream as DaemonStream;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 const DAEMON_READY_TOKEN: &str = "FERRYX_DAEMON_READY";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonSpawnResult {
+    pub session_id: String,
+    pub epoch: u64,
+    pub session: DaemonSessionDetails,
+}
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn wait_for_daemon_ready<R>(reader: R, timeout: Duration) -> Result<(), IpcError>
@@ -63,7 +69,6 @@ where
         )
     })?
 }
-
 #[derive(Debug)]
 struct RequestAttemptError {
     error: IpcError,
@@ -102,6 +107,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::Spawn { .. }
             | DaemonRequest::ListSessions
             | DaemonRequest::DescribeSession { .. }
+            | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
     )
@@ -119,6 +125,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Close { .. } => "close",
         DaemonRequest::ListSessions => "listSessions",
         DaemonRequest::DescribeSession { .. } => "describeSession",
+        DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
         DaemonRequest::Attach { .. } => "attach",
         DaemonRequest::SaveSession { .. } => "saveSession",
         DaemonRequest::LoadSession => "loadSession",
@@ -158,6 +165,17 @@ fn daemon_socket_trust_error(message: String) -> IpcError {
     )
     .with_details(json!({
         "type": "daemonSocketTrustValidation",
+    }))
+}
+
+fn daemon_protocol_mismatch_error(expected_version: u32, received_version: u32) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::DaemonProtocolMismatch,
+        "Ferryx daemon protocol version mismatch",
+    )
+    .with_details(json!({
+        "expectedVersion": expected_version,
+        "receivedVersion": received_version,
     }))
 }
 
@@ -241,6 +259,9 @@ pub struct DaemonAttachment {
     pub end_sequence: Option<u64>,
     pub gap: Option<ReplayGap>,
     pub history: Vec<u8>,
+    pub history_segments: Vec<crate::terminal::output_hub::HistorySegment>,
+    pub pty_cols: Option<u16>,
+    pub pty_rows: Option<u16>,
     pub messages: mpsc::Receiver<DaemonStreamMessage<'static>>,
     pub stream_task: tokio::task::JoinHandle<()>,
 }
@@ -409,15 +430,12 @@ impl DaemonClient {
         })?;
 
         let mut line = String::new();
-        let bytes_read = tokio::time::timeout(
-            Duration::from_secs(5),
-            reader.read_line(&mut line),
-        )
-        .await
-        .map_err(|_| IpcError::new(IpcErrorCode::IoError, "Handshake timed out"))?
-        .map_err(|e| {
-            IpcError::new(IpcErrorCode::IoError, format!("Handshake read failed: {e}"))
-        })?;
+        let bytes_read = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .map_err(|_| IpcError::new(IpcErrorCode::IoError, "Handshake timed out"))?
+            .map_err(|e| {
+                IpcError::new(IpcErrorCode::IoError, format!("Handshake read failed: {e}"))
+            })?;
         if bytes_read == 0 || line.trim().is_empty() {
             return Err(IpcError::new(
                 IpcErrorCode::IoError,
@@ -435,11 +453,9 @@ impl DaemonClient {
         match hs_resp {
             DaemonResponse::HandshakeOk { version, epoch, .. } => {
                 if version != DAEMON_PROTOCOL_VERSION {
-                    return Err(IpcError::new(
-                        IpcErrorCode::InternalError,
-                        format!(
-                            "Daemon protocol version mismatch: expected {DAEMON_PROTOCOL_VERSION}, got {version}"
-                        ),
+                    return Err(daemon_protocol_mismatch_error(
+                        DAEMON_PROTOCOL_VERSION,
+                        version,
                     ));
                 }
                 *self.epoch.write() = Some(epoch);
@@ -451,11 +467,9 @@ impl DaemonClient {
             DaemonResponse::ProtocolMismatch {
                 expected_version,
                 received_version,
-            } => Err(IpcError::new(
-                IpcErrorCode::InternalError,
-                format!(
-                    "Daemon protocol version mismatch: expected {expected_version}, got {received_version}"
-                ),
+            } => Err(daemon_protocol_mismatch_error(
+                expected_version,
+                received_version,
             )),
             DaemonResponse::Error { message } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
@@ -526,6 +540,32 @@ impl DaemonClient {
         rows: u16,
         shell: Option<String>,
     ) -> Result<String, IpcError> {
+        Ok(self
+            .spawn_terminal_with_startup(
+                client_request_id,
+                workspace_id,
+                worktree,
+                cwd,
+                cols,
+                rows,
+                shell,
+                None,
+            )
+            .await?
+            .session_id)
+    }
+
+    pub async fn spawn_terminal_with_startup(
+        &self,
+        client_request_id: String,
+        workspace_id: String,
+        worktree: Option<WorktreeIdentity>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        shell: Option<String>,
+        startup: Option<TerminalStartup>,
+    ) -> Result<DaemonSpawnResult, IpcError> {
         let resp = self
             .send_request(DaemonRequest::Spawn {
                 client_request_id,
@@ -535,11 +575,49 @@ impl DaemonClient {
                 cols,
                 rows,
                 shell,
+                startup,
             })
             .await?;
 
         match resp {
-            DaemonResponse::SpawnOk { session_id } => Ok(session_id),
+            DaemonResponse::SpawnOk {
+                session_id,
+                epoch,
+                session,
+            } => Ok(DaemonSpawnResult {
+                session_id,
+                epoch,
+                session,
+            }),
+            DaemonResponse::AgentResumeInvalid { message } => Err(IpcError::new(
+                IpcErrorCode::AgentResumeInvalid,
+                "Agent resume startup validation failed",
+            )
+            .with_details(serde_json::json!({
+                "reason": message,
+            }))),
+            DaemonResponse::AgentSessionConflict {
+                agent_type,
+                provider_key,
+                provider_id,
+                existing_session_id,
+            } => Err(IpcError::new(
+                IpcErrorCode::AgentSessionConflict,
+                "Agent provider session is already owned by another terminal",
+            )
+            .with_details(serde_json::json!({
+                "agentType": agent_type,
+                "providerKey": provider_key,
+                "providerId": provider_id,
+                "existingSessionId": existing_session_id,
+            }))),
+            DaemonResponse::ProtocolMismatch {
+                expected_version,
+                received_version,
+            } => Err(daemon_protocol_mismatch_error(
+                expected_version,
+                received_version,
+            )),
             DaemonResponse::Error { message } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
@@ -568,6 +646,28 @@ impl DaemonClient {
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn discover_agent_session(
+        &self,
+        session_id: &str,
+        agent_type: &str,
+    ) -> Result<Option<String>, IpcError> {
+        match self
+            .send_request(DaemonRequest::DiscoverAgentSession {
+                session_id: session_id.to_string(),
+                agent_type: agent_type.to_string(),
+            })
+            .await?
+        {
+            DaemonResponse::DiscoverAgentSessionOk {
+                provider_session_id,
+            } => Ok(provider_session_id),
+            DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal(
+                "Unexpected daemon agent-session discovery response",
             )),
         }
     }
@@ -715,22 +815,18 @@ impl DaemonClient {
         match hs_resp {
             DaemonResponse::HandshakeOk { version, .. } if version == DAEMON_PROTOCOL_VERSION => {}
             DaemonResponse::HandshakeOk { version, .. } => {
-                return Err(IpcError::new(
-                    IpcErrorCode::InternalError,
-                    format!(
-                        "Daemon protocol version mismatch: expected {DAEMON_PROTOCOL_VERSION}, got {version}"
-                    ),
+                return Err(daemon_protocol_mismatch_error(
+                    DAEMON_PROTOCOL_VERSION,
+                    version,
                 ));
             }
             DaemonResponse::ProtocolMismatch {
                 expected_version,
                 received_version,
             } => {
-                return Err(IpcError::new(
-                    IpcErrorCode::InternalError,
-                    format!(
-                        "Daemon protocol version mismatch: expected {expected_version}, got {received_version}"
-                    ),
+                return Err(daemon_protocol_mismatch_error(
+                    expected_version,
+                    received_version,
                 ));
             }
             DaemonResponse::Error { message } => {
@@ -791,7 +887,19 @@ impl DaemonClient {
                 end_sequence,
                 gap,
                 history,
+                pty_cols,
+                pty_rows,
+                history_segments,
             } => {
+                let segments = history_segments
+                    .into_iter()
+                    .map(|wire| crate::terminal::output_hub::HistorySegment {
+                        cols: wire.cols,
+                        rows: wire.rows,
+                        bytes: wire.bytes,
+                    })
+                    .collect();
+
                 let (tx, rx) = mpsc::channel(256);
                 let task = tokio::spawn(async move {
                     let mut stream_line = String::new();
@@ -821,6 +929,9 @@ impl DaemonClient {
                     end_sequence,
                     gap,
                     history,
+                    history_segments: segments,
+                    pty_cols,
+                    pty_rows,
                     messages: rx,
                     stream_task: task,
                 })
@@ -1864,5 +1975,28 @@ mod tests {
             }),
         };
         assert!(request_is_retry_safe(&req));
+    }
+
+    #[test]
+    fn test_protocol_mismatch_uses_stable_typed_code_and_versions() {
+        let error = daemon_protocol_mismatch_error(DAEMON_PROTOCOL_VERSION, 2);
+        assert_eq!(error.code, IpcErrorCode::DaemonProtocolMismatch);
+        assert_eq!(error.message, "Ferryx daemon protocol version mismatch");
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("expectedVersion"))
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::from(DAEMON_PROTOCOL_VERSION))
+        );
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("receivedVersion"))
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
     }
 }

@@ -626,6 +626,50 @@ describe("useWorkspaceStore terminal ownership", () => {
   });
 });
 
+describe("session screen activity", () => {
+  it("pins activity identity to the session's authoritative agent type", () => {
+    const initialState = restoredTwoTabState();
+    initialState.sessions["session-1"] = {
+      ...initialState.sessions["session-1"],
+      agentType: "omo",
+    };
+
+    const updatedState = workspaceReducer(initialState, {
+      type: "SESSION_SCREEN_ACTIVITY",
+      tabId: "tab-primary",
+      sessionId: "session-1",
+      state: "working",
+      ruleId: "shared-spinner",
+      manifestId: "antigravity",
+    });
+
+    expect(updatedState.activityBySessionId?.["session-1"]).toMatchObject({
+      state: "working",
+      agentType: "omo",
+      isAgent: true,
+    });
+  });
+
+  it("adopts a supported screen manifest when the session has no agent type", () => {
+    const initialState = restoredTwoTabState();
+
+    const updatedState = workspaceReducer(initialState, {
+      type: "SESSION_SCREEN_ACTIVITY",
+      tabId: "tab-primary",
+      sessionId: "session-1",
+      state: "working",
+      ruleId: "shared-spinner",
+      manifestId: "antigravity",
+    });
+
+    expect(updatedState.activityBySessionId?.["session-1"]).toMatchObject({
+      state: "working",
+      agentType: "antigravity",
+      isAgent: true,
+    });
+  });
+});
+
 describe("session title activity", () => {
   it("clears the working indicator when the title carries no activity signal", async () => {
     const { services } = createServices();
@@ -1246,6 +1290,11 @@ describe("worktree tab and session isolation", () => {
         ...initialTerminalState.sessions["session-target"],
         backendSessionId: "backend-new-123",
         lifecycle: "running",
+        reconnectLifecycle: "idle",
+        reconnectError: null,
+        reconnectRequestId: null,
+        daemonEpoch: null,
+        lastOutputSequence: null,
       });
       expect(updatedState.sessions["session-other"]).toBe(initialTerminalState.sessions["session-other"]);
 

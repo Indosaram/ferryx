@@ -109,6 +109,7 @@ describe("Tauri IPC wrapper contract", () => {
         cwd: null,
         clientRequestId: "spawn-logical-action-1",
         shell: null,
+        startup: null,
       },
     });
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
@@ -132,6 +133,56 @@ describe("Tauri IPC wrapper contract", () => {
         cwd: null,
         clientRequestId: null,
         shell: "pwsh",
+        startup: null,
+      },
+    });
+  });
+
+  it("preserves typed agent-resume startup and binding metadata", async () => {
+    core.invoke.mockResolvedValue({
+      sessionId: "backend-resume-1",
+      daemonEpoch: "42",
+      session: {
+        sessionId: "backend-resume-1",
+        workspaceId: "workspace-main",
+        worktree: null,
+        cwd: "/repo",
+        cols: 80,
+        rows: 24,
+        running: true,
+      },
+    });
+
+    const { spawnTerminalDetailed } = await import("./tauri");
+    await expect(
+      spawnTerminalDetailed({
+        workspaceId: "workspace-main",
+        worktree: null,
+        clientRequestId: "resume-request-1",
+        startup: {
+          kind: "agentResume",
+          agentType: "claude",
+          providerSession: { key: "session_id", id: "provider-1" },
+        },
+      }),
+    ).resolves.toMatchObject({
+      sessionId: "backend-resume-1",
+      daemonEpoch: "42",
+      session: { cwd: "/repo", running: true },
+    });
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_terminal_spawn", {
+      request: {
+        workspaceId: "workspace-main",
+        worktree: null,
+        cwd: null,
+        clientRequestId: "resume-request-1",
+        shell: null,
+        startup: {
+          kind: "agentResume",
+          agentType: "claude",
+          providerSession: { key: "session_id", id: "provider-1" },
+        },
       },
     });
   });

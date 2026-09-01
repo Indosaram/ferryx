@@ -204,12 +204,13 @@ impl TestDaemonClient {
                 worktree: None,
                 cwd: None,
                 shell: None,
+                startup: None,
                 cols,
                 rows,
             })
             .await?;
         match resp {
-            DaemonResponse::SpawnOk { session_id } => Ok(session_id),
+            DaemonResponse::SpawnOk { session_id, .. } => Ok(session_id),
             other => Err(format!("Spawn failed: {other:?}").into()),
         }
     }

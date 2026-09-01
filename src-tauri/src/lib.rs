@@ -1,24 +1,25 @@
 pub mod agent_detect;
 pub mod browser;
 pub mod daemon;
+pub mod dag;
 pub mod ipc;
 #[cfg(feature = "native-terminal")]
 pub mod native_terminal;
 pub mod notification;
 pub mod remote;
+pub mod ssh;
 pub mod session;
 pub mod terminal;
 pub mod util;
 pub mod worktree;
-pub mod dag;
 
 use crate::daemon::DaemonClient;
+#[cfg(all(target_os = "windows", feature = "native-terminal"))]
+use crate::native_terminal::platform::windows_focus::install_windows_terminal_focus_monitor;
 #[cfg(feature = "native-terminal")]
 use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
 #[cfg(all(target_os = "macos", feature = "native-terminal"))]
 use crate::native_terminal::surface_host::NATIVE_TERMINAL_FOCUS_EVENT;
-#[cfg(all(target_os = "windows", feature = "native-terminal"))]
-use crate::native_terminal::platform::windows_focus::install_windows_terminal_focus_monitor;
 use ipc::*;
 use notification::audio::NotificationAudioPlayer;
 use std::sync::Arc;
@@ -538,6 +539,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_close,
         cmd_native_terminal_set_bounds,
         cmd_native_terminal_set_focus,
+        cmd_native_terminal_set_preedit,
         cmd_native_terminal_send_input,
         cmd_native_terminal_scroll,
         cmd_native_terminal_scrollbar,
@@ -557,6 +559,14 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_get_active_selection,
         cmd_project_initial,
         cmd_project_register,
+        ipc::ssh::cmd_ssh_list_hosts,
+        ipc::ssh::cmd_ssh_import_config,
+        ipc::ssh::cmd_ssh_update_host,
+        ipc::ssh::cmd_ssh_delete_host,
+        ipc::ssh::cmd_ssh_test_connection,
+        ipc::ssh::cmd_ssh_list_remote_worktrees,
+        ipc::ssh::cmd_ssh_create_remote_worktree,
+        ipc::ssh::cmd_ssh_delete_remote_worktree,
         cmd_project_branches,
         cmd_worktree_list,
         cmd_worktree_create,
@@ -578,6 +588,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_cli_launcher_status,
         cmd_cli_launcher_install,
         cmd_agents_detect,
+        cmd_agent_session_discover,
         cmd_browser_create,
         cmd_browser_navigate,
         cmd_browser_go_back,
@@ -1071,6 +1082,11 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+
     create_app(tauri::Builder::default())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

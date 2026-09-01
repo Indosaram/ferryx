@@ -21,6 +21,7 @@ export type {
 };
 
 import type {
+  AgentProviderSession,
   AttachTerminalRequest,
   AttachTerminalResponse,
   BranchDeletionPreview,
@@ -109,6 +110,25 @@ export type SpawnTerminalRequest = {
   cwd?: string | null;
   clientRequestId?: string | null;
   shell?: string | null;
+  startup?: {
+    kind: "agentResume";
+    agentType: string;
+    providerSession: AgentProviderSession;
+  } | null;
+};
+
+export type SpawnTerminalResult = {
+  sessionId: string;
+  daemonEpoch: string;
+  session: {
+    sessionId: string;
+    workspaceId?: string | null;
+    worktree?: WorktreeIdentity | null;
+    cwd?: string | null;
+    cols: number;
+    rows: number;
+    running: boolean;
+  };
 };
 
 export function isTauriRuntime() {
@@ -247,17 +267,27 @@ export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) 
   });
 }
 
-export async function spawnTerminal(request: SpawnTerminalRequest) {
-  if (!isTauri()) return `preview:${request.workspaceId}:${request.worktree?.slug ?? "root"}:${crypto.randomUUID()}`;
-  const response = await invokeCommand<{ sessionId: string }>("cmd_terminal_spawn", {
+export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Promise<SpawnTerminalResult> {
+  if (!isTauri()) {
+    throw {
+      code: "INTERNAL_ERROR",
+      message: "Terminal spawning is available only in the Ferryx desktop runtime",
+      details: { runtime: "web" },
+    } satisfies StructuredIpcError;
+  }
+  return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", {
     request: {
       ...request,
       cwd: request.cwd ?? null,
       clientRequestId: request.clientRequestId ?? null,
       shell: request.shell ?? null,
+      startup: request.startup ?? null,
     },
   });
-  return response.sessionId;
+}
+
+export async function spawnTerminal(request: SpawnTerminalRequest): Promise<string> {
+  return (await spawnTerminalDetailed(request)).sessionId;
 }
 
 export async function attachTerminal(
@@ -468,6 +498,14 @@ export type AgentDetection = {
 export async function detectAgents(names: string[]): Promise<AgentDetection[]> {
   if (!isTauri()) return names.map((name) => ({ name, available: false }));
   return invokeCommand<AgentDetection[]>("cmd_agents_detect", { names });
+}
+
+export async function discoverAgentProviderSession(sessionId: string, agentType: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<string | null>("cmd_agent_session_discover", {
+    sessionId,
+    agentType,
+  });
 }
 
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale";

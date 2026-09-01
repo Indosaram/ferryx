@@ -5,12 +5,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::DaemonClient;
 use crate::ipc::IpcError;
-use crate::native_terminal::composition::LogicalBounds;
+use crate::native_terminal::composition::{CellMetrics, LogicalBounds, SurfaceCompositionLayout};
 use crate::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState, NativeTerminalSurfaceReceipt,
 };
 use crate::native_terminal::{
-    MouseEvent, NativeTerminalError, NativeTerminalInput, ScrollViewport, TerminalEngine,
+    MouseAction, MouseEvent, MousePosition, MouseRendererSize, NativeTerminalError,
+    NativeTerminalInput, ScrollViewport, TerminalEngine,
 };
 
 #[derive(Debug, Deserialize)]
@@ -130,10 +131,7 @@ pub fn decode_windows_clipboard_utf16(slice: &[u16]) -> Option<String> {
     if slice.is_empty() {
         return None;
     }
-    let len = slice
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(slice.len());
+    let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
     if len == 0 {
         return None;
     }
@@ -558,6 +556,40 @@ pub async fn cmd_native_terminal_set_focus<R: Runtime>(
     }
 }
 
+#[tauri::command]
+pub async fn cmd_native_terminal_set_preedit<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+    preedit: Option<String>,
+) -> Result<NativeTerminalBoundsReceipt, IpcError> {
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
+    };
+    let state_inner = state.inner().clone();
+    let surface_window = window.clone();
+    let (sender, receiver) = oneshot::channel();
+    let session_id_clone = session_id.clone();
+    if let Err(error) = window.run_on_main_thread(move || {
+        let result = state_inner
+            .set_preedit(&surface_window, &session_id_clone, preedit)
+            .map(|receipt| into_ipc_receipt(session_id_clone.clone(), receipt))
+            .map_err(|error| IpcError::internal(error.to_string()));
+        let _ = sender.send(result);
+    }) {
+        return Err(IpcError::internal(format!(
+            "Could not dispatch native terminal preedit: {error}"
+        )));
+    }
+    match receiver.await {
+        Ok(receipt_result) => receipt_result,
+        Err(_) => Err(IpcError::internal(
+            "Main thread stopped before native terminal preedit completed",
+        )),
+    }
+}
+
 /// Encode input only for a daemon-backed native session that is still attached.
 ///
 /// `NativeTerminalSurfaceHostState::encode_input` supports standalone/local prototype
@@ -893,6 +925,45 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
     }
 }
 
+pub(crate) fn authoritative_mouse_event(
+    event: &MouseEvent,
+    bounds: &LogicalBounds,
+    cell_metrics: &CellMetrics,
+) -> Result<MouseEvent, NativeTerminalError> {
+    let layout = SurfaceCompositionLayout::compute(bounds, cell_metrics)?;
+    if !event.position.x.is_finite() || !event.position.y.is_finite() {
+        return Err(NativeTerminalError::InvalidValue(
+            "MousePosition x and y coordinates must be finite".to_string(),
+        ));
+    }
+
+    let scale_factor = bounds.scale_factor as f32;
+    let position = MousePosition {
+        x: event.position.x * scale_factor,
+        y: event.position.y * scale_factor,
+    };
+    if !position.x.is_finite() || !position.y.is_finite() {
+        return Err(NativeTerminalError::InvalidValue(
+            "MousePosition x and y coordinates must be finite".to_string(),
+        ));
+    }
+
+    Ok(MouseEvent {
+        position,
+        size: Some(MouseRendererSize {
+            screen_width: layout.physical_bounds.width,
+            screen_height: layout.physical_bounds.height,
+            cell_width: cell_metrics.width_px,
+            cell_height: cell_metrics.height_px,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        }),
+        ..event.clone()
+    })
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_mouse<R: Runtime>(
     app: AppHandle<R>,
@@ -901,6 +972,19 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
     session_id: String,
     event: MouseEvent,
 ) -> Result<NativeTerminalMouseReceipt, IpcError> {
+    let bounds = state.session_logical_bounds(&session_id).ok_or_else(|| {
+        IpcError::internal(format!(
+            "Native terminal session {session_id} has no rendered layout yet: logical bounds are unavailable"
+        ))
+    })?;
+    let cell_metrics = state.session_cell_metrics(&session_id).ok_or_else(|| {
+        IpcError::internal(format!(
+            "Native terminal session {session_id} has no rendered layout yet: cell metrics are unavailable"
+        ))
+    })?;
+    let event = authoritative_mouse_event(&event, &bounds, &cell_metrics)
+        .map_err(|error| IpcError::internal(error.to_string()))?;
+
     let tracking =
         mouse_tracking_enabled_for_attached_session(state.inner(), &session_id).unwrap_or(false);
 
@@ -914,10 +998,86 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
                 return Err(err);
             }
         }
-    } else if let Err(err) =
-        select_attached_native_terminal_with_mouse(state.inner(), &session_id, &event)
-    {
-        return Err(IpcError::internal(err.to_string()));
+    } else {
+        if let Err(err) =
+            select_attached_native_terminal_with_mouse(state.inner(), &session_id, &event)
+        {
+            return Err(IpcError::internal(err.to_string()));
+        }
+
+        if event.action == MouseAction::Press
+            && (cfg!(debug_assertions)
+                || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1"))
+        {
+            let logical_bounds = state
+                .session_logical_bounds(&session_id)
+                .map(|bounds| {
+                    serde_json::json!({
+                        "x": bounds.x,
+                        "y": bounds.y,
+                        "width": bounds.width,
+                        "height": bounds.height,
+                        "scaleFactor": bounds.scale_factor,
+                    })
+                })
+                .unwrap_or(serde_json::Value::Null);
+            let (cols, rows, selection_range) = state
+                .with_session_terminal(&session_id, |term| {
+                    let cols = term
+                        .cols()
+                        .map(serde_json::Value::from)
+                        .unwrap_or_else(|error| serde_json::Value::String(error.to_string()));
+                    let rows = term
+                        .rows()
+                        .map(serde_json::Value::from)
+                        .unwrap_or_else(|error| serde_json::Value::String(error.to_string()));
+                    let selection_range = match term.selection_range() {
+                        Ok(range) => serde_json::to_value(range).unwrap_or(serde_json::Value::Null),
+                        Err(error) => serde_json::Value::String(error.to_string()),
+                    };
+                    Ok((cols, rows, selection_range))
+                })
+                .unwrap_or_else(|error| {
+                    let error = serde_json::Value::String(error.to_string());
+                    (error.clone(), error.clone(), error)
+                });
+            let event_size = serde_json::to_value(event.size).unwrap_or(serde_json::Value::Null);
+            let event_position_x = event.position.x as f64;
+            let event_position_y = event.position.y as f64;
+            let debug_session_id = session_id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                use std::time::{SystemTime, UNIX_EPOCH};
+
+                let wall_time_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or(0);
+                let entry = serde_json::json!({
+                    "runId": "rust-mouse-geo",
+                    "sequence": 0,
+                    "event": "terminal.mouse.pressGeoBackend",
+                    "wallTimeMs": wall_time_ms,
+                    "details": {
+                        "session_id": debug_session_id,
+                        "event_position": { "x": event_position_x, "y": event_position_y },
+                        "event_size": event_size,
+                        "cols": cols,
+                        "rows": rows,
+                        "logical_bounds": logical_bounds,
+                        "selection_range": selection_range,
+                    }
+                });
+                if let Ok(mut file) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/ferryx-switch-debug.jsonl")
+                {
+                    let _ = writeln!(file, "{entry}");
+                }
+            });
+        }
     }
 
     let receipt = if let Some(window) = app.get_webview_window("main") {
@@ -1066,11 +1226,7 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
                 }
             });
             let log_path = std::env::temp_dir().join("ferryx-switch-debug.jsonl");
-            if let Ok(mut file) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)
-            {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
                 let _ = writeln!(file, "{entry}");
             }
         }
@@ -1103,6 +1259,105 @@ fn into_ipc_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_terminal::{MouseButton, MousePosition, MouseRendererSize};
+
+    fn test_mouse_event(size: Option<MouseRendererSize>) -> MouseEvent {
+        MouseEvent {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            position: MousePosition { x: 10.5, y: 20.25 },
+            modifiers: Default::default(),
+            size,
+        }
+    }
+
+    #[test]
+    fn authoritative_mouse_event_uses_rendered_physical_size_and_cell_metrics() {
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            scale_factor: 2.0,
+        };
+        let cell_metrics = crate::native_terminal::composition::CellMetrics {
+            width_px: 10,
+            height_px: 20,
+        };
+
+        let event = authoritative_mouse_event(&test_mouse_event(None), &bounds, &cell_metrics)
+            .expect("authoritative mouse event");
+        let size = event.size.expect("authoritative renderer size");
+
+        assert_eq!(size.screen_width, 1600);
+        assert_eq!(size.screen_height, 1200);
+        assert_eq!(size.cell_width, 10);
+        assert_eq!(size.cell_height, 20);
+    }
+
+    #[test]
+    fn authoritative_mouse_event_scales_logical_position_to_physical_pixels() {
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            scale_factor: 2.0,
+        };
+        let cell_metrics = crate::native_terminal::composition::CellMetrics {
+            width_px: 10,
+            height_px: 20,
+        };
+
+        let event = authoritative_mouse_event(&test_mouse_event(None), &bounds, &cell_metrics)
+            .expect("authoritative mouse event");
+
+        assert_eq!(event.position.x, 21.0);
+        assert_eq!(event.position.y, 40.5);
+    }
+
+    #[test]
+    fn authoritative_mouse_event_replaces_frontend_renderer_size() {
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            scale_factor: 2.0,
+        };
+        let cell_metrics = crate::native_terminal::composition::CellMetrics {
+            width_px: 10,
+            height_px: 20,
+        };
+        let bogus_size = MouseRendererSize {
+            screen_width: 1,
+            screen_height: 1,
+            cell_width: 999,
+            cell_height: 999,
+            padding_top: 8,
+            padding_bottom: 8,
+            padding_right: 8,
+            padding_left: 8,
+        };
+
+        let event =
+            authoritative_mouse_event(&test_mouse_event(Some(bogus_size)), &bounds, &cell_metrics)
+                .expect("authoritative mouse event");
+
+        assert_eq!(
+            event.size,
+            Some(MouseRendererSize {
+                screen_width: 1600,
+                screen_height: 1200,
+                cell_width: 10,
+                cell_height: 20,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_right: 0,
+                padding_left: 0,
+            })
+        );
+    }
 
     #[test]
     fn test_classify_clipboard_content_prefers_non_empty_text() {
@@ -1113,19 +1368,13 @@ mod tests {
             }
         );
         assert_eq!(
-            classify_clipboard_content(
-                Some("hello".to_string()),
-                &["public.png".to_string()]
-            ),
+            classify_clipboard_content(Some("hello".to_string()), &["public.png".to_string()]),
             NativeTerminalClipboardContent::Text {
                 text: "hello".to_string()
             }
         );
         assert_eq!(
-            classify_clipboard_content(
-                Some("hello".to_string()),
-                &["public.file-url".to_string()]
-            ),
+            classify_clipboard_content(Some("hello".to_string()), &["public.file-url".to_string()]),
             NativeTerminalClipboardContent::Text {
                 text: "hello".to_string()
             }
@@ -1236,11 +1485,17 @@ mod tests {
         assert!(is_windows_image_or_file_format(49155, Some("image/webp")));
         assert!(is_windows_image_or_file_format(49156, Some("image/gif")));
         assert!(is_windows_image_or_file_format(49157, Some("FileNameW")));
-        assert!(is_windows_image_or_file_format(49158, Some("FileGroupDescriptorW")));
+        assert!(is_windows_image_or_file_format(
+            49158,
+            Some("FileGroupDescriptorW")
+        ));
         assert!(is_windows_image_or_file_format(49159, Some("FileContents")));
         assert!(!is_windows_image_or_file_format(CF_UNICODETEXT_ID, None));
         assert!(!is_windows_image_or_file_format(CF_TEXT_ID, None));
-        assert!(!is_windows_image_or_file_format(49160, Some("CustomNonImageFormat")));
+        assert!(!is_windows_image_or_file_format(
+            49160,
+            Some("CustomNonImageFormat")
+        ));
     }
 
     #[test]

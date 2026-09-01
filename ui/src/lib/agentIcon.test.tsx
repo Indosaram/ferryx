@@ -49,8 +49,21 @@ describe("agent icon mapping and resolution contract", () => {
     expect(resolveAgentLogo("CODEX")).toBe(SUPPORTED_AGENT_LOGOS.codex);
   });
 
+  it("ships gjc as a full-color brand mark with its title matcher registered", () => {
+    expect(resolveAgentLogo("gjc")).toBe(SUPPORTED_AGENT_LOGOS.gjc);
+    expect(isMonochromeAgentLogo("gjc")).toBe(false);
+    expect(KNOWN_AGENT_MATCHERS.find((agent) => agent.type === "gjc")?.name).toBe("Gajae Code");
+  });
+
   it("resolves the cursor-agent binary name to the cursor logo", () => {
     expect(resolveAgentLogo("cursor-agent")).toBe(SUPPORTED_AGENT_LOGOS.cursor);
+  });
+
+  it("resolves herdr antigravity aliases without changing pi identity", () => {
+    expect(resolveAgentLogo("agy")).toBe(SUPPORTED_AGENT_LOGOS.antigravity);
+    expect(resolveAgentLogo("antigravity-cli")).toBe(SUPPORTED_AGENT_LOGOS.antigravity);
+    expect(resolveAgentLogo("pi")).toBe(SUPPORTED_AGENT_LOGOS.pi);
+    expect(resolveAgentLogo("pi")).not.toBe(SUPPORTED_AGENT_LOGOS.omo);
   });
 
   it("only inverts brands whose official mark is a single flat color", () => {

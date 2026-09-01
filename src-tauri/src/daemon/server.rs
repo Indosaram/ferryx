@@ -1,7 +1,8 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 use crate::daemon::protocol::{
-    AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse,
-    DaemonSessionDetails, DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
+    AgentProviderSessionKey, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus,
+    DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire,
+    TerminalStartup, DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
@@ -28,6 +29,97 @@ use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
+/// Returns the compile-time development profile. Debug builds isolate session state and daemon
+/// endpoints so a release GUI cannot attach to a dev daemon; release paths remain byte-identical.
+pub(crate) fn is_dev_runtime() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Returns the QA and multi-instance session directory override. See
+/// `docs/SESSION_STATE_WIPE_2026-08-31.md`; release defaults intentionally remain byte-identical.
+pub(crate) fn session_dir_override() -> Option<PathBuf> {
+    std::env::var_os("FERRYX_SESSION_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+}
+
+pub(crate) fn resolve_session_path(
+    env_dir: Option<&Path>,
+    is_dev: bool,
+    release_path: &Path,
+    dev_path: &Path,
+) -> PathBuf {
+    env_dir
+        .map(|dir| dir.join("session_state.json"))
+        .unwrap_or_else(|| {
+            if is_dev {
+                dev_path.to_path_buf()
+            } else {
+                release_path.to_path_buf()
+            }
+        })
+}
+
+#[cfg(test)]
+mod session_path_tests {
+    use super::resolve_session_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn session_path_override_wins_for_release() {
+        assert_eq!(
+            resolve_session_path(
+                Some(Path::new("/qa/session")),
+                false,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/qa/session/session_state.json")
+        );
+    }
+
+    #[test]
+    fn session_path_dev_uses_isolated_path_without_override() {
+        assert_eq!(
+            resolve_session_path(
+                None,
+                true,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/app/rorca-dev/session_state.json")
+        );
+    }
+
+    #[test]
+    fn session_path_release_preserves_existing_path_without_override() {
+        assert_eq!(
+            resolve_session_path(
+                None,
+                false,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/app/rorca/session_state.json")
+        );
+    }
+
+    #[test]
+    fn session_path_override_wins_for_dev() {
+        assert_eq!(
+            resolve_session_path(
+                Some(Path::new("/qa/session")),
+                true,
+                Path::new("/app/rorca/session_state.json"),
+                Path::new("/app/rorca-dev/session_state.json"),
+            ),
+            PathBuf::from("/qa/session/session_state.json")
+        );
+    }
+}
+
+/// Returns the daemon runtime directory. Debug builds use a separate directory to prevent
+/// dev and release daemons from sharing endpoints; release paths intentionally remain unchanged.
 #[cfg(unix)]
 pub fn get_runtime_dir() -> PathBuf {
     // SAFETY:
@@ -35,7 +127,8 @@ pub fn get_runtime_dir() -> PathBuf {
     // Invariant: `libc::getuid` is a stateless, side-effect-free POSIX syscall wrapper that
     // takes no arguments, dereferences no pointers, and always returns the current process's UID.
     let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/rorca-{uid}"))
+    let suffix = if is_dev_runtime() { "-dev" } else { "" };
+    PathBuf::from(format!("/tmp/rorca-{uid}{suffix}"))
 }
 
 #[cfg(not(unix))]
@@ -45,7 +138,11 @@ pub fn get_runtime_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
         .join("Ferryx")
-        .join("runtime")
+        .join(if is_dev_runtime() {
+            "runtime-dev"
+        } else {
+            "runtime"
+        })
 }
 
 #[cfg(unix)]
@@ -84,17 +181,51 @@ fn get_persistent_lock_path() -> Option<PathBuf> {
                 std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx"))
             }
         })
-        .map(|base| base.join("locks").join("daemon.lock"))
+        .map(|base| {
+            base.join("locks").join(if is_dev_runtime() {
+                "daemon-dev.lock"
+            } else {
+                "daemon.lock"
+            })
+        })
 }
 
 pub fn get_default_session_path() -> PathBuf {
-    if let Some(mut base) = dirs_next().or_else(dirs_fallback) {
-        base.push("rorca");
-        let _ = fs::create_dir_all(&base);
-        base.join("session_state.json")
-    } else {
-        get_runtime_dir().join("session_state.json")
+    let override_dir = session_dir_override();
+    let is_dev = is_dev_runtime();
+    if override_dir.is_some() {
+        let path = resolve_session_path(
+            override_dir.as_deref(),
+            is_dev,
+            Path::new(""),
+            Path::new(""),
+        );
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        return path;
     }
+
+    let path = if let Some(base) = dirs_next().or_else(dirs_fallback) {
+        resolve_session_path(
+            override_dir.as_deref(),
+            is_dev,
+            &base.join("rorca").join("session_state.json"),
+            &base.join("rorca-dev").join("session_state.json"),
+        )
+    } else {
+        let runtime_dir = get_runtime_dir();
+        resolve_session_path(
+            override_dir.as_deref(),
+            is_dev,
+            &runtime_dir.join("session_state.json"),
+            &runtime_dir.join("session_state.dev.json"),
+        )
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    path
 }
 
 fn dirs_next() -> Option<PathBuf> {
@@ -497,6 +628,7 @@ const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 struct SpawnCacheEntry {
     session_id: String,
     created_at: Instant,
+    fingerprint: SpawnRequestFingerprint,
 }
 
 #[derive(Clone)]
@@ -505,6 +637,83 @@ struct StoredSessionMeta {
     workspace_id: String,
     worktree: Option<WorktreeIdentity>,
     cwd: PathBuf,
+    provider_claim: Option<ProviderSessionClaimKey>,
+    spawn_fingerprint: SpawnRequestFingerprint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SpawnRequestFingerprint {
+    workspace_id: String,
+    worktree: Option<WorktreeIdentity>,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+    shell: Option<String>,
+    provider_claim: Option<ProviderSessionClaimKey>,
+    startup: Option<TerminalStartup>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ProviderSessionClaimKey {
+    agent_type: String,
+    provider_key: AgentProviderSessionKey,
+    provider_id: String,
+    transcript_path: Option<String>,
+}
+
+impl ProviderSessionClaimKey {
+    fn from_startup(startup: Option<&TerminalStartup>) -> Option<Self> {
+        let TerminalStartup::AgentResume {
+            agent_type,
+            provider_session,
+        } = startup?;
+        let agent_type = agent_type.trim().to_ascii_lowercase();
+        let transcript_path = if matches!(agent_type.as_str(), "pi" | "prime-agent") {
+            provider_session
+                .transcript_path
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        Some(Self {
+            agent_type,
+            provider_key: provider_session.key,
+            provider_id: provider_session.id.trim().to_string(),
+            transcript_path,
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SpawnError {
+    #[error(
+        "AgentSessionConflict: {agent_type} {provider_key:?} '{provider_id}' is already owned by session '{existing_session_id}'"
+    )]
+    AgentSessionConflict {
+        agent_type: String,
+        provider_key: AgentProviderSessionKey,
+        provider_id: String,
+        existing_session_id: String,
+    },
+    #[error("{0}")]
+    InvalidAgentResume(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl SpawnError {
+    #[cfg(test)]
+    fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
+
+impl From<String> for SpawnError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
 }
 
 pub fn get_agent_state_socket_path() -> PathBuf {
@@ -547,7 +756,13 @@ pub struct DaemonServer {
     spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
     spawn_lock: tokio::sync::Mutex<()>,
     session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
-    agent_state_tx: broadcast::Sender<(String, String, Option<String>)>,
+    provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
+    agent_state_tx: broadcast::Sender<(
+        String,
+        String,
+        Option<String>,
+        Option<crate::daemon::protocol::AgentProviderSession>,
+    )>,
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
 }
 
@@ -620,6 +835,7 @@ impl DaemonServer {
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
             spawn_lock: tokio::sync::Mutex::new(()),
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
+            provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -641,12 +857,29 @@ impl DaemonServer {
 
     #[cfg(unix)]
     /// Parses one newline-delimited extension report, rejecting states the UI cannot render.
-    fn parse_agent_state_report(line: &str) -> Option<(String, String, Option<String>)> {
-        let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
+    fn parse_agent_state_report(
+        line: &str,
+    ) -> Option<(
+        String,
+        String,
+        Option<String>,
+        Option<crate::daemon::protocol::AgentProviderSession>,
+    )> {
+        let mut report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
         if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
             return None;
         }
-        Some((report.session_id, report.state, report.agent))
+        let provider_session = report.provider_session.filter(|provider| {
+            report.agent.as_deref().is_some_and(|agent| {
+                crate::terminal::shell::resolve_agent_resume_plan(agent, provider).is_ok()
+            })
+        });
+        Some((
+            report.session_id,
+            report.state,
+            report.agent,
+            provider_session,
+        ))
     }
 
     #[cfg(unix)]
@@ -803,6 +1036,7 @@ impl DaemonServer {
                     cols,
                     rows,
                     shell,
+                    startup,
                 }) => {
                     let res = self
                         .handle_spawn(
@@ -813,15 +1047,59 @@ impl DaemonServer {
                             cols,
                             rows,
                             shell,
+                            startup,
                         )
                         .await;
                     match res {
-                        Ok(session_id) => DaemonResponse::SpawnOk { session_id },
-                        Err(e) => DaemonResponse::Error { message: e },
+                        Ok(session_id) => match self.handle_describe_session(&session_id) {
+                            DaemonResponse::DescribeSessionOk { session } => {
+                                DaemonResponse::SpawnOk {
+                                    session_id,
+                                    epoch: self.epoch,
+                                    session,
+                                }
+                            }
+                            DaemonResponse::Error { message } => DaemonResponse::Error { message },
+                            _ => DaemonResponse::Error {
+                                message: "Failed to describe spawned session".to_string(),
+                            },
+                        },
+                        Err(SpawnError::AgentSessionConflict {
+                            agent_type,
+                            provider_key,
+                            provider_id,
+                            existing_session_id,
+                        }) => DaemonResponse::AgentSessionConflict {
+                            agent_type,
+                            provider_key,
+                            provider_id,
+                            existing_session_id,
+                        },
+                        Err(SpawnError::InvalidAgentResume(message)) => {
+                            DaemonResponse::AgentResumeInvalid { message }
+                        }
+                        Err(e) => DaemonResponse::Error {
+                            message: e.to_string(),
+                        },
                     }
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     self.handle_describe_session(&session_id)
+                }
+                Ok(DaemonRequest::DiscoverAgentSession {
+                    session_id,
+                    agent_type,
+                }) => {
+                    let provider_session_id = self
+                        .terminal_service
+                        .get_session(&session_id)
+                        .and_then(|session| session.pid())
+                        .and_then(|pid| {
+                            crate::ipc::agents::discover_agent_session_id(pid, &agent_type)
+                        });
+                    DaemonResponse::DiscoverAgentSessionOk {
+                        provider_session_id,
+                    }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
                     match self.terminal_service.write_input(&session_id, &data) {
@@ -850,8 +1128,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Close { session_id }) => {
-                    self.session_metadata.write().remove(&session_id);
-                    match self.terminal_service.close_session(&session_id).await {
+                    match self.handle_close(&session_id).await {
                         Ok(()) => DaemonResponse::CloseOk,
                         Err(e) => DaemonResponse::Error {
                             message: e.to_string(),
@@ -874,7 +1151,23 @@ impl DaemonServer {
                         .attach_with_sequence(&session_id, after_sequence)
                     {
                         Ok(attachment) => {
+                            let (pty_cols, pty_rows) = self
+                                .terminal_service
+                                .get_session(&session_id)
+                                .map(|s| s.get_size())
+                                .map(|(c, r)| (Some(c), Some(r)))
+                                .unwrap_or((None, None));
                             let hub = Arc::clone(self.terminal_service.output_hub());
+                            let history_segments = attachment
+                                .snapshot
+                                .history_segments
+                                .iter()
+                                .map(|seg| HistorySegmentWire {
+                                    cols: seg.cols,
+                                    rows: seg.rows,
+                                    bytes: seg.bytes.clone(),
+                                })
+                                .collect();
                             let resp = DaemonResponse::AttachOk {
                                 epoch: self.epoch,
                                 session_id: session_id.clone(),
@@ -882,6 +1175,9 @@ impl DaemonServer {
                                 end_sequence: attachment.snapshot.history_end_sequence,
                                 gap: attachment.snapshot.gap,
                                 history: attachment.snapshot.history,
+                                pty_cols,
+                                pty_rows,
+                                history_segments,
                             };
                             let mut resp_json = serde_json::to_string(&resp).unwrap();
                             resp_json.push('\n');
@@ -1119,47 +1415,60 @@ impl DaemonServer {
         cols: u16,
         rows: u16,
         shell: Option<String>,
-    ) -> Result<String, String> {
+        startup: Option<TerminalStartup>,
+    ) -> Result<String, SpawnError> {
         if client_request_id.trim().is_empty() {
-            return Err("clientRequestId cannot be empty".into());
+            return Err(SpawnError::Other("clientRequestId cannot be empty".into()));
         }
 
         let _spawn_guard = self.spawn_lock.lock().await;
 
         let now = Instant::now();
+        let provider_claim = ProviderSessionClaimKey::from_startup(startup.as_ref());
+        let spawn_fingerprint = SpawnRequestFingerprint {
+            workspace_id: workspace_id.to_string(),
+            worktree: worktree.clone(),
+            cwd: cwd.clone(),
+            cols,
+            rows,
+            shell: shell.clone(),
+            provider_claim: provider_claim.clone(),
+            startup: startup.clone(),
+        };
+        self.prune_dead_spawn_ownership(now);
         {
             let mut cache = self.spawn_idempotency_cache.lock();
-            cache.retain(|_, entry| {
-                now.duration_since(entry.created_at) <= SPAWN_REQUEST_TTL
-                    && self
-                        .terminal_service
-                        .get_session(&entry.session_id)
-                        .is_some()
-            });
             if let Some(entry) = cache.get_mut(client_request_id) {
+                if entry.fingerprint != spawn_fingerprint {
+                    return Err(SpawnError::Other(format!(
+                        "clientRequestId '{client_request_id}' was reused with a different spawn request"
+                    )));
+                }
                 entry.created_at = now;
                 return Ok(entry.session_id.clone());
             }
         }
 
-        self.session_metadata
-            .write()
-            .retain(|session_id, _| self.terminal_service.get_session(session_id).is_some());
-        if let Some(live_session_id) = self
+        let existing_request = self
             .session_metadata
             .read()
             .iter()
             .find(|(session_id, meta)| {
-                meta.client_request_id == client_request_id
-                    && self.terminal_service.get_session(session_id).is_some()
+                meta.client_request_id == client_request_id && self.session_is_live(session_id)
             })
-            .map(|(session_id, _)| session_id.clone())
-        {
+            .map(|(session_id, meta)| (session_id.clone(), meta.spawn_fingerprint.clone()));
+        if let Some((live_session_id, existing_fingerprint)) = existing_request {
+            if existing_fingerprint != spawn_fingerprint {
+                return Err(SpawnError::Other(format!(
+                    "clientRequestId '{client_request_id}' was reused with a different spawn request"
+                )));
+            }
             self.spawn_idempotency_cache.lock().insert(
                 client_request_id.to_string(),
                 SpawnCacheEntry {
                     session_id: live_session_id.clone(),
                     created_at: now,
+                    fingerprint: spawn_fingerprint.clone(),
                 },
             );
             return Ok(live_session_id);
@@ -1169,40 +1478,61 @@ impl DaemonServer {
         let (mgr, default_cwd) = self
             .workspace_registry
             .resolve_terminal_target(workspace_id, worktree.as_ref())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SpawnError::Other(e.to_string()))?;
 
         let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {
             let custom_path = PathBuf::from(custom_cwd_str);
             if !custom_path.exists() {
-                return Err(format!("CWD does not exist: {custom_cwd_str}"));
+                return Err(SpawnError::Other(format!(
+                    "CWD does not exist: {custom_cwd_str}"
+                )));
             }
             if !custom_path.is_dir() {
-                return Err(format!("CWD is not a directory: {custom_cwd_str}"));
+                return Err(SpawnError::Other(format!(
+                    "CWD is not a directory: {custom_cwd_str}"
+                )));
             }
-            let canonical = fs::canonicalize(&custom_path)
-                .map_err(|e| format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))?;
-            let allowed = mgr
-                .canonical_allowed_path(&canonical)
-                .map_err(|e| format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))?;
+            let canonical = fs::canonicalize(&custom_path).map_err(|e| {
+                SpawnError::Other(format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))
+            })?;
+            let allowed = mgr.canonical_allowed_path(&canonical).map_err(|e| {
+                SpawnError::Other(format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))
+            })?;
             if allowed != default_cwd && !allowed.starts_with(&default_cwd) {
-                return Err(format!(
+                return Err(SpawnError::Other(format!(
                     "CWD '{custom_cwd_str}' is outside the resolved workspace/worktree root '{}'",
                     default_cwd.display()
-                ));
+                )));
             }
             allowed
         } else {
             default_cwd
         };
 
-        let mut cmd = crate::terminal::shell::resolve_shell_command(shell.as_deref());
+        let mut cmd = match crate::terminal::shell::resolve_startup_command(
+            shell.as_deref(),
+            startup.as_ref(),
+        ) {
+            Ok(cmd) => cmd,
+            Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
+        };
+        if let Some(claim) = provider_claim.as_ref() {
+            if let Some(existing_session_id) = self.provider_session_claims.lock().get(claim) {
+                return Err(SpawnError::AgentSessionConflict {
+                    agent_type: claim.agent_type.clone(),
+                    provider_key: claim.provider_key,
+                    provider_id: claim.provider_id.clone(),
+                    existing_session_id: existing_session_id.clone(),
+                });
+            }
+        }
         cmd.env("PROMPT_EOL_MARK", "");
         cmd.cwd(normalize_process_cwd(&resolved_cwd));
 
-        let (session_id, _) = self
+        let (session_id, mut lifecycle_rx) = self
             .terminal_service
             .spawn_in_worktree(cmd, cols, rows, &mgr, &resolved_cwd)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SpawnError::Other(e.to_string()))?;
 
         // Store idempotency entry and session metadata before releasing the request lock.
         self.spawn_idempotency_cache.lock().insert(
@@ -1210,6 +1540,7 @@ impl DaemonServer {
             SpawnCacheEntry {
                 session_id: session_id.clone(),
                 created_at: now,
+                fingerprint: spawn_fingerprint.clone(),
             },
         );
         self.session_metadata.write().insert(
@@ -1219,10 +1550,90 @@ impl DaemonServer {
                 workspace_id: workspace_id.to_string(),
                 worktree,
                 cwd: resolved_cwd,
+                provider_claim: provider_claim.clone(),
+                spawn_fingerprint,
             },
         );
+        if let Some(claim) = provider_claim {
+            self.provider_session_claims
+                .lock()
+                .insert(claim, session_id.clone());
+        }
+
+        let cleanup_session_id = session_id.clone();
+        let cleanup_cache = Arc::clone(&self.spawn_idempotency_cache);
+        let cleanup_metadata = Arc::clone(&self.session_metadata);
+        let cleanup_claims = Arc::clone(&self.provider_session_claims);
+        tokio::spawn(async move {
+            loop {
+                match lifecycle_rx.recv().await {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            cleanup_cache
+                .lock()
+                .retain(|_, entry| entry.session_id != cleanup_session_id);
+            if let Some(meta) = cleanup_metadata.write().remove(&cleanup_session_id) {
+                if let Some(claim) = meta.provider_claim {
+                    cleanup_claims
+                        .lock()
+                        .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
+                }
+            }
+        });
 
         Ok(session_id)
+    }
+
+    async fn handle_close(&self, session_id: &str) -> Result<(), crate::terminal::PtyError> {
+        self.terminal_service.close_session(session_id).await?;
+        self.release_session_ownership(session_id);
+        Ok(())
+    }
+
+    fn session_is_live(&self, session_id: &str) -> bool {
+        self.terminal_service
+            .get_session(session_id)
+            .is_some_and(|session| {
+                matches!(
+                    session.state(),
+                    PtySessionState::Starting | PtySessionState::Running
+                )
+            })
+    }
+
+    fn release_session_ownership(&self, session_id: &str) {
+        self.spawn_idempotency_cache
+            .lock()
+            .retain(|_, entry| entry.session_id != session_id);
+        if let Some(meta) = self.session_metadata.write().remove(session_id) {
+            if let Some(claim) = meta.provider_claim {
+                self.provider_session_claims
+                    .lock()
+                    .retain(|key, owner| key != &claim || owner != session_id);
+            }
+        }
+    }
+
+    fn prune_dead_spawn_ownership(&self, now: Instant) {
+        let dead_sessions: Vec<String> = self
+            .session_metadata
+            .read()
+            .keys()
+            .filter(|session_id| !self.session_is_live(session_id))
+            .cloned()
+            .collect();
+        for session_id in dead_sessions {
+            self.release_session_ownership(&session_id);
+        }
+        self.spawn_idempotency_cache.lock().retain(|_, entry| {
+            now.duration_since(entry.created_at) <= SPAWN_REQUEST_TTL
+                && self.session_is_live(&entry.session_id)
+        });
+        self.provider_session_claims
+            .lock()
+            .retain(|_, session_id| self.session_is_live(session_id));
     }
 
     #[cfg(test)]
@@ -1239,6 +1650,53 @@ impl DaemonServer {
     #[cfg(test)]
     fn spawn_cache_len_for_test(&self) -> usize {
         self.spawn_idempotency_cache.lock().len()
+    }
+
+    #[cfg(test)]
+    fn provider_claim_len_for_test(&self) -> usize {
+        self.provider_session_claims.lock().len()
+    }
+
+    #[cfg(test)]
+    fn reserve_provider_claim_for_test(
+        &self,
+        client_request_id: &str,
+        session_id: &str,
+        startup: &TerminalStartup,
+    ) -> Result<String, SpawnError> {
+        let claim = ProviderSessionClaimKey::from_startup(Some(startup))
+            .expect("agent resume startup has a provider claim");
+        let mut claims = self.provider_session_claims.lock();
+        if let Some(existing_session_id) = claims.get(&claim) {
+            return Err(SpawnError::AgentSessionConflict {
+                agent_type: claim.agent_type,
+                provider_key: claim.provider_key,
+                provider_id: claim.provider_id,
+                existing_session_id: existing_session_id.clone(),
+            });
+        }
+        claims.insert(claim.clone(), session_id.to_string());
+        self.session_metadata.write().insert(
+            session_id.to_string(),
+            StoredSessionMeta {
+                client_request_id: client_request_id.to_string(),
+                workspace_id: "test".to_string(),
+                worktree: None,
+                cwd: PathBuf::from("/test"),
+                provider_claim: Some(claim),
+                spawn_fingerprint: SpawnRequestFingerprint {
+                    workspace_id: "test".to_string(),
+                    worktree: None,
+                    cwd: None,
+                    cols: 80,
+                    rows: 24,
+                    shell: None,
+                    provider_claim: ProviderSessionClaimKey::from_startup(Some(startup)),
+                    startup: Some(startup.clone()),
+                },
+            },
+        );
+        Ok(session_id.to_string())
     }
 
     fn handle_describe_session(&self, session_id: &str) -> DaemonResponse {
@@ -1306,7 +1764,14 @@ impl DaemonServer {
         mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
         writer: W,
-        mut agent_state_rx: Option<broadcast::Receiver<(String, String, Option<String>)>>,
+        mut agent_state_rx: Option<
+            broadcast::Receiver<(
+                String,
+                String,
+                Option<String>,
+                Option<crate::daemon::protocol::AgentProviderSession>,
+            )>,
+        >,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -1318,12 +1783,13 @@ impl DaemonServer {
                 Some(state_rx) => tokio::select! {
                     output = rx.recv() => output,
                     report = state_rx.recv() => {
-                        if let Ok((reported_session_id, state, agent)) = report {
+                        if let Ok((reported_session_id, state, agent, provider_session)) = report {
                             if reported_session_id == session_id {
                                 let msg = DaemonStreamMessage::AgentState {
                                     session_id: Cow::Borrowed(&session_id),
                                     state: Cow::Borrowed(&state),
                                     agent: agent.as_deref().map(Cow::Borrowed),
+                                    provider_session,
                                 };
                                 let mut json = serde_json::to_string(&msg).unwrap();
                                 json.push('\n');
@@ -1378,6 +1844,16 @@ impl DaemonServer {
                             .map(|gap| gap.available_from_sequence)
                             .or(att.snapshot.history_start_sequence)
                             .unwrap_or_else(|| requested_after_sequence.saturating_add(1));
+                        let segments = att
+                            .snapshot
+                            .history_segments
+                            .iter()
+                            .map(|seg| HistorySegmentWire {
+                                cols: seg.cols,
+                                rows: seg.rows,
+                                bytes: seg.bytes.clone(),
+                            })
+                            .collect();
                         let msg = DaemonStreamMessage::Lagged {
                             session_id: Cow::Borrowed(&session_id),
                             requested_after_sequence,
@@ -1385,6 +1861,7 @@ impl DaemonServer {
                             start_sequence: att.snapshot.history_start_sequence,
                             end_sequence: att.snapshot.history_end_sequence,
                             history: Cow::Borrowed(&att.snapshot.history),
+                            segments,
                         };
                         let mut json = serde_json::to_string(&msg).unwrap();
                         json.push('\n');
@@ -1490,7 +1967,7 @@ mod tests {
 
         // 1. Spawning before registration must fail explicitly (no GUI CWD fallback)
         let unreg_res = server
-            .handle_spawn("req-unreg-1", "ws-app", None, None, 80, 24, None)
+            .handle_spawn("req-unreg-1", "ws-app", None, None, 80, 24, None, None)
             .await;
         assert!(
             unreg_res.is_err(),
@@ -1511,7 +1988,7 @@ mod tests {
 
         // 3. Spawning in registered workspace succeeds
         let spawn_res = server
-            .handle_spawn("req-reg-1", "ws-app", None, None, 80, 24, None)
+            .handle_spawn("req-reg-1", "ws-app", None, None, 80, 24, None, None)
             .await;
         assert!(spawn_res.is_ok());
 
@@ -1539,8 +2016,8 @@ mod tests {
 
         let req_id = "spawn-req-idempotency-1".to_string();
         let (first, second) = tokio::join!(
-            server.handle_spawn(&req_id, "default", None, None, 80, 24, None),
-            server.handle_spawn(&req_id, "default", None, None, 80, 24, None),
+            server.handle_spawn(&req_id, "default", None, None, 80, 24, None, None),
+            server.handle_spawn(&req_id, "default", None, None, 80, 24, None, None),
         );
         let session1 = first.expect("first spawn succeeds");
         let session2 = second.expect("concurrent duplicate succeeds");
@@ -1557,18 +2034,266 @@ mod tests {
             .await
             .expect("close first session");
         let replacement = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24, None)
+            .handle_spawn(&req_id, "default", None, None, 80, 24, None, None)
             .await
             .expect("dead cached session is never returned");
         assert_ne!(session1, replacement);
 
         server.expire_spawn_request_for_test(&req_id);
         let after_ttl = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24, None)
+            .handle_spawn(&req_id, "default", None, None, 80, 24, None, None)
             .await
             .expect("a repeated id never creates a second live shell");
         assert_eq!(replacement, after_ttl);
         assert_eq!(server.spawn_cache_len_for_test(), 1);
+    }
+
+    fn claude_resume_startup(id: &str) -> TerminalStartup {
+        TerminalStartup::AgentResume {
+            agent_type: "claude".to_string(),
+            provider_session: crate::daemon::protocol::AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: id.to_string(),
+                transcript_path: None,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    fn test_agent_resume_startup(id: &str) -> TerminalStartup {
+        TerminalStartup::AgentResume {
+            agent_type: "ferryx-test-agent".to_string(),
+            provider_session: crate::daemon::protocol::AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: id.to_string(),
+                transcript_path: None,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_agent_resume_production_spawn_path_fences_duplicates_and_conflicts() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn = |request_id: &'static str, barrier: Arc<tokio::sync::Barrier>| {
+            let server = Arc::clone(&server);
+            async move {
+                barrier.wait().await;
+                server
+                    .handle_spawn(
+                        request_id,
+                        "default",
+                        None,
+                        None,
+                        80,
+                        24,
+                        None,
+                        Some(test_agent_resume_startup("production-provider")),
+                    )
+                    .await
+            }
+        };
+
+        let same_a = spawn("production-same", Arc::clone(&barrier));
+        let same_b = spawn("production-same", Arc::clone(&barrier));
+        let (_, same_a, same_b) = tokio::join!(barrier.wait(), same_a, same_b);
+        let owner = same_a.expect("first production spawn");
+        assert_eq!(owner, same_b.expect("idempotent production retry"));
+        assert_eq!(server.terminal_service().list_sessions().len(), 1);
+
+        let conflict = server
+            .handle_spawn(
+                "production-competing",
+                "default",
+                None,
+                None,
+                80,
+                24,
+                None,
+                Some(test_agent_resume_startup("production-provider")),
+            )
+            .await
+            .expect_err("competing production claim must fail");
+        assert!(matches!(conflict, SpawnError::AgentSessionConflict { .. }));
+        assert_eq!(server.terminal_service().list_sessions().len(), 1);
+
+        let reused_request = server
+            .handle_spawn(
+                "production-same",
+                "default",
+                None,
+                None,
+                100,
+                40,
+                None,
+                Some(test_agent_resume_startup("different-provider")),
+            )
+            .await
+            .expect_err("request id cannot be reused for a different spawn fingerprint");
+        assert!(reused_request
+            .to_string()
+            .contains("reused with a different spawn request"));
+        assert_eq!(server.terminal_service().list_sessions().len(), 1);
+
+        server.handle_close(&owner).await.expect("production close");
+        assert_eq!(server.provider_claim_len_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_idempotency_fingerprint_includes_full_startup_payload() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let startup = |transcript_path: &str| TerminalStartup::AgentResume {
+            agent_type: "ferryx-test-agent".to_string(),
+            provider_session: crate::daemon::protocol::AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: "same-provider-id".to_string(),
+                transcript_path: Some(transcript_path.to_string()),
+            },
+        };
+
+        let first = server
+            .handle_spawn(
+                "same-request",
+                "default",
+                None,
+                None,
+                80,
+                24,
+                None,
+                Some(startup("/tmp/pi-first.json")),
+            )
+            .await
+            .expect("first path-sensitive spawn");
+        let changed = server
+            .handle_spawn(
+                "same-request",
+                "default",
+                None,
+                None,
+                80,
+                24,
+                None,
+                Some(startup("/tmp/pi-second.json")),
+            )
+            .await
+            .expect_err("changed startup payload cannot reuse idempotency key");
+        assert!(changed
+            .to_string()
+            .contains("reused with a different spawn request"));
+
+        server
+            .handle_close(&first)
+            .await
+            .expect("close first session");
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_identical_request_is_one_spawn() {
+        let server = Arc::new(DaemonServer::new());
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn = |barrier: Arc<tokio::sync::Barrier>| {
+            let server = Arc::clone(&server);
+            async move {
+                barrier.wait().await;
+                let _guard = server.spawn_lock.lock().await;
+                if let Some(meta) = server
+                    .session_metadata
+                    .read()
+                    .iter()
+                    .find(|(_, meta)| meta.client_request_id == "resume-same-request")
+                    .map(|(session_id, _)| session_id.clone())
+                {
+                    return Ok(meta);
+                }
+                server.reserve_provider_claim_for_test(
+                    "resume-same-request",
+                    "session-one",
+                    &claude_resume_startup("provider-same"),
+                )
+            }
+        };
+        let first = spawn(Arc::clone(&barrier));
+        let second = spawn(Arc::clone(&barrier));
+        let (_, first, second) = tokio::join!(barrier.wait(), first, second);
+        let first = first.expect("first resume spawn");
+        let second = second.expect("duplicate resume spawn");
+        assert_eq!(first, second);
+        assert_eq!(server.session_metadata.read().len(), 1);
+        assert_eq!(server.provider_claim_len_for_test(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_competing_claim_conflicts_and_releases() {
+        let server = Arc::new(DaemonServer::new());
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn = |request_id: &'static str,
+                     session_id: &'static str,
+                     barrier: Arc<tokio::sync::Barrier>| {
+            let server = Arc::clone(&server);
+            async move {
+                barrier.wait().await;
+                let _guard = server.spawn_lock.lock().await;
+                server.reserve_provider_claim_for_test(
+                    request_id,
+                    session_id,
+                    &claude_resume_startup("provider-conflict"),
+                )
+            }
+        };
+        let first = spawn("resume-owner-a", "session-a", Arc::clone(&barrier));
+        let second = spawn("resume-owner-b", "session-b", Arc::clone(&barrier));
+        let (_, first, second) = tokio::join!(barrier.wait(), first, second);
+        let (owner, conflict) = match (first, second) {
+            (Ok(owner), Err(conflict)) | (Err(conflict), Ok(owner)) => (owner, conflict),
+            other => panic!("expected one owner and one conflict, got {other:?}"),
+        };
+        assert!(matches!(conflict, SpawnError::AgentSessionConflict { .. }));
+        assert_eq!(server.session_metadata.read().len(), 1);
+        assert_eq!(server.provider_claim_len_for_test(), 1);
+
+        server.release_session_ownership(&owner);
+        assert_eq!(
+            server.provider_claim_len_for_test(),
+            0,
+            "close/exit cleanup must make the provider reference immediately claimable"
+        );
+        assert!(
+            !server.provider_session_claims.lock().contains_key(
+                &ProviderSessionClaimKey::from_startup(Some(&claude_resume_startup(
+                    "provider-conflict"
+                )))
+                .expect("claim key")
+            ),
+            "released provider claim must not retain a stale owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_resume_failed_spawn_does_not_leak_claim() {
+        let server = DaemonServer::new();
+        let invalid = crate::terminal::shell::resolve_startup_command(
+            None,
+            Some(&claude_resume_startup("--invalid")),
+        );
+        assert!(invalid.is_err());
+        assert_eq!(server.provider_claim_len_for_test(), 0);
+
+        let valid = server.reserve_provider_claim_for_test(
+            "resume-valid",
+            "session-valid",
+            &claude_resume_startup("provider-after-failure"),
+        );
+        assert!(valid.is_ok());
+        assert_eq!(server.provider_claim_len_for_test(), 1);
     }
 
     #[tokio::test]
@@ -1589,6 +2314,7 @@ mod tests {
                 80,
                 24,
                 None,
+                None,
             )
             .await;
         assert!(err_nonexistent.is_err());
@@ -1603,6 +2329,7 @@ mod tests {
                 Some(outside.path().to_string_lossy().into_owned()),
                 80,
                 24,
+                None,
                 None,
             )
             .await;
@@ -1622,6 +2349,7 @@ mod tests {
                 80,
                 24,
                 None,
+                None,
             )
             .await;
         assert!(
@@ -1640,6 +2368,7 @@ mod tests {
                 80,
                 24,
                 None,
+                None,
             )
             .await;
         assert!(ok_res.is_ok());
@@ -1655,6 +2384,43 @@ mod tests {
             }
             other => panic!("Expected DescribeSessionOk, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_runtime_paths_are_profile_aware() {
+        // SAFETY: `getuid` takes no arguments and returns the current process UID.
+        let uid = unsafe { libc::getuid() };
+        let expected = if cfg!(debug_assertions) {
+            PathBuf::from(format!("/tmp/rorca-{uid}-dev"))
+        } else {
+            PathBuf::from(format!("/tmp/rorca-{uid}"))
+        };
+        assert_eq!(get_runtime_dir(), expected);
+
+        let expected = if cfg!(debug_assertions) {
+            PathBuf::from(format!("/tmp/rorca-{uid}-dev/daemon.sock"))
+        } else {
+            PathBuf::from(format!("/tmp/rorca-{uid}/daemon.sock"))
+        };
+        assert_eq!(get_socket_path(), expected);
+        assert_eq!(get_lock_path(), get_runtime_dir().join("daemon.lock"));
+    }
+
+    #[test]
+    fn test_persistent_lock_filename_is_profile_aware() {
+        let expected = if cfg!(debug_assertions) {
+            "daemon-dev.lock"
+        } else {
+            "daemon.lock"
+        };
+        assert_eq!(
+            get_persistent_lock_path()
+                .expect("persistent daemon lock path")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(expected)
+        );
     }
 
     #[cfg(unix)]
@@ -2187,7 +2953,7 @@ mod tests {
             .unwrap();
 
         let session_id = server
-            .handle_spawn("req-seq-1", "default", None, None, 80, 24, None)
+            .handle_spawn("req-seq-1", "default", None, None, 80, 24, None, None)
             .await
             .unwrap();
 
@@ -2239,6 +3005,7 @@ mod tests {
                 other_session.clone(),
                 "working".to_string(),
                 Some("codex".to_string()),
+                None,
             ))
             .expect("send unrelated report");
         server
@@ -2247,6 +3014,7 @@ mod tests {
                 session_id.clone(),
                 "blocked".to_string(),
                 Some("omo".to_string()),
+                None,
             ))
             .expect("send own report");
 
@@ -2284,14 +3052,36 @@ mod tests {
             Some((
                 "s1".to_string(),
                 "working".to_string(),
-                Some("omo".to_string())
+                Some("omo".to_string()),
+                None,
             ))
+        );
+        let valid = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"working","agent":"omo","providerSession":{"key":"session_id","id":"omo-session"}}"#,
+        )
+        .expect("valid Omo provider report");
+        assert_eq!(valid.3.expect("provider reference").id, "omo-session");
+        let wrong_key = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"working","agent":"omo","providerSession":{"key":"conversation_id","id":"bad-key"}}"#,
+        )
+        .expect("activity report remains valid");
+        assert_eq!(
+            wrong_key.3, None,
+            "semantically invalid provider reference must be omitted"
+        );
+        let missing_required_path = DaemonServer::parse_agent_state_report(
+            r#"{"type":"agentState","sessionId":"s1","state":"working","agent":"pi","providerSession":{"key":"session_id","id":"pi-session"}}"#,
+        )
+        .expect("activity report remains valid");
+        assert_eq!(
+            missing_required_path.3, None,
+            "path-sensitive provider reference must validate fully"
         );
         assert_eq!(
             DaemonServer::parse_agent_state_report(
                 r#"{"type":"agentState","sessionId":"s1","state":"idle"}"#
             ),
-            Some(("s1".to_string(), "idle".to_string(), None)),
+            Some(("s1".to_string(), "idle".to_string(), None, None)),
             "agent is optional so older extension copies keep working"
         );
         for rejected in [

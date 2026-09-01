@@ -1,14 +1,14 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
 #[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
+#[cfg(feature = "native-terminal")]
+use crate::remote::protocol::RemoteGridFrame;
 use crate::remote::protocol::{
     ClientControlMessage, RemoteActiveDesktopSelection, RemoteCreateWorktreeRequest,
     RemoteDeleteWorktreeRequest, RemoteEventMessage, RemoteProjectInfo,
     RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
     RemoteWorkspaceState, RemoteWorktreeInfo,
 };
-#[cfg(feature = "native-terminal")]
-use crate::remote::protocol::RemoteGridFrame;
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
 };

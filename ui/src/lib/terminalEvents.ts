@@ -1,6 +1,7 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 
-import { onTerminalLifecycle, onTerminalOutput } from "./tauri";
+import { attachTerminal, onTerminalLifecycle, onTerminalOutput } from "./tauri";
+import type { SpawnTerminalResult } from "./tauri";
 import {
   decodeBase64,
   decodeTerminalOutputFrame,
@@ -8,7 +9,7 @@ import {
   TerminalOutputDecoderRegistry,
 } from "./terminalOutput";
 import { metricsNow, terminalThroughputMetricsEnabled } from "./terminalThroughputMetrics";
-import type { TerminalLifecyclePayload, TerminalOutputPayload } from "./types";
+import type { TerminalLifecyclePayload, TerminalOutputPayload, TerminalSession } from "./types";
 
 const MAX_BACKLOG_BYTES = 512 * 1024;
 const MAX_OSC_TITLE_CHARS = 8 * 1024;
@@ -337,4 +338,21 @@ export function getBacklogMetricsForTest(sessionId?: string) {
 
 export function ensureTerminalEvents() {
   return terminalEventBus.ensureStarted();
+}
+
+/**
+ * Prepares a newly resumed backend before its local pane commits the binding.
+ *
+ * Cold reconnect starts a new PTY incarnation, so the old pane's sequence and daemon epoch must
+ * never be used as an incremental replay cursor. This callback matches `reconnectAgentSession`'s
+ * attach dependency and deliberately attaches from the beginning after clearing any decoder or
+ * backlog state left under a daemon-reused backend id.
+ */
+export async function attachNativeTerminalRebind(
+  result: SpawnTerminalResult,
+  _localSession: TerminalSession,
+): Promise<void> {
+  terminalEventBus.clearSession(result.sessionId);
+  await terminalEventBus.ensureStarted();
+  await attachTerminal({ sessionId: result.sessionId, afterSequence: null });
 }

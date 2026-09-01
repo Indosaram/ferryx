@@ -50,7 +50,17 @@ export type TerminalSessionSummary = {
   daemonEpoch?: string | null;
 };
 
+export type AgentProviderSessionKey = "session_id" | "conversation_id";
+
+export type AgentProviderSession = {
+  readonly key: AgentProviderSessionKey;
+  readonly id: string;
+  readonly transcriptPath?: string;
+};
+
 export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed" | "running";
+
+export type ReconnectLifecycle = "idle" | "validating" | "spawning" | "binding" | "failed";
 
 export type TerminalSession = {
   /** Frontend-local stable identity used by pane leaves and terminal renderer ownership. */
@@ -71,6 +81,13 @@ export type TerminalSession = {
   agentType?: string | null;
   /** Session id the AGENT ITSELF generated. Ferryx never mints this. */
   agentSessionId?: string | null;
+  /** Authoritative provider session reference. Never minted by Ferryx. */
+  providerSession?: AgentProviderSession | null;
+  /** Transient reconnect lifecycle state (idle | validating | spawning | binding | failed). Never persisted. */
+  reconnectLifecycle?: ReconnectLifecycle;
+  /** Transient structured error when reconnect fails. Never persisted. */
+  reconnectError?: StructuredIpcError | null;
+  reconnectRequestId?: string | null;
 };
 
 export type TerminalTab = {
@@ -400,6 +417,7 @@ export type NativeTerminalAgentStatePayload = {
   state: "working" | "blocked" | "idle";
   ruleId: string;
   manifestId: string;
+  providerSession?: AgentProviderSession | null;
 };
 
 export type NativeTerminalBellPayload = {
@@ -587,6 +605,8 @@ export interface PersistedTerminalSession {
   agentType?: string | null;
   /** Session id the AGENT ITSELF generated. Ferryx never mints this. */
   agentSessionId?: string | null;
+  /** Authoritative provider session reference. Never minted by Ferryx. */
+  providerSession?: AgentProviderSession | null;
 }
 
 export interface PersistedWorkspace {

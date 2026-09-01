@@ -3,11 +3,26 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import dagRunSampleJson from "../../state/__fixtures__/dagRunSample.json";
 import { parseDagRunSnapshot, type DagRunSnapshot } from "../../lib/dagTypes";
+import type { TerminalSession } from "../../lib/types";
 import { dagRunOwnership } from "../../state/dagRunOwnership";
 import { dagStore } from "../../state/dagStore";
 import { DagPaneBadge } from "./DagPaneBadge";
 
 const baseSnapshot: DagRunSnapshot = parseDagRunSnapshot(dagRunSampleJson)!;
+
+function createSession(id: string, providerSessionId?: string): TerminalSession {
+  return {
+    id,
+    cwd: "/repo/my-project",
+    workspaceId: "ws-main",
+    worktree: null,
+    backendSessionId: `backend-${id}`,
+    lifecycle: "working",
+    providerSession: providerSessionId
+      ? { key: "session_id", id: providerSessionId }
+      : null,
+  };
+}
 
 describe("DagPaneBadge", () => {
   beforeEach(() => {
@@ -202,6 +217,115 @@ describe("DagPaneBadge", () => {
     });
     expect(dagRunOwnership.ownerOf("run-cycle")).toBeUndefined();
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+  });
+
+  it("shows an exact root session match without agent presence or working state", () => {
+    const rootSessionId = "01a055f9-a8de-7619-a1f5-81ca62e3d3b1";
+    dagStore.applySnapshot("/repo/my-project", {
+      ...baseSnapshot,
+      runId: "run-exact-match",
+      rootSessionId,
+      status: "running",
+    });
+    const session = createSession("pane-exact", rootSessionId);
+
+    render(
+      <DagPaneBadge
+        projectPath="/repo/my-project"
+        paneId={session.id}
+        providerSessionId={rootSessionId}
+        sessions={[session]}
+        agentPresent={false}
+        agentWorking={false}
+      />,
+    );
+
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+  });
+
+  it("suppresses fallback when another pane exactly matches the run", () => {
+    const rootSessionId = "01a055f9-a8de-7619-a1f5-81ca62e3d3b1";
+    dagStore.applySnapshot("/repo/my-project", {
+      ...baseSnapshot,
+      runId: "run-owned-by-sibling-session",
+      rootSessionId,
+      status: "running",
+    });
+    const currentSession = createSession("pane-current");
+    const matchingSession = createSession("pane-matching", rootSessionId);
+
+    render(
+      <DagPaneBadge
+        projectPath="/repo/my-project"
+        paneId={currentSession.id}
+        providerSessionId={null}
+        sessions={[currentSession, matchingSession]}
+        agentPresent
+        agentWorking={false}
+      />,
+    );
+
+    expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+  });
+
+  it("falls back to an agent-present pane when no pane exactly matches the run", () => {
+    dagStore.applySnapshot("/repo/my-project", {
+      ...baseSnapshot,
+      runId: "run-with-unmatched-root-session",
+      rootSessionId: "01a055f9-a8de-7619-a1f5-81ca62e3d3b1",
+      status: "running",
+    });
+    const currentSession = createSession("pane-current");
+
+    render(
+      <DagPaneBadge
+        projectPath="/repo/my-project"
+        paneId={currentSession.id}
+        sessions={[currentSession]}
+        agentPresent
+        agentWorking={false}
+      />,
+    );
+
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+  });
+
+  it("falls back only to an unclaimed run when another run exactly matches a sibling pane", () => {
+    const rootSessionId = "01a055f9-a8de-7619-a1f5-81ca62e3d3b1";
+    dagStore.applySnapshot("/repo/my-project", {
+      ...baseSnapshot,
+      runId: "run-exact-sibling",
+      name: "Exact Sibling Run",
+      rootSessionId,
+      status: "running",
+      updatedAt: "2026-08-29T12:01:00.000Z",
+    });
+    dagStore.applySnapshot("/repo/my-project", {
+      ...baseSnapshot,
+      runId: "run-unclaimed",
+      name: "Unclaimed Run",
+      status: "running",
+      updatedAt: "2026-08-29T12:00:00.000Z",
+    });
+    const currentSession = createSession("pane-current");
+    const matchingSession = createSession("pane-matching", rootSessionId);
+
+    render(
+      <DagPaneBadge
+        projectPath="/repo/my-project"
+        paneId={currentSession.id}
+        sessions={{
+          [currentSession.id]: currentSession,
+          [matchingSession.id]: matchingSession,
+        }}
+        agentPresent
+        agentWorking={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
+    expect(screen.getByTestId("dag-pane-run-run-unclaimed")).toBeInTheDocument();
+    expect(screen.queryByTestId("dag-pane-run-run-exact-sibling")).not.toBeInTheDocument();
   });
 
   it("pane without an agent stays clean even when its project has a running dag", () => {

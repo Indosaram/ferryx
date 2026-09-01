@@ -37,6 +37,7 @@ vi.mock("../lib/tauri", () => ({
     nativeListeners.agentState.add(handler);
     return () => nativeListeners.agentState.delete(handler);
   }),
+  discoverAgentProviderSession: vi.fn(async () => null),
 }));
 
 const worktree: Worktree = {

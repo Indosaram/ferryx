@@ -25,6 +25,23 @@ await import("./test/setup");
 
 const { saveNotificationSettings } = await import("./lib/notificationSettings");
 
+let nativeFocusChanged: ((event: { payload: boolean }) => void) | null = null;
+let resolveNativeFocusTrackingReady: (() => void) | null = null;
+const nativeFocusTrackingReady = new Promise<void>((resolve) => {
+  resolveNativeFocusTrackingReady = resolve;
+});
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    isFocused: async () => false,
+    onFocusChanged: async (callback: (event: { payload: boolean }) => void) => {
+      nativeFocusChanged = callback;
+      resolveNativeFocusTrackingReady?.();
+      return () => {};
+    },
+  }),
+}));
+
 const native = {
   createWorktree: vi.fn(),
   getWorktreeStatus: vi.fn(),
@@ -290,6 +307,8 @@ describe("App notification coordinator wiring", () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
 
     render(<App />);
+    await nativeFocusTrackingReady;
+    nativeFocusChanged?.({ payload: true });
 
     emitTerminalBell();
 
@@ -315,6 +334,8 @@ describe("App notification coordinator wiring", () => {
     ];
 
     const { rerender } = render(<App />);
+    await nativeFocusTrackingReady;
+    nativeFocusChanged?.({ payload: false });
 
     expect(native.dispatchNotification).not.toHaveBeenCalled();
 
@@ -346,6 +367,47 @@ describe("App notification coordinator wiring", () => {
     expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main");
   });
 
+  it("uses native background focus when the DOM incorrectly reports focused", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+
+    currentActivityTargets = [
+      {
+        sessionId: "sess-1",
+        tabId: "tab-1",
+        worktreePath: "/repo/main",
+        worktreeLabel: "main",
+        agentLabel: "codex",
+        terminalTitle: "codex run",
+        state: "working",
+      },
+    ];
+
+    const { rerender } = render(<App />);
+    await nativeFocusTrackingReady;
+    nativeFocusChanged?.({ payload: false });
+
+    currentActivityTargets = [
+      {
+        sessionId: "sess-1",
+        tabId: "tab-1",
+        worktreePath: "/repo/main",
+        worktreeLabel: "main",
+        agentLabel: "codex",
+        terminalTitle: "codex run",
+        state: "done",
+      },
+    ];
+
+    rerender(<App />);
+
+    expect(native.dispatchNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "agent-task-complete" }),
+    );
+    expect(markTabUnread).toHaveBeenCalledWith("tab-1");
+    expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main");
+  });
+
   it("CRITERION 1b: a background agent transitioning working -> done while FOCUSED dispatches nothing", async () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
 
@@ -362,6 +424,8 @@ describe("App notification coordinator wiring", () => {
     ];
 
     const { rerender } = render(<App />);
+    await nativeFocusTrackingReady;
+    nativeFocusChanged?.({ payload: true });
 
     expect(native.dispatchNotification).not.toHaveBeenCalled();
 

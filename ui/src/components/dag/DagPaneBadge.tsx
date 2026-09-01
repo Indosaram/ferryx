@@ -1,16 +1,19 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import type { DagRunSnapshot } from "../../lib/dagTypes";
+import type { TerminalSession } from "../../lib/types";
 import { dagStore } from "../../state/dagStore";
 import { dagRunOwnership } from "../../state/dagRunOwnership";
 import { DagGraphView } from "./DagGraphView";
 
 export type DagPaneBadgeProps = {
-  projectPath?: string;
+  readonly projectPath?: string;
   /** Identifies this pane as a run owner; sibling panes of one project must not share a run. */
-  paneId?: string;
-  agentPresent?: boolean;
-  agentWorking?: boolean;
+  readonly paneId?: string;
+  readonly providerSessionId?: string | null;
+  readonly sessions?: Readonly<Record<string, TerminalSession>> | readonly TerminalSession[];
+  readonly agentPresent?: boolean;
+  readonly agentWorking?: boolean;
 };
 
 function cleanPath(p: string): string {
@@ -81,6 +84,8 @@ function GraphGlyph(): JSX.Element {
 export function DagPaneBadge({
   projectPath,
   paneId,
+  providerSessionId,
+  sessions,
   agentPresent = false,
   agentWorking = false,
 }: DagPaneBadgeProps): JSX.Element | null {
@@ -112,12 +117,44 @@ export function DagPaneBadge({
     for (const candidate of runningRuns) dagRunOwnership.claim(candidate.runId, paneId);
   }, [agentWorking, paneId, runningRuns]);
 
+  const exactlyMatchedByAnotherPane = useMemo(() => {
+    const matchedRunIds = new Set<string>();
+    if (!sessions) return matchedRunIds;
+    const sessionList = Array.isArray(sessions) ? sessions : Object.values(sessions);
+    for (const candidate of runningRuns) {
+      if (typeof candidate.rootSessionId !== "string" || candidate.rootSessionId.trim() === "") {
+        continue;
+      }
+      if (
+        sessionList.some(
+          (session) =>
+            session.id !== paneId &&
+            session.providerSession?.id === candidate.rootSessionId,
+        )
+      ) {
+        matchedRunIds.add(candidate.runId);
+      }
+    }
+    return matchedRunIds;
+  }, [runningRuns, sessions, paneId]);
+
   const run = useMemo(() => {
     const owned = runningRuns.find((candidate) => ownersByRunId[candidate.runId] === paneId);
     if (owned) return owned;
+    const exact = runningRuns.find(
+      (candidate) =>
+        typeof candidate.rootSessionId === "string" &&
+        candidate.rootSessionId.trim() !== "" &&
+        candidate.rootSessionId === providerSessionId,
+    );
+    if (exact) return exact;
     if (!agentPresent) return null;
-    return runningRuns.find((candidate) => ownersByRunId[candidate.runId] === undefined) ?? null;
-  }, [runningRuns, ownersByRunId, paneId, agentPresent]);
+    return runningRuns.find(
+      (candidate) =>
+        ownersByRunId[candidate.runId] === undefined &&
+        !exactlyMatchedByAnotherPane.has(candidate.runId),
+    ) ?? null;
+  }, [runningRuns, ownersByRunId, paneId, providerSessionId, agentPresent, exactlyMatchedByAnotherPane]);
 
   const visible = run !== null;
 

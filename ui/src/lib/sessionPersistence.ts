@@ -3,6 +3,7 @@ import { collectLeafIds, createLeafNode, removeLeaf, type PaneNode } from "../st
 import type { WorkspaceState } from "../state/workspaceStore";
 import type { TerminalActivity } from "./activity";
 import { loadBrowserSettings, resolveSupportedBrowserProfileId, supportedBrowserProfiles } from "./browserSettings";
+import { normalizeSessionId, providerSessionKeyForAgent } from "./agentResume";
 import {
   createBrowserPaneContent,
   createDagPaneContent,
@@ -222,6 +223,7 @@ export function serializeWorkspaceState(
       lastOutputSequence: sess.lastOutputSequence != null ? String(sess.lastOutputSequence) : null,
       agentType: sess.agentType ?? null,
       agentSessionId: sess.agentSessionId ?? null,
+      providerSession: sess.providerSession ?? null,
       createdAt,
     };
   }
@@ -396,6 +398,13 @@ export function deserializeWorkspaceState(
     const matchingWorktree = worktrees.find((wt) => wt.path === worktreePath);
     const agentType = sess.agentType ?? null;
     const agentSessionId = sess.agentSessionId ?? null;
+    const legacyProviderKey = agentType ? providerSessionKeyForAgent(agentType) : null;
+    const normalizedLegacyId = agentSessionId ? normalizeSessionId(agentSessionId) : null;
+    const providerSession = sess.providerSession ?? (
+      legacyProviderKey && normalizedLegacyId
+        ? { key: legacyProviderKey, id: normalizedLegacyId }
+        : null
+    );
     sessions[localSessionId] = {
       id: localSessionId,
       cwd: sess.cwd || worktreePath,
@@ -408,6 +417,10 @@ export function deserializeWorkspaceState(
       lastOutputSequence,
       agentType,
       agentSessionId,
+      providerSession,
+      reconnectLifecycle: "idle",
+      reconnectError: null,
+      reconnectRequestId: null,
     };
   }
 

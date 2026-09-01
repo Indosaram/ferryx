@@ -1,3 +1,4 @@
+// allow: SIZE_OK — Daemon wire protocol framing, request/response models, and stream encoding
 use crate::remote::auth::{DeviceInfo, DevicePermission};
 use crate::remote::protocol::RemoteActiveDesktopSelection;
 use crate::remote::state::{RemoteGatewayConfig, RemoteNetworkMode};
@@ -8,7 +9,54 @@ use crate::worktree::WorktreeIdentity;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySegmentWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(with = "base64_serde")]
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProviderSessionKey {
+    SessionId,
+    ConversationId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderSession {
+    pub key: AgentProviderSessionKey,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+}
+
+fn deserialize_optional_provider_session<'de, D>(
+    deserializer: D,
+) -> Result<Option<AgentProviderSession>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|candidate| serde_json::from_value(candidate).ok()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TerminalStartup {
+    #[serde(rename_all = "camelCase")]
+    AgentResume {
+        agent_type: String,
+        provider_session: AgentProviderSession,
+    },
+}
 
 pub mod base64_serde {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -81,6 +129,8 @@ pub enum DaemonRequest {
         rows: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        startup: Option<TerminalStartup>,
     },
     #[serde(rename_all = "camelCase")]
     Write {
@@ -107,6 +157,11 @@ pub enum DaemonRequest {
     #[serde(rename_all = "camelCase")]
     DescribeSession {
         session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    DiscoverAgentSession {
+        session_id: String,
+        agent_type: String,
     },
     #[serde(rename_all = "camelCase")]
     Attach {
@@ -164,6 +219,19 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     SpawnOk {
         session_id: String,
+        epoch: u64,
+        session: DaemonSessionDetails,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentResumeInvalid {
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentSessionConflict {
+        agent_type: String,
+        provider_key: AgentProviderSessionKey,
+        provider_id: String,
+        existing_session_id: String,
     },
     WriteOk,
     ResizeOk,
@@ -179,6 +247,10 @@ pub enum DaemonResponse {
         session: DaemonSessionDetails,
     },
     #[serde(rename_all = "camelCase")]
+    DiscoverAgentSessionOk {
+        provider_session_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
     AttachOk {
         epoch: u64,
         session_id: String,
@@ -187,6 +259,12 @@ pub enum DaemonResponse {
         gap: Option<ReplayGap>,
         #[serde(with = "base64_serde")]
         history: Vec<u8>,
+        #[serde(default)]
+        pty_cols: Option<u16>,
+        #[serde(default)]
+        pty_rows: Option<u16>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        history_segments: Vec<HistorySegmentWire>,
     },
     SaveSessionOk,
     #[serde(rename_all = "camelCase")]
@@ -255,6 +333,8 @@ pub enum DaemonStreamMessage<'a> {
         end_sequence: Option<u64>,
         #[serde(with = "base64_serde")]
         history: Cow<'a, [u8]>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        segments: Vec<HistorySegmentWire>,
     },
     #[serde(rename_all = "camelCase")]
     AgentState {
@@ -262,6 +342,8 @@ pub enum DaemonStreamMessage<'a> {
         state: Cow<'a, str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<Cow<'a, str>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_session: Option<AgentProviderSession>,
     },
     #[serde(rename_all = "camelCase")]
     Exit {
@@ -278,6 +360,8 @@ pub struct AgentStateReport {
     pub state: String,
     #[serde(default)]
     pub agent: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_provider_session")]
+    pub provider_session: Option<AgentProviderSession>,
 }
 
 /// Serialize one daemon streaming message using the production newline-delimited JSON frame.
@@ -346,6 +430,42 @@ mod tests {
     }
 
     #[test]
+    fn agent_state_report_treats_malformed_provider_session_as_absent() {
+        // Given: an otherwise valid extension report with an invalid provider key.
+        let report = r#"{"sessionId":"pty-1","state":"working","agent":"omo","providerSession":{"key":"invented","id":"provider-1"}}"#;
+
+        // When: the report crosses the daemon protocol boundary.
+        let decoded: AgentStateReport = serde_json::from_str(report).expect("decode report");
+
+        // Then: state delivery survives, but the malformed provider reference does not.
+        assert_eq!(decoded.provider_session, None);
+    }
+
+    #[test]
+    fn agent_state_stream_serializes_authoritative_provider_session() {
+        // Given: a provider-authored session reference on an agent state frame.
+        let message = DaemonStreamMessage::AgentState {
+            session_id: Cow::Borrowed("pty-1"),
+            state: Cow::Borrowed("working"),
+            agent: Some(Cow::Borrowed("omo")),
+            provider_session: Some(AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: "provider-1".to_string(),
+                transcript_path: None,
+            }),
+        };
+
+        // When: serialized through the production framing contract.
+        let frame = encode_daemon_stream_frame(&message).expect("encode frame");
+
+        // Then: the structured provider reference is present in the snapshot.
+        assert_eq!(
+            frame,
+            "{\"type\":\"agentState\",\"sessionId\":\"pty-1\",\"state\":\"working\",\"agent\":\"omo\",\"providerSession\":{\"key\":\"session_id\",\"id\":\"provider-1\"}}\n"
+        );
+    }
+
+    #[test]
     fn test_daemon_stream_message_gap_roundtrip() {
         let gap = DaemonStreamMessage::Gap {
             session_id: Cow::Borrowed("s_gap"),
@@ -379,6 +499,7 @@ mod tests {
             start_sequence: Some(35),
             end_sequence: Some(100),
             history: Cow::Borrowed(b"history bytes"),
+            segments: Vec::new(),
         };
         let json = serde_json::to_string(&replay).expect("serialize replay gap");
         assert!(!json.contains('['));
@@ -403,7 +524,7 @@ mod tests {
         };
         let json = serde_json::to_string(&response).expect("serialize mismatch");
         assert!(json.contains(r#""type":"protocolMismatch""#));
-        assert!(json.contains(r#""expectedVersion":2"#));
+        assert!(json.contains(&format!(r#""expectedVersion":{DAEMON_PROTOCOL_VERSION}"#)));
         assert!(json.contains(r#""receivedVersion":99"#));
     }
 
@@ -465,6 +586,9 @@ mod tests {
             end_sequence: Some(10),
             gap: None,
             history: b"initial prompt $ ".to_vec(),
+            pty_cols: None,
+            pty_rows: None,
+            history_segments: Vec::new(),
         };
         let resp_json = serde_json::to_string(&attach_resp).expect("serialize attach resp");
         assert!(!resp_json.contains('['));
@@ -482,6 +606,9 @@ mod tests {
                 end_sequence,
                 gap,
                 history,
+                pty_cols,
+                pty_rows,
+                history_segments,
             } => {
                 assert_eq!(epoch, 12345);
                 assert_eq!(session_id, "term-1");
@@ -489,6 +616,119 @@ mod tests {
                 assert_eq!(end_sequence, Some(10));
                 assert!(gap.is_none());
                 assert_eq!(history, b"initial prompt $ ");
+                assert_eq!(pty_cols, None);
+                assert_eq!(pty_rows, None);
+                assert_eq!(history_segments, Vec::<HistorySegmentWire>::new());
+            }
+            _ => panic!("Expected AttachOk variant"),
+        }
+
+        // Serde skew test: deserializing legacy AttachOk JSON without ptyCols/ptyRows defaults to None
+        let legacy_json = r#"{"type":"attachOk","epoch":12345,"sessionId":"term-1","startSequence":1,"endSequence":10,"gap":null,"history":"aW5pdGlhbCBwcm9tcHQgJCA="}"#;
+        let legacy_deserialized: DaemonResponse =
+            serde_json::from_str(legacy_json).expect("deserialize legacy attach resp");
+        match legacy_deserialized {
+            DaemonResponse::AttachOk {
+                epoch,
+                session_id,
+                start_sequence,
+                end_sequence,
+                gap,
+                history,
+                pty_cols,
+                pty_rows,
+                history_segments,
+            } => {
+                assert_eq!(epoch, 12345);
+                assert_eq!(session_id, "term-1");
+                assert_eq!(start_sequence, Some(1));
+                assert_eq!(end_sequence, Some(10));
+                assert!(gap.is_none());
+                assert_eq!(history, b"initial prompt $ ");
+                assert_eq!(pty_cols, None);
+                assert_eq!(pty_rows, None);
+                assert_eq!(history_segments, Vec::<HistorySegmentWire>::new());
+            }
+            _ => panic!("Expected AttachOk variant"),
+        }
+
+        // Segmented history round-trip preserving base64 bytes
+        let segmented_attach_resp = DaemonResponse::AttachOk {
+            epoch: 12345,
+            session_id: "term-1".to_string(),
+            start_sequence: Some(1),
+            end_sequence: Some(2),
+            gap: None,
+            history: b"AB".to_vec(),
+            pty_cols: Some(120),
+            pty_rows: Some(30),
+            history_segments: vec![
+                HistorySegmentWire {
+                    cols: Some(80),
+                    rows: Some(24),
+                    bytes: b"A".to_vec(),
+                },
+                HistorySegmentWire {
+                    cols: Some(120),
+                    rows: Some(30),
+                    bytes: b"B".to_vec(),
+                },
+            ],
+        };
+        let seg_resp_json =
+            serde_json::to_string(&segmented_attach_resp).expect("serialize segmented attach resp");
+        assert!(seg_resp_json.contains(r#""historySegments":[{""#));
+        assert!(seg_resp_json.contains(r#""bytes":"QQ==""#));
+        assert!(seg_resp_json.contains(r#""bytes":"Qg==""#));
+        let seg_deserialized: DaemonResponse =
+            serde_json::from_str(&seg_resp_json).expect("deserialize segmented attach resp");
+        match seg_deserialized {
+            DaemonResponse::AttachOk {
+                history_segments, ..
+            } => {
+                assert_eq!(
+                    history_segments,
+                    vec![
+                        HistorySegmentWire {
+                            cols: Some(80),
+                            rows: Some(24),
+                            bytes: b"A".to_vec(),
+                        },
+                        HistorySegmentWire {
+                            cols: Some(120),
+                            rows: Some(30),
+                            bytes: b"B".to_vec(),
+                        },
+                    ]
+                );
+            }
+            _ => panic!("Expected AttachOk variant"),
+        }
+
+        // Serialization and deserialization with ptyCols / ptyRows
+        let sized_attach_resp = DaemonResponse::AttachOk {
+            epoch: 12345,
+            session_id: "term-1".to_string(),
+            start_sequence: Some(1),
+            end_sequence: Some(10),
+            gap: None,
+            history: b"initial prompt $ ".to_vec(),
+            pty_cols: Some(120),
+            pty_rows: Some(30),
+            history_segments: Vec::new(),
+        };
+        let sized_resp_json =
+            serde_json::to_string(&sized_attach_resp).expect("serialize sized attach resp");
+        assert!(sized_resp_json.contains(r#""ptyCols":120"#));
+        assert!(sized_resp_json.contains(r#""ptyRows":30"#));
+        let sized_deserialized: DaemonResponse =
+            serde_json::from_str(&sized_resp_json).expect("deserialize sized attach resp");
+        match sized_deserialized {
+            DaemonResponse::AttachOk {
+                pty_cols, pty_rows, ..
+            } => {
+                assert_eq!(pty_cols, Some(120));
+                assert_eq!(pty_rows, Some(30));
             }
             _ => panic!("Expected AttachOk variant"),
         }
@@ -504,6 +744,7 @@ mod tests {
             cols: 120,
             rows: 40,
             shell: None,
+            startup: None,
         };
         let spawn_json = serde_json::to_string(&spawn_req).expect("serialize spawn");
         assert!(spawn_json.contains(r#""clientRequestId":"req-abc-123""#));
@@ -534,8 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_v2_handshake_and_list_sessions_epoch() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 2);
+    fn test_protocol_v3_handshake_and_list_sessions_epoch() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 3);
 
         let hs = DaemonResponse::HandshakeOk {
             version: DAEMON_PROTOCOL_VERSION,
@@ -544,7 +785,7 @@ mod tests {
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
-        assert!(hs_json.contains(r#""version":2"#));
+        assert!(hs_json.contains(r#""version":3"#));
 
         let list = DaemonResponse::ListSessionsOk {
             epoch: 777777,
@@ -558,7 +799,8 @@ mod tests {
     fn test_spawn_shell_field_roundtrip_and_backward_compatibility() {
         // Back-compat: JSON without shell field deserializes to None
         let legacy_json = r#"{"type":"spawn","clientRequestId":"req-1","workspaceId":"ws-1","worktree":null,"cwd":"/home","cols":80,"rows":24}"#;
-        let req: DaemonRequest = serde_json::from_str(legacy_json).expect("deserialize legacy spawn");
+        let req: DaemonRequest =
+            serde_json::from_str(legacy_json).expect("deserialize legacy spawn");
         match req {
             DaemonRequest::Spawn {
                 client_request_id,
@@ -568,6 +810,7 @@ mod tests {
                 cols,
                 rows,
                 shell,
+                startup,
             } => {
                 assert_eq!(client_request_id, "req-1");
                 assert_eq!(workspace_id, "ws-1");
@@ -576,6 +819,18 @@ mod tests {
                 assert_eq!(cols, 80);
                 assert_eq!(rows, 24);
                 assert_eq!(shell, None);
+                assert_eq!(startup, None);
+            }
+            _ => panic!("Expected Spawn variant"),
+        }
+
+        // Back-compat: JSON with explicit "startup": null deserializes to None
+        let null_startup_json = r#"{"type":"spawn","clientRequestId":"req-null","workspaceId":"ws-1","worktree":null,"cwd":"/home","cols":80,"rows":24,"startup":null}"#;
+        let req_null: DaemonRequest =
+            serde_json::from_str(null_startup_json).expect("deserialize null startup spawn");
+        match req_null {
+            DaemonRequest::Spawn { startup, .. } => {
+                assert_eq!(startup, None);
             }
             _ => panic!("Expected Spawn variant"),
         }
@@ -589,17 +844,67 @@ mod tests {
             cols: 100,
             rows: 30,
             shell: Some("pwsh".to_string()),
+            startup: None,
         };
-        let serialized = serde_json::to_string(&spawn_with_shell).expect("serialize spawn with shell");
+        let serialized =
+            serde_json::to_string(&spawn_with_shell).expect("serialize spawn with shell");
         assert!(serialized.contains(r#""shell":"pwsh""#));
-        let deserialized: DaemonRequest = serde_json::from_str(&serialized).expect("deserialize spawn with shell");
+        let deserialized: DaemonRequest =
+            serde_json::from_str(&serialized).expect("deserialize spawn with shell");
         match deserialized {
-            DaemonRequest::Spawn { shell, .. } => {
+            DaemonRequest::Spawn { shell, startup, .. } => {
                 assert_eq!(shell, Some("pwsh".to_string()));
+                assert_eq!(startup, None);
             }
             _ => panic!("Expected Spawn variant"),
         }
 
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 2);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 3);
+    }
+
+    #[test]
+    fn test_spawn_with_agent_resume_startup_roundtrip() {
+        // Given: a typed daemon spawn request with structured agent resume startup
+        let req_json = r#"{
+            "type": "spawn",
+            "clientRequestId": "req-resume-1",
+            "workspaceId": "ws-1",
+            "worktree": null,
+            "cwd": "/path/to/repo",
+            "cols": 80,
+            "rows": 24,
+            "startup": {
+                "kind": "agentResume",
+                "agentType": "claude",
+                "providerSession": {
+                    "key": "session_id",
+                    "id": "claude-session-123",
+                    "transcriptPath": "/path/to/transcript.json"
+                }
+            }
+        }"#;
+
+        // When: deserialized into DaemonRequest
+        let deserialized: DaemonRequest =
+            serde_json::from_str(req_json).expect("deserialize spawn with agent resume startup");
+
+        // Then: startup field contains structured agent resume payload
+        match deserialized {
+            DaemonRequest::Spawn { startup, .. } => {
+                let startup = startup.expect("startup must be present");
+                assert_eq!(
+                    startup,
+                    TerminalStartup::AgentResume {
+                        agent_type: "claude".to_string(),
+                        provider_session: AgentProviderSession {
+                            key: AgentProviderSessionKey::SessionId,
+                            id: "claude-session-123".to_string(),
+                            transcript_path: Some("/path/to/transcript.json".to_string()),
+                        },
+                    }
+                );
+            }
+            _ => panic!("Expected DaemonRequest::Spawn variant"),
+        }
     }
 }

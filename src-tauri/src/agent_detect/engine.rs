@@ -112,6 +112,9 @@ pub static SHIPPED_MANIFESTS: &[&str] = &[
     include_str!("manifests/cursor.toml"),
     include_str!("manifests/grok.toml"),
     include_str!("manifests/kimi.toml"),
+    // Sourced from the GJC (gajae-code) TUI sources 2026-08-31. Same global
+    // evaluation contract: every rule carries gjc-exclusive on-screen evidence.
+    include_str!("manifests/gjc.toml"),
 ];
 
 pub fn default_engine() -> &'static DetectionEngine {

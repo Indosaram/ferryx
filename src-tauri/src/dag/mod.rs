@@ -1,7 +1,7 @@
 pub mod journal;
-pub mod watcher;
 #[cfg(test)]
 mod journal_tests;
+pub mod watcher;
 
 pub use journal::*;
 pub use watcher::*;

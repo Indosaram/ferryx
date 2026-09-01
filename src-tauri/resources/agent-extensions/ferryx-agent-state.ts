@@ -22,9 +22,20 @@ let sendChain: Promise<void> = Promise.resolve();
 // Why: the agent awaits extension handlers, so state delivery must never block a
 // turn. Failures are swallowed on purpose: a missing or stalled Ferryx receiver
 // must not surface as an agent-visible error.
-function send(state: AgentState): void {
+function providerSessionFromContext(ctx): unknown {
+  const explicit = ctx?.providerSession ?? ctx?.session?.providerSession;
+  if (explicit && typeof explicit === "object") return explicit;
+  // The real pi runtime exposes the agent's own session identity only through
+  // the session manager; ctx.providerSession exists solely in mocked shapes.
+  const sessionManager = ctx?.sessionManager;
+  const id = sessionManager?.getSessionId?.();
+  if (typeof id !== "string" || id.length === 0) return undefined;
+  return { key: "session_id", id };
+}
+
+function send(state: AgentState, providerSession?: unknown): void {
   if (!enabled()) return;
-  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: AGENT_ID })}\n`;
+  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: AGENT_ID, providerSession })}\n`;
   sendChain = sendChain.then(
     () =>
       new Promise<void>((resolve) => {
@@ -58,11 +69,11 @@ export default function (pi): void {
     return "idle";
   }
 
-  function publishState(force = false): void {
+  function publishState(force = false, ctx?: unknown): void {
     const next = desiredState();
     if (!force && next === lastState) return;
     lastState = next;
-    send(next);
+    send(next, providerSessionFromContext(ctx));
   }
 
   pi.on("session_start", (_event, ctx) => {
@@ -71,19 +82,19 @@ export default function (pi): void {
     if (ctx?.mode !== "tui") return;
     rootSession = true;
     agentActive = ctx?.isIdle?.() === false;
-    publishState(true);
+    publishState(true, ctx);
   });
 
   pi.on("agent_start", (_event, ctx) => {
     if (!rootSession) return;
     agentActive = true;
-    publishState();
+    publishState(false, ctx);
   });
 
   pi.on("agent_settled", (_event, ctx) => {
     if (!rootSession || ctx?.isIdle?.() !== true) return;
     agentActive = false;
-    publishState();
+    publishState(false, ctx);
   });
 
   pi.events?.on?.("ferryx:blocked", (data) => {

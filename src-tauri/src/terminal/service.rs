@@ -50,6 +50,7 @@ impl TerminalService {
                 .spawn_in_worktree(cmd, cols, rows, worktree_manager, worktree_path)?;
 
         let broadcast_rx = self.output_hub.register_session(&session_id);
+        self.output_hub.record_initial_size(&session_id, cols, rows);
 
         // Spawn output pump task from PTY reader to OutputHub
         let output_hub = Arc::clone(&self.output_hub);
@@ -109,7 +110,12 @@ impl TerminalService {
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
-        self.pty_manager.resize(session_id, cols, rows)
+        self.pty_manager.resize(session_id, cols, rows)?;
+        // Single choke point for ALL resize callers (daemon request arm, remote gateway):
+        // every PTY resize must leave a ledger marker or segmented replay misattributes
+        // post-resize bytes to the previous width.
+        self.output_hub.record_resize(session_id, cols, rows);
+        Ok(())
     }
 
     pub fn signal(&self, session_id: &str, signal: TerminalSignal) -> Result<(), PtyError> {

@@ -23,7 +23,12 @@ const sourceWorktree: Worktree = {
   branch: "refs/heads/source",
 };
 
-function terminalSession(id: string, cwd: string): TerminalSession {
+function terminalSession(
+  id: string,
+  cwd: string,
+  agentType?: string,
+  agentSessionId?: string,
+): TerminalSession {
   return {
     id,
     cwd,
@@ -32,6 +37,8 @@ function terminalSession(id: string, cwd: string): TerminalSession {
     worktree: { wsId: "ws-main", slug: cwd.endsWith("source") ? "source" : "target" },
     backendSessionId: `backend-${id}`,
     lifecycle: "working",
+    agentType: agentType ?? null,
+    agentSessionId: agentSessionId ?? null,
   };
 }
 
@@ -54,7 +61,12 @@ function stateWithSplitSource(): WorkspaceState {
     sessions: {
       "session-target": terminalSession("session-target", targetWorktree.path),
       "session-source-primary": terminalSession("session-source-primary", sourceWorktree.path),
-      "session-source-active": terminalSession("session-source-active", sourceWorktree.path),
+      "session-source-active": terminalSession(
+        "session-source-active",
+        sourceWorktree.path,
+        "claude",
+        "claude-session-rep-1",
+      ),
     },
     layout: {
       tabs: [targetTab, sourceTab],
@@ -152,7 +164,44 @@ describe("useWorkspaceStore pane-targeted tab drop", () => {
     expect(result.current.state.sessions["session-source-active"]).toBe(sourceActive);
     expect(result.current.state.sessions["session-source-active"].cwd).toBe(sourceWorktree.path);
     expect(result.current.state.sessions["session-source-active"].backendSessionId).toBe("backend-session-source-active");
+    expect(result.current.state.sessions["session-source-active"].agentType).toBe("claude");
+    expect(result.current.state.sessions["session-source-active"].agentSessionId).toBe("claude-session-rep-1");
     expect(result.current.state.unreadTabIds["tab-source"]).toBeUndefined();
+    expect(workspaceServices.spawnTerminal).not.toHaveBeenCalled();
+    expect(workspaceServices.closeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("retains a freshly rebound backend when its pane subtree is transplanted", () => {
+    const workspaceServices = services();
+    const restored = stateWithSplitSource();
+    restored.sessions["session-source-active"] = {
+      ...restored.sessions["session-source-active"],
+      backendSessionId: "backend-resumed-1",
+      daemonEpoch: "epoch-resumed",
+      lastOutputSequence: null,
+      reconnectLifecycle: "idle",
+    };
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [targetWorktree, sourceWorktree], services: workspaceServices }),
+    );
+
+    act(() => result.current.restoreWorkspace(restored));
+    act(() =>
+      result.current.moveTabToSplit("tab-source", "group-default", "horizontal", "first", {
+        tabId: "tab-target",
+        leafId: "leaf-target",
+      }),
+    );
+
+    expect(result.current.state.sessions["session-source-active"]).toEqual(
+      expect.objectContaining({
+        backendSessionId: "backend-resumed-1",
+        daemonEpoch: "epoch-resumed",
+        lastOutputSequence: null,
+        agentType: "claude",
+        agentSessionId: "claude-session-rep-1",
+      }),
+    );
     expect(workspaceServices.spawnTerminal).not.toHaveBeenCalled();
     expect(workspaceServices.closeTerminal).not.toHaveBeenCalled();
   });

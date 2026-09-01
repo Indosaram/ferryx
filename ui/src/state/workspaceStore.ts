@@ -11,15 +11,18 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import { worktreeIdentity } from "../lib/types";
 import type {
+  AgentProviderSession,
   ActiveAgent,
   BrowserTab,
   LayoutState,
   PaneContent,
+  ReconnectLifecycle,
+  StructuredIpcError,
   TerminalLifecycle,
   TerminalLifecyclePayload,
   TerminalSession,
@@ -141,7 +144,15 @@ export type WorkspaceAction =
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
-  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string }
+  | {
+      type: "SET_RECONNECT_LIFECYCLE";
+      sessionId: string;
+      lifecycle: ReconnectLifecycle;
+      error?: StructuredIpcError | null;
+      requestId?: string | null;
+    }
+  | { type: "APPLY_PROVIDER_SESSION_IF_MISSING"; sessionId: string; providerSession: AgentProviderSession }
+  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
   | {
       type: "SESSION_SCREEN_ACTIVITY";
@@ -150,6 +161,7 @@ export type WorkspaceAction =
       state: "working" | "blocked" | "idle";
       ruleId: string;
       manifestId?: string;
+      providerSession?: AgentProviderSession | null;
     }
   | { type: "MARK_TAB_UNREAD"; tabId: string }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
@@ -295,6 +307,7 @@ export function useWorkspaceStore({
     let unlistenTitle: (() => void) | undefined;
     let unlistenBell: (() => void) | undefined;
     let unlistenAgentState: (() => void) | undefined;
+    const fallbackAttemptedAgents = new Map<string, Set<string>>();
     let subscribed = true;
 
     void onNativeTerminalTitle((payload) => {
@@ -337,6 +350,7 @@ export function useWorkspaceStore({
           state: payload.state,
           ruleId: payload.ruleId,
           manifestId: payload.manifestId,
+          providerSession: payload.providerSession,
         }));
         return;
       }
@@ -347,7 +361,31 @@ export function useWorkspaceStore({
         state: payload.state,
         ruleId: payload.ruleId,
         manifestId: payload.manifestId,
+        providerSession: payload.providerSession,
       });
+      if (
+        !payload.providerSession
+        && payload.manifestId
+        && ["claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc"].includes(payload.manifestId)
+      ) {
+        const discoveryAgent = payload.manifestId === "cursor-agent" ? "cursor" : payload.manifestId;
+        // A pane can surface several manifest ids over its lifetime (shared TUI
+        // patterns across pi-family agents), so track attempts per agent id: a
+        // failed probe under one id must not block a more specific id later.
+        const attempted = fallbackAttemptedAgents.get(resolved.sessionId) ?? new Set<string>();
+        if (!attempted.has(discoveryAgent)) {
+          attempted.add(discoveryAgent);
+          fallbackAttemptedAgents.set(resolved.sessionId, attempted);
+          void discoverAgentProviderSession(payload.sessionId, discoveryAgent).then((id) => {
+            if (!id) return;
+            dispatch({
+              type: "APPLY_PROVIDER_SESSION_IF_MISSING",
+              sessionId: resolved.sessionId,
+              providerSession: { key: "session_id", id },
+            });
+          });
+        }
+      }
     })
       .then((unlisten) => {
         if (subscribed) unlistenAgentState = unlisten;
@@ -445,6 +483,9 @@ export function useWorkspaceStore({
       const targets = sessionIds.filter((sessionId) => {
         const session = stateRef.current.sessions[sessionId];
         if (!session || session.backendSessionId != null) return false;
+        if (session.lifecycle === "exited" && (session.agentType || session.providerSession || session.agentSessionId)) {
+          return false;
+        }
         if (spawningSessionIdsRef.current.has(sessionId)) return false;
         return true;
       });
@@ -996,6 +1037,7 @@ export function useWorkspaceStore({
     ensureTabForWorktree,
     openWorkspacePortInBrowser,
     ensureSessionBackends,
+    dispatchWorkspaceAction: dispatch,
     closeTab,
     closeOtherTabs,
     closeTabsToRight,
@@ -1608,7 +1650,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         Object.entries(state.sessions).map(([id, session]) => {
           if (session.backendSessionId !== action.backendSessionId) return [id, session];
           matchedSessionIds.push(id);
-          return [id, { ...session, lifecycle: action.lifecycle }];
+          return [
+            id,
+            {
+              ...session,
+              lifecycle: action.lifecycle,
+              reconnectLifecycle: action.lifecycle === "exited" ? "idle" : session.reconnectLifecycle,
+            },
+          ];
         }),
       ) as Record<string, TerminalSession>;
       let nextState: WorkspaceState = { ...state, sessions };
@@ -1623,6 +1672,33 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
       return nextState;
     }
+    case "SET_RECONNECT_LIFECYCLE": {
+      const session = state.sessions[action.sessionId];
+      if (!session) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [action.sessionId]: {
+            ...session,
+            reconnectLifecycle: action.lifecycle,
+            reconnectError: action.error ?? null,
+            reconnectRequestId: action.requestId ?? session.reconnectRequestId ?? null,
+          },
+        },
+      };
+    }
+    case "APPLY_PROVIDER_SESSION_IF_MISSING": {
+      const session = state.sessions[action.sessionId];
+      if (!session || session.providerSession) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [action.sessionId]: { ...session, providerSession: action.providerSession },
+        },
+      };
+    }
     case "REBIND_SESSION_BACKEND": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
@@ -1634,7 +1710,12 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...session,
             backendSessionId: action.backendSessionId,
             cwd: action.cwd ?? session.cwd,
+            daemonEpoch: action.daemonEpoch ?? null,
+            lastOutputSequence: null,
             lifecycle: "running",
+            reconnectLifecycle: "idle",
+            reconnectError: null,
+            reconnectRequestId: null,
           },
         },
       };
@@ -1655,12 +1736,21 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         return state;
       }
 
+      const authoritativeAgentType = state.sessions[action.sessionId]?.agentType ?? null;
       const normalizedManifestId = action.manifestId?.trim().toLowerCase();
       const isSupportedManifest = Boolean(normalizedManifestId && resolveAgentLogo(normalizedManifestId));
       const prevActivity = previous as WorkspaceTerminalActivity | undefined;
-      const agentType = isSupportedManifest ? normalizedManifestId : prevActivity?.agentType;
-      const isAgent = isSupportedManifest ? true : (prevActivity?.isAgent ?? false);
-      const agentSource = isSupportedManifest ? "screen" : prevActivity?.agentSource;
+      const agentType = authoritativeAgentType
+        ? authoritativeAgentType
+        : isSupportedManifest
+          ? normalizedManifestId
+          : prevActivity?.agentType;
+      const isAgent = authoritativeAgentType ? true : isSupportedManifest ? true : (prevActivity?.isAgent ?? false);
+      const agentSource = authoritativeAgentType
+        ? prevActivity?.agentSource
+        : isSupportedManifest
+          ? "screen"
+          : prevActivity?.agentSource;
 
       const activity: WorkspaceTerminalActivity = {
         state: mappedState,
@@ -1670,7 +1760,20 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         source: "screen",
         agentSource,
       };
-      return applySessionActivity(state, action.tabId, action.sessionId, activity);
+      const nextState = applySessionActivity(state, action.tabId, action.sessionId, activity);
+      if (!action.providerSession) return nextState;
+      const session = nextState.sessions[action.sessionId];
+      if (!session) return nextState;
+      return {
+        ...nextState,
+        sessions: {
+          ...nextState.sessions,
+          [action.sessionId]: {
+            ...session,
+            providerSession: action.providerSession,
+          },
+        },
+      };
     }
     case "SESSION_TITLE_ACTIVITY": {
       const previous = state.activityBySessionId?.[action.sessionId];
