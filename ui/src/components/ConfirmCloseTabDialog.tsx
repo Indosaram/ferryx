@@ -27,7 +27,7 @@ export function ConfirmCloseTabDialog({ tabLabel, onCancel, onConfirm }: Confirm
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="border-b border-border px-4 py-3 text-sm font-semibold text-foreground">Close tab</header>
-        <div className="space-y-4 p-4 text-xs">
+        <div className="selectable space-y-4 p-4 text-xs">
           <p className="text-muted-foreground">Close “{tabLabel}”? Its terminal or browser session will be released.</p>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onCancel} className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground">

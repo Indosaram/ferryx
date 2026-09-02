@@ -214,6 +214,8 @@ export function serializeWorkspaceState(
   const createdAt = Date.now();
   for (const [id, sess] of Object.entries(state.sessions)) {
     if (!sess || !referencedSessionIds.has(id)) continue;
+    const activity = state.activityBySessionId?.[id];
+    const agentType = sess.agentType ?? (activity?.isAgent && activity?.agentType ? activity.agentType : null);
     persistedTerminalSessions[id] = {
       localSessionId: sess.id,
       backendSessionId: sess.backendSessionId,
@@ -221,7 +223,7 @@ export function serializeWorkspaceState(
       cwd: sess.cwd,
       daemonEpoch: sess.daemonEpoch != null ? String(sess.daemonEpoch) : null,
       lastOutputSequence: sess.lastOutputSequence != null ? String(sess.lastOutputSequence) : null,
-      agentType: sess.agentType ?? null,
+      agentType,
       agentSessionId: sess.agentSessionId ?? null,
       providerSession: sess.providerSession ?? null,
       createdAt,
@@ -396,7 +398,9 @@ export function deserializeWorkspaceState(
 
     const worktreePath = sess.worktreePath || sess.cwd;
     const matchingWorktree = worktrees.find((wt) => wt.path === worktreePath);
-    const agentType = sess.agentType ?? null;
+    const activity = ws.activityBySessionId?.[localSessionId];
+    const fallbackAgentType = activity?.isAgent && activity?.agentType ? activity.agentType : null;
+    const agentType = sess.agentType ?? fallbackAgentType;
     const agentSessionId = sess.agentSessionId ?? null;
     const legacyProviderKey = agentType ? providerSessionKeyForAgent(agentType) : null;
     const normalizedLegacyId = agentSessionId ? normalizeSessionId(agentSessionId) : null;

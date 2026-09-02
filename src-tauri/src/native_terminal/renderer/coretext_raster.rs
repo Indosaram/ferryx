@@ -92,7 +92,67 @@ pub mod macos {
         {
             return false;
         }
+        rasterize_impl(
+            font,
+            text,
+            buffer,
+            width,
+            height,
+            is_combining,
+            needs_synthetic_bold,
+            needs_synthetic_italic,
+            false,
+        )
+    }
 
+    /// Rasterizes a text cluster/character using `font` into an RGB subpixel coverage buffer
+    /// (`width * height * 4`, RGBA layout with per-channel coverage in RGB and max coverage in A),
+    /// top-left origin. Each of R, G, B holds the subpixel coverage for that channel, enabling
+    /// LCD subpixel antialiasing when composited against the destination background.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rasterize_to_subpixel_buffer(
+        font: &CTFont,
+        text: &str,
+        buffer: &mut [u8],
+        width: u32,
+        height: u32,
+        _font_size: f32,
+        is_combining: bool,
+        needs_synthetic_bold: bool,
+        needs_synthetic_italic: bool,
+    ) -> bool {
+        if text.is_empty()
+            || width == 0
+            || height == 0
+            || buffer.len() < (width * height * 4) as usize
+        {
+            return false;
+        }
+        rasterize_impl(
+            font,
+            text,
+            buffer,
+            width,
+            height,
+            is_combining,
+            needs_synthetic_bold,
+            needs_synthetic_italic,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rasterize_impl(
+        font: &CTFont,
+        text: &str,
+        buffer: &mut [u8],
+        width: u32,
+        height: u32,
+        is_combining: bool,
+        needs_synthetic_bold: bool,
+        needs_synthetic_italic: bool,
+        subpixel: bool,
+    ) -> bool {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let cf_text = CFString::from_str(text);
             let font_attr_ptr = unsafe { kCTFontAttributeName as *const CFString as *const c_void };
@@ -201,16 +261,45 @@ pub mod macos {
 
                     let px = (x as i32) + italic_offset;
                     if px >= 0 && (px as usize) < w {
-                        let dst_idx = y * w + (px as usize);
-                        if is_combining {
-                            buffer[dst_idx] = buffer[dst_idx].saturating_add(alpha);
-                        } else {
-                            buffer[dst_idx] = buffer[dst_idx].max(alpha);
-                        }
+                        if subpixel {
+                            // RGBA subpixel coverage: R, G, B each hold per-channel coverage, A holds max coverage.
+                            let dst_idx = (y * w + (px as usize)) * 4;
+                            let r = rgba_buffer[src_idx];
+                            let g = rgba_buffer[src_idx + 1];
+                            let b = rgba_buffer[src_idx + 2];
+                            let a = rgba_buffer[src_idx + 3];
+                            if is_combining {
+                                buffer[dst_idx] = buffer[dst_idx].saturating_add(r);
+                                buffer[dst_idx + 1] = buffer[dst_idx + 1].saturating_add(g);
+                                buffer[dst_idx + 2] = buffer[dst_idx + 2].saturating_add(b);
+                                buffer[dst_idx + 3] = buffer[dst_idx + 3].saturating_add(a);
+                            } else {
+                                buffer[dst_idx] = buffer[dst_idx].max(r);
+                                buffer[dst_idx + 1] = buffer[dst_idx + 1].max(g);
+                                buffer[dst_idx + 2] = buffer[dst_idx + 2].max(b);
+                                buffer[dst_idx + 3] = buffer[dst_idx + 3].max(a);
+                            }
 
-                        if needs_synthetic_bold && (px + 1) < (w as i32) {
-                            let bold_idx = y * w + ((px + 1) as usize);
-                            buffer[bold_idx] = buffer[bold_idx].saturating_add(alpha);
+                            if needs_synthetic_bold && (px + 1) < (w as i32) {
+                                let bold_idx = (y * w + ((px + 1) as usize)) * 4;
+                                buffer[bold_idx] = buffer[bold_idx].saturating_add(r);
+                                buffer[bold_idx + 1] = buffer[bold_idx + 1].saturating_add(g);
+                                buffer[bold_idx + 2] = buffer[bold_idx + 2].saturating_add(b);
+                                buffer[bold_idx + 3] = buffer[bold_idx + 3].saturating_add(a);
+                            }
+                        } else {
+                            // 8-bit alpha mask (grayscale).
+                            let dst_idx = y * w + (px as usize);
+                            if is_combining {
+                                buffer[dst_idx] = buffer[dst_idx].saturating_add(alpha);
+                            } else {
+                                buffer[dst_idx] = buffer[dst_idx].max(alpha);
+                            }
+
+                            if needs_synthetic_bold && (px + 1) < (w as i32) {
+                                let bold_idx = y * w + ((px + 1) as usize);
+                                buffer[bold_idx] = buffer[bold_idx].saturating_add(alpha);
+                            }
                         }
                     }
                 }

@@ -1,3 +1,4 @@
+import { ChevronDown } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
@@ -7,6 +8,7 @@ import {
 } from "../lib/remoteClient";
 import { PairingPage } from "./PairingPage";
 import {
+  contextName,
   getRemoteDocumentTitle,
   normalizeRemoteWorkspaceState,
   RemoteWorkspaceMirror,
@@ -183,6 +185,8 @@ export const RemoteApp: React.FC = () => {
   const [token, setToken] = useState<string | null>(getRemoteAuthToken);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
   const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
   const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
@@ -441,13 +445,18 @@ export const RemoteApp: React.FC = () => {
     <div className="flex h-[100dvh] min-h-screen flex-col overflow-hidden bg-background text-foreground">
       <Toaster />
       <header className="flex h-7 shrink-0 items-center justify-between border-b border-border bg-card px-2.5">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="flex size-4 items-center justify-center rounded bg-primary text-[10px] font-bold text-primary-foreground" aria-hidden="true">
-            F
-          </span>
-          <h1 className="truncate text-xs font-semibold leading-none">Ferryx Remote</h1>
-          <span className="hidden text-[10px] text-muted-foreground sm:inline leading-none">Following Ferryx Desktop</span>
-        </div>
+        <button
+          type="button"
+          aria-label="Change workspace context"
+          aria-expanded={selectorOpen}
+          onClick={() => setSelectorOpen((open) => !open)}
+          className="flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span className="flex size-4 shrink-0 items-center justify-center rounded bg-primary text-[10px] font-bold text-primary-foreground" aria-hidden="true">F</span>
+          <span className="shrink-0 text-xs font-semibold leading-none">Ferryx Remote</span>
+          <span className="min-w-0 truncate font-mono text-[11px] leading-none text-muted-foreground" aria-label="Current desktop context">{contextName(model.context)}</span>
+          <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
+        </button>
         <div className="flex items-center gap-1.5">
           {firstWaiting ? (
             <button
@@ -475,19 +484,41 @@ export const RemoteApp: React.FC = () => {
               ) : null}
             </button>
           ) : null}
-          <button
-            type="button"
-            onClick={disconnect}
-            className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            Disconnect
-          </button>
+          {confirmDisconnect ? (
+            <>
+              <button
+                type="button"
+                aria-label="Confirm disconnect. This removes pairing from this device; re-pair with a QR code to reconnect."
+                onClick={disconnect}
+                className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                Remove pairing?
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDisconnect(false)}
+                className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDisconnect(true)}
+              className="flex h-5 items-center rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              Disconnect
+            </button>
+          )}
         </div>
       </header>
 
       <RemoteWorkspaceMirror
         model={model}
         pending={pending}
+        selectorOpen={selectorOpen}
+        onSelectorOpenChange={setSelectorOpen}
         onSelect={(option) => void selectContext(option)}
       >
         {effectiveSessionId ? (

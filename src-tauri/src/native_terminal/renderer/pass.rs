@@ -41,6 +41,7 @@ pub fn encode_terminal_passes(
             a: 1.0,
         },
         None,
+        &[],
     );
 }
 
@@ -60,6 +61,7 @@ pub fn encode_terminal_passes_with_surface_options(
     glyph: &[GlyphInstance],
     clear_color: wgpu::Color,
     scissor: Option<PhysicalBounds>,
+    overlay: &[RectInstance],
 ) {
     queue.write_buffer(
         uniform_buf,
@@ -79,6 +81,17 @@ pub fn encode_terminal_passes_with_surface_options(
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Glyph Buffer"),
                 contents: bytemuck::cast_slice(glyph),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+        )
+    } else {
+        None
+    };
+    let overlay_buf = if !overlay.is_empty() {
+        Some(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Overlay Buffer"),
+                contents: bytemuck::cast_slice(overlay),
                 usage: wgpu::BufferUsages::VERTEX,
             }),
         )
@@ -113,5 +126,12 @@ pub fn encode_terminal_passes_with_surface_options(
         rpass.set_bind_group(1, atlas_bg, &[]);
         rpass.set_vertex_buffer(0, buf.slice(..));
         rpass.draw(0..6, 0..glyph.len() as u32);
+    }
+    if let Some(buf) = &overlay_buf {
+        let overlay_pipe = pipelines.get_overlay_pipeline(format);
+        rpass.set_pipeline(overlay_pipe);
+        rpass.set_bind_group(0, uniform_bg, &[]);
+        rpass.set_vertex_buffer(0, buf.slice(..));
+        rpass.draw(0..6, 0..overlay.len() as u32);
     }
 }

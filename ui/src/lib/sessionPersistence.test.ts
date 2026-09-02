@@ -1204,4 +1204,37 @@ describe("sessionPersistence v2 serialization and migration", () => {
     expect(restoredSession?.lifecycle).toBe("exited");
     expect(restoredSession?.backendSessionId).toBeNull();
   });
+
+  it("falls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset", () => {
+    const state = workspaceState();
+    // sess-1 has no agentType on session, but has agent activity in activityBySessionId
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      agentType: undefined,
+      agentSessionId: null,
+      providerSession: { key: "session_id", id: "omo-sess-123" },
+    };
+    state.activityBySessionId = {
+      "sess-1": {
+        state: "working",
+        title: "OmO working",
+        isAgent: true,
+        agentType: "omo",
+        source: "screen",
+      },
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    const persistedSession = serialized.workspaces["default"]?.terminalSessions["sess-1"];
+    expect(persistedSession?.agentType).toBe("omo");
+
+    // Clear sess.agentType in serialized JSON to simulate older/missing session agentType with activity fallback
+    if (persistedSession) {
+      persistedSession.agentType = null;
+    }
+
+    const restored = deserializeWorkspaceState("default", serialized, []);
+    expect(restored).not.toBeNull();
+    expect(restored?.sessions["sess-1"]?.agentType).toBe("omo");
+  });
 });

@@ -4,6 +4,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { cn } from "../lib/cn";
+import type { TerminalActivity } from "../lib/activity";
 import {
   attachNativeTerminalLifecycle,
   detachNativeTerminalLifecycle,
@@ -11,11 +12,14 @@ import {
   reattachNativeTerminalLifecycle,
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
+import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
   isStructuredIpcError,
+  onNativeTerminalCopyOrInterrupt,
   onNativeTerminalFocus,
   onNativeTerminalPaste,
   onNativeTerminalScrollbar,
+  setNativeTerminalScrollbarOverlay,
 } from "../lib/tauri";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
@@ -32,6 +36,7 @@ export interface NativeTerminalPaneProps {
   session?: TerminalSession;
   className?: string;
   style?: CSSProperties;
+  activity?: TerminalActivity;
 }
 
 interface GeometryState {
@@ -126,6 +131,7 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_send_input"
   | "cmd_native_terminal_scroll"
   | "cmd_native_terminal_scrollbar"
+  | "cmd_native_terminal_set_scrollbar_overlay"
   | "cmd_native_terminal_copy_selection"
   | "cmd_native_terminal_paste"
   | "cmd_native_terminal_clipboard_content"
@@ -254,6 +260,46 @@ function physicalKeyForAltChord(event: ForwardableKeyEvent): string {
   return event.key;
 }
 
+function physicalKeyForCtrlChord(event: {
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey?: boolean;
+  key: string;
+  code?: string;
+}): string {
+  if (!event.ctrlKey || event.altKey) {
+    return event.key;
+  }
+
+  const code = event.code ?? "";
+  if (/^Key[A-Z]$/.test(code)) {
+    const letter = code.slice(3);
+    return event.shiftKey ? letter : letter.toLowerCase();
+  }
+  if (/^Digit[0-9]$/.test(code)) {
+    return code.slice(5);
+  }
+
+  return event.key;
+}
+
+function isPlainCtrlCChord(event: {
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+  key: string;
+  code?: string;
+}): boolean {
+  return (
+    event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.shiftKey &&
+    (event.code === "KeyC" || event.key === "c")
+  );
+}
+
 function reportNativeTerminalIpcFailure(command: NativeTerminalIpcCommand, error: unknown): void {
   console.error("Native terminal IPC command failed", { command, error });
 }
@@ -295,6 +341,22 @@ function quoteShellPath(path: string): string {
 }
 
 /**
+ * Tauri labels drag-drop positions "physical" on every platform, but the units
+ * differ: macOS wry forwards AppKit `draggingLocation()` verbatim (logical
+ * points), while Windows/Linux forward real device pixels. Dividing macOS
+ * payloads by `devicePixelRatio` halves the coordinate and breaks the pane
+ * hit test on Retina, so macOS must divide by 1 and other platforms by DPR.
+ */
+export function dragDropPositionToLogical(
+  position: { x: number; y: number },
+  devicePixelRatio: number,
+  isMacos: boolean,
+): { x: number; y: number } {
+  const scale = isMacos ? 1 : devicePixelRatio;
+  return { x: position.x / scale, y: position.y / scale };
+}
+
+/**
  * Height in CSS pixels reserved at the top of every terminal pane for the DOM
  * pane-drag handle.
  *
@@ -318,6 +380,7 @@ function quoteShellPath(path: string): string {
 export const NATIVE_TERMINAL_HANDLE_INSET_PX = 12;
 export const NATIVE_TERMINAL_BOTTOM_INSET_PX = 20;
 export const NATIVE_TERMINAL_SCROLLBAR_WIDTH_PX = 12;
+export const NATIVE_TERMINAL_SCROLLBAR_HIDE_DELAY_MS = 800;
 const NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX = 20;
 
 export function nativeScrollbarThumb(metrics: ScrollbarMetrics | null): {
@@ -353,7 +416,9 @@ export function NativeTerminalPane({
   session,
   className,
   style,
+  activity,
 }: NativeTerminalPaneProps): ReactElement {
+  const translateClearToKillLine = activity?.isAgent === true && activity.state !== "working";
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const scrollbarTrackRef = useRef<HTMLDivElement>(null);
@@ -378,6 +443,9 @@ export function NativeTerminalPane({
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
+  const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
+  const scrollbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isScrollbarHoveredRef = useRef(false);
   const scrollbarRevisionRef = useRef(0);
   // Native Tauri commands identify the PTY/surface by `backendSessionId`. When callers only
   // supply `sessionId` without a `session` object, fall back safely to `sessionId``.
@@ -389,6 +457,42 @@ export function NativeTerminalPane({
   useEffect(() => {
     previousTargetSessionIdRef.current = targetSessionId;
   }, [targetSessionId]);
+
+  const revealScrollbar = useCallback(() => {
+    if (scrollbarHideTimeoutRef.current !== null) {
+      clearTimeout(scrollbarHideTimeoutRef.current);
+      scrollbarHideTimeoutRef.current = null;
+    }
+    setIsScrollbarRevealed(true);
+  }, []);
+
+  const scheduleScrollbarHide = useCallback((delay = NATIVE_TERMINAL_SCROLLBAR_HIDE_DELAY_MS) => {
+    if (scrollbarHideTimeoutRef.current !== null) {
+      clearTimeout(scrollbarHideTimeoutRef.current);
+    }
+    scrollbarHideTimeoutRef.current = setTimeout(() => {
+      scrollbarHideTimeoutRef.current = null;
+      if (!isScrollbarHoveredRef.current && scrollbarDragRef.current === null) {
+        setIsScrollbarRevealed(false);
+      }
+    }, delay);
+  }, []);
+
+  const triggerScrollbarReveal = useCallback(() => {
+    revealScrollbar();
+    if (!isScrollbarHoveredRef.current && scrollbarDragRef.current === null) {
+      scheduleScrollbarHide();
+    }
+  }, [revealScrollbar, scheduleScrollbarHide]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollbarHideTimeoutRef.current !== null) {
+        clearTimeout(scrollbarHideTimeoutRef.current);
+        scrollbarHideTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   const updateImeAnchor = (receipt: NativeTerminalReceipt | undefined) => {
     if (!receipt) {
@@ -585,7 +689,7 @@ export function NativeTerminalPane({
     void executeInput(false);
   }, [performAttach, targetSessionId, visible]);
 
-  const handleCopy = useCallback(() => {
+  const copySelectionOrInterrupt = useCallback(() => {
     if (!visible || !isTauri() || !targetSessionId) return;
     void invoke<string | null>("cmd_native_terminal_copy_selection", {
       sessionId: targetSessionId,
@@ -593,12 +697,28 @@ export function NativeTerminalPane({
       .then((text) => {
         if (text && typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
           void navigator.clipboard.writeText(text).catch(() => undefined);
+        } else {
+          sendInput({
+            keyEvent: {
+              key: translateClearToKillLine ? "u" : "c",
+              action: "Press",
+              modifiers: {
+                shift: false,
+                ctrl: true,
+                alt: false,
+                superKey: false,
+                capsLock: false,
+                numLock: false,
+              },
+              utf8: null,
+            },
+          });
         }
       })
       .catch((error: unknown) => {
         reportNativeTerminalIpcFailure("cmd_native_terminal_copy_selection", error);
       });
-  }, [targetSessionId, visible]);
+  }, [sendInput, targetSessionId, translateClearToKillLine, visible]);
 
   const sendPaste = useCallback(
     (text: string) => {
@@ -732,6 +852,11 @@ export function NativeTerminalPane({
     if (!visible || !targetSessionId || !isTauri()) {
       scrollbarRevisionRef.current += 1;
       setScrollbar(null);
+      setIsScrollbarRevealed(false);
+      if (scrollbarHideTimeoutRef.current !== null) {
+        clearTimeout(scrollbarHideTimeoutRef.current);
+        scrollbarHideTimeoutRef.current = null;
+      }
       return;
     }
 
@@ -786,6 +911,9 @@ export function NativeTerminalPane({
         scrollbarDragRef.current = null;
         document.body.style.cursor = "";
         refreshScrollbar();
+        if (!isScrollbarHoveredRef.current) {
+          scheduleScrollbarHide();
+        }
       }
       if (pointerDragRef.current?.pointerId === event.pointerId) {
         if (motionFrameRef.current !== null) {
@@ -811,7 +939,7 @@ export function NativeTerminalPane({
       pendingMotionRef.current = null;
       document.body.style.cursor = "";
     };
-  }, [refreshScrollbar, scrollToTrackPosition, sendMouse]);
+  }, [refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse]);
 
   useEffect(() => {
     if (!visible || !targetSessionId) return;
@@ -903,7 +1031,33 @@ export function NativeTerminalPane({
         isCopyShortcut(forwardable) &&
         canClaimInput
       ) {
+        event.preventDefault();
         inputRef.current?.focus();
+        copySelectionOrInterrupt();
+        return;
+      }
+      if (
+        targetEl !== inputRef.current &&
+        isPlainCtrlCChord(forwardable) &&
+        canClaimInput
+      ) {
+        event.preventDefault();
+        inputRef.current?.focus();
+        sendInput({
+          keyEvent: {
+            key: translateClearToKillLine ? "u" : physicalKeyForCtrlChord(forwardable),
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        });
         return;
       }
       if (
@@ -1001,7 +1155,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [performNativePasteFallback, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
+  }, [copySelectionOrInterrupt, performNativePasteFallback, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, translateClearToKillLine, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -1041,6 +1195,45 @@ export function NativeTerminalPane({
       unlisten?.();
     };
   }, [performNativePasteFallback, targetSessionId, visible]);
+
+  useEffect(() => {
+    if (!visible || !targetSessionId || !isTauri()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onNativeTerminalCopyOrInterrupt(() => {
+      if (disposed) return;
+      const activeEl = typeof document !== "undefined" ? document.activeElement : null;
+      const activeElement = `${activeEl?.tagName ?? ""}/${activeEl?.getAttribute("data-testid") ?? ""}`;
+      const fallbackSessionId =
+        lastFocusedNativeTerminalSessionId ?? mountedNativeTerminalSessionCounts.keys().next().value;
+      switchDebug("terminal.surface.copy.native.event", {
+        fallbackSessionId: fallbackSessionId ?? null,
+        targetSessionId,
+        activeElement,
+      });
+      if (
+        activeEl &&
+        activeEl !== inputRef.current &&
+        activeEl !== document.body &&
+        isEditableElement(activeEl)
+      ) {
+        return;
+      }
+      if (fallbackSessionId !== targetSessionId) return;
+
+      inputRef.current?.focus();
+      copySelectionOrInterrupt();
+    }).then((listener) => {
+      if (disposed) listener();
+      else unlisten = listener;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [copySelectionOrInterrupt, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -1094,6 +1287,12 @@ export function NativeTerminalPane({
           const payload = event.payload;
           if (payload && payload.type === "drop") {
             const container = containerRef.current;
+            switchDebug("terminal.surface.drop.event", {
+              backendSessionId: targetSessionId,
+              hasContainer: Boolean(container),
+              position: payload.position,
+              pathCount: payload.paths?.length ?? 0,
+            });
             if (!container) return;
 
             const rect = container.getBoundingClientRect();
@@ -1102,8 +1301,13 @@ export function NativeTerminalPane({
                 ? window.devicePixelRatio
                 : 1;
 
-            const logicalX = payload.position.x / scaleFactor;
-            const logicalY = payload.position.y / scaleFactor;
+            const logicalPosition = dragDropPositionToLogical(
+              payload.position,
+              scaleFactor,
+              isMacShortcutPlatform(),
+            );
+            const logicalX = logicalPosition.x;
+            const logicalY = logicalPosition.y;
 
             if (
               logicalX >= rect.left &&
@@ -1365,6 +1569,23 @@ export function NativeTerminalPane({
   }, [isBackendRebind, measureGeometry, performAttach, refreshScrollbar, sessionId, targetSessionId, visible]);
 
   const thumb = nativeScrollbarThumb(scrollbar);
+  const overlayVisible = Boolean(visible && isScrollbarRevealed && thumb.visible);
+
+  useEffect(() => {
+    if (!isTauri() || !targetSessionId) return;
+    setNativeTerminalScrollbarOverlay(targetSessionId, overlayVisible).catch((error: unknown) => {
+      reportNativeTerminalIpcFailure("cmd_native_terminal_set_scrollbar_overlay", error);
+    });
+  }, [overlayVisible, targetSessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (!isTauri() || !targetSessionId) return;
+      setNativeTerminalScrollbarOverlay(targetSessionId, false).catch((error: unknown) => {
+        reportNativeTerminalIpcFailure("cmd_native_terminal_set_scrollbar_overlay", error);
+      });
+    };
+  }, [targetSessionId]);
 
   return (
     <div
@@ -1377,8 +1598,23 @@ export function NativeTerminalPane({
         height: `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX}px)`,
         ...style,
       }}
+      onPointerEnter={() => {
+        if (!visible) return;
+        triggerScrollbarReveal();
+      }}
+      onPointerMove={() => {
+        if (!visible) return;
+        triggerScrollbarReveal();
+      }}
+      onPointerLeave={() => {
+        if (!visible) return;
+        if (scrollbarDragRef.current === null && !isScrollbarHoveredRef.current) {
+          scheduleScrollbarHide();
+        }
+      }}
       onPointerDown={(event) => {
         if (!visible) return;
+        triggerScrollbarReveal();
         const geoViewport = viewportRef.current;
         if (geoViewport) {
           const geoRect = geoViewport.getBoundingClientRect();
@@ -1398,7 +1634,9 @@ export function NativeTerminalPane({
         }
       }}
       onWheel={(event) => {
-        if (!visible || !isTauri() || !targetSessionId) return;
+        if (!visible) return;
+        triggerScrollbarReveal();
+        if (!isTauri() || !targetSessionId) return;
         const rows = Math.trunc(event.deltaY / 20) || (event.deltaY > 0 ? 1 : -1);
         void invoke("cmd_native_terminal_scroll", {
           sessionId: targetSessionId,
@@ -1413,7 +1651,7 @@ export function NativeTerminalPane({
       <div
         ref={viewportRef}
         data-testid="native-terminal-viewport"
-        className="absolute inset-y-0 left-0 right-3"
+        className="absolute inset-0"
       >
         <textarea
           ref={inputRef}
@@ -1464,7 +1702,7 @@ export function NativeTerminalPane({
           }}
           onCopy={(event) => {
             event.preventDefault();
-            handleCopy();
+            copySelectionOrInterrupt();
           }}
           onKeyDown={(event) => {
             if (event.defaultPrevented) {
@@ -1480,7 +1718,27 @@ export function NativeTerminalPane({
             // Copy shortcut: Cmd+C on Mac (without Ctrl) or Ctrl+Shift+C
             if (isCopyShortcut(event)) {
               event.preventDefault();
-              handleCopy();
+              copySelectionOrInterrupt();
+              return;
+            }
+
+            if (isPlainCtrlCChord(event)) {
+              event.preventDefault();
+              sendInput({
+                keyEvent: {
+                  key: translateClearToKillLine ? "u" : physicalKeyForCtrlChord(event),
+                  action: "Press",
+                  modifiers: {
+                    shift: false,
+                    ctrl: true,
+                    alt: false,
+                    superKey: false,
+                    capsLock: false,
+                    numLock: false,
+                  },
+                  utf8: null,
+                },
+              });
               return;
             }
 
@@ -1569,10 +1827,30 @@ export function NativeTerminalPane({
               "aria-valuenow": scrollbar?.offset ?? 0,
             }
           : {})}
-        className="absolute inset-y-0 right-0 w-3 bg-terminal"
+        className={cn(
+          "absolute inset-y-0 right-0 w-3 transition-opacity duration-150",
+          isScrollbarRevealed && thumb.visible
+            ? "opacity-100 pointer-events-auto"
+            : "opacity-0 pointer-events-none",
+        )}
+        onPointerEnter={() => {
+          isScrollbarHoveredRef.current = true;
+          revealScrollbar();
+        }}
+        onPointerMove={() => {
+          isScrollbarHoveredRef.current = true;
+          revealScrollbar();
+        }}
+        onPointerLeave={() => {
+          isScrollbarHoveredRef.current = false;
+          if (scrollbarDragRef.current === null) {
+            scheduleScrollbarHide();
+          }
+        }}
         onPointerDown={thumb.visible ? (event) => {
             event.preventDefault();
             event.stopPropagation();
+            revealScrollbar();
             const rect = event.currentTarget.getBoundingClientRect();
             const trackHeight = Math.max(1, rect.height);
             const thumbHeightPx = Math.max(
@@ -1601,6 +1879,7 @@ export function NativeTerminalPane({
             onPointerDown={(event) => {
               event.preventDefault();
               event.stopPropagation();
+              revealScrollbar();
               const track = scrollbarTrackRef.current;
               if (!track) return;
               const rect = track.getBoundingClientRect();

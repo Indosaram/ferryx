@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { reconnectAgentSession, clearAgentReconnectInflightForTests } from "./agentReconnect";
+import { scheduleAgentAutoResume, resetAgentAutoResumeGuard } from "./agentAutoResume";
 import { workspaceReducer } from "../state/workspaceStore";
 import { deserializeWorkspaceState, serializeWorkspaceState } from "./sessionPersistence";
 import type { TerminalSession } from "./types";
@@ -94,5 +95,88 @@ describe("agent reconnect cross-layer contracts", () => {
     })).rejects.toMatchObject({ code: "AGENT_SESSION_CONFLICT" });
     expect(close).toHaveBeenCalledWith("backend-doomed");
     expect(state.sessions[session.id]).toMatchObject({ backendSessionId: null, lifecycle: "exited", providerSession: session.providerSession, reconnectLifecycle: "failed" });
+  });
+
+  it("auto-resumes deserialized exited agent sessions through scheduleAgentAutoResume", async () => {
+    vi.useFakeTimers();
+    resetAgentAutoResumeGuard();
+    clearAgentReconnectInflightForTests();
+
+    const persisted: PersistedWorkspaceSession = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "ws-auto",
+      workspaces: {
+        "ws-auto": {
+          workspaceId: "ws-auto",
+          repoRoot: "/repo",
+          worktrees: [{ path: "/repo", branch: "main", head: "123", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo",
+          layout: {
+            splitMode: "none",
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [
+              { id: "tab-1", kind: "terminal", label: "Agent 1", terminal: { primarySessionId: "agent-1", paneTree: { type: "leaf", leafId: "leaf-1" }, sessionIdsByLeafId: { "leaf-1": "agent-1" }, activeLeafId: "leaf-1", expandedLeafId: null } },
+              { id: "tab-2", kind: "terminal", label: "Agent 2", terminal: { primarySessionId: "agent-2", paneTree: { type: "leaf", leafId: "leaf-2" }, sessionIdsByLeafId: { "leaf-2": "agent-2" }, activeLeafId: "leaf-2", expandedLeafId: null } },
+              { id: "tab-3", kind: "terminal", label: "Shell", terminal: { primarySessionId: "shell-1", paneTree: { type: "leaf", leafId: "leaf-3" }, sessionIdsByLeafId: { "leaf-3": "shell-1" }, activeLeafId: "leaf-3", expandedLeafId: null } },
+            ],
+          },
+          terminalSessions: {
+            "agent-1": { localSessionId: "agent-1", backendSessionId: null, cwd: "/repo", worktreePath: "/repo", createdAt: 1, agentType: "claude", providerSession: { key: "session_id", id: "uuid-1" } },
+            "agent-2": { localSessionId: "agent-2", backendSessionId: null, cwd: "/repo", worktreePath: "/repo", createdAt: 2, agentType: "claude", providerSession: { key: "session_id", id: "uuid-2" } },
+            "shell-1": { localSessionId: "shell-1", backendSessionId: null, cwd: "/repo", worktreePath: "/repo", createdAt: 3 },
+          },
+        },
+      },
+    };
+
+    const restored = deserializeWorkspaceState("ws-auto", persisted, []);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    let state = restored;
+    const spawn = vi.fn(async ({ startup }) => ({
+      sessionId: `backend-${startup.providerSession.id}`,
+      daemonEpoch: "epoch-new",
+      session: { sessionId: `backend-${startup.providerSession.id}`, workspaceId: "ws-auto", worktree: null, cwd: "/repo", cols: 80, rows: 24, running: true },
+    }));
+
+    const dispatch = (action: any) => {
+      state = workspaceReducer(state, action);
+    };
+
+    scheduleAgentAutoResume({
+      workspaceId: "ws-auto",
+      state: restored,
+      recoveredFromHmr: false,
+      reconnect: (sessionId) => reconnectAgentSession(sessionId, {
+        getSessions: () => state.sessions,
+        dispatch,
+        spawn,
+        attach: vi.fn(async () => undefined),
+      }),
+    });
+
+    // t = 0ms: agent-1 is spawned
+    await vi.advanceTimersByTimeAsync(0);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ startup: expect.objectContaining({ providerSession: { key: "session_id", id: "uuid-1" } }) }));
+
+    // t = 400ms: agent-2 is spawned
+    await vi.advanceTimersByTimeAsync(400);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(spawn).toHaveBeenLastCalledWith(expect.objectContaining({ startup: expect.objectContaining({ providerSession: { key: "session_id", id: "uuid-2" } }) }));
+
+    // Advance further: shell session is not spawned
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(spawn).toHaveBeenCalledTimes(2);
+
+    expect(state.sessions["agent-1"].backendSessionId).toBe("backend-uuid-1");
+    expect(state.sessions["agent-2"].backendSessionId).toBe("backend-uuid-2");
+    expect(state.sessions["shell-1"].backendSessionId).toBeNull();
+
+    vi.useRealTimers();
   });
 });

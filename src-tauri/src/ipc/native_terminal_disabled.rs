@@ -51,6 +51,11 @@ pub async fn cmd_native_terminal_scrollbar() -> Result<(), IpcError> {
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_set_scrollbar_overlay() -> Result<(), IpcError> {
+    Err(IpcError::native_terminal_unsupported())
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_select() -> Result<(), IpcError> {
     Err(IpcError::native_terminal_unsupported())
 }
@@ -97,6 +102,7 @@ mod tests {
             cmd_native_terminal_send_input().await,
             cmd_native_terminal_scroll().await,
             cmd_native_terminal_scrollbar().await,
+            cmd_native_terminal_set_scrollbar_overlay().await,
             cmd_native_terminal_select().await,
             cmd_native_terminal_copy_selection().await,
             cmd_native_terminal_paste().await,

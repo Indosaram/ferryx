@@ -3,7 +3,8 @@
 use ferryx_lib::native_terminal::composition::PhysicalBounds;
 use ferryx_lib::native_terminal::renderer::RendererTheme;
 use ferryx_lib::native_terminal::{
-    NativeTerminalRenderer, OffscreenFrame, RenderSnapshot, RendererConfig, SelectionSnapshot,
+    NativeTerminalRenderer, OffscreenFrame, RenderSnapshot, RendererConfig,
+    ScrollbarOverlayState, ScrollbarState, SelectionSnapshot,
 };
 
 #[test]
@@ -245,5 +246,78 @@ fn test_render_snapshot_offscreen_frame_with_color_emoji() {
     assert!(
         non_zero_pixels > 0,
         "rendered frame with emoji must produce visible pixels"
+    );
+}
+
+#[test]
+fn test_render_to_offscreen_viewport_with_scrollbar_overlay() {
+    let snapshot: RenderSnapshot = super::snapshot_builder::build_test_snapshot();
+    let surface_w = 800;
+    let surface_h = 480;
+    let viewport = PhysicalBounds {
+        x: 0,
+        y: 0,
+        width: surface_w,
+        height: surface_h,
+    };
+
+    let background = [0.0, 0.0, 0.0, 1.0];
+    let foreground = [1.0, 1.0, 1.0, 1.0];
+    let config = RendererConfig {
+        cell_width_px: 10,
+        cell_height_px: 20,
+        device_scale_factor: 1.0,
+        theme: RendererTheme {
+            background,
+            foreground,
+            ..Default::default()
+        },
+    };
+
+    let mut renderer = NativeTerminalRenderer::new(config).expect("renderer creation");
+
+    // Render with overlay disabled
+    let frame_no_overlay = renderer
+        .render_to_offscreen_viewport(&snapshot, None, surface_w, surface_h, viewport)
+        .expect("render without overlay");
+
+    // Render with overlay enabled: total=1000, len=100, offset=0
+    // Thumb: width 6px, right inset 5px -> x in [789, 795), y in [0, 48) (since 480 * 100/1000 = 48)
+    let overlay_state = ScrollbarOverlayState {
+        visible: true,
+        metrics: Some(ScrollbarState {
+            total: 1000,
+            offset: 0,
+            len: 100,
+        }),
+    };
+
+    let frame_with_overlay = renderer
+        .render_to_offscreen_viewport_with_overlay(
+            &snapshot,
+            None,
+            surface_w,
+            surface_h,
+            viewport,
+            Some(&overlay_state),
+        )
+        .expect("render with overlay");
+
+    // Check pixel at thumb location (x=790, y=10)
+    let thumb_x = 790;
+    let thumb_y = 10;
+    let thumb_idx = ((thumb_y * surface_w + thumb_x) * 4) as usize;
+
+    let no_overlay_pixel = &frame_no_overlay.pixels[thumb_idx..thumb_idx + 4];
+    let with_overlay_pixel = &frame_with_overlay.pixels[thumb_idx..thumb_idx + 4];
+
+    // With white foreground @ 0.35 alpha blended onto black background, color channels will be around 89 (255 * 0.35)
+    assert_ne!(
+        no_overlay_pixel, with_overlay_pixel,
+        "pixel at thumb location must be modified by overlay"
+    );
+    assert!(
+        with_overlay_pixel[0] > no_overlay_pixel[0],
+        "overlay pixel red channel must be brighter due to blended white foreground"
     );
 }

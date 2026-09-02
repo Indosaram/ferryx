@@ -370,4 +370,41 @@ describe("TerminalPane native routing contract", () => {
 
     expect(screen.getByRole("button", { name: "Open new shell" })).toBeDisabled();
   });
+
+  it("shows Session disconnected when session.agentType is null but session.providerSession is present", () => {
+    render(
+      <TerminalPane
+        session={createExitedSession({
+          agentType: null,
+          providerSession: { key: "session_id", id: "omo-provider-1" },
+        })}
+        active={true}
+      />,
+    );
+
+    expect(screen.getByText("Session disconnected")).toBeInTheDocument();
+    expect(screen.queryByText("Shell exited")).toBeNull();
+  });
+
+  it("shows Session disconnected when session.agentType is null but activity identifies an agent", () => {
+    render(
+      <TerminalPane
+        session={createExitedSession({
+          agentType: null,
+          providerSession: null,
+        })}
+        activity={{
+          state: "done",
+          title: "Claude turn",
+          isAgent: true,
+          agentType: "claude",
+        }}
+        active={true}
+      />,
+    );
+
+    expect(screen.getByText("Session disconnected")).toBeInTheDocument();
+    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    expect(screen.queryByText("Shell exited")).toBeNull();
+  });
 });

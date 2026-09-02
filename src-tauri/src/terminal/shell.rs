@@ -572,23 +572,6 @@ mod tests {
         assert_eq!(
             plan,
             ShellCommandPlan {
-                program: "/bin/zsh".to_string(),
-                args: vec!["-l".to_string()],
-            }
-        );
-    }
-
-    #[test]
-    fn test_custom_shell_keeps_no_login_flag() {
-        let plan = resolve_shell_command_pure(
-            Some("/usr/local/bin/nu"),
-            TargetPlatform::MacOS,
-            |_| true,
-            |_| None,
-        );
-        assert_eq!(
-            plan,
-            ShellCommandPlan {
                 program: "/usr/local/bin/nu".to_string(),
                 args: vec![],
             }

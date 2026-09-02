@@ -1,15 +1,13 @@
 import {
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   GitBranch,
   LoaderCircle,
-  Monitor,
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
-import React, { useMemo, useState, type ReactNode } from "react";
+import React, { useMemo, type ReactNode } from "react";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 
 export type RemoteTerminalTabInfo = {
@@ -290,7 +288,7 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
   };
 }
 
-function contextName(context: Pick<RemoteContext, "workspaceId" | "worktreeLabel" | "worktreeSlug">) {
+export function contextName(context: Pick<RemoteContext, "workspaceId" | "worktreeLabel" | "worktreeSlug">) {
   const workspace = context.workspaceId ?? "No workspace selected";
   const worktree = context.worktreeLabel ?? context.worktreeSlug;
   return worktree ? `${workspace} / ${worktree}` : workspace;
@@ -327,6 +325,8 @@ export function getRemoteDocumentTitle(model: RemoteWorkspaceModel): string {
 type RemoteWorkspaceMirrorProps = {
   model: RemoteWorkspaceModel;
   pending: RemoteContextOption | null;
+  selectorOpen: boolean;
+  onSelectorOpenChange: (open: boolean) => void;
   onSelect: (option: RemoteContextOption) => void;
   children?: ReactNode;
 };
@@ -334,10 +334,11 @@ type RemoteWorkspaceMirrorProps = {
 export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   model,
   pending,
+  selectorOpen,
+  onSelectorOpenChange,
   onSelect,
   children,
 }) => {
-  const [selectorOpen, setSelectorOpen] = useState(false);
   const groupedOptions = useMemo(() => {
     const groups = new Map<string, RemoteContextOption[]>();
     for (const option of model.options) {
@@ -350,31 +351,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-background">
-      <div className="border-b border-border bg-card px-2 py-1">
-        <button
-          type="button"
-          aria-label="Change workspace context"
-          aria-expanded={selectorOpen}
-          onClick={() => setSelectorOpen((open) => !open)}
-          className="flex h-8 w-full items-center gap-2 rounded-md border border-border bg-background px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <span className="flex size-5 shrink-0 items-center justify-center rounded bg-secondary text-muted-foreground">
-            <Monitor className="size-3" aria-hidden="true" />
-          </span>
-          <span className="min-w-0 flex-1" aria-label="Current desktop context">
-            <span className="block truncate font-mono text-[11px] text-foreground">
-              {contextName(model.context)}
-            </span>
-          </span>
-          <ChevronDown
-            aria-hidden="true"
-            className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`}
-          />
-        </button>
-      </div>
-
       {selectorOpen ? (
-        <div className="absolute inset-x-2 top-2 z-20 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl" role="dialog" aria-label="Workspace context">
+        <div className="absolute inset-x-2 top-1.5 z-20 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl" role="dialog" aria-label="Workspace context">
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <div>
               <h2 className="text-sm font-semibold">Choose worktree</h2>
@@ -382,7 +360,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             <button
               type="button"
               aria-label="Close workspace context"
-              onClick={() => setSelectorOpen(false)}
+              onClick={() => onSelectorOpenChange(false)}
               className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <X className="size-4" aria-hidden="true" />
@@ -439,7 +417,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                             aria-label={optionName(option)}
                             disabled={pending !== null}
                             onClick={() => {
-                              setSelectorOpen(false);
+                              onSelectorOpenChange(false);
                               onSelect(option);
                             }}
                             className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"

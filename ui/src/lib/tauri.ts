@@ -405,6 +405,17 @@ export async function onNativeTerminalScrollbar(
   return listen<NativeTerminalScrollbarPayload>("native_terminal_scrollbar", (event) => handler(event.payload));
 }
 
+export async function setNativeTerminalScrollbarOverlay(
+  sessionId: string,
+  visible: boolean,
+): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_native_terminal_set_scrollbar_overlay", {
+    sessionId,
+    visible,
+  });
+}
+
 export async function onNativeTerminalFocus(
   handler: (sessionId: string) => void,
 ): Promise<UnlistenFn> {
@@ -419,6 +430,16 @@ export async function onNativeTerminalFocus(
 export async function onNativeTerminalPaste(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<void>("native_terminal_paste", () => handler());
+}
+
+/**
+ * AppKit consumes Cmd+C via the native Edit menu before WebKit emits `keydown`.
+ * The native key monitor forwards that physical shortcut here so the terminal pane
+ * can copy any active selection or interrupt (clear the input line) when empty.
+ */
+export async function onNativeTerminalCopyOrInterrupt(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<void>("native_terminal_copy_or_interrupt", () => handler());
 }
 
 export async function onNewTerminalTabMenu(handler: () => void): Promise<UnlistenFn> {

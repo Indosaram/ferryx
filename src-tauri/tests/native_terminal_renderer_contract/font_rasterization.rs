@@ -32,8 +32,8 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
         .into_buffer();
     assert_eq!(
         ascii_mask.len(),
-        (metrics.width_px * metrics.height_px) as usize,
-        "ASCII mask length must equal width * height"
+        (metrics.width_px * metrics.height_px * 4) as usize,
+        "ASCII mask length must equal width * height * 4"
     );
 
     // Rasterize CJK char '가' (wide cell: 2 * width)
@@ -42,8 +42,8 @@ fn test_font_rasterization_ascii_cjk_fallback_and_missing_glyph_contract() {
         .into_buffer();
     assert_eq!(
         cjk_mask.len(),
-        (metrics.width_px * 2 * metrics.height_px) as usize,
-        "CJK mask length must equal 2 * width * height"
+        (metrics.width_px * 2 * metrics.height_px * 4) as usize,
+        "CJK mask length must equal 2 * width * height * 4"
     );
 
     let ascii_non_empty = ascii_mask.iter().any(|&b| b > 0);
@@ -157,12 +157,12 @@ fn test_retina_scale_glyph_rasterization_sharpness() {
 
     assert_eq!(
         mask_1x.len(),
-        (m1.width_px * m1.height_px) as usize,
+        (m1.width_px * m1.height_px * 4) as usize,
         "1x mask length matches 1x cell dimensions"
     );
     assert_eq!(
         mask_2x.len(),
-        (m2.width_px * m2.height_px) as usize,
+        (m2.width_px * m2.height_px * 4) as usize,
         "2x mask length matches 2x cell dimensions"
     );
 
@@ -193,7 +193,8 @@ fn test_glyph_orientation_regression_contract() {
     let mut bottom_ink_l = 0u64;
     for y in 0..h as usize {
         for x in 0..w as usize {
-            let val = l_mask[y * (w as usize) + x] as u64;
+            let idx = (y * (w as usize) + x) * 4;
+            let val = l_mask[idx + 3] as u64;
             if y < mid_y {
                 top_ink_l += val;
             } else {
@@ -214,7 +215,8 @@ fn test_glyph_orientation_regression_contract() {
     let mut bottom_ink_p = 0u64;
     for y in 0..h as usize {
         for x in 0..w as usize {
-            let val = p_mask[y * (w as usize) + x] as u64;
+            let idx = (y * (w as usize) + x) * 4;
+            let val = p_mask[idx + 3] as u64;
             if y < mid_y {
                 top_ink_p += val;
             } else {
@@ -234,7 +236,10 @@ fn test_glyph_orientation_regression_contract() {
     let mut row_sums: Vec<(usize, u64)> = (0..h as usize)
         .map(|y| {
             let sum: u64 = (0..w as usize)
-                .map(|x| line_mask[y * (w as usize) + x] as u64)
+                .map(|x| {
+                    let idx = (y * (w as usize) + x) * 4;
+                    line_mask[idx + 3] as u64
+                })
                 .sum();
             (y, sum)
         })

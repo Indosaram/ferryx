@@ -6,7 +6,9 @@ use crate::daemon::protocol::{
 };
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
-use crate::remote::state::{RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode};
+use crate::remote::state::{
+    RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, REMOTE_GATEWAY_PORT,
+};
 use crate::session::{clear_session_from_path, load_session_from_path, save_session_to_path};
 use crate::terminal::{PtyManager, PtySessionState, TerminalOutputHub, TerminalService};
 use crate::worktree::{WorkspaceRegistry, WorktreeIdentity, WorktreeManager};
@@ -1490,7 +1492,12 @@ impl DaemonServer {
             .map_err(|e| e.to_string())
     }
 
-    pub async fn handle_remote_configure(&self, config: RemoteGatewayConfig) -> Result<(), String> {
+    pub async fn handle_remote_configure(&self, mut config: RemoteGatewayConfig) -> Result<(), String> {
+        config.port = REMOTE_GATEWAY_PORT;
+        self.configure_gateway(config).await
+    }
+
+    pub(crate) async fn configure_gateway(&self, config: RemoteGatewayConfig) -> Result<(), String> {
         if config.mode == RemoteNetworkMode::Off {
             let prev_handle = self.remote_server_handle.lock().take();
             if let Some(handle) = prev_handle {

@@ -602,7 +602,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(pinButton);
 
     expect(writeText).toHaveBeenCalledWith("482916");
-    expect(pinButton).toHaveTextContent(/copied/i);
+    await waitFor(() => expect(pinButton).toHaveTextContent(/copied/i));
   });
 
   it("states that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed", () => {

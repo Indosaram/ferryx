@@ -28,7 +28,7 @@ describe("activity summaries", () => {
     });
   });
 
-  it("uses attention-first visual precedence", () => {
+  it("uses attention-first visual precedence (unseen completion outranks live work)", () => {
     const base: ActivitySummary = {
       workingCount: 1,
       waitingCount: 1,
@@ -40,9 +40,46 @@ describe("activity summaries", () => {
       hasUnread: true,
     };
     expect(resolveActivityIndicator(base)).toBe("waiting");
-    expect(resolveActivityIndicator({ ...base, waitingCount: 0, hasWaiting: false })).toBe("working");
-    expect(resolveActivityIndicator({ ...base, waitingCount: 0, hasWaiting: false, workingCount: 0, runningCount: 0, hasWorking: false })).toBe("unread");
-    expect(resolveActivityIndicator({ ...base, waitingCount: 0, hasWaiting: false, workingCount: 0, runningCount: 0, hasWorking: false, hasUnread: false })).toBe("done");
+    // An unseen completion is attention: it wins over live work and bell-unread.
+    expect(resolveActivityIndicator({ ...base, waitingCount: 0, hasWaiting: false })).toBe("unread");
+    // Live work with no unseen completion: spinner.
+    expect(
+      resolveActivityIndicator({
+        ...base,
+        waitingCount: 0,
+        hasWaiting: false,
+        doneCount: 0,
+        hasDone: false,
+        hasUnread: false,
+      }),
+    ).toBe("working");
+    // Completion-only, already acknowledged: quiet done dot.
+    expect(
+      resolveActivityIndicator({
+        ...base,
+        waitingCount: 0,
+        hasWaiting: false,
+        workingCount: 0,
+        runningCount: 0,
+        hasWorking: false,
+        hasUnread: false,
+      }),
+    ).toBe("done");
+  });
+
+  it("keeps a seen completion below live work", () => {
+    expect(
+      resolveActivityIndicator({
+        workingCount: 1,
+        waitingCount: 0,
+        doneCount: 0,
+        runningCount: 1,
+        hasWorking: true,
+        hasWaiting: false,
+        hasDone: false,
+        hasUnread: false,
+      }),
+    ).toBe("working");
   });
 
   it("combines child summaries without losing unread attention", () => {

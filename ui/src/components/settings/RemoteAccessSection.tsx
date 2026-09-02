@@ -19,6 +19,27 @@ import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Switch } from "../ui/switch";
 
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to legacy path */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
 export function RemoteAccessSection() {
   const [status, setStatus] = useState<RemoteGatewayStatus | null>(null);
   const statusRef = useRef<RemoteGatewayStatus | null>(null);
@@ -229,9 +250,10 @@ export function RemoteAccessSection() {
                       size="sm"
                       data-testid="remote-pairing-code"
                       aria-label={pinCopied ? `Copied pairing PIN ${pairingCode}` : `Copy pairing PIN ${pairingCode}`}
-                      onClick={() => {
-                        void navigator.clipboard.writeText(pairingCode);
-                        showCopied(setPinCopied);
+                      onClick={async () => {
+                        if (await copyTextToClipboard(pairingCode)) {
+                          showCopied(setPinCopied);
+                        }
                       }}
                       className="h-auto p-0 font-mono text-[11px] font-semibold text-status-success hover:bg-transparent hover:underline"
                     >
@@ -274,9 +296,10 @@ export function RemoteAccessSection() {
                     type="button"
                     variant="secondary"
                     size="sm"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(localUrl);
-                      showCopied(setCopied);
+                    onClick={async () => {
+                      if (await copyTextToClipboard(localUrl)) {
+                        showCopied(setCopied);
+                      }
                     }}
                     className="h-auto rounded bg-muted px-1.5 py-0.5 text-[11px] hover:bg-muted/80"
                   >

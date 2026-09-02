@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalSession } from "../lib/types";
+import type { TerminalActivity } from "../lib/activity";
 import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
 import { attachNativeTerminalRebind, terminalEventBus } from "../lib/terminalEvents";
 import { useShortcuts } from "../lib/shortcuts";
@@ -9,6 +10,7 @@ import {
   NATIVE_TERMINAL_BOTTOM_INSET_PX,
   NATIVE_TERMINAL_HANDLE_INSET_PX,
   NativeTerminalPane,
+  dragDropPositionToLogical,
   resetNativeTerminalPaneForTest,
 } from "./NativeTerminalPane";
 
@@ -41,6 +43,11 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
   scrollbarListener: null as ((payload: { sessionId: string; total: number; offset: number; len: number }) => void) | null,
   focusListeners: [] as Array<(sessionId: string) => void>,
   pasteListeners: [] as Array<() => void>,
+  copyOrInterruptListeners: [] as Array<() => void>,
+  scrollbarOverlayCalls: [] as Array<{ sessionId: string; visible: boolean }>,
+  setNativeTerminalScrollbarOverlay: vi.fn(async (sessionId: string, visible: boolean) => {
+    nativeTerminalEventMocks.scrollbarOverlayCalls.push({ sessionId, visible });
+  }),
   onNativeTerminalScrollbar: vi.fn(async (handler: (payload: {
     sessionId: string;
     total: number;
@@ -66,6 +73,14 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
       );
     };
   }),
+  onNativeTerminalCopyOrInterrupt: vi.fn(async (handler: () => void) => {
+    nativeTerminalEventMocks.copyOrInterruptListeners.push(handler);
+    return () => {
+      nativeTerminalEventMocks.copyOrInterruptListeners = nativeTerminalEventMocks.copyOrInterruptListeners.filter(
+        (candidate) => candidate !== handler,
+      );
+    };
+  }),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -83,7 +98,9 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
   onNativeTerminalFocus: nativeTerminalEventMocks.onNativeTerminalFocus,
   onNativeTerminalPaste: nativeTerminalEventMocks.onNativeTerminalPaste,
+  onNativeTerminalCopyOrInterrupt: nativeTerminalEventMocks.onNativeTerminalCopyOrInterrupt,
   onNativeTerminalScrollbar: nativeTerminalEventMocks.onNativeTerminalScrollbar,
+  setNativeTerminalScrollbarOverlay: nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay,
   attachTerminal: vi.fn(async (request) => tauriCoreMocks.invoke("cmd_terminal_attach", request)),
 }));
 
@@ -166,9 +183,13 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     nativeTerminalEventMocks.scrollbarListener = null;
     nativeTerminalEventMocks.focusListeners = [];
     nativeTerminalEventMocks.pasteListeners = [];
+    nativeTerminalEventMocks.copyOrInterruptListeners = [];
     nativeTerminalEventMocks.onNativeTerminalFocus.mockClear();
     nativeTerminalEventMocks.onNativeTerminalPaste.mockClear();
+    nativeTerminalEventMocks.onNativeTerminalCopyOrInterrupt.mockClear();
     nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
+    nativeTerminalEventMocks.scrollbarOverlayCalls = [];
+    nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay.mockClear();
     resizeRecords.length = 0;
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
@@ -2693,25 +2714,53 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expect(listener).not.toBeNull();
       tauriCoreMocks.invoke.mockClear();
 
-      // 1. Point that would look inside if unscaled (physical x: 15, y: 35), but at DPR=2 is
-      // logical (7.5, 17.5) which is outside container bounds (left: 10, top: 32). Must be ignored.
+      // 1. Drop inside the pane (bounds left: 10, top: 32, size 800x588) pastes the
+      // shell-quoted path. Raw payload read verbatim (macOS contract).
+      const insidePayload = { x: 50, y: 100 };
+      const insideLogical = dragDropPositionToLogical(insidePayload, 2, true);
+      expect(insideLogical).toEqual(insidePayload);
       act(() => {
         listener?.({
           payload: {
             type: "drop",
-            paths: ["/Users/indo/Outside/file.txt"],
-            position: { x: 15, y: 35 },
+            paths: ["/Users/indo/Inside/file.txt"],
+            position: insidePayload,
           },
         });
       });
 
-      expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
-        "cmd_native_terminal_paste",
-        expect.anything(),
-      );
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-tauri-dnd",
+        text: "/Users/indo/Inside/file.txt",
+      });
 
-      // 2. Event inside pane bounds -> physical (100, 100) -> logical (50, 50), inside bounds [10..810, 32..620],
-      // atomically pasted with shell-safe quoting
+      // 1b. Regression discriminator: raw (19, 100) is INSIDE on macOS (19 >= 10),
+      // but the pre-fix ÷DPR code misread it as (9.5, 50) and wrongly dropped it.
+      const boundaryPayload = { x: 19, y: 100 };
+      act(() => {
+        listener?.({
+          payload: {
+            type: "drop",
+            paths: ["/Users/indo/Boundary/file.txt"],
+            position: boundaryPayload,
+          },
+        });
+      });
+
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-tauri-dnd",
+        text: "/Users/indo/Boundary/file.txt",
+      });
+
+      // 2. Point outside the pane (left of left edge 10 / above top 32); macOS reads
+      // the raw payload with no DPR halving. Must not paste.
+      const outsidePayload = { x: 5, y: 20 };
+      const outsideLogical = dragDropPositionToLogical(outsidePayload, 2, true);
+      expect(outsideLogical).toEqual(outsidePayload);
+
+      // 2. Event inside pane bounds -> raw payload (100, 100) read as logical (100, 100) on
+      // macOS (wry forwards AppKit points verbatim; the pre-fix code would have halved it to
+      // (50, 50)), inside bounds [10..810, 32..620], atomically pasted with shell-safe quoting
       act(() => {
         listener?.({
           payload: {
@@ -2811,6 +2860,180 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     fireEvent.pointerUp(window, { clientY: 620, pointerId: 8 });
   });
 
+  it("hides native scrollbar track by default, reveals on wheel, and fades out after hide timer", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-wheel-reveal");
+      tauriCoreMocks.invoke.mockImplementation(async (command) => {
+        if (command === "cmd_native_terminal_scrollbar") {
+          return { total: 200, offset: 0, len: 20 };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-wheel-reveal" session={session} />,
+      );
+
+      const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
+      const pane = getByTestId("native-terminal-pane");
+
+      expect(track.className).toContain("opacity-0");
+      expect(track.className).toContain("pointer-events-none");
+
+      act(() => {
+        fireEvent.wheel(pane, { deltaY: -20 });
+      });
+
+      expect(track.className).toContain("opacity-100");
+      expect(track.className).toContain("pointer-events-auto");
+      expect(nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay).toHaveBeenCalledWith(
+        "term-session-wheel-reveal",
+        true,
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+
+      expect(track.className).toContain("opacity-0");
+      expect(track.className).toContain("pointer-events-none");
+      expect(nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay).toHaveBeenLastCalledWith(
+        "term-session-wheel-reveal",
+        false,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reveals the native scrollbar on pointer down on the container", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-pointerdown-reveal");
+      tauriCoreMocks.invoke.mockImplementation(async (command) => {
+        if (command === "cmd_native_terminal_scrollbar") {
+          return { total: 200, offset: 0, len: 20 };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-pointerdown-reveal" session={session} />,
+      );
+
+      const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
+      const pane = getByTestId("native-terminal-pane");
+
+      expect(track.className).toContain("opacity-0");
+
+      act(() => {
+        fireEvent.pointerDown(pane, { clientX: 50, clientY: 50, button: 0 });
+      });
+
+      expect(track.className).toContain("opacity-100");
+      expect(track.className).toContain("pointer-events-auto");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+
+      expect(track.className).toContain("opacity-0");
+      expect(track.className).toContain("pointer-events-none");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not hide native scrollbar while dragging the thumb", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-drag-no-hide");
+      tauriCoreMocks.invoke.mockImplementation(async (command) => {
+        if (command === "cmd_native_terminal_scrollbar") {
+          return { total: 200, offset: 0, len: 20 };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-drag-no-hide" session={session} />,
+      );
+
+      const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
+      const thumb = getByTestId("native-terminal-scrollbar-thumb");
+
+      act(() => {
+        fireEvent.pointerDown(thumb, { clientY: 50, pointerId: 10 });
+      });
+
+      expect(track.className).toContain("opacity-100");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1200);
+      });
+
+      expect(track.className).toContain("opacity-100");
+      expect(track.className).toContain("pointer-events-auto");
+
+      act(() => {
+        fireEvent.pointerUp(window, { clientY: 50, pointerId: 10 });
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+
+      expect(track.className).toContain("opacity-0");
+      expect(track.className).toContain("pointer-events-none");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps native scrollbar visible while hovered on track", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-hover-track");
+      tauriCoreMocks.invoke.mockImplementation(async (command) => {
+        if (command === "cmd_native_terminal_scrollbar") {
+          return { total: 200, offset: 0, len: 20 };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-hover-track" session={session} />,
+      );
+
+      const track = await waitFor(() => getByTestId("native-terminal-scrollbar-track"));
+
+      act(() => {
+        fireEvent.pointerEnter(track);
+      });
+
+      expect(track.className).toContain("opacity-100");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1200);
+      });
+
+      expect(track.className).toContain("opacity-100");
+
+      act(() => {
+        fireEvent.pointerLeave(track);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+
+      expect(track.className).toContain("opacity-0");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("copies native selection to navigator.clipboard on platform copy shortcut", async () => {
     const session = createSession("term-session-1");
     const writeTextSpy = vi.fn().mockResolvedValue(undefined);
@@ -2884,6 +3107,95 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       });
       expect(writeTextSpy).toHaveBeenCalledWith("selected korean copy text");
     });
+  });
+
+  it("copy-or-interrupt event with empty selection sends Ctrl+C to PTY", async () => {
+    const session = createSession("term-session-copy-interrupt-empty");
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(), writeText: writeTextSpy },
+    });
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_copy_selection") {
+        return null;
+      }
+      return undefined;
+    });
+
+    render(<NativeTerminalPane sessionId="term-session-copy-interrupt-empty" session={session} />);
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.copyOrInterruptListeners) {
+        listener();
+      }
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-copy-interrupt-empty",
+      });
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-copy-interrupt-empty",
+        input: {
+          keyEvent: {
+            key: "c",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+      expect(writeTextSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("copy-or-interrupt event with selection copies", async () => {
+    const session = createSession("term-session-copy-interrupt-with-text");
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(), writeText: writeTextSpy },
+    });
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_copy_selection") {
+        return "some selection";
+      }
+      return undefined;
+    });
+
+    render(<NativeTerminalPane sessionId="term-session-copy-interrupt-with-text" session={session} />);
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.copyOrInterruptListeners) {
+        listener();
+      }
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-copy-interrupt-with-text",
+      });
+      expect(writeTextSpy).toHaveBeenCalledWith("some selection");
+    });
+
+    const sendInputCallsWithC = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" &&
+        (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key === "c",
+    );
+    expect(sendInputCallsWithC).toHaveLength(0);
   });
 
   it("does not send standalone modifier and lock keys through IPC", () => {
@@ -3768,6 +4080,313 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       sessionId: "daemon-native-ime-switch",
       input: { text: "가" },
     });
+  });
+
+  it("forwards plain Ctrl+C with no activity prop as key 'c' with ctrl true", async () => {
+    const session = createSession("term-session-plain-ctrlc");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-plain-ctrlc" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const ctrlCEvent = new KeyboardEvent("keydown", {
+      key: "c",
+      code: "KeyC",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(ctrlCEvent);
+    });
+
+    expect(ctrlCEvent.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-plain-ctrlc",
+        input: {
+          keyEvent: {
+            key: "c",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+  });
+
+  it("translates plain Ctrl+C to key 'u' when activity indicates agent is waiting", async () => {
+    const session = createSession("term-session-agent-waiting-ctrlc");
+    const activity: TerminalActivity = {
+      isAgent: true,
+      state: "waiting",
+      title: "Agent Waiting",
+    };
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-agent-waiting-ctrlc"
+        session={session}
+        activity={activity}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const ctrlCEvent = new KeyboardEvent("keydown", {
+      key: "c",
+      code: "KeyC",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(ctrlCEvent);
+    });
+
+    expect(ctrlCEvent.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-agent-waiting-ctrlc",
+        input: {
+          keyEvent: {
+            key: "u",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+  });
+
+  it("keeps interrupt key 'c' on plain Ctrl+C when activity indicates agent is working", async () => {
+    const session = createSession("term-session-agent-working-ctrlc");
+    const activity: TerminalActivity = {
+      isAgent: true,
+      state: "working",
+      title: "Agent Working",
+    };
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-agent-working-ctrlc"
+        session={session}
+        activity={activity}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const ctrlCEvent = new KeyboardEvent("keydown", {
+      key: "c",
+      code: "KeyC",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(ctrlCEvent);
+    });
+
+    expect(ctrlCEvent.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-agent-working-ctrlc",
+        input: {
+          keyEvent: {
+            key: "c",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+  });
+
+  it("normalizes Korean layout Ctrl+C (key ㅊ and code KeyC) to key 'c' instead of 'ㅊ'", async () => {
+    const session = createSession("term-session-korean-ctrlc");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-korean-ctrlc" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const koreanCtrlC = new KeyboardEvent("keydown", {
+      key: "ㅊ",
+      code: "KeyC",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(koreanCtrlC);
+    });
+
+    expect(koreanCtrlC.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-korean-ctrlc",
+        input: {
+          keyEvent: {
+            key: "c",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+
+    const sentWithHangul = tauriCoreMocks.invoke.mock.calls.some(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" &&
+        (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key === "ㅊ",
+    );
+    expect(sentWithHangul).toBe(false);
+  });
+
+  it("translates Cmd+C with empty selection to key 'u' when activity indicates agent is waiting", async () => {
+    const session = createSession("term-session-cmdc-empty-waiting");
+    const activity: TerminalActivity = {
+      isAgent: true,
+      state: "waiting",
+      title: "Agent Waiting",
+    };
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(), writeText: writeTextSpy },
+    });
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_copy_selection") {
+        return null;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-cmdc-empty-waiting"
+        session={session}
+        activity={activity}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const copyShortcut = new KeyboardEvent("keydown", {
+      key: "c",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(copyShortcut);
+    });
+
+    expect(copyShortcut.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-cmdc-empty-waiting",
+      });
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-cmdc-empty-waiting",
+        input: {
+          keyEvent: {
+            key: "u",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+      expect(writeTextSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("copies selection to clipboard on Ctrl+Shift+C without sending input", async () => {
+    const session = createSession("term-session-ctrl-shift-c-copy");
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(), writeText: writeTextSpy },
+    });
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_copy_selection") {
+        return "copied text from ctrl shift c";
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ctrl-shift-c-copy" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const ctrlShiftC = new KeyboardEvent("keydown", {
+      key: "C",
+      code: "KeyC",
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(ctrlShiftC);
+    });
+
+    expect(ctrlShiftC.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-ctrl-shift-c-copy",
+      });
+      expect(writeTextSpy).toHaveBeenCalledWith("copied text from ctrl shift c");
+    });
+
+    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_send_input",
+    );
+    expect(sendInputCalls).toHaveLength(0);
   });
 
 });

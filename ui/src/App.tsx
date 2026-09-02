@@ -65,6 +65,7 @@ import {
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
 import { reconnectAgentSession } from "./lib/agentReconnect";
+import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
@@ -79,6 +80,7 @@ import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
   worktreeIdentity,
   type DirtyState,
+  type TerminalSession,
   type WorkspaceTab,
   type Worktree,
 } from "./lib/types";
@@ -91,9 +93,15 @@ import { useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
-const SettingsDialog = lazy(() =>
-  import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog })),
-);
+const loadSettingsDialog = () =>
+  import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
+const SettingsDialog = lazy(loadSettingsDialog);
+let settingsDialogPreloaded = false;
+const preloadSettingsDialog = () => {
+  if (settingsDialogPreloaded) return;
+  settingsDialogPreloaded = true;
+  void loadSettingsDialog();
+};
 
 type ProjectBootstrap = {
   projects: RegisteredProject[];
@@ -405,6 +413,11 @@ function WorkspaceApp({
   const [pendingBackendRecovery, setPendingBackendRecovery] = useState<{ workspaceId: string; sessionIds: string[] } | null>(
     null,
   );
+  const [pendingAgentAutoResume, setPendingAgentAutoResume] = useState<{
+    workspaceId: string;
+    state: WorkspaceState;
+  } | null>(null);
+  const lastRestoredSessionsRef = useRef<Record<string, TerminalSession>>({});
   const { settings: generalSettings } = useGeneralSettings();
   const activeProject = useMemo(
     () => projects.find((project) => project.workspaceId === activeProjectId) ?? projects[0] ?? DEFAULT_PROJECT,
@@ -801,6 +814,7 @@ function WorkspaceApp({
 
   const restoreWorkspaceAndReconnect = useCallback(
     (restoredState: WorkspaceState) => {
+      lastRestoredSessionsRef.current = restoredState.sessions;
       restoreWorkspace(restoredState);
       setPendingBackendRecovery({
         workspaceId: activeProjectRef.current.workspaceId,
@@ -808,6 +822,10 @@ function WorkspaceApp({
           .filter((session) => session.backendSessionId === null)
           .filter((session) => !(session.lifecycle === "exited" && (session.agentType || session.providerSession || session.agentSessionId)))
           .map((session) => session.id),
+      });
+      setPendingAgentAutoResume({
+        workspaceId: activeProjectRef.current.workspaceId,
+        state: restoredState,
       });
     },
     [restoreWorkspace],
@@ -849,6 +867,63 @@ function WorkspaceApp({
       console.error("Failed to save workspace session:", error);
     });
   }, [persistSessionStrict]);
+
+  const handleReconnectAgentSession = useCallback(
+    (sessionId: string, options?: { silent?: boolean }) => {
+      return reconnectAgentSession(
+        sessionId,
+        createAppReconnectDependencies({
+          getSessions: () => {
+            const current = stateRef.current.sessions;
+            if (current[sessionId]) return current;
+            return { ...lastRestoredSessionsRef.current, ...current };
+          },
+          dispatch: dispatchWorkspaceAction,
+          persist: async (result, localSession) => {
+            const current = stateRef.current;
+            const nextState = workspaceReducer(current, {
+              type: "REBIND_SESSION_BACKEND",
+              sessionId: localSession.id,
+              backendSessionId: result.sessionId,
+              cwd: result.session.cwd ?? localSession.cwd,
+              daemonEpoch: result.daemonEpoch,
+            });
+            await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+          },
+        }),
+      ).catch((error) => {
+        if (!options?.silent) {
+          reportRuntimeError(error);
+        }
+        throw error;
+      });
+    },
+    [activeProject.repoRoot, activeProject.workspaceId, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
+  );
+
+  const activeAutoResumeCancelRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      activeAutoResumeCancelRef.current?.();
+      activeAutoResumeCancelRef.current = null;
+    };
+  }, [activeProject.workspaceId]);
+
+  useEffect(() => {
+    if (registeredProjectId !== activeProject.workspaceId || pendingAgentAutoResume === null) return;
+    const pending = pendingAgentAutoResume;
+    setPendingAgentAutoResume(null);
+    if (pending.workspaceId !== activeProject.workspaceId) return;
+
+    activeAutoResumeCancelRef.current?.();
+    activeAutoResumeCancelRef.current = scheduleAgentAutoResume({
+      workspaceId: activeProject.workspaceId,
+      state: pending.state,
+      recoveredFromHmr,
+      reconnect: (sessionId) => handleReconnectAgentSession(sessionId, { silent: true }),
+    });
+  }, [activeProject.workspaceId, handleReconnectAgentSession, pendingAgentAutoResume, recoveredFromHmr, registeredProjectId]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
@@ -1394,9 +1469,15 @@ function WorkspaceApp({
   }, []);
   const handleOpenCommandPalette = useCallback(() => setIsCommandPaletteOpen(true), []);
   const handleCloseCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
-  const handleOpenSettings = useCallback(() => setIsSettingsOpen(true), []);
+  const handleOpenSettings = useCallback(() => {
+    preloadSettingsDialog();
+    setIsSettingsOpen(true);
+  }, []);
   const handleCloseSettings = useCallback(() => setIsSettingsOpen(false), []);
-  const handleToggleSettings = useCallback(() => setIsSettingsOpen((current) => !current), []);
+  const handleToggleSettings = useCallback(() => {
+    preloadSettingsDialog();
+    setIsSettingsOpen((current) => !current);
+  }, []);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
   const handleCancelTabClose = useCallback(() => setPendingTabClose(null), []);
@@ -1649,21 +1730,7 @@ function WorkspaceApp({
             searchLeafId={searchLeafId}
             onCloseSearch={handleCloseSearch}
             onReconnectAgentSession={(sessionId) => {
-              void reconnectAgentSession(sessionId, createAppReconnectDependencies({
-                getSessions: () => stateRef.current.sessions,
-                dispatch: dispatchWorkspaceAction,
-                persist: async (result, localSession) => {
-                  const current = stateRef.current;
-                  const nextState = workspaceReducer(current, {
-                    type: "REBIND_SESSION_BACKEND",
-                    sessionId: localSession.id,
-                    backendSessionId: result.sessionId,
-                    cwd: result.session.cwd ?? localSession.cwd,
-                    daemonEpoch: result.daemonEpoch,
-                  });
-                  await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
-                },
-              })).catch(reportRuntimeError);
+              void handleReconnectAgentSession(sessionId);
             }}
             onOpenNewShell={(sessionId) => replaceExitedShellSession(sessionId, {
               getSessions: () => stateRef.current.sessions,
@@ -1703,7 +1770,14 @@ function WorkspaceApp({
         />
       ) : null}
       {isSettingsOpen ? (
-        <Suspense fallback={null}>
+        <Suspense
+          fallback={
+            <div data-testid="settings-dialog" role="dialog" aria-label="Settings" className="fixed inset-0 z-50 flex overflow-hidden bg-background">
+              <div className="w-[280px] shrink-0 border-r border-border" />
+              <div className="min-w-0 flex-1" />
+            </div>
+          }
+        >
           <SettingsDialog open onClose={handleCloseSettings} />
         </Suspense>
       ) : null}

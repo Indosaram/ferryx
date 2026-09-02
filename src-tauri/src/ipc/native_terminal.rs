@@ -862,6 +862,56 @@ pub async fn cmd_native_terminal_scrollbar(
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_set_scrollbar_overlay<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+    visible: bool,
+) -> Result<(), IpcError> {
+    if let Err(err) = state.set_scrollbar_overlay_visible(&session_id, visible) {
+        return Err(IpcError::internal(err.to_string()));
+    }
+
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => return Ok(()),
+    };
+    let state_inner = state.inner().clone();
+    let surface_window = window.clone();
+    let (sender, receiver) = oneshot::channel();
+    let session_id_clone = session_id.clone();
+    let bounds = state.session_logical_bounds(&session_id);
+
+    if let Err(error) = window.run_on_main_thread(move || {
+        let result = match bounds {
+            Some(logical_bounds) => state_inner
+                .render(
+                    &surface_window,
+                    NativeTerminalBoundsRequest {
+                        session_id: session_id_clone.clone(),
+                        bounds: logical_bounds,
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| IpcError::internal(error.to_string())),
+            None => Ok(()),
+        };
+        let _ = sender.send(result);
+    }) {
+        return Err(IpcError::internal(format!(
+            "Could not dispatch native terminal scrollbar overlay render: {error}"
+        )));
+    }
+
+    match receiver.await {
+        Ok(res) => res,
+        Err(_) => Err(IpcError::internal(
+            "Main thread stopped before native terminal scrollbar overlay render completed",
+        )),
+    }
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_select<R: Runtime>(
     _app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,

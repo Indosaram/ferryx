@@ -15,6 +15,7 @@ use super::input::{cursor_style_for_focus, NativeTerminalInput};
 use super::platform::PlatformCompositorTarget;
 use super::renderer::font_manager;
 use super::renderer::{NativeTerminalRenderer, RendererConfig, RendererTheme, SelectionSnapshot};
+use super::scroll::ScrollbarOverlayState;
 use super::snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 use super::surface_error::{classify_surface_error, SurfaceFrameAction};
 pub use super::surface_snapshot::snapshot_for_layout;
@@ -271,6 +272,7 @@ pub struct NativeTerminalSession {
     pub render_coordinator: Arc<RenderScheduleCoordinator>,
     pub last_agent_activity: Option<crate::agent_detect::AgentActivity>,
     pub last_scrollbar: Option<NativeTerminalScrollbarPayload>,
+    pub scrollbar_overlay: ScrollbarOverlayState,
     /// Set once the agent reports its own state through the Ferryx extension, which permanently
     /// disables screen inference for this session.
     pub agent_reports_own_state: bool,
@@ -335,6 +337,7 @@ fn dispatch_scheduled_render<R: Runtime>(
                     layout,
                     &render_input.snapshot,
                     render_input.selection.as_ref(),
+                    render_input.scrollbar_overlay.as_ref(),
                 ) {
                     tracing::warn!(
                         session_id = %session_id,
@@ -462,6 +465,7 @@ fn take_native_terminal_scrollbar_event(
         offset: scrollbar.offset,
         len: scrollbar.len,
     };
+    session.scrollbar_overlay.metrics = Some(scrollbar);
     if session.last_scrollbar.as_ref() == Some(&payload) {
         return None;
     }
@@ -478,6 +482,7 @@ fn take_native_terminal_scrollbar_event(
 struct SessionRenderInput {
     snapshot: RenderSnapshot,
     selection: Option<SelectionSnapshot>,
+    scrollbar_overlay: Option<ScrollbarOverlayState>,
 }
 
 fn preedit_char_wide(c: char) -> bool {
@@ -560,9 +565,23 @@ fn session_render_snapshot(
             apply_preedit_to_snapshot(&mut snapshot, preedit);
         }
     }
+    let scrollbar_overlay = if session.scrollbar_overlay.visible {
+        let metrics = session
+            .terminal
+            .scrollbar()
+            .ok()
+            .or(session.scrollbar_overlay.metrics);
+        Some(ScrollbarOverlayState {
+            visible: true,
+            metrics,
+        })
+    } else {
+        None
+    };
     Ok(SessionRenderInput {
         snapshot,
         selection,
+        scrollbar_overlay,
     })
 }
 
@@ -655,6 +674,25 @@ impl NativeTerminalSurfaceHostState {
             .lock()
             .get(session_id)
             .and_then(|session| session.cell_metrics)
+    }
+
+    pub fn set_scrollbar_overlay_visible(
+        &self,
+        session_id: &str,
+        visible: bool,
+    ) -> Result<(), NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let mut sessions = self.sessions.lock();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or(NativeTerminalError::NoValue)?;
+        session.scrollbar_overlay.visible = visible;
+        if visible {
+            if let Ok(scrollbar) = session.terminal.scrollbar() {
+                session.scrollbar_overlay.metrics = Some(scrollbar);
+            }
+        }
+        Ok(())
     }
 
     /// Maps DOM logical coordinates against attached session viewports.
@@ -751,6 +789,7 @@ impl NativeTerminalSurfaceHostState {
                         render_coordinator,
                         last_agent_activity: None,
                         last_scrollbar: None,
+                        scrollbar_overlay: ScrollbarOverlayState::default(),
                         agent_reports_own_state: false,
                         surface_attached: true,
                     },
@@ -967,6 +1006,7 @@ impl NativeTerminalSurfaceHostState {
                         render_coordinator: Arc::clone(&render_coordinator),
                         last_agent_activity: None,
                         last_scrollbar: None,
+                        scrollbar_overlay: ScrollbarOverlayState::default(),
                         agent_reports_own_state: false,
                         surface_attached: true,
                     },
@@ -1318,6 +1358,7 @@ impl NativeTerminalSurfaceHostState {
                         render_coordinator,
                         last_agent_activity: None,
                         last_scrollbar: None,
+                        scrollbar_overlay: ScrollbarOverlayState::default(),
                         agent_reports_own_state: false,
                         surface_attached: true,
                     },
@@ -1402,6 +1443,7 @@ impl NativeTerminalSurfaceHostState {
             layout,
             &render_input.snapshot,
             render_input.selection.as_ref(),
+            render_input.scrollbar_overlay.as_ref(),
         )
     }
 
@@ -1434,6 +1476,7 @@ impl NativeTerminalSurfaceHostState {
                 layout,
                 &render_input.snapshot,
                 render_input.selection.as_ref(),
+                render_input.scrollbar_overlay.as_ref(),
             )
         } else {
             Ok(NativeTerminalSurfaceReceipt::from_snapshot(
@@ -1540,6 +1583,7 @@ impl NativeTerminalSurfaceHost {
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
         selection: Option<&super::renderer::SelectionSnapshot>,
+        scrollbar_overlay: Option<&ScrollbarOverlayState>,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         if let Some(bounds) = self.logical_bounds {
             self.target.update_viewport(Some(bounds));
@@ -1605,6 +1649,7 @@ impl NativeTerminalSurfaceHost {
             surface_size.height,
             self.format,
             local_viewport,
+            scrollbar_overlay,
         )?;
         frame.present();
         self.target.reveal_after_present();

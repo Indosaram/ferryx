@@ -1,12 +1,14 @@
 #[cfg(feature = "native-terminal")]
 use crate::native_terminal::{
     CellSnapshot, CellWide, ColorRgb, CursorSnapshot, CursorVisualStyle, NativeTerminal,
-    NativeTerminalError, RenderSnapshot, TerminalEngine,
+    NativeTerminalError, RenderSnapshot, ScrollViewport, TerminalEngine,
 };
 #[cfg(feature = "native-terminal")]
 use crate::remote::protocol::{
     RemoteGridCursor, RemoteGridCursorVisualStyle, RemoteGridFrame, RemoteGridLine, RemoteGridRun,
 };
+#[cfg(feature = "native-terminal")]
+use crate::terminal::output_hub::HistorySegment;
 
 #[cfg(feature = "native-terminal")]
 const REMOTE_CELL_WIDTH_PX: u32 = 8;
@@ -40,9 +42,41 @@ impl RemoteTerminalMirror {
         Ok(self.frame_from_snapshot(snapshot, false))
     }
 
+    pub fn feed_segments(
+        &mut self,
+        segments: &[HistorySegment],
+    ) -> Result<(), NativeTerminalError> {
+        for segment in segments {
+            if let (Some(cols), Some(rows)) = (segment.cols, segment.rows) {
+                if self.engine.dimensions()? != (cols, rows) {
+                    self.engine
+                        .resize(cols, rows, REMOTE_CELL_WIDTH_PX, REMOTE_CELL_HEIGHT_PX)?;
+                }
+            }
+            self.engine.feed(&segment.bytes)?;
+        }
+        Ok(())
+    }
+
+    pub fn dimensions(&self) -> Result<(u16, u16), NativeTerminalError> {
+        self.engine.dimensions()
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<RemoteGridFrame, NativeTerminalError> {
         self.engine
             .resize(cols, rows, REMOTE_CELL_WIDTH_PX, REMOTE_CELL_HEIGHT_PX)?;
+        self.clear_baseline();
+        self.full_frame()
+    }
+
+    pub fn scroll(&mut self, rows: i16) -> Result<RemoteGridFrame, NativeTerminalError> {
+        // ScrollViewport::Delta sign convention in ghostty-vt:
+        // Negative delta moves viewport toward top (older scrollback content).
+        // Positive delta moves viewport toward bottom (newer content).
+        // Wire contract: positive rows = toward bottom (newer), negative rows = toward top (older).
+        // Returning a full frame ensures the entire shifted viewport is rendered.
+        self.engine
+            .scroll_viewport(ScrollViewport::Delta(rows as isize))?;
         self.clear_baseline();
         self.full_frame()
     }
@@ -303,5 +337,129 @@ mod tests {
             }
         };
         assert_eq!((cursor.x, cursor.y), (0, 0));
+    }
+
+    #[test]
+    fn feed_segments_replays_at_recorded_geometry_then_resizes() {
+        let mut mirror = RemoteTerminalMirror::new(50, 6).expect("mirror");
+        let seg1 = HistorySegment {
+            cols: Some(120),
+            rows: Some(6),
+            bytes: b"\x1b[1;1H\xed\x95\x9c\xea\xb8\x80\x1b[110GX".to_vec(),
+        };
+        let seg2 = HistorySegment {
+            cols: Some(50),
+            rows: Some(6),
+            bytes: b"\x1b[2;1Hnext".to_vec(),
+        };
+        mirror
+            .feed_segments(&[seg1, seg2])
+            .expect("feed_segments");
+        let frame = mirror.full_frame().expect("full frame");
+        let lines = match &frame {
+            RemoteGridFrame::Grid { lines, cols, rows, .. } => {
+                assert_eq!((*cols, *rows), (50, 6));
+                lines
+            }
+            RemoteGridFrame::GridDiff { lines, cols, rows, .. } => {
+                assert_eq!((*cols, *rows), (50, 6));
+                lines
+            }
+        };
+        let line2 = lines.iter().find(|l| l.index == 1).expect("line 2 exists");
+        assert_eq!(line2.runs[0].text, "next");
+    }
+
+    #[test]
+    fn flat_history_replay_corrupts_relative_to_segmented_replay() {
+        let seg1_bytes = b"\x1b[1;1H\xed\x95\x9c\xea\xb8\x80\x1b[110GX";
+        let seg2_bytes = b"\x1b[2;1Hnext";
+
+        // Segmented replay
+        let mut seg_mirror = RemoteTerminalMirror::new(50, 6).expect("seg mirror");
+        seg_mirror
+            .feed_segments(&[
+                HistorySegment {
+                    cols: Some(120),
+                    rows: Some(6),
+                    bytes: seg1_bytes.to_vec(),
+                },
+                HistorySegment {
+                    cols: Some(50),
+                    rows: Some(6),
+                    bytes: seg2_bytes.to_vec(),
+                },
+            ])
+            .expect("feed_segments");
+        let seg_frame = seg_mirror.full_frame().expect("seg full frame");
+
+        // Flat replay directly at 50 cols
+        let mut flat_mirror = RemoteTerminalMirror::new(50, 6).expect("flat mirror");
+        let mut flat_bytes = seg1_bytes.to_vec();
+        flat_bytes.extend_from_slice(seg2_bytes);
+        flat_mirror.feed(&flat_bytes).expect("flat feed");
+        let flat_frame = flat_mirror.full_frame().expect("flat full frame");
+
+        let seg_line0 = match &seg_frame {
+            RemoteGridFrame::Grid { lines, .. } | RemoteGridFrame::GridDiff { lines, .. } => {
+                lines.iter().find(|l| l.index == 0).expect("line 0")
+            }
+        };
+        let flat_line0 = match &flat_frame {
+            RemoteGridFrame::Grid { lines, .. } | RemoteGridFrame::GridDiff { lines, .. } => {
+                lines.iter().find(|l| l.index == 0).expect("line 0")
+            }
+        };
+
+        // In flat replay on a 50-col grid, ESC[110G clamps to col 50 (index 49) on line 0,
+        // so flat_line0 contains "X" at col 50 (or has text with "X").
+        // In segmented replay, 120-col line 0 had "X" at col 110 (index 109), which reflows
+        // to a different position/line when resized down to 50 cols.
+        assert_ne!(seg_line0, flat_line0);
+    }
+
+    #[test]
+    fn scroll_negative_reveals_older_content_and_positive_returns_toward_newest() {
+        let mut mirror = RemoteTerminalMirror::new(30, 10).expect("mirror");
+        let lines = (0..200)
+            .map(|index| format!("line-{index:03}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let initial_frame = mirror.feed(lines.as_bytes()).expect("feed lines");
+
+        fn extract_line(frame: &RemoteGridFrame, idx: u16) -> String {
+            let lines = match frame {
+                RemoteGridFrame::Grid { lines, .. } | RemoteGridFrame::GridDiff { lines, .. } => {
+                    lines
+                }
+            };
+            lines
+                .iter()
+                .find(|l| l.index == idx)
+                .map(|l| l.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                .unwrap_or_default()
+        }
+
+        let bottom_row0 = extract_line(&initial_frame, 0);
+        assert!(
+            bottom_row0.starts_with("line-190"),
+            "expected line-190 at row 0 at bottom, got: {bottom_row0}"
+        );
+
+        let scrolled_up = mirror.scroll(-5).expect("scroll up (-5)");
+        assert!(matches!(scrolled_up, RemoteGridFrame::Grid { .. }));
+        let up_row0 = extract_line(&scrolled_up, 0);
+        assert!(
+            up_row0.starts_with("line-185"),
+            "expected line-185 at row 0 after scrolling up -5, got: {up_row0}"
+        );
+
+        let scrolled_down = mirror.scroll(5).expect("scroll back down (+5)");
+        assert!(matches!(scrolled_down, RemoteGridFrame::Grid { .. }));
+        let down_row0 = extract_line(&scrolled_down, 0);
+        assert!(
+            down_row0.starts_with("line-190"),
+            "expected line-190 at row 0 after scrolling down +5, got: {down_row0}"
+        );
     }
 }

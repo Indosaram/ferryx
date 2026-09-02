@@ -151,7 +151,7 @@ export type WorkspaceAction =
       error?: StructuredIpcError | null;
       requestId?: string | null;
     }
-  | { type: "APPLY_PROVIDER_SESSION_IF_MISSING"; sessionId: string; providerSession: AgentProviderSession }
+  | { type: "APPLY_PROVIDER_SESSION_IF_MISSING"; sessionId: string; providerSession: AgentProviderSession; agentType?: string }
   | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
   | {
@@ -382,6 +382,7 @@ export function useWorkspaceStore({
               type: "APPLY_PROVIDER_SESSION_IF_MISSING",
               sessionId: resolved.sessionId,
               providerSession: { key: "session_id", id },
+              agentType: discoveryAgent,
             });
           });
         }
@@ -1690,12 +1691,21 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case "APPLY_PROVIDER_SESSION_IF_MISSING": {
       const session = state.sessions[action.sessionId];
-      if (!session || session.providerSession) return state;
+      if (!session) return state;
+      const nextProviderSession = session.providerSession ?? action.providerSession;
+      const nextAgentType = session.agentType ?? (action.agentType || null);
+      if (nextProviderSession === session.providerSession && nextAgentType === session.agentType) {
+        return state;
+      }
       return {
         ...state,
         sessions: {
           ...state.sessions,
-          [action.sessionId]: { ...session, providerSession: action.providerSession },
+          [action.sessionId]: {
+            ...session,
+            providerSession: nextProviderSession,
+            ...(nextAgentType ? { agentType: nextAgentType } : {}),
+          },
         },
       };
     }
@@ -1761,16 +1771,24 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         agentSource,
       };
       const nextState = applySessionActivity(state, action.tabId, action.sessionId, activity);
-      if (!action.providerSession) return nextState;
       const session = nextState.sessions[action.sessionId];
       if (!session) return nextState;
+
+      const updatedAgentType = session.agentType ?? (agentType || null);
+      const updatedProviderSession = action.providerSession ?? session.providerSession;
+
+      if (updatedAgentType === session.agentType && updatedProviderSession === session.providerSession) {
+        return nextState;
+      }
+
       return {
         ...nextState,
         sessions: {
           ...nextState.sessions,
           [action.sessionId]: {
             ...session,
-            providerSession: action.providerSession,
+            ...(updatedAgentType ? { agentType: updatedAgentType } : {}),
+            ...(updatedProviderSession ? { providerSession: updatedProviderSession } : {}),
           },
         },
       };

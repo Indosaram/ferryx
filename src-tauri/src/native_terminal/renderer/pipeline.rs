@@ -12,14 +12,14 @@ pub struct ScreenUniform {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct RectInstance {
     pub rect: [f32; 4],
     pub color: [f32; 4],
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct GlyphInstance {
     pub rect: [f32; 4],
     pub uv: [f32; 4],
@@ -31,12 +31,16 @@ pub struct GlyphInstance {
 pub struct RenderPipelines {
     pub rgba_bg: wgpu::RenderPipeline,
     pub rgba_glyph: wgpu::RenderPipeline,
+    pub rgba_overlay: wgpu::RenderPipeline,
     pub bgra_bg: wgpu::RenderPipeline,
     pub bgra_glyph: wgpu::RenderPipeline,
+    pub bgra_overlay: wgpu::RenderPipeline,
     pub rgba_srgb_bg: wgpu::RenderPipeline,
     pub rgba_srgb_glyph: wgpu::RenderPipeline,
+    pub rgba_srgb_overlay: wgpu::RenderPipeline,
     pub bgra_srgb_bg: wgpu::RenderPipeline,
     pub bgra_srgb_glyph: wgpu::RenderPipeline,
+    pub bgra_srgb_overlay: wgpu::RenderPipeline,
     pub uniform_layout: wgpu::BindGroupLayout,
     pub atlas_layout: wgpu::BindGroupLayout,
 }
@@ -121,6 +125,12 @@ impl RenderPipelines {
                 &glyph_layout,
                 wgpu::TextureFormat::Rgba8Unorm,
             ),
+            rgba_overlay: build_overlay_pipeline(
+                device,
+                &bg_shader,
+                &bg_layout,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
             bgra_bg: build_bg_pipeline(
                 device,
                 &bg_shader,
@@ -131,6 +141,12 @@ impl RenderPipelines {
                 device,
                 &glyph_shader,
                 &glyph_layout,
+                wgpu::TextureFormat::Bgra8Unorm,
+            ),
+            bgra_overlay: build_overlay_pipeline(
+                device,
+                &bg_shader,
+                &bg_layout,
                 wgpu::TextureFormat::Bgra8Unorm,
             ),
             rgba_srgb_bg: build_bg_pipeline(
@@ -145,6 +161,12 @@ impl RenderPipelines {
                 &glyph_layout,
                 wgpu::TextureFormat::Rgba8UnormSrgb,
             ),
+            rgba_srgb_overlay: build_overlay_pipeline(
+                device,
+                &bg_shader,
+                &bg_layout,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            ),
             bgra_srgb_bg: build_bg_pipeline(
                 device,
                 &bg_shader,
@@ -155,6 +177,12 @@ impl RenderPipelines {
                 device,
                 &glyph_shader,
                 &glyph_layout,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+            ),
+            bgra_srgb_overlay: build_overlay_pipeline(
+                device,
+                &bg_shader,
+                &bg_layout,
                 wgpu::TextureFormat::Bgra8UnormSrgb,
             ),
             uniform_layout,
@@ -173,6 +201,52 @@ impl RenderPipelines {
             _ => (&self.rgba_bg, &self.rgba_glyph),
         }
     }
+
+    pub fn get_overlay_pipeline(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
+        match format {
+            wgpu::TextureFormat::Bgra8Unorm => &self.bgra_overlay,
+            wgpu::TextureFormat::Bgra8UnormSrgb => &self.bgra_srgb_overlay,
+            wgpu::TextureFormat::Rgba8UnormSrgb => &self.rgba_srgb_overlay,
+            _ => &self.rgba_overlay,
+        }
+    }
+}
+
+fn build_overlay_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Overlay Render Pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<RectInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
 }
 
 fn build_bg_pipeline(

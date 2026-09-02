@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { resolveActivityIndicator } from "../lib/activity";
 import type { Worktree } from "../lib/types";
-import { selectTabActivitySummaries, workspaceReducer, type WorkspaceState } from "./workspaceStore";
+import {
+  selectTabActivitySummaries,
+  selectWorktreeActivitySummaries,
+  workspaceReducer,
+  type WorkspaceState,
+} from "./workspaceStore";
 
 const worktree: Worktree = {
   path: "/repo/main",
@@ -71,6 +76,52 @@ function titleAction(title: string) {
     tabId: "tab-a",
     sessionId: "session-a",
     title,
+  } as const;
+}
+
+function twoSessionState(activeTabId: string, sessionBTabId: "tab-a" | "tab-b"): WorkspaceState {
+  const base = stateWithSession(activeTabId);
+  const sessionBLayouts = {
+    ...base.layout.layoutsByTabId,
+    [sessionBTabId]: {
+      ...base.layout.layoutsByTabId!["tab-a"],
+      sessionIdsByLeafId: {
+        ...base.layout.layoutsByTabId!["tab-a"].sessionIdsByLeafId,
+        "leaf-b": "session-b",
+      },
+    },
+  };
+  return {
+    ...base,
+    sessions: {
+      ...base.sessions,
+      "session-b": {
+        ...base.sessions["session-a"],
+        id: "session-b",
+        backendSessionId: "backend-b",
+      },
+    },
+    layout: {
+      ...base.layout,
+      layoutsByTabId: sessionBLayouts,
+    },
+  } as unknown as WorkspaceState;
+}
+
+function screenActionForSession(
+  tabId: string,
+  sessionId: string,
+  state: "working" | "blocked" | "idle",
+  ruleId = "test_rule",
+  manifestId?: string,
+) {
+  return {
+    type: "SESSION_SCREEN_ACTIVITY",
+    tabId,
+    sessionId,
+    state,
+    ruleId,
+    manifestId,
   } as const;
 }
 
@@ -257,6 +308,35 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
     state = workspaceReducer(state, { type: "ACTIVATE_TAB", tabId: "tab-b" });
     state = workspaceReducer(state, screenAction("idle", "prompt_idle", "omo"));
     expect(resolveActivityIndicator(selectTabActivitySummaries(state)["tab-a"])).toBe("unread");
+  });
+
+  it("11. an unseen completion flips the tab to attention even while another session keeps working", () => {
+    // Two sessions share tab-a: session-a keeps working, session-b just finished unseen
+    // (tab-b is the active tab, so neither completion is acknowledged by visibility).
+    let state = twoSessionState("tab-b", "tab-a");
+    state = workspaceReducer(state, screenAction("working", "spinner_working", "omo"));
+    state = workspaceReducer(state, screenActionForSession("tab-a", "session-b", "working", "spinner_working", "codex"));
+    expect(resolveActivityIndicator(selectTabActivitySummaries(state)["tab-a"])).toBe("working");
+
+    state = workspaceReducer(state, screenAction("idle", "prompt_idle", "omo"));
+
+    const summary = selectTabActivitySummaries(state)["tab-a"];
+    expect(summary).toMatchObject({ hasDone: true, hasWorking: true, hasUnread: true });
+    // The finished session wins the indicator over the still-running one.
+    expect(resolveActivityIndicator(summary)).toBe("unread");
+  });
+
+  it("12. an unseen completion flips the worktree row while another session keeps working", () => {
+    // session-a works on the active tab-b; session-b shares the worktree from non-visible tab-a
+    // and finishes there, so its completion is unseen.
+    let state = twoSessionState("tab-b", "tab-a");
+    state = workspaceReducer(state, screenAction("working", "spinner_working", "omo"));
+    state = workspaceReducer(state, screenActionForSession("tab-a", "session-b", "working", "spinner_working", "codex"));
+    state = workspaceReducer(state, screenActionForSession("tab-a", "session-b", "idle", "prompt_idle"));
+
+    const summary = selectWorktreeActivitySummaries(state)[worktree.path];
+    expect(summary).toMatchObject({ hasDone: true, hasWorking: true });
+    expect(resolveActivityIndicator(summary)).toBe("unread");
   });
 
   it("7. title-only sessions keep working exactly as before (existing tests must stay green)", () => {

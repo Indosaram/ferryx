@@ -44,7 +44,10 @@ export function useNativeTerminalVisibility(): boolean {
       return;
     }
 
-    const update = () => setSurfaceOpen(isYieldingSurfaceVisible());
+    const update = () => {
+      const next = isYieldingSurfaceVisible();
+      setSurfaceOpen((current) => (current === next ? current : next));
+    };
     update();
 
     const observer = new MutationObserver(update);

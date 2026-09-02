@@ -2,10 +2,11 @@
 
 use super::font_manager::FontManager;
 
-/// Result of rasterizing a glyph cluster: either an 8-bit alpha mask or a 32-bit RGBA color buffer.
+/// Result of rasterizing a glyph cluster: either an 8-bit alpha mask, a 32-bit RGBA subpixel coverage buffer, or a 32-bit RGBA color buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RasterizedGlyph {
     Alpha(Vec<u8>),
+    Subpixel(Vec<u8>),
     Color(Vec<u8>),
 }
 
@@ -14,15 +15,19 @@ impl RasterizedGlyph {
         matches!(self, Self::Color(_))
     }
 
+    pub fn is_subpixel(&self) -> bool {
+        matches!(self, Self::Subpixel(_))
+    }
+
     pub fn buffer(&self) -> &[u8] {
         match self {
-            Self::Alpha(b) | Self::Color(b) => b,
+            Self::Alpha(b) | Self::Subpixel(b) | Self::Color(b) => b,
         }
     }
 
     pub fn into_buffer(self) -> Vec<u8> {
         match self {
-            Self::Alpha(b) | Self::Color(b) => b,
+            Self::Alpha(b) | Self::Subpixel(b) | Self::Color(b) => b,
         }
     }
 }

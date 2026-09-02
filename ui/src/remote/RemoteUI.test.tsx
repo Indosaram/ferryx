@@ -1910,8 +1910,60 @@ describe("Remote UI Components", () => {
     // Click Disconnect
     fireEvent.click(screen.getByRole("button", { name: /Disconnect/i }));
 
+    expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirm disconnect/i }));
+
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText(/6-digit PIN/i)).toBeInTheDocument();
+  });
+
+  it("requires confirmation before Disconnect removes the pairing", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(focusedState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Disconnect$/i }));
+
+    expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Confirm disconnect/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Cancel$/i }));
+
+    expect(screen.getByRole("button", { name: /^Disconnect$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Confirm disconnect/i })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
+  });
+
+  it("Cancel keeps the remote session paired", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(focusedState));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    await screen.findByTestId("remote-terminal");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Disconnect$/i }));
+    expect(screen.getByRole("button", { name: /Confirm disconnect/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Cancel$/i }));
+
+    expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
   });
 
   it("clears optimistic session override when a different authoritative state arrives", async () => {

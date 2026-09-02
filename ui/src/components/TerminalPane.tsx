@@ -78,10 +78,19 @@ export function TerminalPane({
 
   const isExited = session.backendSessionId === null;
   const affordance = getAgentReconnectAffordance(session, sessions);
-  const isAgentSession = Boolean(session.agentType && session.agentType.trim().length > 0);
-  const agentName = friendlyAgentName(affordance.agentType ?? session.agentType);
-  const logo = resolveAgentLogo(affordance.agentType ?? session.agentType);
-  const isMonochrome = isMonochromeAgentLogo(affordance.agentType ?? session.agentType);
+  const isAgentSession = Boolean(
+    (session.agentType && session.agentType.trim().length > 0) ||
+      affordance.agentType ||
+      session.providerSession ||
+      (activity?.isAgent && activity?.agentType),
+  );
+  const effectiveAgentType =
+    affordance.agentType ??
+    (session.agentType && session.agentType.trim().length > 0 ? session.agentType.trim() : null) ??
+    (activity?.isAgent && activity?.agentType ? activity.agentType : null);
+  const agentName = friendlyAgentName(effectiveAgentType);
+  const logo = resolveAgentLogo(effectiveAgentType);
+  const isMonochrome = isMonochromeAgentLogo(effectiveAgentType);
 
   const isPending = pendingLocal || affordance.isReconnecting;
   const errorDescription = resolveAffordanceErrorDescription(affordance);
@@ -122,6 +131,7 @@ export function TerminalPane({
       <NativeTerminalPane
         sessionId={session.id}
         session={session}
+        activity={activity}
       />
       {searchOpen ? (
         <TerminalSearchOverlay
@@ -135,7 +145,7 @@ export function TerminalPane({
           aria-labelledby={titleId}
           aria-describedby={errorDescription ? descId : undefined}
           data-testid="terminal-pane-overlay"
-          className="absolute inset-0 z-20 flex items-center justify-center bg-background/85 px-6 text-center backdrop-blur-sm"
+          className="absolute inset-0 z-20 flex items-center justify-center bg-background/85 px-6 text-center"
         >
           <div className="flex max-w-sm flex-col items-center rounded-lg border border-border bg-card p-5 shadow-lg">
             {isAgentSession ? (

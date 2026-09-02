@@ -175,6 +175,7 @@ fn test_renderer_theme_conversion_from_terminal_preferences() {
         source: ferryx_lib::terminal::preferences::TerminalPreferencesSource::Defaults,
         status: ferryx_lib::terminal::preferences::TerminalPreferencesStatus::Imported,
         source_path: None,
+        default_shell: None,
     };
 
     let theme_from_prefs = RendererTheme::from(&prefs);
@@ -220,6 +221,7 @@ fn test_rendered_row_instances_honor_preference_theme_colors() {
         source: ferryx_lib::terminal::preferences::TerminalPreferencesSource::Defaults,
         status: ferryx_lib::terminal::preferences::TerminalPreferencesStatus::Imported,
         source_path: None,
+        default_shell: None,
     };
 
     let theme = RendererTheme::from(&prefs);
@@ -320,6 +322,7 @@ fn test_renderer_cursor_visual_style_preference_and_unfocused_hollow() {
         source: ferryx_lib::terminal::preferences::TerminalPreferencesSource::Defaults,
         status: ferryx_lib::terminal::preferences::TerminalPreferencesStatus::Imported,
         source_path: None,
+        default_shell: None,
     };
 
     let theme = RendererTheme::from(&prefs);

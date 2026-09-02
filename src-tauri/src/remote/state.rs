@@ -16,6 +16,10 @@ use tokio::sync::{broadcast, watch};
 
 pub type DesktopEventSink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 pub const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT: &str = "remote_active_selection_changed";
+#[cfg(not(test))]
+pub const REMOTE_GATEWAY_PORT: u16 = 43821;
+#[cfg(test)]
+pub const REMOTE_GATEWAY_PORT: u16 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,7 +49,7 @@ impl Default for RemoteGatewayConfig {
     fn default() -> Self {
         Self {
             mode: RemoteNetworkMode::Off,
-            port: 43821,
+            port: REMOTE_GATEWAY_PORT,
             allow_control: true,
         }
     }
@@ -150,7 +154,8 @@ impl RemoteGatewayState {
             .and_then(|bytes| serde_json::from_slice::<PersistedRemoteGatewayConfig>(&bytes).ok())
             .map(|persisted| RemoteGatewayConfig {
                 mode: persisted.mode,
-                port: persisted.port,
+                // Port is fixed; ignore persisted value so stale custom ports heal on load.
+                port: REMOTE_GATEWAY_PORT,
                 allow_control: persisted.allow_control,
             })
             .unwrap_or_default();
@@ -469,7 +474,7 @@ mod tests {
         );
         let config = reopened.config.read().clone();
         assert_eq!(config.mode, RemoteNetworkMode::LocalNetwork);
-        assert_eq!(config.port, 45678);
+        assert_eq!(config.port, REMOTE_GATEWAY_PORT);
         assert!(!config.allow_control);
         assert_eq!(
             config.restart_policy(),
@@ -510,7 +515,7 @@ mod tests {
         let (state, _, _) = test_state(config_path, auth_path);
         let config = state.config.read().clone();
         assert_eq!(config.mode, RemoteNetworkMode::LocalNetwork);
-        assert_eq!(config.port, 41234);
+        assert_eq!(config.port, REMOTE_GATEWAY_PORT);
         assert!(config.allow_control);
         assert_eq!(
             config.restart_policy(),

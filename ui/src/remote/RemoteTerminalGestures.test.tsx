@@ -283,4 +283,150 @@ describe("RemoteTerminal touch gestures", () => {
     expect(onSwipeNextTab).not.toHaveBeenCalled();
     expect(onSwipePreviousTab).not.toHaveBeenCalled();
   });
+
+  it("sends scroll messages on vertical single-finger drag when socket is open", () => {
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const grid = surface();
+
+    act(() => socket().onopen?.());
+    socket().send.mockClear();
+
+    // Drag up: finger moves from 200px to 140px (deltaY = -60px)
+    // font size 13 -> cell height 13 * 1.2 = 15.6px
+    // Math.trunc(-(-60) / 15.6) = Math.trunc(3.846) = 3 rows
+    fireEvent.touchStart(grid, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 100, clientY: 140 }],
+    });
+    expect(socket().send).toHaveBeenCalledWith(JSON.stringify({ type: "scroll", rows: 3 }));
+
+    fireEvent.touchEnd(grid, {
+      touches: [],
+      changedTouches: [{ clientX: 100, clientY: 140 }],
+    });
+
+    socket().send.mockClear();
+
+    // Drag down: finger moves from 100px to 160px (deltaY = +60px)
+    // Math.trunc(-(60) / 15.6) = Math.trunc(-3.846) = -3 rows
+    fireEvent.touchStart(grid, {
+      touches: [{ clientX: 100, clientY: 100 }],
+    });
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 100, clientY: 160 }],
+    });
+    expect(socket().send).toHaveBeenCalledWith(JSON.stringify({ type: "scroll", rows: -3 }));
+  });
+
+  it("does not send scroll messages during horizontal swipe tab-switch gesture", () => {
+    const onSwipeNextTab = vi.fn();
+    const onSwipePreviousTab = vi.fn();
+
+    render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        onSwipeNextTab={onSwipeNextTab}
+        onSwipePreviousTab={onSwipePreviousTab}
+      />,
+    );
+    const grid = surface();
+
+    act(() => socket().onopen?.());
+    socket().send.mockClear();
+
+    swipe(grid, { x: 200, y: 100 }, { x: 100, y: 100 });
+    expect(onSwipeNextTab).toHaveBeenCalledTimes(1);
+    expect(socket().send).not.toHaveBeenCalledWith(expect.stringMatching(/"type":"scroll"/));
+  });
+
+  it("does not fire swipe callbacks on touch end after a vertical scroll gesture", () => {
+    const onSwipeNextTab = vi.fn();
+    const onSwipePreviousTab = vi.fn();
+
+    render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        onSwipeNextTab={onSwipeNextTab}
+        onSwipePreviousTab={onSwipePreviousTab}
+      />,
+    );
+    const grid = surface();
+
+    act(() => socket().onopen?.());
+
+    // Single finger vertical drag that moves > 8px vertically
+    fireEvent.touchStart(grid, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 100, clientY: 150 }],
+    });
+    // Even if it then moves horizontally past 40px, it was locked to scroll
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 30, clientY: 150 }],
+    });
+    fireEvent.touchEnd(grid, {
+      touches: [],
+      changedTouches: [{ clientX: 30, clientY: 150 }],
+    });
+
+    expect(onSwipeNextTab).not.toHaveBeenCalled();
+    expect(onSwipePreviousTab).not.toHaveBeenCalled();
+  });
+
+  it("does not send scroll message on vertical touch drag when socket is not open", () => {
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const grid = surface();
+
+    socket().readyState = 0;
+    socket().send.mockClear();
+
+    fireEvent.touchStart(grid, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 100, clientY: 140 }],
+    });
+    expect(socket().send).not.toHaveBeenCalledWith(expect.stringMatching(/"type":"scroll"/));
+  });
+
+  it("throttles touch scroll messages to at most one per 33ms", () => {
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const grid = surface();
+
+    act(() => socket().onopen?.());
+    socket().send.mockClear();
+
+    const nowSpy = vi.spyOn(Date, "now");
+    nowSpy.mockReturnValue(1000);
+
+    // Initial move at t=1000 sends first scroll (delta -35px -> 2 rows @ 15.6px/row)
+    fireEvent.touchStart(grid, {
+      touches: [{ clientX: 100, clientY: 200 }],
+    });
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 100, clientY: 165 }],
+    });
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: 2 }));
+
+    // Second move at t=1010 (< 33ms elapsed): should NOT send yet, but delta accumulates
+    nowSpy.mockReturnValue(1010);
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 100, clientY: 130 }],
+    });
+    expect(socket().send).toHaveBeenCalledTimes(1);
+
+    // Third move at t=1040 (>= 33ms elapsed): sends accumulated delta
+    nowSpy.mockReturnValue(1040);
+    fireEvent.touchMove(grid, {
+      touches: [{ clientX: 100, clientY: 110 }],
+    });
+    expect(socket().send).toHaveBeenCalledTimes(2);
+    expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: 3 }));
+  });
 });

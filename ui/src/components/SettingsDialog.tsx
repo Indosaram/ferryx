@@ -126,7 +126,7 @@ function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
 
       <main className="min-w-0 flex-1 overflow-y-auto bg-background scrollbar-sleek">
         <div data-tauri-drag-region className="drag-region h-titlebar shrink-0 border-b border-border/70" />
-        <div className="mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
+        <div className="selectable mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
           {section === "general" ? <GeneralSection /> : null}
           {section === "appearance" ? <AppearanceSection /> : null}
           {section === "terminal" ? (

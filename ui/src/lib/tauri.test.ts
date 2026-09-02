@@ -24,6 +24,8 @@ import {
   listProjectBranches,
   listTerminalSessions,
   onNativeTerminalScrollbar,
+  setNativeTerminalScrollbarOverlay,
+  onNativeTerminalCopyOrInterrupt,
   onNewTerminalTabMenu,
   onCloseTabMenu,
   listWorktrees,
@@ -288,6 +290,24 @@ describe("Tauri IPC wrapper contract", () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
+  it("bridges the native copy or interrupt event into the frontend callback", async () => {
+    const unlisten = vi.fn();
+    let listener: ((event: { payload: void }) => void) | null = null;
+    events.listen.mockImplementation(async (eventName: string, callback: (event: { payload: void }) => void) => {
+      expect(eventName).toBe("native_terminal_copy_or_interrupt");
+      listener = callback;
+      return unlisten;
+    });
+    const handler = vi.fn();
+
+    await expect(onNativeTerminalCopyOrInterrupt(handler)).resolves.toBe(unlisten);
+    expect(listener).toBeTypeOf("function");
+    if (typeof listener === "function") {
+      (listener as (event: { payload: void }) => void)({ payload: undefined });
+    }
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
   it("normalizes rejected command invocations at the wrapper boundary", async () => {
     core.invoke.mockRejectedValue("backend exploded");
 
@@ -477,6 +497,22 @@ describe("Tauri IPC wrapper contract", () => {
       payload: { sessionId: "pty-scroll", total: 200, offset: 80, len: 20 },
     });
     expect(handler).toHaveBeenCalledWith({ sessionId: "pty-scroll", total: 200, offset: 80, len: 20 });
+  });
+
+  it("invokes backend command to set native terminal scrollbar overlay visibility", async () => {
+    core.invoke.mockResolvedValue(undefined);
+
+    await setNativeTerminalScrollbarOverlay("session-overlay-1", true);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_scrollbar_overlay", {
+      sessionId: "session-overlay-1",
+      visible: true,
+    });
+
+    await setNativeTerminalScrollbarOverlay("session-overlay-1", false);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_scrollbar_overlay", {
+      sessionId: "session-overlay-1",
+      visible: false,
+    });
   });
 
   it("sets native app badge count with normalized integer payload", async () => {

@@ -73,6 +73,7 @@ describe("remote terminal grid contract", () => {
     cleanup();
     MockWebSocket.latest = null;
     MockWebSocket.instances = [];
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -136,6 +137,292 @@ describe("remote terminal grid contract", () => {
     view.unmount();
 
     expect(onSocketLifecycle).not.toHaveBeenCalled();
+  });
+
+  it("automatically re-dials with exponential backoff on abnormal close (1s, 2s, 4s)", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onSocketLifecycle = vi.fn();
+
+    render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    const firstSocket = MockWebSocket.instances[0];
+
+    // Initial abnormal close (without prior onopen)
+    act(() => {
+      firstSocket.onclose?.();
+    });
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-123", "closed");
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    // After 999ms, no new socket yet
+    act(() => {
+      vi.advanceTimersByTime(999);
+    });
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    // After 1000ms total, first reconnect dial occurs (1s delay)
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const secondSocket = MockWebSocket.instances[1];
+    expect(secondSocket.url).toBe(firstSocket.url);
+
+    // Second failure: onclose on the second socket
+    act(() => {
+      secondSocket.onclose?.();
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    // After 1999ms, no new socket yet
+    act(() => {
+      vi.advanceTimersByTime(1999);
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    // After 2000ms total, second reconnect dial occurs (2s backoff)
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(MockWebSocket.instances).toHaveLength(3);
+    const thirdSocket = MockWebSocket.instances[2];
+    expect(thirdSocket.url).toBe(firstSocket.url);
+
+    // Third failure: onclose on the third socket
+    act(() => {
+      thirdSocket.onclose?.();
+    });
+    expect(MockWebSocket.instances).toHaveLength(3);
+
+    // Advance 4s for next backoff (4s)
+    act(() => {
+      vi.advanceTimersByTime(3999);
+    });
+    expect(MockWebSocket.instances).toHaveLength(3);
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(MockWebSocket.instances).toHaveLength(4);
+  });
+
+  it("successful reconnect reports open lifecycle again and resets backoff to 1s", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onSocketLifecycle = vi.fn();
+
+    render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+
+    const firstSocket = MockWebSocket.instances[0];
+
+    // First socket opens and then closes
+    act(() => {
+      firstSocket.onopen?.();
+    });
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-123", "open");
+
+    act(() => {
+      firstSocket.onclose?.();
+    });
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-123", "closed");
+
+    // Advance 1s -> 2nd socket connects
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const secondSocket = MockWebSocket.instances[1];
+
+    // 2nd socket fails immediately -> backoff becomes 2s
+    act(() => {
+      secondSocket.onclose?.();
+    });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(3);
+    const thirdSocket = MockWebSocket.instances[2];
+
+    // 3rd socket successfully opens -> resets backoff!
+    act(() => {
+      thirdSocket.onopen?.();
+    });
+    expect(onSocketLifecycle).toHaveBeenLastCalledWith("session-123", "open");
+
+    // 3rd socket closes abnormally later
+    act(() => {
+      thirdSocket.onclose?.();
+    });
+    expect(onSocketLifecycle).toHaveBeenLastCalledWith("session-123", "closed");
+
+    // Because backoff was reset to 0, next reconnect must happen after 1s (not 4s or 8s)
+    act(() => {
+      vi.advanceTimersByTime(999);
+    });
+    expect(MockWebSocket.instances).toHaveLength(3);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(MockWebSocket.instances).toHaveLength(4);
+  });
+
+  it("unmount does not schedule a re-dial or fire lifecycle events", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onSocketLifecycle = vi.fn();
+
+    const view = render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    const firstSocket = MockWebSocket.instances[0];
+
+    // Unmount the component
+    view.unmount();
+    expect(firstSocket.close).toHaveBeenCalled();
+
+    // Trigger onclose on the unmounted socket (simulate browser close event)
+    act(() => {
+      firstSocket.onclose?.();
+    });
+
+    // Advance time significantly
+    act(() => {
+      vi.advanceTimersByTime(30000);
+    });
+
+    // No new WebSockets should be created, no lifecycle events fired
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(onSocketLifecycle).not.toHaveBeenCalled();
+  });
+
+  it("changing session cancels any pending reconnect timer and connects only to the new session", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onSocketLifecycle = vi.fn();
+
+    const view = render(
+      <RemoteTerminal
+        sessionId="session-a"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+
+    const socketA = MockWebSocket.instances[0];
+    expect(socketA.url).toContain("session-a");
+
+    // Close socket A abnormally to start reconnect timer (1s)
+    act(() => {
+      socketA.onclose?.();
+    });
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-a", "closed");
+
+    // Switch to session B before the 1s timer elapses (e.g. at 500ms)
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    view.rerender(
+      <RemoteTerminal
+        sessionId="session-b"
+        token="token-abc"
+        onSocketLifecycle={onSocketLifecycle}
+      />,
+    );
+
+    // Session B is dialed immediately
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const socketB = MockWebSocket.instances[1];
+    expect(socketB.url).toContain("session-b");
+
+    // Advance beyond the remaining 500ms of session A's timer
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+
+    // No extra dials for session A occurred
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it("guards against double-dialing so only one reconnect timer runs at a time", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    const firstSocket = MockWebSocket.instances[0];
+
+    // Trigger multiple close callbacks on the same socket
+    act(() => {
+      firstSocket.onclose?.();
+      firstSocket.onclose?.();
+    });
+
+    // Advance 1s: exactly one new socket is dialed
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it("caps backoff delay at 10s and continues retrying indefinitely", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    // 1st close -> 1s
+    act(() => { MockWebSocket.instances[0].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    // 2nd close -> 2s
+    act(() => { MockWebSocket.instances[1].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(MockWebSocket.instances).toHaveLength(3);
+
+    // 3rd close -> 4s
+    act(() => { MockWebSocket.instances[2].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(4000); });
+    expect(MockWebSocket.instances).toHaveLength(4);
+
+    // 4th close -> 8s
+    act(() => { MockWebSocket.instances[3].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(8000); });
+    expect(MockWebSocket.instances).toHaveLength(5);
+
+    // 5th close -> 10s (capped)
+    act(() => { MockWebSocket.instances[4].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(9999); });
+    expect(MockWebSocket.instances).toHaveLength(5);
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(MockWebSocket.instances).toHaveLength(6);
+
+    // 6th close -> 10s (still capped)
+    act(() => { MockWebSocket.instances[5].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(9999); });
+    expect(MockWebSocket.instances).toHaveLength(6);
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(MockWebSocket.instances).toHaveLength(7);
   });
 
   it("reattaches to the newly focused session and ignores callbacks from the old socket", async () => {
@@ -232,6 +519,68 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).toHaveBeenNthCalledWith(7, new TextEncoder().encode("pasted text"));
   });
 
+  it("does not shatter IME jamo keydowns into individual PTY writes", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "ㄱ" });
+    fireEvent.keyDown(surface(), { key: "ㅏ" });
+    fireEvent.keyDown(surface(), { key: "ㄴ", isComposing: true });
+    fireEvent.keyDown(surface(), { key: "Enter", isComposing: true });
+    fireEvent.keyDown(surface(), { key: "Process" });
+
+    expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it("commits IME composition through the input sink as one write", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+
+    fireEvent.compositionStart(sink);
+    fireEvent.compositionUpdate(sink, { data: "ㄱ" });
+    fireEvent.input(sink, { target: { value: "ㄱ" } });
+    fireEvent.compositionUpdate(sink, { data: "가" });
+    fireEvent.input(sink, { target: { value: "가" } });
+    fireEvent.compositionEnd(sink, { data: "가" });
+    fireEvent.compositionStart(sink);
+    fireEvent.input(sink, { target: { value: "나" } });
+    fireEvent.compositionEnd(sink, { data: "나" });
+
+    expect(socket().send).toHaveBeenCalledTimes(2);
+    expect(socket().send).toHaveBeenNthCalledWith(1, new TextEncoder().encode("가"));
+    expect(socket().send).toHaveBeenNthCalledWith(2, new TextEncoder().encode("나"));
+    expect(sink).toHaveValue("");
+  });
+
+  it("renders and clears a local preedit overlay while composing", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+
+    expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+    fireEvent.compositionStart(sink);
+    fireEvent.input(sink, { target: { value: "ㄱ" } });
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("ㄱ");
+    fireEvent.compositionEnd(sink, { data: "ㄱ" });
+    expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("ㄱ"));
+  });
+
+  it("sends non-composing sink input as text without keydown duplication", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+
+    fireEvent.input(sink, { target: { value: "ls" } });
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("ls"));
+
+    fireEvent.keyDown(surface(), { key: "a" });
+    expect(socket().send).toHaveBeenNthCalledWith(2, new TextEncoder().encode("a"));
+    expect(sink).toHaveValue("");
+  });
+
   it("preserves control modifiers for physical navigation keys", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
@@ -287,5 +636,52 @@ describe("remote terminal grid contract", () => {
     await waitFor(() => {
       expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "resize", cols: 64, rows: 20 }));
     });
+  });
+
+  it("renders surface with overflow-hidden to prevent layout scrollbars", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    expect(surface()).toHaveClass("overflow-hidden");
+    expect(surface()).not.toHaveClass("overflow-auto");
+  });
+
+  it("sends clamped scroll message on wheel events over an open socket", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    act(() => socket().onopen?.());
+    socket().send.mockClear();
+
+    // Positive deltaY (scrolling down toward newer content)
+    fireEvent.wheel(surface(), { deltaY: 60 });
+    expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: 3 }));
+
+    // Small negative deltaY (< 20) falls back to sign-only (-1)
+    fireEvent.wheel(surface(), { deltaY: -10 });
+    expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: -1 }));
+
+    // Large deltaY clamped to max 10
+    fireEvent.wheel(surface(), { deltaY: 500 });
+    expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: 10 }));
+
+    // Large negative deltaY clamped to min -10
+    fireEvent.wheel(surface(), { deltaY: -500 });
+    expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: -10 }));
+
+    // Zero deltaY sends nothing
+    socket().send.mockClear();
+    fireEvent.wheel(surface(), { deltaY: 0 });
+    expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it("does not send scroll message on wheel event when socket is not open", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    // Socket readyState is CONNECTING (0) before onopen
+    socket().readyState = 0;
+    fireEvent.wheel(surface(), { deltaY: 60 });
+    expect(socket().send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"scroll"'));
   });
 });

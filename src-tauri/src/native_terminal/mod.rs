@@ -50,6 +50,9 @@ pub use renderer::{
     canonical_scenario, GlyphAtlasStats, NativeTerminalRenderer, OffscreenFrame, RendererConfig,
     SelectionSnapshot,
 };
-pub use scroll::{ScrollViewport, ScrollbarState};
+pub use scroll::{
+    compute_scrollbar_overlay_rect, macos_wheel_scroll_rows, ScrollViewport, ScrollbarOverlayState,
+    ScrollbarState,
+};
 pub use snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 pub use terminal::NativeTerminal;

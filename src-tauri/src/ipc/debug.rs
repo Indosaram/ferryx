@@ -18,7 +18,7 @@ pub struct SwitchDebugEntry {
 /// opts in with `FERRYX_SWITCH_DEBUG=1`, which is what makes the shipped app
 /// observable without running it under the Vite dev server (and therefore
 /// without HMR reloads tearing the page down mid-keystroke).
-pub(crate) fn switch_debug_sink_enabled(debug_build: bool, env_flag: Option<&str>) -> bool {
+pub fn switch_debug_sink_enabled(debug_build: bool, env_flag: Option<&str>) -> bool {
     debug_build || env_flag == Some("1")
 }
 

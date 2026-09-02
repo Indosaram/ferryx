@@ -134,12 +134,13 @@ pub struct RemoteDeleteWorktreeRequest {
     pub delete_branch: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientControlMessage {
     Resize { cols: u16, rows: u16 },
     Signal { signal: String },
     Ping,
+    Scroll { rows: i16 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,4 +210,27 @@ pub enum RemoteGridFrame {
         cursor: RemoteGridCursor,
         lines: Vec<RemoteGridLine>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_control_message_scroll_serde_roundtrip() {
+        let msg = ClientControlMessage::Scroll { rows: 3 };
+        let serialized = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(serialized, r#"{"type":"scroll","rows":3}"#);
+
+        let deserialized: ClientControlMessage =
+            serde_json::from_str(r#"{"type":"scroll","rows":3}"#).expect("deserialize positive");
+        assert_eq!(deserialized, ClientControlMessage::Scroll { rows: 3 });
+
+        let deserialized_neg: ClientControlMessage =
+            serde_json::from_str(r#"{"type":"scroll","rows":-5}"#).expect("deserialize negative");
+        assert_eq!(deserialized_neg, ClientControlMessage::Scroll { rows: -5 });
+
+        let malformed = serde_json::from_str::<ClientControlMessage>(r#"{"type":"scroll","rows":"abc"}"#);
+        assert!(malformed.is_err());
+    }
 }

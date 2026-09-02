@@ -153,6 +153,7 @@ impl FontManager {
     ) -> RasterizedGlyph {
         let total_pixels = (width * height) as usize;
         let mut buffer = vec![0u8; total_pixels];
+        let mut subpixel_buffer = vec![0u8; total_pixels * 4];
 
         if text.is_empty() || text.chars().all(|c| c.is_whitespace()) || width == 0 || height == 0 {
             return RasterizedGlyph::Alpha(buffer);
@@ -203,10 +204,10 @@ impl FontManager {
                     });
 
                 if all_in_first {
-                    rendered_base = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_alpha_buffer(
+                    rendered_base = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_subpixel_buffer(
                         font,
                         text,
-                        &mut buffer,
+                        &mut subpixel_buffer,
                         width,
                         height,
                         effective_font_size,
@@ -215,10 +216,10 @@ impl FontManager {
                         false,
                     );
                 } else {
-                    rendered_base = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_alpha_buffer(
+                    rendered_base = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_subpixel_buffer(
                         font,
                         &first_ch.to_string(),
-                        &mut buffer,
+                        &mut subpixel_buffer,
                         width,
                         height,
                         effective_font_size,
@@ -232,10 +233,10 @@ impl FontManager {
                             let comb_font_opt =
                                 system.resolve_font_for_char(comb_ch, bold, italic, scale);
                             if let Some(ref comb_font) = comb_font_opt {
-                                let _ = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_alpha_buffer(
+                                let _ = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_subpixel_buffer(
                                     comb_font,
                                     &comb_ch.to_string(),
-                                    &mut buffer,
+                                    &mut subpixel_buffer,
                                     width,
                                     height,
                                     effective_font_size,
@@ -295,7 +296,11 @@ impl FontManager {
             );
         }
 
-        RasterizedGlyph::Alpha(buffer)
+        if subpixel_buffer.iter().any(|&b| b != 0) {
+            RasterizedGlyph::Subpixel(subpixel_buffer)
+        } else {
+            RasterizedGlyph::Alpha(buffer)
+        }
     }
 
     /// Rasterizes text into an alpha mask or RGBA color buffer with dimensions `(width, height)` at 1.0x scale.
@@ -346,7 +351,7 @@ mod tests {
             .into_buffer();
         assert_eq!(
             ascii_mask.len(),
-            (metrics.width_px * metrics.height_px) as usize
+            (metrics.width_px * metrics.height_px * 4) as usize
         );
         assert!(
             !ascii_mask.iter().all(|&b| b == 0),
@@ -358,7 +363,7 @@ mod tests {
             .into_buffer();
         assert_eq!(
             cjk_mask.len(),
-            (metrics.width_px * 2 * metrics.height_px) as usize
+            (metrics.width_px * 2 * metrics.height_px * 4) as usize
         );
         assert!(
             !cjk_mask.iter().all(|&b| b == 0),
@@ -386,9 +391,12 @@ mod tests {
         let mask = mgr
             .rasterize_glyph("실", 16, 16, false, false)
             .into_buffer();
-        assert_eq!(mask.len(), 256);
+        assert_eq!(mask.len(), 1024);
 
-        let ink_sum: u64 = mask.iter().map(|&b| b as u64).sum();
+        let ink_sum: u64 = mask
+            .chunks_exact(4)
+            .map(|px| px[3] as u64)
+            .sum();
         let density = (ink_sum as f64) / 255.0 / 256.0;
 
         // Thin on this machine is ~0.098, Regular (wght=400) is ~0.188
@@ -446,7 +454,8 @@ mod tests {
         let mut bottom_ink_l = 0u64;
         for y in 0..h as usize {
             for x in 0..w as usize {
-                let val = l_mask[y * (w as usize) + x] as u64;
+                let idx = (y * (w as usize) + x) * 4;
+                let val = l_mask[idx + 3] as u64;
                 if y < mid_y {
                     top_ink_l += val;
                 } else {
@@ -466,7 +475,8 @@ mod tests {
         let mut bottom_ink_p = 0u64;
         for y in 0..h as usize {
             for x in 0..w as usize {
-                let val = p_mask[y * (w as usize) + x] as u64;
+                let idx = (y * (w as usize) + x) * 4;
+                let val = p_mask[idx + 3] as u64;
                 if y < mid_y {
                     top_ink_p += val;
                 } else {
@@ -485,7 +495,10 @@ mod tests {
         let bottom_quarter_ink: u64 = ((h * 3 / 4) as usize..h as usize)
             .map(|y| {
                 (0..w as usize)
-                    .map(|x| g_mask[y * (w as usize) + x] as u64)
+                    .map(|x| {
+                        let idx = (y * (w as usize) + x) * 4;
+                        g_mask[idx + 3] as u64
+                    })
                     .sum::<u64>()
             })
             .sum();
@@ -500,7 +513,10 @@ mod tests {
         let mut row_sums: Vec<(usize, u64)> = (0..h as usize)
             .map(|y| {
                 let sum: u64 = (0..w as usize)
-                    .map(|x| line_mask[y * (w as usize) + x] as u64)
+                    .map(|x| {
+                        let idx = (y * (w as usize) + x) * 4;
+                        line_mask[idx + 3] as u64
+                    })
                     .sum();
                 (y, sum)
             })
@@ -565,7 +581,7 @@ mod tests {
         let mask = mgr
             .rasterize_glyph("I", odd_width, metrics.height_px, false, false)
             .into_buffer();
-        assert_eq!(mask.len(), (odd_width * metrics.height_px) as usize);
+        assert_eq!(mask.len(), (odd_width * metrics.height_px * 4) as usize);
         let total_coverage: u32 = mask.iter().map(|&b| b as u32).sum();
         assert!(total_coverage > 0, "glyph mask must not be empty");
     }
@@ -579,7 +595,7 @@ mod tests {
             let mask = mgr
                 .rasterize_glyph("M", tight_width, metrics.height_px, false, false)
                 .into_buffer();
-            assert_eq!(mask.len(), (tight_width * metrics.height_px) as usize);
+            assert_eq!(mask.len(), (tight_width * metrics.height_px * 4) as usize);
             let total_coverage: u32 = mask.iter().map(|&b| b as u32).sum();
             assert!(
                 total_coverage > 0,

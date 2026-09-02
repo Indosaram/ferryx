@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { deserializeWorkspaceState, serializeWorkspaceState } from "../lib/sessionPersistence";
+import { resetAgentAutoResumeGuard } from "../lib/agentAutoResume";
 import { isTauriRuntime, listTerminalSessions, loadSession } from "../lib/tauri";
 import { defaultTauriTransport } from "../lib/terminalTransport/tauriTransport";
 import type { PersistedWorkspaceSession } from "../lib/types";
@@ -41,6 +42,7 @@ export function resetWorkspaceRestore(workspaceId?: string): void {
     restoreStatusByWorkspace.clear();
     preloadedRestoreStateByWorkspace.clear();
   }
+  resetAgentAutoResumeGuard(workspaceId);
 }
 
 export type UseWorkspaceRestoreOptions = {

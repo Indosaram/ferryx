@@ -129,6 +129,16 @@ body {
 }
 
 @layer utilities {
+  /* Re-enable text selection inside read-only content regions while the
+     app shell keeps `user-select: none` (see body above). Apply the
+     `selectable` class to containers whose text users may want to copy
+     (settings values, paths, dialogs, logs, etc.). */
+  .selectable,
+  .selectable * {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
   .drag-region {
     -webkit-app-region: drag;
   }

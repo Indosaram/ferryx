@@ -20,10 +20,14 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, MainThreadMarker};
-use objc2_app_kit::{NSView, NSWindow, NSWindowOrderingMode};
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+#[allow(deprecated)] // NSFilenamesPboardType mirrors wry's drag payload collection.
+use objc2_app_kit::NSFilenamesPboardType;
+use objc2_app_kit::{
+    NSDragOperation, NSDraggingInfo, NSPasteboardType, NSView, NSWindow, NSWindowOrderingMode,
+};
+use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
@@ -45,6 +49,63 @@ fn log_first_responder_error_once(msg: &str) {
 
 use crate::native_terminal::error::NativeTerminalError;
 
+/// Appends one JSONL record to the shared switch-debug log so release builds
+/// (which have no devtools console) can be traced after the fact.
+///
+/// Tracing is on in debug builds and in release builds launched with
+/// `FERRYX_SWITCH_DEBUG=1`, matching the JS-side `switchDebug` sink and the
+/// `cmd_switch_debug_log` command. When disabled this is a no-op, so the drag
+/// instrumentation below is free in normal operation.
+fn switch_debug_log(event: &str, details: serde_json::Value) {
+    if !crate::ipc::debug::switch_debug_sink_enabled(
+        cfg!(debug_assertions),
+        std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref(),
+    ) {
+        return;
+    }
+    let wall_time_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let record = serde_json::json!({
+        "runId": "rust-native-terminal",
+        "sequence": 0,
+        "event": event,
+        "wallTimeMs": wall_time_ms,
+        "details": details,
+    });
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/ferryx-switch-debug.jsonl")
+        .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()));
+}
+
+/// Reads the file paths offered by a drag session, mirroring wry's
+/// `collect_paths` so the instrumentation logs the same payload the webview
+/// would receive (empty when the pasteboard carries no filenames).
+#[allow(deprecated)] // NSFilenamesPboardType matches wry's collect_paths; logging must mirror what the webview sees.
+fn drag_info_paths(drag_info: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<String> {
+    let pb = drag_info.draggingPasteboard();
+    let filenames_type: Retained<NSPasteboardType> =
+        unsafe { Retained::retain(NSFilenamesPboardType as *const NSPasteboardType as *mut NSPasteboardType) }
+            .expect("NSFilenamesPboardType is a non-null static");
+    let types = NSArray::from_retained_slice(&[filenames_type]);
+    let mut paths = Vec::new();
+    if pb.availableTypeFromArray(&types).is_some() {
+        if let Some(plist) = pb.propertyListForType(unsafe { NSFilenamesPboardType }) {
+            if let Some(array) = plist.downcast::<NSArray>().ok() {
+                for item in array {
+                    if let Ok(path) = item.downcast::<NSString>() {
+                        paths.push(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
 define_class!(
     /// Custom NSView subclass that is completely pointer-transparent.
     /// Returning `None` from `hitTest:` allows all clicks and pointer interactions
@@ -65,8 +126,89 @@ define_class!(
         fn is_flipped(&self) -> bool {
             true
         }
+
+        // Drag instrumentation: this view sits ABOVE the WKWebView in the
+        // contentView hierarchy and is pointer-transparent only for mouse
+        // events (`hitTest:` returns nil). AppKit's drag-session routing is a
+        // separate path, so these overrides log whether the drag reaches this
+        // view at all. Each forwards to the default NSView implementation so
+        // the drop keeps falling through to the webview.
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(
+            &self,
+            drag_info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            let location = drag_info.draggingLocation();
+            let frame = self.frame();
+            switch_debug_log(
+                "terminal.surface.drag.native.entered",
+                serde_json::json!({
+                    "location": { "x": location.x, "y": location.y },
+                    "frame": {
+                        "x": frame.origin.x,
+                        "y": frame.origin.y,
+                        "width": frame.size.width,
+                        "height": frame.size.height,
+                    },
+                    "paths": drag_info_paths(drag_info),
+                }),
+            );
+            unsafe { msg_send![super(self), draggingEntered: drag_info] }
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(
+            &self,
+            drag_info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            let location = drag_info.draggingLocation();
+            switch_debug_log(
+                "terminal.surface.drag.native.updated",
+                serde_json::json!({
+                    "location": { "x": location.x, "y": location.y },
+                }),
+            );
+            unsafe { msg_send![super(self), draggingUpdated: drag_info] }
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(
+            &self,
+            drag_info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> bool {
+            let location = drag_info.draggingLocation();
+            switch_debug_log(
+                "terminal.surface.drag.native.performDrop",
+                serde_json::json!({
+                    "location": { "x": location.x, "y": location.y },
+                    "paths": drag_info_paths(drag_info),
+                }),
+            );
+            unsafe { msg_send![super(self), performDragOperation: drag_info] }
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, drag_info: &ProtocolObject<dyn NSDraggingInfo>) {
+            switch_debug_log("terminal.surface.drag.native.exited", serde_json::json!({}));
+            unsafe { msg_send![super(self), draggingExited: drag_info] }
+        }
     }
 );
+
+impl FerryxNativeTerminalView {
+    pub fn window_backing_scale_factor(&self) -> f64 {
+        let Some(window) = self.window() else {
+            return 1.0;
+        };
+        let scale = window.backingScaleFactor();
+        let scale: f64 = scale.into();
+        if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        }
+    }
+}
 
 impl FerryxNativeTerminalView {
     /// Initializes a new instance with the given frame bounds.
@@ -186,6 +328,16 @@ impl MacosCompositorTarget {
     /// Returns the raw-window-handle target for wgpu surface creation.
     pub fn surface_target(&self) -> Arc<NativeChildViewHandle> {
         Arc::clone(&self.handle)
+    }
+
+    pub fn window_backing_scale_factor(&self) -> f64 {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let _ = mtm;
+            let view = unsafe { &*(self.view_ptr.as_ptr() as *const FerryxNativeTerminalView) };
+            view.window_backing_scale_factor()
+        } else {
+            1.0
+        }
     }
 
     /// Returns the target descriptor for this platform compositor target.

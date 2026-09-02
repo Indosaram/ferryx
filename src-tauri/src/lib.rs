@@ -125,10 +125,16 @@ pub fn is_unshifted_cmd_w_characters(characters: Option<&str>) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_C: u16 = 8;
+
+#[cfg(target_os = "macos")]
 pub const ANSI_KEY_CODE_W: u16 = 13;
 
 #[cfg(target_os = "macos")]
 pub const ANSI_KEY_CODE_V: u16 = 9;
+
+#[cfg(target_os = "macos")]
+pub const NATIVE_TERMINAL_COPY_OR_INTERRUPT_EVENT: &str = "native_terminal_copy_or_interrupt";
 
 #[cfg(target_os = "macos")]
 pub const ANSI_KEY_CODE_1: u16 = 18;
@@ -191,6 +197,17 @@ pub fn is_unshifted_cmd_v(
     is_unshifted_cmd_w_modifiers(flags)
         && (characters.is_some_and(|chars| chars.eq_ignore_ascii_case("v"))
             || key_code == ANSI_KEY_CODE_V)
+}
+
+#[cfg(target_os = "macos")]
+pub fn is_unshifted_cmd_c(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    characters: Option<&str>,
+    key_code: u16,
+) -> bool {
+    is_unshifted_cmd_w_modifiers(flags)
+        && (characters.is_some_and(|chars| chars.eq_ignore_ascii_case("c"))
+            || key_code == ANSI_KEY_CODE_C)
 }
 
 #[cfg(target_os = "macos")]
@@ -317,59 +334,105 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                     false
                 }
             };
-            let mut latch = paste_latch.get();
-            let action = latch.handle_event(
-                event_type,
-                flags,
-                chars_str.as_deref(),
-                key_code,
-                has_focused_terminal,
-            );
-            paste_latch.set(latch);
-            if (cfg!(debug_assertions)
-                || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1"))
-                && event_type == NSEventType::KeyDown
-                && is_unshifted_cmd_v(flags, chars_str.as_deref(), key_code)
+            if event_type == NSEventType::KeyDown
+                && is_unshifted_cmd_c(flags, chars_str.as_deref(), key_code)
             {
-                use std::io::Write;
-                let action_str = match action {
-                    NativeTerminalPasteAction::EmitAndConsume => "EmitAndConsume",
-                    NativeTerminalPasteAction::ConsumeOnly => "ConsumeOnly",
-                    NativeTerminalPasteAction::PassThrough => "PassThrough",
-                };
-                let wall_time_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let record = serde_json::json!({
-                    "runId": "rust-monitor",
-                    "sequence": 0,
-                    "event": "terminal.surface.paste.monitor",
-                    "wallTimeMs": wall_time_ms,
-                    "details": {
-                        "action": action_str,
-                        "hasFocusedTerminal": has_focused_terminal,
-                        "keyCode": key_code,
-                        "characters": chars_str.as_deref(),
-                    }
-                });
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/ferryx-switch-debug.jsonl")
+                if cfg!(debug_assertions)
+                    || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1")
                 {
-                    let _ = writeln!(file, "{}", record);
+                    use std::io::Write;
+                    let action_str = if has_focused_terminal {
+                        "EmitAndConsume"
+                    } else {
+                        "PassThrough"
+                    };
+                    let wall_time_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let record = serde_json::json!({
+                        "runId": "rust-monitor",
+                        "sequence": 0,
+                        "event": "terminal.surface.copy_or_interrupt.monitor",
+                        "wallTimeMs": wall_time_ms,
+                        "details": {
+                            "action": action_str,
+                            "hasFocusedTerminal": has_focused_terminal,
+                            "keyCode": key_code,
+                            "characters": chars_str.as_deref(),
+                        }
+                    });
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/ferryx-switch-debug.jsonl")
+                    {
+                        let _ = writeln!(file, "{}", record);
+                    }
                 }
-            }
-            match action {
-                NativeTerminalPasteAction::EmitAndConsume => {
+                if has_focused_terminal {
                     if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.emit("native_terminal_paste", ());
+                        let _ = window.emit(NATIVE_TERMINAL_COPY_OR_INTERRUPT_EVENT, ());
                     }
                     ptr::null_mut()
+                } else {
+                    event_ptr.as_ptr()
                 }
-                NativeTerminalPasteAction::ConsumeOnly => ptr::null_mut(),
-                NativeTerminalPasteAction::PassThrough => event_ptr.as_ptr(),
+            } else {
+                let mut latch = paste_latch.get();
+                let action = latch.handle_event(
+                    event_type,
+                    flags,
+                    chars_str.as_deref(),
+                    key_code,
+                    has_focused_terminal,
+                );
+                paste_latch.set(latch);
+                if (cfg!(debug_assertions)
+                    || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1"))
+                    && event_type == NSEventType::KeyDown
+                    && is_unshifted_cmd_v(flags, chars_str.as_deref(), key_code)
+                {
+                    use std::io::Write;
+                    let action_str = match action {
+                        NativeTerminalPasteAction::EmitAndConsume => "EmitAndConsume",
+                        NativeTerminalPasteAction::ConsumeOnly => "ConsumeOnly",
+                        NativeTerminalPasteAction::PassThrough => "PassThrough",
+                    };
+                    let wall_time_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let record = serde_json::json!({
+                        "runId": "rust-monitor",
+                        "sequence": 0,
+                        "event": "terminal.surface.paste.monitor",
+                        "wallTimeMs": wall_time_ms,
+                        "details": {
+                            "action": action_str,
+                            "hasFocusedTerminal": has_focused_terminal,
+                            "keyCode": key_code,
+                            "characters": chars_str.as_deref(),
+                        }
+                    });
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/ferryx-switch-debug.jsonl")
+                    {
+                        let _ = writeln!(file, "{}", record);
+                    }
+                }
+                match action {
+                    NativeTerminalPasteAction::EmitAndConsume => {
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.emit("native_terminal_paste", ());
+                        }
+                        ptr::null_mut()
+                    }
+                    NativeTerminalPasteAction::ConsumeOnly => ptr::null_mut(),
+                    NativeTerminalPasteAction::PassThrough => event_ptr.as_ptr(),
+                }
             }
         }
     });
@@ -435,6 +498,94 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     Ok(())
 }
 
+#[cfg(all(target_os = "macos", feature = "native-terminal"))]
+fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+) -> tauri::Result<()> {
+    use block2::RcBlock;
+    use objc2_app_kit::{NSEvent, NSEventMask, NSWindow};
+    use std::ptr::{self, NonNull};
+
+    let app_handle = app.handle().clone();
+    let surface_host = app
+        .state::<NativeTerminalSurfaceHostState>()
+        .inner()
+        .clone();
+    let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
+        let event = unsafe { event_ptr.as_ref() };
+        if let Some(window) = app_handle.get_webview_window("main") {
+            if let Ok(raw_window) = window.ns_window() {
+                if !raw_window.is_null() {
+                    let ns_window = unsafe { &*(raw_window as *const NSWindow) };
+                    if event.windowNumber() == ns_window.windowNumber() {
+                        if let Some(content_view) = ns_window.contentView() {
+                            let location = event.locationInWindow();
+                            let content_height = content_view.bounds().size.height;
+                            let logical_x = location.x;
+                            let logical_y = content_height - location.y;
+                            if let Some(session_id) =
+                                surface_host.session_at_logical_point(logical_x, logical_y)
+                            {
+                                let delta_y = event.scrollingDeltaY();
+                                let has_precise = event.hasPreciseScrollingDeltas();
+                                let rows = crate::native_terminal::macos_wheel_scroll_rows(
+                                    delta_y,
+                                    has_precise,
+                                );
+                                if rows != 0 {
+                                    if ipc::native_terminal::scroll_attached_native_terminal(
+                                        &surface_host,
+                                        &session_id,
+                                        crate::native_terminal::ScrollViewport::Delta(rows as isize),
+                                    )
+                                    .is_ok()
+                                    {
+                                        let surface_window = window.clone();
+                                        let state_inner = surface_host.clone();
+                                        let session_id_clone = session_id.clone();
+                                        let bounds =
+                                            surface_host.session_logical_bounds(&session_id);
+                                        let _ = window.run_on_main_thread(move || {
+                                            match bounds {
+                                                Some(logical_bounds) => {
+                                                    let _ = state_inner.render(
+                                                        &surface_window,
+                                                        crate::native_terminal::surface_host::NativeTerminalBoundsRequest {
+                                                            session_id: session_id_clone,
+                                                            bounds: logical_bounds,
+                                                        },
+                                                    );
+                                                }
+                                                None => {
+                                                    let _ = state_inner.get_receipt(
+                                                        &surface_window,
+                                                        &session_id_clone,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                                return ptr::null_mut();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        event_ptr.as_ptr()
+    });
+
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::ScrollWheel, &block)
+    };
+    if let Some(monitor) = monitor {
+        std::mem::forget(monitor);
+    }
+
+    Ok(())
+}
+
 /// Relays desktop-directed remote gateway events from the daemon (which owns the
 /// gateway) into Tauri events the frontend already listens for. Without this the
 /// remote client's selection requests never reach the desktop.
@@ -488,6 +639,63 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     }
 
     let builder = builder
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::DragDrop(drag_event) = event {
+                if crate::ipc::debug::switch_debug_sink_enabled(
+                    cfg!(debug_assertions),
+                    std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref(),
+                ) {
+                    let wall_time_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let details = match drag_event {
+                        tauri::DragDropEvent::Enter { paths, position } => serde_json::json!({
+                            "label": window.label(),
+                            "kind": "enter",
+                            "pathCount": paths.len(),
+                            "paths": paths,
+                            "position": { "x": position.x, "y": position.y },
+                        }),
+                        tauri::DragDropEvent::Over { position } => serde_json::json!({
+                            "label": window.label(),
+                            "kind": "over",
+                            "position": { "x": position.x, "y": position.y },
+                        }),
+                        tauri::DragDropEvent::Drop { paths, position } => serde_json::json!({
+                            "label": window.label(),
+                            "kind": "drop",
+                            "pathCount": paths.len(),
+                            "paths": paths,
+                            "position": { "x": position.x, "y": position.y },
+                        }),
+                        tauri::DragDropEvent::Leave => serde_json::json!({
+                            "label": window.label(),
+                            "kind": "leave",
+                        }),
+                        _ => serde_json::json!({
+                            "label": window.label(),
+                            "kind": "unknown",
+                        }),
+                    };
+                    let record = serde_json::json!({
+                        "runId": "rust-monitor",
+                        "sequence": 0,
+                        "event": "terminal.surface.dragdrop.window_event",
+                        "wallTimeMs": wall_time_ms,
+                        "details": details
+                    });
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/ferryx-switch-debug.jsonl")
+                        .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()));
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (window, event);
+        })
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             install_app_menu(app)?;
@@ -495,6 +703,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             install_macos_key_monitor(app)?;
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
             install_macos_terminal_focus_monitor(app)?;
+            #[cfg(all(target_os = "macos", feature = "native-terminal"))]
+            install_macos_terminal_scroll_monitor(app)?;
             #[cfg(all(target_os = "windows", feature = "native-terminal"))]
             install_windows_terminal_focus_monitor(app)?;
             ipc::browser_cli::start_browser_cli_server(
@@ -543,6 +753,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_send_input,
         cmd_native_terminal_scroll,
         cmd_native_terminal_scrollbar,
+        cmd_native_terminal_set_scrollbar_overlay,
         cmd_native_terminal_select,
         cmd_native_terminal_copy_selection,
         cmd_native_terminal_paste,
@@ -853,6 +1064,97 @@ mod tests {
             0
         ));
         assert!(!is_unshifted_cmd_w(NSEventModifierFlags::Command, None, 0));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_macos_cmd_c_shortcut_predicate_boundaries() {
+        use objc2_app_kit::NSEventModifierFlags;
+
+        // Accepted: unshifted Cmd+C (lowercase or uppercase, with or without caps lock)
+        assert!(is_unshifted_cmd_c(
+            NSEventModifierFlags::Command,
+            Some("c"),
+            ANSI_KEY_CODE_C
+        ));
+        assert!(is_unshifted_cmd_c(
+            NSEventModifierFlags::Command,
+            Some("C"),
+            ANSI_KEY_CODE_C
+        ));
+        assert!(is_unshifted_cmd_c(
+            NSEventModifierFlags::Command | NSEventModifierFlags::CapsLock,
+            Some("c"),
+            ANSI_KEY_CODE_C
+        ));
+        assert!(is_unshifted_cmd_c(
+            NSEventModifierFlags::Command | NSEventModifierFlags::CapsLock,
+            Some("C"),
+            ANSI_KEY_CODE_C
+        ));
+
+        // Rejected: Cmd+Shift+C
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+            Some("c"),
+            ANSI_KEY_CODE_C
+        ));
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+            Some("C"),
+            ANSI_KEY_CODE_C
+        ));
+
+        // Rejected: Cmd+V
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::Command,
+            Some("v"),
+            ANSI_KEY_CODE_V
+        ));
+
+        // Rejected: plain c (no Command modifier)
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::empty(),
+            Some("c"),
+            ANSI_KEY_CODE_C
+        ));
+
+        // Rejected: Ctrl+C
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::Control,
+            Some("c"),
+            ANSI_KEY_CODE_C
+        ));
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::Command | NSEventModifierFlags::Control,
+            Some("c"),
+            ANSI_KEY_CODE_C
+        ));
+
+        // Keycode fallback tests:
+        // Accepted: key code 8 with None or Korean character ("ㅊ" on 2-Set Korean keyboard)
+        assert!(is_unshifted_cmd_c(
+            NSEventModifierFlags::Command,
+            None,
+            ANSI_KEY_CODE_C
+        ));
+        assert!(is_unshifted_cmd_c(
+            NSEventModifierFlags::Command,
+            Some("ㅊ"),
+            ANSI_KEY_CODE_C
+        ));
+
+        // Rejected: other keycode without 'c' char
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::Command,
+            Some("a"),
+            0
+        ));
+        assert!(!is_unshifted_cmd_c(
+            NSEventModifierFlags::Command,
+            Some("ㅊ"),
+            0
+        ));
     }
 
     #[test]

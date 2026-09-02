@@ -965,6 +965,7 @@ async fn handle_terminal_socket(
                                 }
                             }
                             ClientControlMessage::Ping => {}
+                            ClientControlMessage::Scroll { .. } => {}
                         }
                     }
                 }
@@ -1051,8 +1052,17 @@ async fn handle_terminal_grid_socket(
 
     let initial_frame = {
         let mut mirror = mirror.lock();
-        if !snapshot.history.is_empty() && mirror.feed(&snapshot.history).is_err() {
+        if !snapshot.history_segments.is_empty() {
+            if mirror.feed_segments(&snapshot.history_segments).is_err() {
+                return;
+            }
+        } else if !snapshot.history.is_empty() && mirror.feed(&snapshot.history).is_err() {
             return;
+        }
+        if mirror.dimensions().ok() != Some((cols, rows)) {
+            if mirror.resize(cols, rows).is_err() {
+                return;
+            }
         }
         match mirror.full_frame() {
             Ok(frame) => frame,
@@ -1142,8 +1152,19 @@ async fn handle_terminal_grid_socket(
                                 Ok(mirror) => mirror,
                                 Err(_) => break,
                             };
-                            if replacement.feed(&snapshot.history).is_err() {
+                            if !snapshot.history_segments.is_empty() {
+                                if replacement.feed_segments(&snapshot.history_segments).is_err() {
+                                    break;
+                                }
+                            } else if !snapshot.history.is_empty()
+                                && replacement.feed(&snapshot.history).is_err()
+                            {
                                 break;
+                            }
+                            if replacement.dimensions().ok() != Some((cols, rows)) {
+                                if replacement.resize(cols, rows).is_err() {
+                                    break;
+                                }
                             }
                             let frame = match replacement.full_frame() {
                                 Ok(frame) => frame,
@@ -1152,8 +1173,19 @@ async fn handle_terminal_grid_socket(
                             *mirror = replacement;
                             frame
                         } else {
-                            if mirror.feed(&snapshot.history).is_err() {
+                            if !snapshot.history_segments.is_empty() {
+                                if mirror.feed_segments(&snapshot.history_segments).is_err() {
+                                    break;
+                                }
+                            } else if !snapshot.history.is_empty()
+                                && mirror.feed(&snapshot.history).is_err()
+                            {
                                 break;
+                            }
+                            if mirror.dimensions().ok() != Some((cols, rows)) {
+                                if mirror.resize(cols, rows).is_err() {
+                                    break;
+                                }
                             }
                             match mirror.full_frame() {
                                 Ok(frame) => frame,
@@ -1209,6 +1241,16 @@ async fn handle_terminal_grid_socket(
                                 }
                             }
                             ClientControlMessage::Ping => {}
+                            ClientControlMessage::Scroll { rows } => {
+                                let clamped_rows = rows.clamp(-50, 50);
+                                if clamped_rows != 0 {
+                                    if !enqueue_grid_operation(&recv_mirror, &recv_tx, move |mirror| {
+                                        mirror.scroll(clamped_rows)
+                                    }) {
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }

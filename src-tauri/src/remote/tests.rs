@@ -1428,7 +1428,7 @@ async fn test_occupied_port_enable_does_not_persist_enabled_intent() {
 
     // When: attempting to enable on the occupied port
     let enable_result = server
-        .handle_remote_configure(RemoteGatewayConfig {
+        .configure_gateway(RemoteGatewayConfig {
             mode: RemoteNetworkMode::LocalNetwork,
             port: occupied_port,
             allow_control: true,

@@ -6,6 +6,7 @@ use crate::remote::protocol::{RemoteActiveDesktopSelection, RemoteTerminalTabInf
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
+    REMOTE_GATEWAY_PORT,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -108,6 +109,7 @@ pub struct RemoteGatewayStatusResponse {
 #[serde(rename_all = "camelCase")]
 pub struct EnableRemoteGatewayRequest {
     pub mode: RemoteNetworkMode,
+    /// Deprecated, kept for wire compatibility, always ignored; gateway port is fixed to REMOTE_GATEWAY_PORT.
     pub port: Option<u16>,
     pub allow_control: Option<bool>,
 }
@@ -163,7 +165,7 @@ pub async fn cmd_remote_enable(
             let current = client.remote_get_status().await?;
             let config = RemoteGatewayConfig {
                 mode: request.mode,
-                port: request.port.unwrap_or(current.port),
+                port: REMOTE_GATEWAY_PORT,
                 allow_control: request.allow_control.unwrap_or(current.allow_control),
             };
             client.remote_configure(config).await?;
@@ -178,9 +180,7 @@ pub async fn cmd_remote_enable(
             {
                 let mut config = state.config.write();
                 config.mode = request.mode;
-                if let Some(port) = request.port {
-                    config.port = port;
-                }
+                config.port = REMOTE_GATEWAY_PORT;
                 if let Some(allow_ctrl) = request.allow_control {
                     config.allow_control = allow_ctrl;
                 }

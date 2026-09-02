@@ -128,7 +128,7 @@ export function WorktreeDeleteDialog({
           </button>
         </header>
 
-        <div className="space-y-4 p-4 text-xs">
+        <div className="selectable space-y-4 p-4 text-xs">
           <p className="text-muted-foreground">Review the branch state before deleting this worktree.</p>
           <div data-testid="worktree-delete-path" className="break-all rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-foreground">
             {worktree.path}

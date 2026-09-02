@@ -124,15 +124,17 @@ export function combineActivitySummaries(
 }
 
 /**
- * Visual precedence mirrors Orca: user attention wins over live work, live work wins over
- * retained notifications, and a completed-but-read agent is shown last.
+ * Visual precedence mirrors Orca: user attention wins over live work. A finished (unseen) session
+ * must flip its tab/worktree to an attention state even while another session in the same tab or
+ * worktree is still running, so unseen `done` ranks above `working`. A completed-but-read agent is
+ * shown last, and a bell-unread tab without completion stays below live work.
  */
 export function resolveActivityIndicator(summary: ActivitySummary | undefined): ActivityIndicatorState {
   if (!summary) return null;
   if (summary.hasWaiting) return "waiting";
+  if (summary.hasDone) return summary.hasUnread ? "unread" : "done";
   if (summary.hasWorking) return "working";
   if (summary.hasUnread) return "unread";
-  if (summary.hasDone) return "done";
   return null;
 }
 

@@ -54,6 +54,11 @@ pub struct PlatformCompositorTarget {
 }
 
 impl PlatformCompositorTarget {
+    #[cfg(target_os = "macos")]
+    pub fn window_backing_scale_factor(&self) -> f64 {
+        self.inner.window_backing_scale_factor()
+    }
+
     /// Creates and attaches the platform compositor target for the given window.
     pub fn new<R: Runtime>(window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
         #[cfg(target_os = "macos")]

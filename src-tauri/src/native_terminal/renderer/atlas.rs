@@ -50,7 +50,7 @@ impl GlyphAtlas {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -162,6 +162,10 @@ impl GlyphAtlas {
 
         match rasterized {
             RasterizedGlyph::Alpha(alpha_bytes) => {
+                let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+                for &a in &alpha_bytes {
+                    rgba.extend_from_slice(&[a, a, a, a]);
+                }
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: &self.mask_texture,
@@ -173,10 +177,35 @@ impl GlyphAtlas {
                         },
                         aspect: wgpu::TextureAspect::All,
                     },
-                    &alpha_bytes,
+                    &rgba,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(width),
+                        bytes_per_row: Some(width * 4),
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            RasterizedGlyph::Subpixel(subpixel_bytes) => {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.mask_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: self.cursor_x,
+                            y: self.cursor_y,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &subpixel_bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width * 4),
                         rows_per_image: Some(height),
                     },
                     wgpu::Extent3d {

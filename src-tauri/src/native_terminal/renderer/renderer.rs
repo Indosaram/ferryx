@@ -11,6 +11,7 @@ use super::row_cache::RowCacheManager;
 use super::types::{GlyphAtlasStats, OffscreenFrame, RendererConfig, SelectionSnapshot};
 use crate::native_terminal::composition::PhysicalBounds;
 use crate::native_terminal::error::NativeTerminalError;
+use crate::native_terminal::scroll::{compute_scrollbar_overlay_rect, ScrollbarOverlayState};
 use crate::native_terminal::snapshot::RenderSnapshot;
 
 pub struct NativeTerminalRenderer {
@@ -180,6 +181,7 @@ impl NativeTerminalRenderer {
             &glyph,
             clear_color,
             None,
+            &[],
         );
         target.copy_to_staging(&mut encoder);
         self.gpu.queue.submit(Some(encoder.finish()));
@@ -242,6 +244,7 @@ impl NativeTerminalRenderer {
             &glyph,
             clear_color,
             None,
+            &[],
         );
         self.gpu.queue.submit(Some(encoder.finish()));
         self.gpu.check_error()?;
@@ -258,6 +261,7 @@ impl NativeTerminalRenderer {
         surface_height_px: u32,
         format: wgpu::TextureFormat,
         viewport: PhysicalBounds,
+        scrollbar_overlay: Option<&ScrollbarOverlayState>,
     ) -> Result<(u16, u16), NativeTerminalError> {
         let (terminal_width_px, terminal_height_px) = self.validate_and_dims(snapshot)?;
         let right = viewport
@@ -309,6 +313,23 @@ impl NativeTerminalRenderer {
             instance.rect[1] += viewport.y as f32;
         }
 
+        let mut overlay_instances = Vec::new();
+        if let Some(overlay) = scrollbar_overlay {
+            if overlay.visible {
+                if let Some(metrics) = overlay.metrics {
+                    if let Some(rect) = compute_scrollbar_overlay_rect(
+                        viewport,
+                        metrics.total,
+                        metrics.offset,
+                        metrics.len,
+                        self.config.theme.foreground,
+                    ) {
+                        overlay_instances.push(rect);
+                    }
+                }
+            }
+        }
+
         let mut encoder = self
             .gpu
             .device
@@ -336,6 +357,7 @@ impl NativeTerminalRenderer {
                 a: default_bg_color[3] as f64,
             },
             Some(viewport),
+            &overlay_instances,
         );
         self.gpu.queue.submit(Some(encoder.finish()));
         self.gpu.check_error()?;
@@ -351,6 +373,26 @@ impl NativeTerminalRenderer {
         surface_height_px: u32,
         viewport: PhysicalBounds,
     ) -> Result<OffscreenFrame, NativeTerminalError> {
+        self.render_to_offscreen_viewport_with_overlay(
+            snapshot,
+            selection,
+            surface_width_px,
+            surface_height_px,
+            viewport,
+            None,
+        )
+    }
+
+    /// Renders snapshot passes with an optional scrollbar overlay to an offscreen viewport target.
+    pub fn render_to_offscreen_viewport_with_overlay(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        surface_width_px: u32,
+        surface_height_px: u32,
+        viewport: PhysicalBounds,
+        scrollbar_overlay: Option<&ScrollbarOverlayState>,
+    ) -> Result<OffscreenFrame, NativeTerminalError> {
         let target = RenderTarget::new(&self.gpu.device, surface_width_px, surface_height_px);
         let (rebuilt, reused) = self.render_to_surface_viewport(
             snapshot,
@@ -360,6 +402,7 @@ impl NativeTerminalRenderer {
             surface_height_px,
             TARGET_FORMAT,
             viewport,
+            scrollbar_overlay,
         )?;
 
         let mut encoder = self
@@ -374,6 +417,7 @@ impl NativeTerminalRenderer {
 
         let mut frame = target.readback_frame(&self.gpu.device, snapshot.rows)?;
         self.gpu.check_error()?;
+
         frame.rebuilt_row_count = rebuilt;
         frame.reused_row_count = reused;
         Ok(frame)

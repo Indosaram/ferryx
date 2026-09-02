@@ -1471,5 +1471,39 @@ describe("worktree tab and session isolation", () => {
       expect(result.current.state.sessions["session-inflight"].backendSessionId).toBe("backend-success-after-retry");
       expect(result.current.state.sessions["session-inflight"].lifecycle).toBe("running");
     });
+
+    it("SESSION_SCREEN_ACTIVITY sets session.agentType when agentType is inferred from manifestId and session.agentType was unset", () => {
+      const baseState = restoredSplitState();
+      expect(baseState.sessions["session-1"].agentType).toBeUndefined();
+
+      const nextState = workspaceReducer(baseState, {
+        type: "SESSION_SCREEN_ACTIVITY",
+        tabId: "tab-primary",
+        sessionId: "session-1",
+        state: "working",
+        ruleId: "omo_screen",
+        manifestId: "omo",
+        providerSession: { key: "session_id", id: "omo-sess-456" },
+      });
+
+      expect(nextState.sessions["session-1"].agentType).toBe("omo");
+      expect(nextState.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "omo-sess-456" });
+    });
+
+    it("APPLY_PROVIDER_SESSION_IF_MISSING sets providerSession and agentType when session.agentType is unset", () => {
+      const baseState = restoredSplitState();
+      expect(baseState.sessions["session-1"].agentType).toBeUndefined();
+      expect(baseState.sessions["session-1"].providerSession).toBeUndefined();
+
+      const nextState = workspaceReducer(baseState, {
+        type: "APPLY_PROVIDER_SESSION_IF_MISSING",
+        sessionId: "session-1",
+        providerSession: { key: "session_id", id: "claude-sess-789" },
+        agentType: "claude",
+      });
+
+      expect(nextState.sessions["session-1"].agentType).toBe("claude");
+      expect(nextState.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "claude-sess-789" });
+    });
   });
 });

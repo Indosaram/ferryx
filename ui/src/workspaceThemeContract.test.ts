@@ -50,7 +50,7 @@ describe("workspace shell theme contract", () => {
   it("keeps pane-local hover chrome at the reference contrast", () => {
     const source = readSource("./components/TerminalSplitView.tsx");
 
-    expect(source).toContain("border-b border-border/30 bg-background/85 backdrop-blur-md");
-    expect(source).not.toContain("border-b border-border/20 bg-background/50 backdrop-blur-md");
+    expect(source).toContain("border-b border-border/30 bg-background/85");
+    expect(source).not.toContain("border-b border-border/20 bg-background/50");
   });
 });

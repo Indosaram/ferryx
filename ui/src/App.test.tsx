@@ -19,6 +19,18 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
+if (!(window as any).__TAURI_INTERNALS__) {
+  (window as any).__TAURI_INTERNALS__ = {
+    invoke: () => Promise.resolve(),
+    transformCallback: () => 1,
+  };
+}
+if (!(window as any).__TAURI_EVENT_PLUGIN_INTERNALS__) {
+  (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+    unregisterListener: () => {},
+  };
+}
+
 Object.defineProperty(globalThis.navigator, "platform", {
   configurable: true,
   value: "MacIntel",
@@ -53,6 +65,7 @@ const native = {
   clearSession: vi.fn().mockResolvedValue(undefined),
   listTerminalSessions: vi.fn().mockResolvedValue([]),
   spawnTerminal: vi.fn().mockResolvedValue("mock-spawn-id"),
+  spawnTerminalDetailed: vi.fn().mockImplementation(async (req) => ({ sessionId: "mock-backend-id", daemonEpoch: "mock-epoch", session: { cwd: req.cwd } })),
   detectAgents: vi.fn().mockResolvedValue([]),
   writeTerminal: vi.fn().mockResolvedValue(undefined),
   isTauriRuntime: vi.fn(() => true),
@@ -90,6 +103,7 @@ const workspace = {
   syncWorktrees: vi.fn(),
   restoreWorkspace: vi.fn(),
   createBrowserTab: vi.fn().mockResolvedValue("browser-tab-1"),
+  dispatchWorkspaceAction: vi.fn(),
   reportRuntimeError: vi.fn(),
   storeState: {
     activeWorktreePath: "/repo/main",
@@ -142,7 +156,9 @@ vi.mock("./lib/tauri", () => ({
   clearSession: native.clearSession,
   listTerminalSessions: native.listTerminalSessions,
   spawnTerminal: native.spawnTerminal,
-  closeTerminal: vi.fn(),
+  spawnTerminalDetailed: native.spawnTerminalDetailed,
+  closeTerminal: vi.fn().mockResolvedValue(undefined),
+  attachTerminal: vi.fn().mockResolvedValue(undefined),
   getTerminalCwd: vi.fn(),
   resizeTerminal: vi.fn(),
   waitForTerminalExit: vi.fn(),
@@ -334,6 +350,7 @@ describe("App project workspace flow", () => {
       syncWorktrees: workspace.syncWorktrees,
       restoreWorkspace: workspace.restoreWorkspace,
       createBrowserTab: workspace.createBrowserTab,
+      dispatchWorkspaceAction: workspace.dispatchWorkspaceAction,
       subscribeTerminalBell: () => () => undefined,
     })) as any);
     localStorage.clear();
@@ -353,6 +370,8 @@ describe("App project workspace flow", () => {
     native.listTerminalSessions.mockResolvedValue([]);
     native.spawnTerminal.mockReset();
     native.spawnTerminal.mockResolvedValue("mock-spawn-id");
+    native.spawnTerminalDetailed.mockReset();
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({ sessionId: "mock-backend-id", daemonEpoch: "mock-epoch", session: { cwd: req.cwd } }));
     native.onNewTerminalTabMenu.mockReset();
     native.onSelectWorktreeMenu.mockReset();
     native.selectWorktreeMenuHandler = null;
@@ -2107,7 +2126,8 @@ describe("App project workspace flow", () => {
 
   it("lazy-loads SettingsDialog via React.lazy with Suspense", () => {
     const appSource = readFileSync(resolve(import.meta.dirname ?? ".", "App.tsx"), "utf-8");
-    expect(appSource).toMatch(/lazy\(\s*\(\)\s*=>\s*import\(\s*["']\.\/components\/SettingsDialog["']\s*\)/);
+    expect(appSource).toMatch(/lazy\(/);
+    expect(appSource).toMatch(/import\(\s*["']\.\/components\/SettingsDialog["']\s*\)/);
     expect(appSource).not.toMatch(/^import\s+\{[^}]*SettingsDialog[^}]*\}\s+from\s+["']\.\/components\/SettingsDialog["']/m);
   });
 
@@ -3399,6 +3419,160 @@ describe("App project workspace flow", () => {
       render(<App />);
 
       await waitFor(() => expect(workspace.reportRuntimeError).toHaveBeenCalledWith(badgeError));
+    });
+  });
+
+  describe("Automatic agent session resume on workspace restore", () => {
+    it("auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed", async () => {
+      native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+      native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+
+      const savedSession = {
+        version: 2,
+        timestamp: Date.now(),
+        activeWorkspaceId: "default",
+        workspaces: {
+          default: {
+            workspaceId: "default",
+            repoRoot: ".",
+            worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+            activeWorktreePath: "/repo/main",
+            layout: {
+              splitMode: "none" as const,
+              primaryTabId: "tab-1",
+              secondaryTabId: null,
+              activeTabId: "tab-1",
+              tabs: [
+                { id: "tab-1", sessionId: "agent-sess-1", label: "Agent 1", worktreePath: "/repo/main" },
+                { id: "tab-2", sessionId: "agent-sess-2", label: "Agent 2", worktreePath: "/repo/main" },
+                { id: "tab-3", sessionId: "plain-shell-sess", label: "Shell", worktreePath: "/repo/main" },
+                { id: "tab-4", sessionId: "unsupported-agent-sess", label: "Unsupported", worktreePath: "/repo/main" },
+              ],
+            },
+            terminalSessions: {
+              "agent-sess-1": {
+                sessionId: "agent-sess-1",
+                worktreePath: "/repo/main",
+                cwd: "/repo/main",
+                createdAt: Date.now(),
+                agentType: "claude",
+                providerSession: { key: "session_id", id: "uuid-claude-1" },
+              },
+              "agent-sess-2": {
+                sessionId: "agent-sess-2",
+                worktreePath: "/repo/main",
+                cwd: "/repo/main",
+                createdAt: Date.now(),
+                agentType: "claude",
+                providerSession: { key: "session_id", id: "uuid-claude-2" },
+              },
+              "plain-shell-sess": {
+                sessionId: "plain-shell-sess",
+                worktreePath: "/repo/main",
+                cwd: "/repo/main",
+                createdAt: Date.now(),
+              },
+              "unsupported-agent-sess": {
+                sessionId: "unsupported-agent-sess",
+                worktreePath: "/repo/main",
+                cwd: "/repo/main",
+                createdAt: Date.now(),
+                agentType: "unsupported-agent-xyz",
+                providerSession: { key: "session_id", id: "uuid-unsupported" },
+              },
+            },
+          },
+        },
+      };
+
+      native.loadSession.mockResolvedValue(savedSession as any);
+      native.listTerminalSessions.mockResolvedValue([]);
+
+      render(<App />);
+
+      await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+
+      // At t = 0: agent 1 should be initiated immediately
+      await waitFor(() => expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1));
+      expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clientRequestId: expect.any(String),
+          startup: expect.objectContaining({
+            kind: "agentResume",
+            agentType: "claude",
+            providerSession: expect.objectContaining({ id: "uuid-claude-1" }),
+          }),
+        }),
+      );
+
+      // At t = 400ms: agent 2 is initiated
+      await waitFor(
+        () => {
+          expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
+        },
+        { timeout: 1500 },
+      );
+      expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          startup: expect.objectContaining({
+            kind: "agentResume",
+            agentType: "claude",
+            providerSession: expect.objectContaining({ id: "uuid-claude-2" }),
+          }),
+        }),
+      );
+
+      // Plain-shell and unsupported-agent are NOT auto-resumed
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not crash and degrades silently when auto-resume spawn fails", async () => {
+      native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+      native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+
+      const savedSession = {
+        version: 2,
+        timestamp: Date.now(),
+        activeWorkspaceId: "default",
+        workspaces: {
+          default: {
+            workspaceId: "default",
+            repoRoot: ".",
+            worktrees: [{ path: "/repo/main", branch: "main", head: "abc", isMain: true, isLocked: false }],
+            activeWorktreePath: "/repo/main",
+            layout: {
+              splitMode: "none" as const,
+              primaryTabId: "tab-1",
+              secondaryTabId: null,
+              activeTabId: "tab-1",
+              tabs: [{ id: "tab-1", sessionId: "failing-agent-sess", label: "Agent", worktreePath: "/repo/main" }],
+            },
+            terminalSessions: {
+              "failing-agent-sess": {
+                sessionId: "failing-agent-sess",
+                worktreePath: "/repo/main",
+                cwd: "/repo/main",
+                createdAt: Date.now(),
+                agentType: "claude",
+                providerSession: { key: "session_id", id: "uuid-fail" },
+              },
+            },
+          },
+        },
+      };
+
+      native.loadSession.mockResolvedValue(savedSession as any);
+      native.listTerminalSessions.mockResolvedValue([]);
+      native.spawnTerminalDetailed.mockRejectedValue(new Error("Daemon failed to spawn"));
+
+      render(<App />);
+
+      await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
+      await waitFor(() => expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1));
+
+      // Must degrade silently: no reportRuntimeError calls from auto-resume failure
+      expect(workspace.reportRuntimeError).not.toHaveBeenCalled();
     });
   });
 });

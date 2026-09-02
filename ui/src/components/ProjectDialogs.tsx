@@ -139,7 +139,7 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
               <X className="size-3.5" />
             </button>
           </div>
-          <div className="space-y-3 p-3">
+          <div className="selectable space-y-3 p-3">
             <p className="text-xs text-muted-foreground">
               Add this folder as a separate Ferryx project.
             </p>
