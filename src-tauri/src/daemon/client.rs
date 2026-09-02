@@ -16,6 +16,7 @@ use serde_json::json;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -110,6 +111,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
+            | DaemonRequest::UpgradeBinary
     )
 }
 
@@ -138,6 +140,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
+        DaemonRequest::UpgradeBinary => "upgradeBinary",
         DaemonRequest::Shutdown => "shutdown",
     }
 }
@@ -266,11 +269,22 @@ pub struct DaemonAttachment {
     pub stream_task: tokio::task::JoinHandle<()>,
 }
 
+/// Pure function determining whether a daemon self-upgrade should be requested.
+/// Returns `true` if and only if both mtimes are known (`Some`) and the local GUI/on-disk
+/// binary mtime is strictly newer than the running daemon's binary mtime.
+pub fn should_request_upgrade(daemon_mtime: Option<u64>, own_mtime: Option<u64>) -> bool {
+    match (daemon_mtime, own_mtime) {
+        (Some(daemon), Some(own)) => own > daemon,
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub struct DaemonClient {
     socket_path: PathBuf,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
+    upgrade_requested: Arc<AtomicBool>,
 }
 
 impl Default for DaemonClient {
@@ -285,6 +299,7 @@ impl DaemonClient {
             socket_path: get_socket_path(),
             connection: Arc::new(Mutex::new(None)),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
+            upgrade_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -293,7 +308,12 @@ impl DaemonClient {
             socket_path,
             connection: Arc::new(Mutex::new(None)),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
+            upgrade_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub async fn upgrade_binary(&self) -> Result<DaemonResponse, IpcError> {
+        self.send_request(DaemonRequest::UpgradeBinary).await
     }
 
     pub fn epoch(&self) -> Option<u64> {
@@ -333,6 +353,56 @@ impl DaemonClient {
             .parse()
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
         DaemonStream::connect(format!("127.0.0.1:{port}")).await
+    }
+
+    fn maybe_trigger_upgrade_if_stale(&self, daemon_mtime_ms: Option<u64>) {
+        let Some(daemon_mtime) = daemon_mtime_ms else {
+            return;
+        };
+        if self
+            .upgrade_requested
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        let socket_path = self.socket_path.clone();
+        tokio::spawn(async move {
+            let own_mtime = tokio::task::spawn_blocking(|| {
+                let exe = std::env::current_exe().ok()?;
+                crate::daemon::server::get_file_mtime_ms(&exe)
+            })
+            .await
+            .unwrap_or(None);
+
+            if should_request_upgrade(Some(daemon_mtime), own_mtime) {
+                tracing::info!(
+                    "Daemon binary is stale (running daemon mtime: {daemon_mtime}, on-disk GUI mtime: {own_mtime:?}). Sending UpgradeBinary request."
+                );
+                let temp_client = DaemonClient::new_with_socket(socket_path);
+                match temp_client.send_request(DaemonRequest::UpgradeBinary).await {
+                    Ok(DaemonResponse::UpgradeScheduled) => {
+                        tracing::info!("Daemon upgrade scheduled successfully.");
+                    }
+                    Ok(DaemonResponse::UpgradeNotNeeded) => {
+                        tracing::info!("Daemon reported upgrade not needed.");
+                    }
+                    Ok(DaemonResponse::UpgradeDeferred) => {
+                        tracing::info!("Daemon reported upgrade deferred because active sessions are running.");
+                    }
+                    Ok(DaemonResponse::UpgradeUnsupported) => {
+                        tracing::info!("Daemon reported upgrade unsupported on this platform.");
+                    }
+                    Ok(other) => {
+                        tracing::warn!("Unexpected response to daemon upgrade request: {other:?}");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to send daemon upgrade request: {e}");
+                    }
+                }
+            }
+        });
     }
 
     async fn connect_or_spawn(&self) -> Result<DaemonStream, IpcError> {
@@ -451,7 +521,12 @@ impl DaemonClient {
         })?;
 
         match hs_resp {
-            DaemonResponse::HandshakeOk { version, epoch, .. } => {
+            DaemonResponse::HandshakeOk {
+                version,
+                epoch,
+                binary_mtime_ms,
+                ..
+            } => {
                 if version != DAEMON_PROTOCOL_VERSION {
                     return Err(daemon_protocol_mismatch_error(
                         DAEMON_PROTOCOL_VERSION,
@@ -459,6 +534,7 @@ impl DaemonClient {
                     ));
                 }
                 *self.epoch.write() = Some(epoch);
+                self.maybe_trigger_upgrade_if_stale(binary_mtime_ms);
                 Ok(ActiveConnection {
                     reader,
                     writer: write_half,
@@ -728,8 +804,13 @@ impl DaemonClient {
                 )
             })?;
             match resp {
-                DaemonResponse::HandshakeOk { version, .. }
-                    if version == DAEMON_PROTOCOL_VERSION => {}
+                DaemonResponse::HandshakeOk {
+                    version,
+                    binary_mtime_ms,
+                    ..
+                } if version == DAEMON_PROTOCOL_VERSION => {
+                    self.maybe_trigger_upgrade_if_stale(binary_mtime_ms);
+                }
                 DaemonResponse::SubscribeRemoteEventsOk => {}
                 DaemonResponse::Error { message } => {
                     return Err(IpcError::new(IpcErrorCode::InternalError, message));
@@ -813,7 +894,13 @@ impl DaemonClient {
         })?;
 
         match hs_resp {
-            DaemonResponse::HandshakeOk { version, .. } if version == DAEMON_PROTOCOL_VERSION => {}
+            DaemonResponse::HandshakeOk {
+                version,
+                binary_mtime_ms,
+                ..
+            } if version == DAEMON_PROTOCOL_VERSION => {
+                self.maybe_trigger_upgrade_if_stale(binary_mtime_ms);
+            }
             DaemonResponse::HandshakeOk { version, .. } => {
                 return Err(daemon_protocol_mismatch_error(
                     DAEMON_PROTOCOL_VERSION,
@@ -1337,6 +1424,8 @@ mod tests {
                 version: DAEMON_PROTOCOL_VERSION,
                 pid: std::process::id(),
                 epoch: 999,
+                binary_path: None,
+                binary_mtime_ms: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -1411,6 +1500,8 @@ mod tests {
                 version: DAEMON_PROTOCOL_VERSION,
                 pid: std::process::id(),
                 epoch: 999,
+                binary_path: None,
+                binary_mtime_ms: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -1743,6 +1834,8 @@ mod tests {
                 version: DAEMON_PROTOCOL_VERSION,
                 pid: std::process::id(),
                 epoch: 321,
+                binary_path: None,
+                binary_mtime_ms: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');
@@ -1852,6 +1945,8 @@ mod tests {
                 version: DAEMON_PROTOCOL_VERSION,
                 pid: std::process::id(),
                 epoch: 654,
+                binary_path: None,
+                binary_mtime_ms: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');
@@ -1998,5 +2093,22 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(2)
         );
+    }
+
+    #[test]
+    fn test_should_request_upgrade_all_branches() {
+        // Own strictly newer than daemon -> true
+        assert!(should_request_upgrade(Some(1000), Some(2000)));
+
+        // Daemon equal to own -> false
+        assert!(!should_request_upgrade(Some(2000), Some(2000)));
+
+        // Daemon newer than own -> false
+        assert!(!should_request_upgrade(Some(3000), Some(2000)));
+
+        // Either or both None -> false
+        assert!(!should_request_upgrade(None, Some(2000)));
+        assert!(!should_request_upgrade(Some(1000), None));
+        assert!(!should_request_upgrade(None, None));
     }
 }

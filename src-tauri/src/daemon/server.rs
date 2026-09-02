@@ -159,6 +159,80 @@ pub fn get_lock_path() -> PathBuf {
     get_runtime_dir().join("daemon.lock")
 }
 
+pub fn get_file_mtime_ms(path: &Path) -> Option<u64> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(duration.as_millis() as u64)
+}
+
+pub fn resolve_binary_identity_with<FExe, FMtime>(
+    get_exe: FExe,
+    get_mtime: FMtime,
+) -> (Option<String>, Option<u64>)
+where
+    FExe: Fn() -> std::io::Result<PathBuf>,
+    FMtime: Fn(&Path) -> Option<u64>,
+{
+    match get_exe() {
+        Ok(exe_path) => {
+            let mtime = get_mtime(&exe_path);
+            (Some(exe_path.to_string_lossy().into_owned()), mtime)
+        }
+        Err(error) => {
+            tracing::warn!("Failed to determine current_exe for binary identity: {error}");
+            (None, None)
+        }
+    }
+}
+
+pub fn resolve_binary_identity() -> (Option<String>, Option<u64>) {
+    resolve_binary_identity_with(std::env::current_exe, get_file_mtime_ms)
+}
+
+#[cfg(unix)]
+pub fn clear_cloexec(fd: std::os::unix::io::RawFd) -> Result<(), std::io::Error> {
+    // SAFETY: Foreign Function Interface to fcntl.
+    // Invariant: fd is a valid open file descriptor.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if (flags & libc::FD_CLOEXEC) != 0 {
+            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn perform_daemon_exec() -> Result<(), std::io::Error> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = std::env::current_exe()?;
+    tracing::info!("Re-executing daemon with binary at: {}", exe.display());
+
+    // Lock file semantics:
+    // The daemon lock is held via `libc::flock` on an open file descriptor (`DaemonLockFile`).
+    // Rust standard library opens files with `FD_CLOEXEC` by default.
+    // When `Command::exec()` is called, the kernel atomically replaces the process image
+    // (preserving the PID). Descriptors marked `FD_CLOEXEC` are closed by the kernel upon `exec()`,
+    // releasing the old flock. The newly exec'd daemon then re-acquires the lock cleanly in `run_server()`.
+    //
+    // Socket semantics:
+    // The existing socket file at `/tmp/rorca-{uid}/daemon.sock` is safely unlinked by the new
+    // daemon's `remove_stale_socket_after_lock` after it acquires the lock. No drop guards delete
+    // the socket prematurely.
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--daemon");
+    let err = cmd.exec();
+    tracing::error!("Daemon exec failed: {err}");
+    Err(err)
+}
+
 fn get_persistent_lock_path() -> Option<PathBuf> {
     std::env::var_os("FERRYX_DATA_DIR")
         .map(PathBuf::from)
@@ -753,6 +827,8 @@ pub struct DaemonServer {
     remote_state: Arc<RemoteGatewayState>,
     remote_server_handle: Arc<Mutex<Option<RemoteServerHandle>>>,
     epoch: u64,
+    binary_path: Option<String>,
+    binary_mtime_ms: Option<u64>,
     spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
     spawn_lock: tokio::sync::Mutex<()>,
     session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
@@ -812,6 +888,8 @@ impl DaemonServer {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(1);
 
+        let (binary_path, binary_mtime_ms) = resolve_binary_identity();
+
         // The gateway runs inside this process, so desktop-directed events must
         // be relayed to the GUI over the socket; without this sink they are
         // dropped and remote-issued selections never reach the desktop.
@@ -832,6 +910,8 @@ impl DaemonServer {
             remote_server_handle: Arc::new(Mutex::new(None)),
             agent_state_tx: broadcast::channel(64).0,
             epoch,
+            binary_path,
+            binary_mtime_ms,
             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
             spawn_lock: tokio::sync::Mutex::new(()),
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
@@ -865,7 +945,7 @@ impl DaemonServer {
         Option<String>,
         Option<crate::daemon::protocol::AgentProviderSession>,
     )> {
-        let mut report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
+        let report = serde_json::from_str::<AgentStateReport>(line.trim()).ok()?;
         if !matches!(report.state.as_str(), "working" | "blocked" | "idle") {
             return None;
         }
@@ -1017,6 +1097,8 @@ impl DaemonServer {
                             version: DAEMON_PROTOCOL_VERSION,
                             pid: std::process::id(),
                             epoch: self.epoch,
+                            binary_path: self.binary_path.clone(),
+                            binary_mtime_ms: self.binary_mtime_ms,
                         }
                     }
                 }
@@ -1316,6 +1398,9 @@ impl DaemonServer {
                         }
                     }
                 }
+                Ok(DaemonRequest::UpgradeBinary) => {
+                    self.handle_upgrade_binary().await
+                }
                 Ok(DaemonRequest::Shutdown) => {
                     std::process::exit(0);
                 }
@@ -1334,6 +1419,45 @@ impl DaemonServer {
                 break;
             }
         }
+    }
+
+    #[cfg(unix)]
+    async fn handle_upgrade_binary(&self) -> DaemonResponse {
+        let booted_mtime = self.binary_mtime_ms;
+        let on_disk_mtime = tokio::task::spawn_blocking(|| {
+            let exe = std::env::current_exe().ok()?;
+            get_file_mtime_ms(&exe)
+        })
+        .await
+        .unwrap_or(None);
+
+        if !crate::daemon::client::should_request_upgrade(booted_mtime, on_disk_mtime) {
+            return DaemonResponse::UpgradeNotNeeded;
+        }
+
+        let active_sessions = self.terminal_service.list_sessions();
+        if !active_sessions.is_empty() {
+            tracing::warn!(
+                "Deferring daemon binary upgrade because {} live terminal session(s) are active ({:?})",
+                active_sessions.len(),
+                active_sessions
+            );
+            return DaemonResponse::UpgradeDeferred;
+        }
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Err(e) = perform_daemon_exec() {
+                tracing::error!("Failed to re-exec daemon during upgrade: {e}");
+            }
+        });
+
+        DaemonResponse::UpgradeScheduled
+    }
+
+    #[cfg(not(unix))]
+    async fn handle_upgrade_binary(&self) -> DaemonResponse {
+        DaemonResponse::UpgradeUnsupported
     }
 
     pub fn handle_register_workspace(
@@ -2867,10 +2991,14 @@ mod tests {
                 version,
                 pid,
                 epoch,
+                binary_path,
+                binary_mtime_ms,
             } => {
                 assert_eq!(version, DAEMON_PROTOCOL_VERSION);
                 assert_eq!(pid, std::process::id());
                 assert_eq!(epoch, server.epoch());
+                assert!(binary_path.is_some());
+                assert!(binary_mtime_ms.is_some());
             }
             other => panic!("Expected HandshakeOk, got {other:?}"),
         }
@@ -3149,5 +3277,94 @@ mod tests {
             )),
             PathBuf::from(r"\\?\Volume{b75e2c83-0000-0000-0000-602200000000}\")
         );
+    }
+
+    #[test]
+    fn test_binary_identity_helper_pure_and_injection() {
+        // Injection test: successful exe and mtime
+        let mock_exe = || Ok(PathBuf::from("/opt/ferryx/bin/ferryx"));
+        let mock_mtime = |_path: &Path| Some(1725280000000u64);
+        let (path, mtime) = resolve_binary_identity_with(mock_exe, mock_mtime);
+        assert_eq!(path, Some("/opt/ferryx/bin/ferryx".to_string()));
+        assert_eq!(mtime, Some(1725280000000u64));
+
+        // Injection test: exe failure
+        let mock_exe_err = || Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"));
+        let (path_err, mtime_err) = resolve_binary_identity_with(mock_exe_err, mock_mtime);
+        assert_eq!(path_err, None);
+        assert_eq!(mtime_err, None);
+
+        // Injection test: mtime failure
+        let mock_mtime_none = |_path: &Path| None;
+        let (path_no_mtime, mtime_none) =
+            resolve_binary_identity_with(mock_exe, mock_mtime_none);
+        assert_eq!(path_no_mtime, Some("/opt/ferryx/bin/ferryx".to_string()));
+        assert_eq!(mtime_none, None);
+
+        // Live identity test
+        let (live_path, live_mtime) = resolve_binary_identity();
+        assert!(live_path.is_some(), "live binary path should be resolved");
+        assert!(
+            live_mtime.is_some_and(|t| t > 0),
+            "live binary mtime should be non-zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_upgrade_binary_idempotent_when_not_needed() {
+        let server = Arc::new(DaemonServer::new());
+        let resp = server.handle_upgrade_binary().await;
+        // The running test binary is at least as new as itself on disk, so upgrade is not needed
+        #[cfg(unix)]
+        assert!(matches!(resp, DaemonResponse::UpgradeNotNeeded));
+        #[cfg(not(unix))]
+        assert!(matches!(resp, DaemonResponse::UpgradeUnsupported));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_clear_cloexec_and_fd_inheritance_across_exec() {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+
+        // 1. Create a pipe
+        let mut pipe_fds = [0i32; 2];
+        let ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+        assert_eq!(ret, 0);
+        let [read_fd, write_fd] = pipe_fds;
+
+        // 2. Set FD_CLOEXEC explicitly on read_fd (simulating portable-pty behavior)
+        let set_cloexec_ret = unsafe {
+            libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC)
+        };
+        assert_eq!(set_cloexec_ret, 0);
+
+        let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0, "FD_CLOEXEC must be set");
+
+        // 3. Clear FD_CLOEXEC using clear_cloexec
+        clear_cloexec(read_fd).expect("clear_cloexec must succeed");
+
+        let flags_cleared = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
+        assert_eq!(flags_cleared & libc::FD_CLOEXEC, 0, "FD_CLOEXEC must be cleared");
+
+        // 4. Write data to write_fd
+        let test_message = b"ferryx-inherited-fd-payload\n";
+        let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        write_file.write_all(test_message).expect("write to pipe");
+        drop(write_file); // Close writer so reader hits EOF
+
+        // 5. Spawn /bin/sh to read from inherited read_fd
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("read -r line <&{}; echo \"$line\"", read_fd))
+            .output()
+            .expect("spawn helper process with inherited fd");
+
+        unsafe { libc::close(read_fd); }
+
+        assert!(output.status.success());
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout_str.trim(), "ferryx-inherited-fd-payload");
     }
 }

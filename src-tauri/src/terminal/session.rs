@@ -113,6 +113,11 @@ impl PtySession {
         self.state.lock().clone()
     }
 
+    #[cfg(unix)]
+    pub fn raw_master_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        self.master.lock().as_ref().and_then(|m| m.as_raw_fd())
+    }
+
     pub(crate) fn mark_running(&self) {
         let mut state = self.state.lock();
         if matches!(*state, PtySessionState::Starting) {

@@ -197,6 +197,7 @@ pub enum DaemonRequest {
     /// events. Without it the gateway (which lives in the daemon) has no way to
     /// reach the GUI, so remote-issued selections are silently dropped.
     SubscribeRemoteEvents,
+    UpgradeBinary,
     Shutdown,
 }
 
@@ -208,6 +209,10 @@ pub enum DaemonResponse {
         version: u32,
         pid: u32,
         epoch: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binary_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binary_mtime_ms: Option<u64>,
     },
     Pong,
     #[serde(rename_all = "camelCase")]
@@ -292,6 +297,10 @@ pub enum DaemonResponse {
         selection: Option<RemoteActiveDesktopSelection>,
     },
     SubscribeRemoteEventsOk,
+    UpgradeScheduled,
+    UpgradeNotNeeded,
+    UpgradeDeferred,
+    UpgradeUnsupported,
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,
@@ -782,10 +791,30 @@ mod tests {
             version: DAEMON_PROTOCOL_VERSION,
             pid: 9999,
             epoch: 777777,
+            binary_path: Some("/bin/ferryx".to_string()),
+            binary_mtime_ms: Some(1700000000000),
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
         assert!(hs_json.contains(r#""version":3"#));
+        assert!(hs_json.contains(r#""binaryPath":"/bin/ferryx""#));
+        assert!(hs_json.contains(r#""binaryMtimeMs":1700000000000"#));
+
+        // Back-compat: JSON without binary fields deserializes with None
+        let legacy_hs_json = r#"{"type":"handshakeOk","version":3,"pid":9999,"epoch":777777}"#;
+        let legacy_hs: DaemonResponse =
+            serde_json::from_str(legacy_hs_json).expect("deserialize legacy handshake");
+        match legacy_hs {
+            DaemonResponse::HandshakeOk {
+                binary_path,
+                binary_mtime_ms,
+                ..
+            } => {
+                assert_eq!(binary_path, None);
+                assert_eq!(binary_mtime_ms, None);
+            }
+            _ => panic!("Expected HandshakeOk"),
+        }
 
         let list = DaemonResponse::ListSessionsOk {
             epoch: 777777,
@@ -905,6 +934,35 @@ mod tests {
                 );
             }
             _ => panic!("Expected DaemonRequest::Spawn variant"),
+        }
+    }
+
+    #[test]
+    fn test_upgrade_binary_protocol_serde_roundtrip() {
+        let req = DaemonRequest::UpgradeBinary;
+        let json = serde_json::to_string(&req).expect("serialize UpgradeBinary");
+        assert_eq!(json, r#"{"type":"upgradeBinary"}"#);
+        let deserialized: DaemonRequest =
+            serde_json::from_str(&json).expect("deserialize UpgradeBinary");
+        assert!(matches!(deserialized, DaemonRequest::UpgradeBinary));
+
+        for (variant, expected_type) in [
+            (DaemonResponse::UpgradeScheduled, "upgradeScheduled"),
+            (DaemonResponse::UpgradeNotNeeded, "upgradeNotNeeded"),
+            (DaemonResponse::UpgradeDeferred, "upgradeDeferred"),
+            (DaemonResponse::UpgradeUnsupported, "upgradeUnsupported"),
+        ] {
+            let resp_json = serde_json::to_string(&variant).expect("serialize response");
+            assert_eq!(resp_json, format!(r#"{{"type":"{expected_type}"}}"#));
+            let deserialized_resp: DaemonResponse =
+                serde_json::from_str(&resp_json).expect("deserialize response");
+            match (&variant, &deserialized_resp) {
+                (DaemonResponse::UpgradeScheduled, DaemonResponse::UpgradeScheduled) => {}
+                (DaemonResponse::UpgradeNotNeeded, DaemonResponse::UpgradeNotNeeded) => {}
+                (DaemonResponse::UpgradeDeferred, DaemonResponse::UpgradeDeferred) => {}
+                (DaemonResponse::UpgradeUnsupported, DaemonResponse::UpgradeUnsupported) => {}
+                _ => panic!("Mismatch deserializing {expected_type}"),
+            }
         }
     }
 }
