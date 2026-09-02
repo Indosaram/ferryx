@@ -27,7 +27,7 @@ describe("Ferryx development runtime contract", () => {
 
     expect(tauriConfig).toMatchObject({
       build: {
-        beforeDevCommand: "bun run --cwd ui dev",
+        beforeDevCommand: "bun scripts/dev-frontend.mjs",
         devUrl: "http://127.0.0.1:5173",
       },
     });
