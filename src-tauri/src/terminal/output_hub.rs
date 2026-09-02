@@ -499,6 +499,45 @@ impl TerminalOutputHub {
         self.sessions.read().contains_key(session_id)
     }
 
+    pub fn session_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.sessions.read().keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Full snapshot of a session buffer together with its next sequence, so a
+    /// persistence flusher can detect changes and resume sequence numbering
+    /// when the snapshot is later seeded into a fresh buffer.
+    pub fn snapshot_with_next_sequence(&self, session_id: &str) -> Option<(Vec<u8>, u64)> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+        let hub = session_hub.read();
+        Some((hub.buffer.snapshot(), hub.buffer.next_sequence()))
+    }
+
+    /// Seeds an empty, freshly-registered buffer with persisted history so the
+    /// next attach replay carries the previous session's output. Returns false
+    /// when the session is unknown or its buffer already has content.
+    pub fn seed_history(&self, session_id: &str, bytes: Vec<u8>) -> bool {
+        if bytes.is_empty() {
+            return false;
+        }
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        };
+        let Some(session_hub) = session_hub else {
+            return false;
+        };
+        let mut hub = session_hub.write();
+        if hub.buffer.current_size() > 0 || hub.buffer.next_sequence() > 1 {
+            return false;
+        }
+        hub.buffer.push(bytes).is_some()
+    }
+
     pub fn list_sessions(&self) -> Vec<String> {
         self.sessions.read().keys().cloned().collect()
     }
@@ -888,5 +927,38 @@ mod tests {
                 bytes: Vec::new(),
             }]
         );
+    
+    #[test]
+    fn seed_history_replays_into_fresh_attach() {
+        let hub = TerminalOutputHub::new(1024);
+        let seeded = hub.seed_history("session:ghost", b"old output".to_vec());
+        assert!(!seeded, "seed before register must fail: no session");
+
+        hub.register_session("session:ghost");
+        assert!(hub.seed_history("session:ghost", b"old output".to_vec()));
+        assert!(
+            !hub.seed_history("session:ghost", b"second seed".to_vec()),
+            "seed must not overwrite live content"
+        );
+
+        let attachment = hub
+            .subscribe_with_sequence("session:ghost", None)
+            .expect("attach after seed");
+        assert_eq!(attachment.snapshot.history, b"old output");
+
+        hub.publish("session:ghost", b"live".to_vec());
+        let (bytes, next_seq) = hub.snapshot_with_next_sequence("session:ghost").unwrap();
+        assert_eq!(bytes, b"old outputlive");
+        assert_eq!(next_seq, 3);
     }
+
+    #[test]
+    fn session_ids_enumerates_registered_sessions() {
+        let hub = TerminalOutputHub::new(64);
+        hub.register_session("session:b");
+        hub.register_session("session:a");
+        let ids = hub.session_ids();
+        assert_eq!(ids, vec!["session:a".to_string(), "session:b".to_string()]);
+    }
+}
 }

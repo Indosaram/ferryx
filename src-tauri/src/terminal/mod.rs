@@ -28,6 +28,7 @@ pub enum PtyError {
 }
 
 pub(crate) mod metrics;
+pub mod history_store;
 pub mod output_hub;
 pub mod preferences;
 pub mod pty;

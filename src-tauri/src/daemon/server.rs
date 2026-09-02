@@ -231,6 +231,13 @@ pub fn get_default_session_path() -> PathBuf {
     path
 }
 
+fn get_history_store_dir() -> PathBuf {
+    if let Some(parent) = get_default_session_path().parent() {
+        return parent.join("terminal-history");
+    }
+    std::env::temp_dir().join("ferryx-terminal-history")
+}
+
 fn dirs_next() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -777,6 +784,8 @@ pub struct DaemonServer {
     remote_transports: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<SshRelayTransport>>>>>,
     /// Test-only ssh binary override; production always resolves to "ssh".
     ssh_program: Option<&'static str>,
+    history_store: Arc<crate::terminal::history_store::HistoryStore>,
+    history_flush_cursor: Arc<Mutex<HashMap<String, (usize, u64)>>>,
 }
 
 struct RemoteContinuitySpawnRequest {
@@ -867,6 +876,10 @@ impl DaemonServer {
             remote_leases: Arc::new(Mutex::new(RemoteLeaseStore::default())),
             remote_transports: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ssh_program: None,
+            history_store: Arc::new(crate::terminal::history_store::HistoryStore::new(
+                get_history_store_dir(),
+            )),
+            history_flush_cursor: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -932,6 +945,59 @@ impl DaemonServer {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Periodically snapshots live session buffers to disk so a daemon restart
+    /// can restore scrollback. SSH-routed panes are skipped: their panes must
+    /// not resurrect as local shells after a restart.
+    async fn run_history_flusher(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            self.flush_history_once().await;
+        }
+    }
+
+    async fn flush_history_once(&self) {
+        let remote_ids: Vec<String> = self.remote_transports.lock().await.keys().cloned().collect();
+        for session_id in self.terminal_service.output_hub().session_ids() {
+            if remote_ids.iter().any(|id| id == &session_id) {
+                continue;
+            }
+            let is_ssh_routed = self
+                .session_metadata
+                .read()
+                .get(&session_id)
+                .map(|meta| meta.ssh_host_id.is_some())
+                .unwrap_or(false);
+            if is_ssh_routed {
+                continue;
+            }
+            let Some((bytes, next_sequence)) = self
+                .terminal_service
+                .output_hub()
+                .snapshot_with_next_sequence(&session_id)
+            else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            let key = (bytes.len(), next_sequence);
+            if self.history_flush_cursor.lock().get(&session_id) == Some(&key) {
+                continue;
+            }
+            let store = Arc::clone(&self.history_store);
+            let sid = session_id.clone();
+            let saved =
+                tokio::task::spawn_blocking(move || store.save(&sid, &bytes)).await.is_ok();
+            if saved {
+                self.history_flush_cursor
+                    .lock()
+                    .insert(session_id, key);
+            }
+        }
     }
 
     pub fn terminal_service(&self) -> &Arc<TerminalService> {
@@ -1012,6 +1078,14 @@ impl DaemonServer {
     pub async fn run_server(self: Arc<Self>) -> Result<(), String> {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
+
+        let _ = self
+            .history_store
+            .prune(crate::terminal::history_store::DEFAULT_MAX_TOTAL_BYTES, crate::terminal::history_store::DEFAULT_MAX_FILES);
+        let flusher = Arc::clone(&self);
+        tokio::spawn(async move {
+            flusher.run_history_flusher().await;
+        });
 
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
@@ -1237,7 +1311,11 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::Close { session_id }) => {
                     match self.handle_close(&session_id).await {
-                        Ok(()) => DaemonResponse::CloseOk,
+                        Ok(()) => {
+                            let _ = self.history_store.delete(&session_id);
+                            self.history_flush_cursor.lock().remove(&session_id);
+                            DaemonResponse::CloseOk
+                        }
                         Err(e) => DaemonResponse::Error {
                             message: e.to_string(),
                         },
@@ -1258,6 +1336,32 @@ impl DaemonServer {
                     session_id,
                     after_sequence,
                 }) => {
+                    // A restored tab references a session id the fresh daemon
+                    // has never seen. When a persisted scrollback snapshot
+                    // exists, resurrect that id (fresh shell PTY + seeded
+                    // history) instead of failing the attach with
+                    // SessionNotFound. SSH-routed panes never get snapshots
+                    // (the flusher skips them), so only local panes resurrect.
+                    if !self
+                        .terminal_service
+                        .list_sessions()
+                        .contains(&session_id)
+                    {
+                        match self.history_store.load(&session_id) {
+                            Ok(Some(bytes)) => {
+                                let _ = self.terminal_service.resurrect_with_history(
+                                    &session_id,
+                                    bytes,
+                                    80,
+                                    24,
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("history store load failed for {session_id}: {e}");
+                            }
+                        }
+                    }
                     match self
                         .terminal_service
                         .attach_with_sequence(&session_id, after_sequence)
@@ -1429,6 +1533,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Shutdown) => {
+                    self.flush_history_once().await;
                     std::process::exit(0);
                 }
                 Err(e) => DaemonResponse::Error {

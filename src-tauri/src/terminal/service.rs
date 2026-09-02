@@ -1,8 +1,9 @@
 use crate::terminal::output_hub::{SessionAttachment, TerminalOutputHub};
+use crate::terminal::shell::resolve_shell_command;
 use crate::terminal::{PtyError, PtyManager, PtySession, TerminalSignal};
 use crate::worktree::manager::WorktreeManager;
 use portable_pty::CommandBuilder;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -193,6 +194,35 @@ impl TerminalService {
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
         self.output_hub.remove_session(session_id);
         self.pty_manager.close_session(session_id).await
+    }
+
+    /// Brings a session id that died with a previous daemon back to life:
+    /// spawns a fresh shell PTY under the SAME id, seeds the output hub with
+    /// the persisted scrollback, and pumps live output on top of it. Only
+    /// called from the Attach path when a history snapshot exists, so a stale
+    /// or unknown id can never silently spawn processes.
+    pub fn resurrect_with_history(
+        &self,
+        session_id: &str,
+        history_bytes: Vec<u8>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), PtyError> {
+        if self.pty_manager.list_sessions().contains(&session_id.to_string()) {
+            return Ok(());
+        }
+        let mut cmd = resolve_shell_command(None);
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            cmd.cwd(home);
+        }
+        let pty_rx =
+            self.pty_manager
+                .spawn_with_id(session_id.to_string(), cmd, cols, rows)?;
+        let _broadcast_rx = self.output_hub.register_session(session_id);
+        self.output_hub.seed_history(session_id, history_bytes);
+        self.output_hub.record_initial_size(session_id, cols, rows);
+        let _ = self.pump_output(session_id.to_string(), pty_rx, true);
+        Ok(())
     }
 
     pub fn list_sessions(&self) -> Vec<String> {
