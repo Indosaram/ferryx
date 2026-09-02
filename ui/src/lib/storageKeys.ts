@@ -11,6 +11,7 @@ export const BROWSER_SETTINGS_STORAGE_KEY = "ferryx.settings.browser";
 export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
 export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabled";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
+export const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "ferryx.update.dismissedVersion";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],

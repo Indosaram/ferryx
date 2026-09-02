@@ -121,7 +121,7 @@ export function useWorkspaceRuntime({
       code: ipcError.code,
       ...sanitizedDetails,
     });
-    setRuntimeError(ipcError);
+    setRuntimeError({ ...ipcError });
   }, []);
   const reportRuntimeErrorRef = useRef(reportRuntimeError);
   reportRuntimeErrorRef.current = reportRuntimeError;

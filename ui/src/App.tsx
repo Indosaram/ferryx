@@ -11,6 +11,8 @@ import { Sidebar } from "./components/Sidebar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
+import { TerminalLinkActions } from "./components/TerminalLinkActions";
+import { Toaster, toast } from "./components/ui/sonner";
 import { IconButton } from "./components/ui/IconButton";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
@@ -22,6 +24,7 @@ import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/na
 import type { TerminalActivityState } from "./lib/activity";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
+import { initUpdateToasts } from "./lib/updateToast";
 import {
   AGENTS_SETTINGS_CHANGED_EVENT,
   detectionTargets,
@@ -76,7 +79,6 @@ import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
   worktreeIdentity,
   type DirtyState,
-  type StructuredIpcError,
   type WorkspaceTab,
   type Worktree,
 } from "./lib/types";
@@ -182,7 +184,9 @@ function canonicalizeProjectBootstrap(stored: ProjectBootstrap, startup: Registe
 export function App() {
   useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
-  const [bootstrap, setBootstrap] = useState<ProjectBootstrap>(() => loadProjectBootstrap());
+  const [bootstrap, setBootstrap] = useState<ProjectBootstrap | null>(() =>
+    isNativeRuntime ? null : loadProjectBootstrap(),
+  );
 
   useEffect(() => {
     if (isNativeRuntime) void checkForUpdate();
@@ -226,7 +230,15 @@ export function App() {
     };
   }, [isNativeRuntime]);
 
-  return <WorkspaceApp initialProjects={bootstrap.projects} initialActiveProjectId={bootstrap.activeProjectId} />;
+  if (!bootstrap) return <div className="h-screen w-screen bg-background" aria-label="Initializing project" />;
+
+  return (
+    <WorkspaceApp
+      key={`${bootstrap.activeProjectId}:${bootstrap.projects.map((project) => project.workspaceId).join(",")}`}
+      initialProjects={bootstrap.projects}
+      initialActiveProjectId={bootstrap.activeProjectId}
+    />
+  );
 }
 
 export function deriveFocusedTerminal(
@@ -393,9 +405,6 @@ function WorkspaceApp({
   const [pendingBackendRecovery, setPendingBackendRecovery] = useState<{ workspaceId: string; sessionIds: string[] } | null>(
     null,
   );
-  const [runtimeErrorCopyAcknowledged, setRuntimeErrorCopyAcknowledged] = useState(false);
-  const [lastRuntimeError, setLastRuntimeError] = useState<StructuredIpcError | null>(null);
-  const [runtimeErrorDismissed, setRuntimeErrorDismissed] = useState(false);
   const { settings: generalSettings } = useGeneralSettings();
   const activeProject = useMemo(
     () => projects.find((project) => project.workspaceId === activeProjectId) ?? projects[0] ?? DEFAULT_PROJECT,
@@ -657,10 +666,32 @@ function WorkspaceApp({
   inactiveProjectWorktreesRef.current = inactiveProjectWorktrees;
 
   useEffect(() => {
-    if (runtimeError) {
-      setLastRuntimeError(runtimeError);
-      setRuntimeErrorDismissed(false);
-    }
+    return initUpdateToasts();
+  }, []);
+
+  useEffect(() => {
+    if (!runtimeError) return;
+    const text = `${runtimeError.code}: ${runtimeError.message}`;
+    const details =
+      runtimeError.details && Object.keys(runtimeError.details).length > 0
+        ? JSON.stringify(runtimeError.details, null, 2)
+        : undefined;
+    const clipboardText = details ? `${text}\n${details}` : text;
+    toast.error(text, {
+      description: details,
+      duration: Infinity,
+      action: {
+        label: "Copy",
+        onClick: () => {
+          void navigator.clipboard
+            .writeText(clipboardText)
+            .then(() => {
+              toast.success("Copied error to clipboard");
+            })
+            .catch(() => {});
+        },
+      },
+    });
   }, [runtimeError]);
 
   useEffect(() => {
@@ -1540,6 +1571,8 @@ function WorkspaceApp({
 
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
+      <Toaster />
+      <TerminalLinkActions />
       {isSidebarOpen ? (
         <Sidebar
           open={true}
@@ -1718,43 +1751,6 @@ function WorkspaceApp({
           onCancel={handleCancelTabClose}
           onConfirm={handleConfirmTabClose}
         />
-      ) : null}
-
-      {lastRuntimeError && !runtimeErrorDismissed ? (
-        <div className="fixed bottom-3 right-3 z-40 max-w-error border border-destructive/30 bg-card/95 text-[11px] text-destructive shadow-lg">
-          <div className="flex items-start gap-1 px-3 py-2">
-            <button
-              type="button"
-              title="Click to copy error details"
-              onClick={() => {
-                const details = lastRuntimeError.details
-                  ? `\n${JSON.stringify(lastRuntimeError.details, null, 2)}`
-                  : "";
-                void navigator.clipboard
-                  .writeText(`${lastRuntimeError.code}: ${lastRuntimeError.message}${details}`)
-                  .then(() => {
-                    setRuntimeErrorCopyAcknowledged(true);
-                    window.setTimeout(() => setRuntimeErrorCopyAcknowledged(false), 1600);
-                  })
-                  .catch(() => {});
-              }}
-              className="cursor-pointer text-left"
-            >
-              {runtimeErrorCopyAcknowledged
-                ? "Copied error to clipboard"
-                : `${lastRuntimeError.code}: ${lastRuntimeError.message}`}
-            </button>
-            <button
-              type="button"
-              aria-label="Dismiss error"
-              title="Dismiss"
-              onClick={() => setRuntimeErrorDismissed(true)}
-              className="ml-1 shrink-0 cursor-pointer text-destructive/60 hover:text-destructive"
-            >
-              ×
-            </button>
-          </div>
-        </div>
       ) : null}
     </div>
   );

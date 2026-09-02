@@ -158,6 +158,7 @@ vi.mock("./lib/tauri", () => ({
   setBadgeCount: native.setBadgeCount,
   onRemoteSelectionRequested: native.onRemoteSelectionRequested,
   onWorktreeChanged: vi.fn().mockResolvedValue(() => {}),
+  bootTrace: vi.fn().mockResolvedValue(undefined),
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
 }));
@@ -423,7 +424,12 @@ describe("App project workspace flow", () => {
     native.menuHandler?.();
 
     await waitFor(() =>
-      expect(workspace.openTab).toHaveBeenCalledWith(expect.objectContaining({ path: "/repo/main" })),
+      expect(workspace.openTab).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "/repo/main" }),
+        undefined,
+        undefined,
+        undefined,
+      ),
     );
   });
 

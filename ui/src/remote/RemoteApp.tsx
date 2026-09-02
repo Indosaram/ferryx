@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Toaster } from "../components/ui/sonner";
 import {
   clearRemoteAuthToken,
   getRemoteAuthToken,
@@ -438,6 +439,7 @@ export const RemoteApp: React.FC = () => {
 
   return (
     <div className="flex h-[100dvh] min-h-screen flex-col overflow-hidden bg-background text-foreground">
+      <Toaster />
       <header className="flex h-7 shrink-0 items-center justify-between border-b border-border bg-card px-2.5">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="flex size-4 items-center justify-center rounded bg-primary text-[10px] font-bold text-primary-foreground" aria-hidden="true">
