@@ -15,7 +15,6 @@ adaptive below so they invert for dark chrome. Never hand-tint a brand logo.
 | `antigravity.svg` | Antigravity | lobehub `antigravity-color` | brand color |
 | `claude.svg` | Claude | lobehub `claude-color` | brand color |
 | `codex.svg` | OpenAI Codex | lobehub `codex-color` | brand color |
-| `gemini.svg` | Google Gemini | lobehub `gemini-color` | brand color |
 | `copilot.svg` | GitHub Copilot | lobehub `copilot-color` | brand color |
 | `kimi.svg` | Kimi | lobehub `kimi-color` | brand color |
 | `opencode.svg` | OpenCode | lobehub `opencode` | adaptive monochrome |

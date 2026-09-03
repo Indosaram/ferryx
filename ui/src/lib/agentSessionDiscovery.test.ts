@@ -152,6 +152,14 @@ describe("agentSessionDiscovery", () => {
       expect(extractSessionIdFromPath("omo", wrongDir)).toBeNull();
     });
 
+    it("extracts session id for pi from real verified session path", () => {
+      const realPath =
+        "/Users/indo/.pi/agent/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c.jsonl";
+      expect(extractSessionIdFromPath("pi", realPath)).toBe(
+        "01a04339-8665-7cf7-864f-2b0dd9f6678c",
+      );
+    });
+
     it("returns null for unknown agent type", () => {
       const path = `/Users/x/.unknown/sessions/${UUID}.jsonl`;
       expect(extractSessionIdFromPath("unknown-agent", path)).toBeNull();
@@ -333,46 +341,6 @@ describe("agentSessionDiscovery", () => {
       warnSpy.mockRestore();
     });
 
-    it("warns unsupported-by-design for opencode and gemini when their process is found", () => {
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      const opencodeSnapshot: ProcessSnapshot = [
-        { pid: 100, ppid: 1, command: "zsh" },
-        { pid: 101, ppid: 100, command: "opencode start" },
-      ];
-      const geminiSnapshot: ProcessSnapshot = [
-        { pid: 200, ppid: 1, command: "zsh" },
-        { pid: 201, ppid: 200, command: "gemini chat" },
-      ];
-
-      const openFiles: OpenFileProbe = () => ["/home/user/.local/share/opencode/opencode.db"];
-
-      const opencodeResult = discoverAgentSessionId({
-        snapshot: opencodeSnapshot,
-        rootPid: 100,
-        agentType: "opencode",
-        openFiles,
-      });
-      expect(opencodeResult).toBeNull();
-      expect(warnSpy).toHaveBeenLastCalledWith(
-        expect.stringMatching(/^\[agent-session-discovery\] Session ID discovery is unsupported by design for agent "opencode"/),
-      );
-
-      const geminiResult = discoverAgentSessionId({
-        snapshot: geminiSnapshot,
-        rootPid: 200,
-        agentType: "gemini",
-        openFiles,
-      });
-      expect(geminiResult).toBeNull();
-      expect(warnSpy).toHaveBeenLastCalledWith(
-        expect.stringMatching(/^\[agent-session-discovery\] Session ID discovery is unsupported by design for agent "gemini"/),
-      );
-
-      expect(warnSpy).toHaveBeenCalledTimes(2);
-      warnSpy.mockRestore();
-    });
-
     it("regression guard: returns null and never invents or generates a session ID when probe returns empty list", () => {
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const snapshot: ProcessSnapshot = [
@@ -393,12 +361,14 @@ describe("agentSessionDiscovery", () => {
       warnSpy.mockRestore();
     });
 
-    it("exports UNSUPPORTED_DISCOVERY_AGENTS set containing opencode and gemini", () => {
-      expect(UNSUPPORTED_DISCOVERY_AGENTS.has("opencode")).toBe(true);
-      expect(UNSUPPORTED_DISCOVERY_AGENTS.has("gemini")).toBe(true);
+    it("exports UNSUPPORTED_DISCOVERY_AGENTS set not containing opencode or pi", () => {
+      expect(UNSUPPORTED_DISCOVERY_AGENTS.has("opencode")).toBe(false);
       expect(UNSUPPORTED_DISCOVERY_AGENTS.has("claude")).toBe(false);
+      expect(UNSUPPORTED_DISCOVERY_AGENTS.has("antigravity")).toBe(false);
+      expect(UNSUPPORTED_DISCOVERY_AGENTS.has("pi")).toBe(false);
       expect(UNSUPPORTED_DISCOVERY_AGENTS.has("cursor")).toBe(false);
       expect(UNSUPPORTED_DISCOVERY_AGENTS.has("omo")).toBe(false);
+      expect(UNSUPPORTED_DISCOVERY_AGENTS.has("unknown-agent")).toBe(false);
     });
   });
 
@@ -434,6 +404,69 @@ describe("agentSessionDiscovery", () => {
           "/Users/me/.gjc/agent/sessions/v2-scopeid/2026-02-16T10-20-30.000Z_abcd.jsonl",
         ),
       ).toBeNull();
+    });
+  });
+
+  describe("antigravity (agy) session discovery", () => {
+    it("matches the agy binary in the process tree", () => {
+      const snapshot: ProcessSnapshot = [
+        { pid: 400, ppid: 1, command: "zsh" },
+        { pid: 401, ppid: 400, command: "/usr/local/bin/agy" },
+      ];
+      expect(findAgentPid(snapshot, 400, "antigravity")).toBe(401);
+    });
+
+    it("extracts the session id from antigravity conversations db path", () => {
+      const uuid = "12345678-1234-1234-1234-123456789abc";
+      expect(
+        extractSessionIdFromPath(
+          "antigravity",
+          `/Users/me/.gemini/antigravity-cli/conversations/${uuid}.db`,
+        ),
+      ).toBe(uuid);
+      expect(
+        extractSessionIdFromPath(
+          "antigravity",
+          `/Users/me/.gemini/antigravity-cli/conversations/${uuid}.db-wal`,
+        ),
+      ).toBe(uuid);
+      expect(
+        extractSessionIdFromPath(
+          "antigravity",
+          `/Users/me/.gemini/antigravity-cli/conversations/${uuid}.db-shm`,
+        ),
+      ).toBe(uuid);
+    });
+
+    it("returns null outside antigravity session store or for non-uuid db names", () => {
+      expect(
+        extractSessionIdFromPath("antigravity", "/tmp/conversations/12345678-1234-1234-1234-123456789abc.db"),
+      ).toBeNull();
+      expect(
+        extractSessionIdFromPath(
+          "antigravity",
+          "/Users/me/.gemini/antigravity-cli/conversations/not-a-uuid.db",
+        ),
+      ).toBeNull();
+    });
+
+    it("discovers antigravity session id from open db file", () => {
+      const uuid = "abcdef12-3456-7890-abcd-ef1234567890";
+      const snapshot: ProcessSnapshot = [
+        { pid: 400, ppid: 1, command: "zsh" },
+        { pid: 401, ppid: 400, command: "agy" },
+      ];
+      const openFiles: OpenFileProbe = (pid) =>
+        pid === 401 ? [`/Users/me/.gemini/antigravity-cli/conversations/${uuid}.db`] : [];
+
+      const discovered = discoverAgentSessionId({
+        snapshot,
+        rootPid: 400,
+        agentType: "antigravity",
+        openFiles,
+      });
+
+      expect(discovered).toBe(uuid);
     });
   });
 });

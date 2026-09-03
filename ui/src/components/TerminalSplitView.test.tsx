@@ -1,9 +1,10 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { resetNotificationSettings, saveNotificationSettings } from "../lib/notificationSettings";
 import * as TerminalSplitViewModule from "./TerminalSplitView";
 import { TerminalSplitView } from "./TerminalSplitView";
 
@@ -12,21 +13,31 @@ vi.mock("./TerminalPane", () => ({
     session,
     searchOpen,
     headerHovered,
+    needsAttention,
   }: {
     session: TerminalSession;
     searchOpen?: boolean;
     headerHovered?: boolean;
+    needsAttention?: boolean;
   }) => (
     <div
       data-testid="terminal-pane"
       data-backend-session-id={session.backendSessionId ?? session.id}
       data-search-open={String(Boolean(searchOpen))}
       data-header-hovered={String(Boolean(headerHovered))}
+      data-needs-attention={String(Boolean(needsAttention))}
     />
   ),
 }));
 
-afterEach(cleanup);
+beforeEach(() => {
+  resetNotificationSettings();
+});
+
+afterEach(() => {
+  cleanup();
+  resetNotificationSettings();
+});
 
 function tab(id: string, sessionId: string): TerminalTab {
   return { id, label: id, sessionId };
@@ -504,5 +515,107 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(paneLeaf).not.toHaveClass("transition-all");
     expect(paneLeaf).not.toHaveClass("transition-[width]");
     expect(paneLeaf).not.toHaveClass("transition-[height]");
+  });
+
+  it("does not apply amber ring class on pane leaf in any state, while forwarding needsAttention to terminal pane and rendering bottom DOM frame completion for waiting or unread done", () => {
+    const layout = singleTabLayout();
+    const sessions = { "session-1": session("session-1", "backend-1") };
+
+    // 1. No activity -> no ring, needsAttention=false, no DOM frame completion
+    const { rerender } = render(<TerminalSplitView layout={layout} sessions={sessions} />);
+    let paneLeaf = screen.getByTestId("pane-leaf");
+    let terminalPane = screen.getByTestId("terminal-pane");
+    expect(paneLeaf.className).not.toContain("ring-[#fbbf24]");
+    expect(terminalPane).toHaveAttribute("data-needs-attention", "false");
+    expect(screen.queryByTestId("attention-frame-bottom")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-left")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-right")).not.toBeInTheDocument();
+
+    // 2. Waiting -> no DOM ring, needsAttention=true forwarded to pane, DOM frame completion rendered
+    rerender(
+      <TerminalSplitView
+        layout={layout}
+        sessions={sessions}
+        activityBySessionId={{ "session-1": { state: "waiting", title: "Waiting", isAgent: true } }}
+      />,
+    );
+    paneLeaf = screen.getByTestId("pane-leaf");
+    terminalPane = screen.getByTestId("terminal-pane");
+    expect(paneLeaf.className).not.toContain("ring-[#fbbf24]");
+    expect(terminalPane).toHaveAttribute("data-needs-attention", "true");
+    expect(screen.getByTestId("attention-frame-bottom")).toBeInTheDocument();
+    expect(screen.getByTestId("attention-frame-corner-left")).toBeInTheDocument();
+    expect(screen.getByTestId("attention-frame-corner-right")).toBeInTheDocument();
+
+    // 3. Done (unseen) -> no DOM ring, needsAttention=true forwarded to pane, DOM frame completion rendered
+    rerender(
+      <TerminalSplitView
+        layout={layout}
+        sessions={sessions}
+        activityBySessionId={{ "session-1": { state: "done", title: "Done", isAgent: true, seen: false } }}
+      />,
+    );
+    paneLeaf = screen.getByTestId("pane-leaf");
+    terminalPane = screen.getByTestId("terminal-pane");
+    expect(paneLeaf.className).not.toContain("ring-[#fbbf24]");
+    expect(terminalPane).toHaveAttribute("data-needs-attention", "true");
+    expect(screen.getByTestId("attention-frame-bottom")).toBeInTheDocument();
+    expect(screen.getByTestId("attention-frame-corner-left")).toBeInTheDocument();
+    expect(screen.getByTestId("attention-frame-corner-right")).toBeInTheDocument();
+
+    // 4. Done (seen) -> no ring, needsAttention=false, no DOM frame completion
+    rerender(
+      <TerminalSplitView
+        layout={layout}
+        sessions={sessions}
+        activityBySessionId={{ "session-1": { state: "done", title: "Done", isAgent: true, seen: true } }}
+      />,
+    );
+    paneLeaf = screen.getByTestId("pane-leaf");
+    terminalPane = screen.getByTestId("terminal-pane");
+    expect(paneLeaf.className).not.toContain("ring-[#fbbf24]");
+    expect(terminalPane).toHaveAttribute("data-needs-attention", "false");
+    expect(screen.queryByTestId("attention-frame-bottom")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-left")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-right")).not.toBeInTheDocument();
+
+    // 5. Working -> no ring, needsAttention=false, no DOM frame completion
+    rerender(
+      <TerminalSplitView
+        layout={layout}
+        sessions={sessions}
+        activityBySessionId={{ "session-1": { state: "working", title: "Working", isAgent: true } }}
+      />,
+    );
+    paneLeaf = screen.getByTestId("pane-leaf");
+    terminalPane = screen.getByTestId("terminal-pane");
+    expect(paneLeaf.className).not.toContain("ring-[#fbbf24]");
+    expect(terminalPane).toHaveAttribute("data-needs-attention", "false");
+    expect(screen.queryByTestId("attention-frame-bottom")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-left")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-right")).not.toBeInTheDocument();
+  });
+
+  it("renders no amber ring and passes needsAttention=false when attentionFrame setting is false", () => {
+    saveNotificationSettings({ attentionFrame: false });
+    const layout = singleTabLayout();
+    const sessions = { "session-1": session("session-1", "backend-1") };
+
+    render(
+      <TerminalSplitView
+        layout={layout}
+        sessions={sessions}
+        activityBySessionId={{ "session-1": { state: "done", title: "Done", isAgent: true, seen: false } }}
+      />,
+    );
+
+    const paneLeaf = screen.getByTestId("pane-leaf");
+    expect(paneLeaf.className).not.toContain("ring-[#fbbf24]");
+
+    const terminalPane = screen.getByTestId("terminal-pane");
+    expect(terminalPane).toHaveAttribute("data-needs-attention", "false");
+    expect(screen.queryByTestId("attention-frame-bottom")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-left")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attention-frame-corner-right")).not.toBeInTheDocument();
   });
 });

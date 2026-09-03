@@ -416,6 +416,17 @@ export async function setNativeTerminalScrollbarOverlay(
   });
 }
 
+export async function setNativeTerminalAttentionFrame(
+  sessionId: string,
+  attention: boolean,
+): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_native_terminal_set_attention_frame", {
+    sessionId,
+    attention,
+  });
+}
+
 export async function onNativeTerminalFocus(
   handler: (sessionId: string) => void,
 ): Promise<UnlistenFn> {

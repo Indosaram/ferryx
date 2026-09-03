@@ -12,7 +12,7 @@ export const PROVIDER_SESSION_ID_MAX_LENGTH = 512;
 export const PROVIDER_TRANSCRIPT_PATH_MAX_LENGTH = 4096;
 
 export const RESUMABLE_TUI_AGENTS = [
-  "claude", "codex", "gemini", "antigravity", "opencode", "pi", "prime-agent",
+  "claude", "codex", "antigravity", "opencode", "pi", "prime-agent",
   "mimo-code", "droid", "grok", "devin", "omp", "omo", "kimi", "gjc",
   "copilot", "cursor", "cursor-agent",
 ] as const;
@@ -28,8 +28,7 @@ type ResumeArgvBuilder = {
 const RESUME_BUILDERS: Readonly<Record<string, ResumeArgvBuilder>> = {
   claude: { key: "session_id", binary: "claude", args: (id) => ["--resume", id] },
   codex: { key: "session_id", binary: "codex", args: (id) => ["resume", id] },
-  gemini: { key: "session_id", binary: "gemini", args: (id) => ["--resume", id] },
-  antigravity: { key: "conversation_id", binary: "agy", args: (id) => ["--conversation", id] },
+  antigravity: { key: "session_id", binary: "agy", args: (id) => ["--conversation", id] },
   opencode: { key: "session_id", binary: "opencode", args: (id) => ["--session", id] },
   pi: { key: "session_id", binary: "pi", args: (_id, s) => (s.transcriptPath ? ["--session", s.transcriptPath] : []) },
   "prime-agent": { key: "session_id", binary: "prime-agent", args: (_id, s) => (s.transcriptPath ? ["--resume", s.transcriptPath] : []) },
@@ -58,6 +57,9 @@ export const AUTHORITATIVE_RECONNECT_AGENTS = [
   "kimi",
   "omo",
   "gjc",
+  "antigravity",
+  "opencode",
+  "pi",
 ] as const;
 
 export function canCaptureAuthoritativeProviderSession(agentType: string): boolean {
@@ -155,10 +157,6 @@ export function extractAgentProviderSession(
   payload: Record<string, unknown>,
 ): AgentProviderSession | null {
   const norm = normalizeAgentType(source);
-  if (norm === "antigravity") {
-    const id = readSessionId(payload, ["conversationId", "conversation_id"]);
-    return id ? { key: "conversation_id", id } : null;
-  }
   if (norm === "pi" || norm === "prime-agent") {
     const id = readSessionId(payload, ["session_id"]);
     const transcriptPath = readTranscriptPath(payload, ["session_file", "transcript_path", "transcriptPath"]);
@@ -193,8 +191,7 @@ export function buildResumeArgv(ref: AgentSessionRef): string[] | null {
 
   let session = ref.providerSession ? normalizeAgentProviderSession(ref.providerSession) : null;
   if (!session && typeof ref.sessionId === "string") {
-    const key: AgentProviderSessionKey = normAgent === "antigravity" ? "conversation_id" : "session_id";
-    session = normalizeAgentProviderSession({ key, id: ref.sessionId });
+    session = normalizeAgentProviderSession({ key: "session_id", id: ref.sessionId });
   }
   if (!session) return null;
 

@@ -36,6 +36,7 @@ import { BrowserPane } from "./BrowserPane";
 import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
+import { useAttentionFrameEnabled } from "../lib/notificationSettings";
 import { PaneEdgeDropZones } from "./tab-dnd/PaneEdgeDropZones";
 import { resolveSplitEdgeForPoint } from "./tab-dnd/SplitEdgeDropZone";
 import { TabGroupDropSurface } from "./tab-dnd/TabGroupDropSurface";
@@ -51,6 +52,7 @@ import {
   type WorkspaceDropData,
 } from "./tab-dnd/tabDragTypes";
 import { TerminalPane } from "./TerminalPane";
+import { NATIVE_TERMINAL_BOTTOM_INSET_PX } from "./NativeTerminalPane";
 import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
@@ -896,6 +898,10 @@ const PaneLeafView = React.memo(function PaneLeafView({
   // cannot cover a live terminal surface. Only the targeted pane paints feedback, so only
   // it yields its surface -- every other terminal keeps rendering during the drag.
   const showsDropFeedback = dropFeedbackLeafId === leafId;
+  const attentionFrameEnabled = useAttentionFrameEnabled();
+  const needsAttention = attentionFrameEnabled && Boolean(
+    activity && (activity.state === "waiting" || (activity.state === "done" && !activity.seen)),
+  );
 
   return (
     <NativeTerminalVisibilityProvider visible={!showsDropFeedback}>
@@ -923,6 +929,36 @@ const PaneLeafView = React.memo(function PaneLeafView({
       }}
     >
       <PaneEdgeDropZones tabId={tab.id} leafId={leafId} />
+      {needsAttention ? (
+        <>
+          <div
+            data-testid="attention-frame-bottom"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[2px]"
+            style={{
+              backgroundColor: "rgba(253, 230, 138, 0.95)",
+              boxShadow: "0 0 8px rgba(253, 230, 138, 0.35)",
+            }}
+          />
+          <div
+            data-testid="attention-frame-corner-left"
+            className="pointer-events-none absolute bottom-0 left-0 z-10 w-[2px]"
+            style={{
+              height: NATIVE_TERMINAL_BOTTOM_INSET_PX,
+              backgroundColor: "rgba(253, 230, 138, 0.95)",
+              boxShadow: "0 0 8px rgba(253, 230, 138, 0.35)",
+            }}
+          />
+          <div
+            data-testid="attention-frame-corner-right"
+            className="pointer-events-none absolute bottom-0 right-0 z-10 w-[2px]"
+            style={{
+              height: NATIVE_TERMINAL_BOTTOM_INSET_PX,
+              backgroundColor: "rgba(253, 230, 138, 0.95)",
+              boxShadow: "0 0 8px rgba(253, 230, 138, 0.35)",
+            }}
+          />
+        </>
+      ) : null}
       <div
         className="absolute inset-x-0 top-0 z-20 h-4 pointer-events-none"
         data-testid="pane-toolbar-hotspot"
@@ -996,6 +1032,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   session={session}
                   active={isActive}
                   activity={activity}
+                  needsAttention={needsAttention}
                   searchOpen={searchOpen}
                   onCloseSearch={onCloseSearch}
                   onReconnect={onReconnectAgentSession}

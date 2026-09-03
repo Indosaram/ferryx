@@ -53,6 +53,14 @@ export type RemoteWorkspaceModel = {
 
 type UnknownRecord = Record<string, unknown>;
 
+function focusTerminalInput(): void {
+  if (typeof document === "undefined") return;
+  const sink = document.querySelector<HTMLTextAreaElement>(
+    'textarea[data-testid="remote-terminal-input-sink"]'
+  );
+  sink?.focus({ preventScroll: true });
+}
+
 function record(value: unknown): UnknownRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as UnknownRecord)
@@ -419,6 +427,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                             onClick={() => {
                               onSelectorOpenChange(false);
                               onSelect(option);
+                              focusTerminalInput();
                             }}
                             className="flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
                           >
@@ -489,6 +498,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                       tabId: prevTab.id,
                       sessionId: prevTab.sessionId,
                     });
+                    focusTerminalInput();
                   }
                 }}
                 className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
@@ -515,6 +525,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                       tabId: nextTab.id,
                       sessionId: nextTab.sessionId,
                     });
+                    focusTerminalInput();
                   }
                 }}
                 className="relative flex size-7 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
@@ -549,7 +560,12 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                     aria-label={tabAriaLabel}
                     disabled={pending !== null}
                     onClick={() => {
-                      if (isActive || !model.context.workspaceId) return;
+                      if (isActive || !model.context.workspaceId) {
+                        if (isActive) {
+                          focusTerminalInput();
+                        }
+                        return;
+                      }
                       onSelect({
                         workspaceId: model.context.workspaceId,
                         worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
@@ -557,6 +573,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                         tabId: tab.id,
                         sessionId: tab.sessionId,
                       });
+                      focusTerminalInput();
                     }}
                     className={`flex h-7 min-w-0 max-w-40 items-center gap-1.5 rounded px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 ${
                       isActive

@@ -25,6 +25,7 @@ import {
   listTerminalSessions,
   onNativeTerminalScrollbar,
   setNativeTerminalScrollbarOverlay,
+  setNativeTerminalAttentionFrame,
   onNativeTerminalCopyOrInterrupt,
   onNewTerminalTabMenu,
   onCloseTabMenu,
@@ -512,6 +513,22 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_scrollbar_overlay", {
       sessionId: "session-overlay-1",
       visible: false,
+    });
+  });
+
+  it("invokes backend command to set native terminal attention frame", async () => {
+    core.invoke.mockResolvedValue(undefined);
+
+    await setNativeTerminalAttentionFrame("session-attention-1", true);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_attention_frame", {
+      sessionId: "session-attention-1",
+      attention: true,
+    });
+
+    await setNativeTerminalAttentionFrame("session-attention-1", false);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_attention_frame", {
+      sessionId: "session-attention-1",
+      attention: false,
     });
   });
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyGridFrame,
   decodeGridAttrs,
+  estimateCellWidth,
   parseGridFrame,
   type FullGridFrame,
   type TerminalGridState,
@@ -85,5 +86,31 @@ describe("terminal grid protocol", () => {
     }));
 
     expect(frame?.lines[0]?.runs[0]?.text).toBe("한글");
+  });
+
+  it("preserves per-run cell counts from server frames and tolerates legacy frames", () => {
+    const frame = parseGridFrame(JSON.stringify({
+      type: "grid",
+      cols: 12,
+      rows: 1,
+      cursor,
+      lines: [{
+        index: 0,
+        runs: [
+          { text: "한글", fg: null, bg: null, attrs: 0, cells: 4 },
+          { text: " ok", fg: null, bg: null, attrs: 0 },
+        ],
+      }],
+    }));
+
+    expect(frame?.lines[0]?.runs[0]?.cells).toBe(4);
+    expect(frame?.lines[0]?.runs[1]?.cells).toBeUndefined();
+  });
+
+  it("estimates wide cell widths as a legacy fallback", () => {
+    expect(estimateCellWidth("한글")).toBe(4);
+    expect(estimateCellWidth("ab가")).toBe(4);
+    expect(estimateCellWidth("hi!")).toBe(3);
+    expect(estimateCellWidth("")).toBe(0);
   });
 });

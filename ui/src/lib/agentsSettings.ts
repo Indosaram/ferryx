@@ -1,7 +1,7 @@
 export const AGENT_CANDIDATES = [
   "claude",
   "codex",
-  "gemini",
+  "antigravity",
   "opencode",
   "omo",
   "gjc",
@@ -12,6 +12,10 @@ export const AGENT_CANDIDATES = [
 ] as const;
 
 export type AgentCandidate = (typeof AGENT_CANDIDATES)[number];
+
+export const DEFAULT_AGENT_COMMANDS: Readonly<Partial<Record<AgentCandidate, string>>> = {
+  antigravity: "agy",
+};
 
 export const AGENTS_SETTINGS_STORAGE_KEY = "ferryx.agents.v1";
 export const AGENTS_SETTINGS_CHANGED_EVENT = "ferryx:agents-settings";
@@ -124,8 +128,8 @@ export function detectionTargets(settings: AgentSettings): string[] {
   const targets = new Set<string>();
   for (const name of AGENT_CANDIDATES) {
     const override = settings.overrides?.[name];
-    const command = override?.command?.trim();
-    targets.add(command && command !== "" ? command : name);
+    const command = override?.command?.trim() || DEFAULT_AGENT_COMMANDS[name] || name;
+    targets.add(command);
   }
   for (const agent of settings.custom ?? []) {
     const override = settings.overrides?.[agent.name];
@@ -247,7 +251,9 @@ export function mergeDetections(
   };
 
   return [
-    ...AGENT_CANDIDATES.map((name) => resolve(name, name, "", false)),
+    ...AGENT_CANDIDATES.map((name) =>
+      resolve(name, DEFAULT_AGENT_COMMANDS[name] || name, "", false),
+    ),
     ...(settings?.custom ?? []).map((agent) =>
       resolve(agent.name, agent.command, agent.args, true),
     ),

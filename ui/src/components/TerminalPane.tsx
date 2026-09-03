@@ -16,6 +16,7 @@ type TerminalPaneProps = {
   sessions?: Readonly<Record<string, TerminalSession>> | readonly TerminalSession[];
   active: boolean;
   activity?: TerminalActivity;
+  needsAttention?: boolean;
   searchOpen?: boolean;
   onCloseSearch?: () => void;
   onReconnect?: (sessionId: string) => Promise<void> | void;
@@ -67,6 +68,7 @@ export function TerminalPane({
   sessions,
   active: _active,
   activity,
+  needsAttention,
   searchOpen,
   onCloseSearch,
   onReconnect,
@@ -132,6 +134,7 @@ export function TerminalPane({
         sessionId={session.id}
         session={session}
         activity={activity}
+        needsAttention={needsAttention}
       />
       {searchOpen ? (
         <TerminalSearchOverlay

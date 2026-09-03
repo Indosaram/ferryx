@@ -141,6 +141,9 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::UpgradeBinary => "upgradeBinary",
+        DaemonRequest::PrepareHandover => "prepareHandover",
+        DaemonRequest::CommitHandover { .. } => "commitHandover",
+        DaemonRequest::AbortHandover => "abortHandover",
         DaemonRequest::Shutdown => "shutdown",
     }
 }
@@ -368,6 +371,7 @@ impl DaemonClient {
         }
 
         let socket_path = self.socket_path.clone();
+        let connection_slot = Arc::clone(&self.connection);
         tokio::spawn(async move {
             let own_mtime = tokio::task::spawn_blocking(|| {
                 let exe = std::env::current_exe().ok()?;
@@ -383,16 +387,20 @@ impl DaemonClient {
                 let temp_client = DaemonClient::new_with_socket(socket_path);
                 match temp_client.send_request(DaemonRequest::UpgradeBinary).await {
                     Ok(DaemonResponse::UpgradeScheduled) => {
-                        tracing::info!("Daemon upgrade scheduled successfully.");
+                        tracing::info!("Daemon upgrade scheduled successfully. Invalidating cached connection.");
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        *connection_slot.lock().await = None;
                     }
                     Ok(DaemonResponse::UpgradeNotNeeded) => {
                         tracing::info!("Daemon reported upgrade not needed.");
                     }
                     Ok(DaemonResponse::UpgradeDeferred) => {
-                        tracing::info!("Daemon reported upgrade deferred because active sessions are running.");
+                        tracing::info!(
+                            "Daemon reported upgrade deferred because active sessions are running."
+                        );
                     }
                     Ok(DaemonResponse::UpgradeUnsupported) => {
-                        tracing::info!("Daemon reported upgrade unsupported on this platform.");
+                        tracing::info!("Daemon reported upgrade unsupported on this platform. Suppressing further upgrade requests.");
                     }
                     Ok(other) => {
                         tracing::warn!("Unexpected response to daemon upgrade request: {other:?}");

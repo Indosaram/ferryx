@@ -33,13 +33,84 @@ describe("agentResumeAffordance", () => {
 describe("getAgentReconnectAffordance", () => {
   it("does not advertise reconnect for argv-only agents without authoritative capture", () => {
     const session = createSession({
-      agentType: "gemini",
-      providerSession: { key: "session_id", id: "gemini-session" },
+      agentType: "droid",
+      providerSession: { key: "session_id", id: "droid-session" },
     });
     expect(getAgentReconnectAffordance(session)).toMatchObject({
       status: "unsupported",
       canReconnect: false,
       reason: expect.stringContaining("authoritative session capture"),
+    });
+  });
+
+  it("returns enabled Reconnect for an exited OpenCode session with authoritative capture", () => {
+    const session = createSession({
+      id: "pane-term-opencode",
+      cwd: "/repo/workspace/sub",
+      lifecycle: "exited",
+      backendSessionId: null,
+      agentType: "opencode",
+      providerSession: { key: "session_id", id: "ses_f9d2d353affewnpwvJ0rOcNZls" },
+    });
+    expect(getAgentReconnectAffordance(session)).toMatchObject({
+      status: "idle",
+      canReconnect: true,
+      agentType: "opencode",
+      providerSession: { key: "session_id", id: "ses_f9d2d353affewnpwvJ0rOcNZls" },
+      argv: ["opencode", "--session", "ses_f9d2d353affewnpwvJ0rOcNZls"],
+    });
+  });
+
+  it("returns enabled Reconnect for an exited Pi session with authoritative capture", () => {
+    const session = createSession({
+      id: "pane-term-pi",
+      cwd: "/repo/workspace/sub",
+      lifecycle: "exited",
+      backendSessionId: null,
+      agentType: "pi",
+      providerSession: {
+        key: "session_id",
+        id: "01a04339-8665-7cf7-864f-2b0dd9f6678c",
+        transcriptPath: "/repo/.pi/agent/sessions/test.jsonl",
+      },
+    });
+    expect(getAgentReconnectAffordance(session)).toMatchObject({
+      status: "idle",
+      canReconnect: true,
+      agentType: "pi",
+      providerSession: {
+        key: "session_id",
+        id: "01a04339-8665-7cf7-864f-2b0dd9f6678c",
+        transcriptPath: "/repo/.pi/agent/sessions/test.jsonl",
+      },
+      argv: ["pi", "--session", "/repo/.pi/agent/sessions/test.jsonl"],
+    });
+  });
+
+  it("returns enabled Reconnect and exact local session target for an exited Antigravity session", () => {
+    const session = createSession({
+      id: "pane-term-agy",
+      cwd: "/repo/workspace/sub",
+      lifecycle: "exited",
+      backendSessionId: null,
+      agentType: "antigravity",
+      providerSession: { key: "session_id", id: "agy-session-abc" },
+    });
+
+    expect(getAgentReconnectAffordance(session)).toEqual({
+      status: "idle",
+      canReconnect: true,
+      canRetry: false,
+      isReconnecting: false,
+      sessionId: "pane-term-agy",
+      agentType: "antigravity",
+      providerSession: { key: "session_id", id: "agy-session-abc" },
+      reconnectLifecycle: "idle",
+      error: null,
+      reason: null,
+      conflictingSessionId: null,
+      argv: ["agy", "--conversation", "agy-session-abc"],
+      cwd: "/repo/workspace/sub",
     });
   });
     it("returns enabled Reconnect and exact local session target for an exited Claude session", () => {

@@ -124,6 +124,9 @@ mod session_path_tests {
 /// dev and release daemons from sharing endpoints; release paths intentionally remain unchanged.
 #[cfg(unix)]
 pub fn get_runtime_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FERRYX_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
     // SAFETY:
     // Category: Foreign Function Interface (FFI).
     // Invariant: `libc::getuid` is a stateless, side-effect-free POSIX syscall wrapper that
@@ -135,6 +138,9 @@ pub fn get_runtime_dir() -> PathBuf {
 
 #[cfg(not(unix))]
 pub fn get_runtime_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FERRYX_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
     std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("TEMP"))
         .map(PathBuf::from)
@@ -824,6 +830,8 @@ pub(crate) fn normalize_process_cwd(path: &Path) -> PathBuf {
 }
 
 pub struct DaemonServer {
+    pub session_router: Arc<crate::daemon::proxy::SessionRouter>,
+    pub handover_manager: Arc<crate::daemon::handover::HandoverManager>,
     terminal_service: Arc<TerminalService>,
     workspace_registry: WorkspaceRegistry,
     remote_state: Arc<RemoteGatewayState>,
@@ -862,25 +870,30 @@ impl DaemonServer {
             Arc::clone(&pty_manager),
             Arc::clone(&output_hub),
         ));
+        let session_router = Arc::new(crate::daemon::proxy::SessionRouter::new(Arc::clone(
+            &terminal_service,
+        )));
         let workspace_registry = WorkspaceRegistry::new();
         #[cfg(test)]
-        let remote_state = Arc::new(RemoteGatewayState::new_with_paths(
-            Arc::clone(&terminal_service),
+        let remote_state = Arc::new(RemoteGatewayState::new_with_paths_backend(
+            Arc::clone(&session_router) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
             workspace_registry.clone(),
             config_path,
             auth_path,
         ));
         #[cfg(not(test))]
         let remote_state = if config_path.is_some() || auth_path.is_some() {
-            Arc::new(RemoteGatewayState::new_with_paths(
-                Arc::clone(&terminal_service),
+            Arc::new(RemoteGatewayState::new_with_paths_backend(
+                Arc::clone(&session_router)
+                    as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
                 workspace_registry.clone(),
                 config_path,
                 auth_path,
             ))
         } else {
-            Arc::new(RemoteGatewayState::new_persistent(
-                Arc::clone(&terminal_service),
+            Arc::new(RemoteGatewayState::new_persistent_with_backend(
+                Arc::clone(&session_router)
+                    as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
                 workspace_registry.clone(),
             ))
         };
@@ -904,12 +917,35 @@ impl DaemonServer {
             });
         }));
 
+        let handover_manager = Arc::new(crate::daemon::handover::HandoverManager::new(
+            get_socket_path(),
+        ));
+
+        let remote_handle_for_handover: Arc<Mutex<Option<crate::remote::server::RemoteServerHandle>>> =
+            Arc::new(Mutex::new(None));
+        {
+            let remote_state_cb = Arc::clone(&remote_state);
+            let remote_handle_cb = Arc::clone(&remote_handle_for_handover);
+            handover_manager.on_commit(move || {
+                tracing::info!("Handover committed: tearing down legacy Remote Gateway listener and clearing active selection");
+                let prev_handle = remote_handle_cb.lock().take();
+                if let Some(handle) = prev_handle {
+                    handle.stop();
+                }
+                remote_state_cb.clear_active_selection();
+                *remote_state_cb.is_running.write() = false;
+                *remote_state_cb.bound_address.write() = None;
+            });
+        }
+
         Self {
+            session_router,
+            handover_manager,
             terminal_service,
             workspace_registry,
             remote_state,
             remote_event_tx,
-            remote_server_handle: Arc::new(Mutex::new(None)),
+            remote_server_handle: remote_handle_for_handover,
             agent_state_tx: broadcast::channel(64).0,
             epoch,
             binary_path,
@@ -1001,13 +1037,57 @@ impl DaemonServer {
     }
 
     pub async fn run_server(self: Arc<Self>) -> Result<(), String> {
+        self.run_server_with_handover_and_readiness(None, None)
+            .await
+    }
+
+    pub async fn run_server_with_handover(
+        self: Arc<Self>,
+        handover_from: Option<PathBuf>,
+    ) -> Result<(), String> {
+        self.run_server_with_handover_and_readiness(handover_from, None)
+            .await
+    }
+
+    pub async fn run_server_with_handover_and_readiness(
+        self: Arc<Self>,
+        handover_from: Option<PathBuf>,
+        ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<(), String> {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
 
         let socket_path = get_socket_path();
         let lock_path = get_lock_path();
 
-        let _lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
+        if let Some(ref legacy_path) = handover_from {
+            tracing::info!(
+                "Starting daemon with handover from {}",
+                legacy_path.display()
+            );
+            // Strictly validate that legacy socket is in the expected runtime directory,
+            // owned by current user, mode 0700 parent directory, and not a symlink.
+            validate_runtime_socket_path(legacy_path)?;
+            let legacy_peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(
+                legacy_path.clone(),
+                Vec::new(),
+            ));
+            // Commit handover with old daemon so it drops locks
+            let commit_resp = legacy_peer
+                .send_request(&DaemonRequest::CommitHandover {
+                    legacy_socket_path: None,
+                })
+                .await?;
+            if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
+                return Err(format!("CommitHandover failed: {commit_resp:?}"));
+            }
+            // Populate legacy peer sessions
+            let _ = legacy_peer.list_sessions().await;
+            self.session_router.add_legacy_peer(legacy_peer);
+        }
+
+        let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
+        self.handover_manager.set_lock_files(lock_files);
 
         // Clean up stale socket only after lock acquisition and safe ownership check.
         remove_stale_socket_after_lock(&socket_path)?;
@@ -1042,6 +1122,12 @@ impl DaemonServer {
             .map_err(|error| format!("Failed to secure daemon socket: {error}"))?;
 
         tracing::info!("rorca daemon listening on {}", socket_path.display());
+
+        self.session_router.adopt_routes_from_manifest().await;
+
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(());
+        }
 
         #[cfg(unix)]
         self.spawn_agent_state_listener();
@@ -1079,15 +1165,26 @@ impl DaemonServer {
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
+        let mut abort_rx = self.handover_manager.subscribe_client_abort();
 
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 {
-                break;
-            }
-            let req: Result<DaemonRequest, _> = serde_json::from_str(line.trim());
-            line.clear();
+        loop {
+            tokio::select! {
+                _ = abort_rx.recv() => {
+                    break;
+                }
+                read_res = reader.read_line(&mut line) => {
+                    match read_res {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    let req: Result<DaemonRequest, _> = serde_json::from_str(line.trim());
+                    line.clear();
+                    let should_check_retirement = matches!(
+                        req.as_ref(),
+                        Ok(DaemonRequest::Close { .. }) | Ok(DaemonRequest::CommitHandover { .. })
+                    );
 
-            let resp = match req {
+                    let resp = match req {
                 Ok(DaemonRequest::Handshake { version }) => {
                     if version != DAEMON_PROTOCOL_VERSION {
                         DaemonResponse::ProtocolMismatch {
@@ -1168,59 +1265,136 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
-                    self.handle_describe_session(&session_id)
+                    if self.session_router.is_local_session(&session_id) {
+                        self.handle_describe_session(&session_id)
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        match peer.describe_session(&session_id).await {
+                            Ok(session) => DaemonResponse::DescribeSessionOk { session },
+                            Err(message) => DaemonResponse::Error { message },
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
+                    }
                 }
                 Ok(DaemonRequest::DiscoverAgentSession {
                     session_id,
                     agent_type,
                 }) => {
-                    let provider_session_id = self
-                        .terminal_service
-                        .get_session(&session_id)
-                        .and_then(|session| session.pid())
-                        .and_then(|pid| {
-                            crate::ipc::agents::discover_agent_session_id(pid, &agent_type)
-                        });
-                    DaemonResponse::DiscoverAgentSessionOk {
-                        provider_session_id,
+                    if self.session_router.is_local_session(&session_id) {
+                        let maybe_pid = self
+                            .terminal_service
+                            .get_session(&session_id)
+                            .and_then(|session| session.pid());
+                        let provider_session_id = match maybe_pid {
+                            Some(pid) => {
+                                let agent_type = agent_type.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    crate::ipc::agents::discover_agent_session_id(pid, &agent_type)
+                                })
+                                .await
+                                .ok()
+                                .flatten()
+                            }
+                            None => None,
+                        };
+                        DaemonResponse::DiscoverAgentSessionOk {
+                            provider_session_id,
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        match peer.discover_agent_session(&session_id, &agent_type).await {
+                            Ok(provider_session_id) => DaemonResponse::DiscoverAgentSessionOk { provider_session_id },
+                            Err(message) => DaemonResponse::Error { message },
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
-                    match self.terminal_service.write_input(&session_id, &data) {
-                        Ok(()) => DaemonResponse::WriteOk,
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
+                    if self.session_router.is_local_session(&session_id) {
+                        match self.terminal_service.write_input(&session_id, &data) {
+                            Ok(()) => DaemonResponse::WriteOk,
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        match peer.write_input(&session_id, &data).await {
+                            Ok(()) => DaemonResponse::WriteOk,
+                            Err(message) => DaemonResponse::Error { message },
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
                     }
                 }
                 Ok(DaemonRequest::Resize {
                     session_id,
                     cols,
                     rows,
-                }) => match self.terminal_service.resize(&session_id, cols, rows) {
-                    Ok(()) => DaemonResponse::ResizeOk,
-                    Err(e) => DaemonResponse::Error {
-                        message: e.to_string(),
-                    },
-                },
+                }) => {
+                    if self.session_router.is_local_session(&session_id) {
+                        match self.terminal_service.resize(&session_id, cols, rows) {
+                            Ok(()) => DaemonResponse::ResizeOk,
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        match peer.resize(&session_id, cols, rows).await {
+                            Ok(()) => DaemonResponse::ResizeOk,
+                            Err(message) => DaemonResponse::Error { message },
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
+                    }
+                }
                 Ok(DaemonRequest::Signal { session_id, signal }) => {
-                    match self.terminal_service.signal(&session_id, signal) {
-                        Ok(()) => DaemonResponse::SignalOk,
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
+                    if self.session_router.is_local_session(&session_id) {
+                        match self.terminal_service.signal(&session_id, signal) {
+                            Ok(()) => DaemonResponse::SignalOk,
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        match peer.signal(&session_id, signal).await {
+                            Ok(()) => DaemonResponse::SignalOk,
+                            Err(message) => DaemonResponse::Error { message },
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
                     }
                 }
                 Ok(DaemonRequest::Close { session_id }) => {
-                    match self.handle_close(&session_id).await {
-                        Ok(()) => DaemonResponse::CloseOk,
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
+                    if self.session_router.is_local_session(&session_id) {
+                        match self.handle_close(&session_id).await {
+                            Ok(()) => DaemonResponse::CloseOk,
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        match peer.close(&session_id).await {
+                            Ok(()) => DaemonResponse::CloseOk,
+                            Err(message) => DaemonResponse::Error { message },
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
                     }
                 }
                 Ok(DaemonRequest::ListSessions) => {
-                    let sessions = self.terminal_service.list_sessions();
+                    let sessions = self.session_router.list_sessions().await;
                     DaemonResponse::ListSessionsOk {
                         epoch: self.epoch,
                         sessions,
@@ -1230,57 +1404,69 @@ impl DaemonServer {
                     session_id,
                     after_sequence,
                 }) => {
-                    match self
-                        .terminal_service
-                        .attach_with_sequence(&session_id, after_sequence)
-                    {
-                        Ok(attachment) => {
-                            let (pty_cols, pty_rows) = self
-                                .terminal_service
-                                .get_session(&session_id)
-                                .map(|s| s.get_size())
-                                .map(|(c, r)| (Some(c), Some(r)))
-                                .unwrap_or((None, None));
-                            let hub = Arc::clone(self.terminal_service.output_hub());
-                            let history_segments = attachment
-                                .snapshot
-                                .history_segments
-                                .iter()
-                                .map(|seg| HistorySegmentWire {
-                                    cols: seg.cols,
-                                    rows: seg.rows,
-                                    bytes: seg.bytes.clone(),
-                                })
-                                .collect();
-                            let resp = DaemonResponse::AttachOk {
-                                epoch: self.epoch,
-                                session_id: session_id.clone(),
-                                start_sequence: attachment.snapshot.history_start_sequence,
-                                end_sequence: attachment.snapshot.history_end_sequence,
-                                gap: attachment.snapshot.gap,
-                                history: attachment.snapshot.history,
-                                pty_cols,
-                                pty_rows,
-                                history_segments,
-                            };
-                            let mut resp_json = serde_json::to_string(&resp).unwrap();
-                            resp_json.push('\n');
-                            let _ = write_half.write_all(resp_json.as_bytes()).await;
-                            let _ = write_half.flush().await;
+                    if self.session_router.is_local_session(&session_id) {
+                        match self
+                            .terminal_service
+                            .attach_with_sequence(&session_id, after_sequence)
+                        {
+                            Ok(attachment) => {
+                                let (pty_cols, pty_rows) = self
+                                    .terminal_service
+                                    .get_session(&session_id)
+                                    .map(|s| s.get_size())
+                                    .map(|(c, r)| (Some(c), Some(r)))
+                                    .unwrap_or((None, None));
+                                let hub = Arc::clone(self.terminal_service.output_hub());
+                                let history_segments = attachment
+                                    .snapshot
+                                    .history_segments
+                                    .iter()
+                                    .map(|seg| HistorySegmentWire {
+                                        cols: seg.cols,
+                                        rows: seg.rows,
+                                        bytes: seg.bytes.clone(),
+                                    })
+                                    .collect();
+                                let resp = DaemonResponse::AttachOk {
+                                    epoch: self.epoch,
+                                    session_id: session_id.clone(),
+                                    start_sequence: attachment.snapshot.history_start_sequence,
+                                    end_sequence: attachment.snapshot.history_end_sequence,
+                                    gap: attachment.snapshot.gap,
+                                    history: attachment.snapshot.history,
+                                    pty_cols,
+                                    pty_rows,
+                                    history_segments,
+                                };
+                                let mut resp_json = serde_json::to_string(&resp).unwrap();
+                                resp_json.push('\n');
+                                let _ = write_half.write_all(resp_json.as_bytes()).await;
+                                let _ = write_half.flush().await;
 
-                            Self::pump_sequenced_stream_with_agent_state(
-                                session_id,
-                                attachment.receiver,
-                                hub,
-                                write_half,
-                                Some(self.agent_state_tx.subscribe()),
-                            )
-                            .await;
+                                Self::pump_sequenced_stream_with_agent_state(
+                                    session_id,
+                                    attachment.receiver,
+                                    hub,
+                                    write_half,
+                                    Some(self.agent_state_tx.subscribe()),
+                                )
+                                .await;
+                                return;
+                            }
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        if let Err(e) = peer.attach_and_stream(&session_id, after_sequence, &mut write_half).await {
+                            DaemonResponse::Error { message: e }
+                        } else {
                             return;
                         }
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
                     }
                 }
                 Ok(DaemonRequest::SaveSession { session }) => {
@@ -1403,6 +1589,40 @@ impl DaemonServer {
                 Ok(DaemonRequest::UpgradeBinary) => {
                     self.handle_upgrade_binary().await
                 }
+                Ok(DaemonRequest::PrepareHandover) => {
+                    #[cfg(unix)]
+                    {
+                        match self.handover_manager.prepare_handover(&self.terminal_service) {
+                            Ok((legacy_path, active_sessions, listener)) => {
+                                let legacy_path_str = legacy_path.to_string_lossy().into_owned();
+                                Arc::clone(&self).spawn_legacy_listener(listener);
+                                DaemonResponse::PrepareHandoverOk {
+                                    legacy_socket_path: legacy_path_str,
+                                    active_sessions,
+                                }
+                            }
+                            Err(e) => DaemonResponse::Error { message: e },
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        DaemonResponse::HandoverRejected {
+                            reason: "Handover is only supported on Unix platforms".to_string(),
+                        }
+                    }
+                }
+                Ok(DaemonRequest::CommitHandover { .. }) => {
+                    match self.handover_manager.commit_handover(&self.terminal_service) {
+                        Ok(()) => DaemonResponse::CommitHandoverOk,
+                        Err(e) => DaemonResponse::Error { message: e },
+                    }
+                }
+                Ok(DaemonRequest::AbortHandover) => {
+                    match self.handover_manager.abort_handover() {
+                        Ok(()) => DaemonResponse::AbortHandoverOk,
+                        Err(e) => DaemonResponse::Error { message: e },
+                    }
+                }
                 Ok(DaemonRequest::Shutdown) => {
                     std::process::exit(0);
                 }
@@ -1420,11 +1640,70 @@ impl DaemonServer {
             if matches!(resp, DaemonResponse::ProtocolMismatch { .. }) {
                 break;
             }
+            if should_check_retirement {
+                self.handover_manager
+                    .check_retirement_if_empty(&self.terminal_service);
+            }
+                }
+            }
         }
     }
 
     #[cfg(unix)]
-    async fn handle_upgrade_binary(&self) -> DaemonResponse {
+    pub fn spawn_legacy_listener(self: Arc<Self>, listener: UnixListener) {
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let s = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            s.handle_client(stream).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    pub fn spawn_legacy_handover_daemon(
+        self: Arc<Self>,
+        legacy_path: PathBuf,
+        listener: UnixListener,
+    ) {
+        tokio::spawn(async move {
+            let exe = match std::env::current_exe() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!("Failed to get current_exe: {e}");
+                    return;
+                }
+            };
+
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--daemon").arg("--handover-from").arg(&legacy_path);
+            if let Err(e) = cmd.spawn() {
+                tracing::error!("Failed to spawn new daemon for handover: {e}");
+                return;
+            }
+
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let s = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            s.handle_client(stream).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    async fn handle_upgrade_binary(self: &Arc<Self>) -> DaemonResponse {
         let booted_mtime = self.binary_mtime_ms;
         let on_disk_mtime = tokio::task::spawn_blocking(|| {
             let exe = std::env::current_exe().ok()?;
@@ -1438,27 +1717,35 @@ impl DaemonServer {
         }
 
         let active_sessions = self.terminal_service.list_sessions();
-        if !active_sessions.is_empty() {
-            tracing::warn!(
-                "Deferring daemon binary upgrade because {} live terminal session(s) are active ({:?})",
-                active_sessions.len(),
-                active_sessions
-            );
-            return DaemonResponse::UpgradeDeferred;
+        if active_sessions.is_empty() {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if let Err(e) = perform_daemon_exec() {
+                    tracing::error!("Failed to re-exec daemon during upgrade: {e}");
+                }
+            });
+            return DaemonResponse::UpgradeScheduled;
         }
 
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            if let Err(e) = perform_daemon_exec() {
-                tracing::error!("Failed to re-exec daemon during upgrade: {e}");
+        let (legacy_path, _, listener) = match self
+            .handover_manager
+            .prepare_handover(&self.terminal_service)
+        {
+            Ok(res) => res,
+            Err(e) => {
+                return DaemonResponse::Error {
+                    message: format!("Failed to prepare handover: {e}"),
+                }
             }
-        });
+        };
+
+        Arc::clone(self).spawn_legacy_handover_daemon(legacy_path, listener);
 
         DaemonResponse::UpgradeScheduled
     }
 
     #[cfg(not(unix))]
-    async fn handle_upgrade_binary(&self) -> DaemonResponse {
+    async fn handle_upgrade_binary(self: &Arc<Self>) -> DaemonResponse {
         DaemonResponse::UpgradeUnsupported
     }
 
@@ -1492,12 +1779,18 @@ impl DaemonServer {
             .map_err(|e| e.to_string())
     }
 
-    pub async fn handle_remote_configure(&self, mut config: RemoteGatewayConfig) -> Result<(), String> {
+    pub async fn handle_remote_configure(
+        &self,
+        mut config: RemoteGatewayConfig,
+    ) -> Result<(), String> {
         config.port = REMOTE_GATEWAY_PORT;
         self.configure_gateway(config).await
     }
 
-    pub(crate) async fn configure_gateway(&self, config: RemoteGatewayConfig) -> Result<(), String> {
+    pub(crate) async fn configure_gateway(
+        &self,
+        config: RemoteGatewayConfig,
+    ) -> Result<(), String> {
         if config.mode == RemoteNetworkMode::Off {
             let prev_handle = self.remote_server_handle.lock().take();
             if let Some(handle) = prev_handle {
@@ -1548,6 +1841,12 @@ impl DaemonServer {
         shell: Option<String>,
         startup: Option<TerminalStartup>,
     ) -> Result<String, SpawnError> {
+        if self.handover_manager.is_draining() {
+            return Err(SpawnError::Other(
+                "Daemon is in draining mode and does not accept new sessions".into(),
+            ));
+        }
+
         if client_request_id.trim().is_empty() {
             return Err(SpawnError::Other("clientRequestId cannot be empty".into()));
         }
@@ -1695,6 +1994,8 @@ impl DaemonServer {
         let cleanup_cache = Arc::clone(&self.spawn_idempotency_cache);
         let cleanup_metadata = Arc::clone(&self.session_metadata);
         let cleanup_claims = Arc::clone(&self.provider_session_claims);
+        let handover_manager = Arc::clone(&self.handover_manager);
+        let terminal_service = Arc::clone(&self.terminal_service);
         tokio::spawn(async move {
             loop {
                 match lifecycle_rx.recv().await {
@@ -1712,6 +2013,7 @@ impl DaemonServer {
                         .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
                 }
             }
+            handover_manager.check_retirement_if_empty(&terminal_service);
         });
 
         Ok(session_id)
@@ -3296,15 +3598,19 @@ mod tests {
         assert_eq!(mtime, Some(1725280000000u64));
 
         // Injection test: exe failure
-        let mock_exe_err = || Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"));
+        let mock_exe_err = || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "not found",
+            ))
+        };
         let (path_err, mtime_err) = resolve_binary_identity_with(mock_exe_err, mock_mtime);
         assert_eq!(path_err, None);
         assert_eq!(mtime_err, None);
 
         // Injection test: mtime failure
         let mock_mtime_none = |_path: &Path| None;
-        let (path_no_mtime, mtime_none) =
-            resolve_binary_identity_with(mock_exe, mock_mtime_none);
+        let (path_no_mtime, mtime_none) = resolve_binary_identity_with(mock_exe, mock_mtime_none);
         assert_eq!(path_no_mtime, Some("/opt/ferryx/bin/ferryx".to_string()));
         assert_eq!(mtime_none, None);
 
@@ -3341,9 +3647,7 @@ mod tests {
         let [read_fd, write_fd] = pipe_fds;
 
         // 2. Set FD_CLOEXEC explicitly on read_fd (simulating portable-pty behavior)
-        let set_cloexec_ret = unsafe {
-            libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC)
-        };
+        let set_cloexec_ret = unsafe { libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC) };
         assert_eq!(set_cloexec_ret, 0);
 
         let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
@@ -3353,7 +3657,11 @@ mod tests {
         clear_cloexec(read_fd).expect("clear_cloexec must succeed");
 
         let flags_cleared = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
-        assert_eq!(flags_cleared & libc::FD_CLOEXEC, 0, "FD_CLOEXEC must be cleared");
+        assert_eq!(
+            flags_cleared & libc::FD_CLOEXEC,
+            0,
+            "FD_CLOEXEC must be cleared"
+        );
 
         // 4. Write data to write_fd
         let test_message = b"ferryx-inherited-fd-payload\n";
@@ -3368,7 +3676,9 @@ mod tests {
             .output()
             .expect("spawn helper process with inherited fd");
 
-        unsafe { libc::close(read_fd); }
+        unsafe {
+            libc::close(read_fd);
+        }
 
         assert!(output.status.success());
         let stdout_str = String::from_utf8_lossy(&output.stdout);

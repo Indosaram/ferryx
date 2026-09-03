@@ -1,7 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resetNotificationSettings, saveNotificationSettings } from "../../lib/notificationSettings";
+import {
+  NOTIFICATION_SETTINGS_EVENT,
+  loadNotificationSettings,
+  resetNotificationSettings,
+  saveNotificationSettings,
+} from "../../lib/notificationSettings";
 import { NotificationsSection } from "./NotificationsSection";
 
 const native = vi.hoisted(() => ({
@@ -117,5 +122,31 @@ describe("NotificationsSection", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Choose an audio file to enable the custom sound.");
+  });
+
+  it("persists attentionFrame and fires the settings event when toggling the pane attention border switch", async () => {
+    saveNotificationSettings({ enabled: true, attentionFrame: true });
+
+    let eventFiredWith: any = null;
+    const listener = (e: Event) => {
+      eventFiredWith = (e as CustomEvent).detail;
+    };
+    window.addEventListener(NOTIFICATION_SETTINGS_EVENT, listener);
+
+    try {
+      render(<NotificationsSection />);
+
+      const toggle = await screen.findByRole("switch", { name: /pane attention border/i });
+      expect(toggle).toBeInTheDocument();
+      expect(toggle).toHaveAttribute("data-state", "checked");
+
+      fireEvent.click(toggle);
+
+      expect(loadNotificationSettings().attentionFrame).toBe(false);
+      expect(eventFiredWith).not.toBeNull();
+      expect(eventFiredWith.attentionFrame).toBe(false);
+    } finally {
+      window.removeEventListener(NOTIFICATION_SETTINGS_EVENT, listener);
+    }
   });
 });

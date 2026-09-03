@@ -7,7 +7,6 @@ import codexLogo from "../assets/agent-logos/codex.svg";
 import copilotLogo from "../assets/agent-logos/copilot.svg";
 import clineLogo from "../assets/agent-logos/cline.svg";
 import cursorLogo from "../assets/agent-logos/cursor.svg";
-import geminiLogo from "../assets/agent-logos/gemini.svg";
 import gjcLogo from "../assets/agent-logos/gjc.png";
 import grokLogo from "../assets/agent-logos/grok.svg";
 import kimiLogo from "../assets/agent-logos/kimi.svg";
@@ -19,7 +18,6 @@ export const SUPPORTED_AGENT_LOGOS = {
   antigravity: antigravityLogo,
   claude: claudeLogo,
   codex: codexLogo,
-  gemini: geminiLogo,
   gjc: gjcLogo,
   opencode: opencodeLogo,
   pi: piLogo,

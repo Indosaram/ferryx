@@ -366,7 +366,7 @@ export function useWorkspaceStore({
       if (
         !payload.providerSession
         && payload.manifestId
-        && ["claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc"].includes(payload.manifestId)
+        && ["claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc", "antigravity"].includes(payload.manifestId)
       ) {
         const discoveryAgent = payload.manifestId === "cursor-agent" ? "cursor" : payload.manifestId;
         // A pane can surface several manifest ids over its lifetime (shared TUI

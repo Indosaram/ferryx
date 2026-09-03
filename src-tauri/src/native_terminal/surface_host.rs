@@ -273,6 +273,7 @@ pub struct NativeTerminalSession {
     pub last_agent_activity: Option<crate::agent_detect::AgentActivity>,
     pub last_scrollbar: Option<NativeTerminalScrollbarPayload>,
     pub scrollbar_overlay: ScrollbarOverlayState,
+    pub attention_frame: bool,
     /// Set once the agent reports its own state through the Ferryx extension, which permanently
     /// disables screen inference for this session.
     pub agent_reports_own_state: bool,
@@ -338,6 +339,7 @@ fn dispatch_scheduled_render<R: Runtime>(
                     &render_input.snapshot,
                     render_input.selection.as_ref(),
                     render_input.scrollbar_overlay.as_ref(),
+                    render_input.attention_frame,
                 ) {
                     tracing::warn!(
                         session_id = %session_id,
@@ -483,6 +485,7 @@ struct SessionRenderInput {
     snapshot: RenderSnapshot,
     selection: Option<SelectionSnapshot>,
     scrollbar_overlay: Option<ScrollbarOverlayState>,
+    attention_frame: bool,
 }
 
 fn preedit_char_wide(c: char) -> bool {
@@ -582,6 +585,7 @@ fn session_render_snapshot(
         snapshot,
         selection,
         scrollbar_overlay,
+        attention_frame: session.attention_frame,
     })
 }
 
@@ -695,6 +699,20 @@ impl NativeTerminalSurfaceHostState {
         Ok(())
     }
 
+    pub fn set_attention_frame(
+        &self,
+        session_id: &str,
+        attention: bool,
+    ) -> Result<(), NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let mut sessions = self.sessions.lock();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or(NativeTerminalError::NoValue)?;
+        session.attention_frame = attention;
+        Ok(())
+    }
+
     /// Maps DOM logical coordinates against attached session viewports.
     /// Uses half-open bounds `left <= x < right` and `top <= y < bottom` so split
     /// boundaries deterministically map to exactly one pane.
@@ -790,6 +808,7 @@ impl NativeTerminalSurfaceHostState {
                         last_agent_activity: None,
                         last_scrollbar: None,
                         scrollbar_overlay: ScrollbarOverlayState::default(),
+                        attention_frame: false,
                         agent_reports_own_state: false,
                         surface_attached: true,
                     },
@@ -1007,6 +1026,7 @@ impl NativeTerminalSurfaceHostState {
                         last_agent_activity: None,
                         last_scrollbar: None,
                         scrollbar_overlay: ScrollbarOverlayState::default(),
+                        attention_frame: false,
                         agent_reports_own_state: false,
                         surface_attached: true,
                     },
@@ -1359,6 +1379,7 @@ impl NativeTerminalSurfaceHostState {
                         last_agent_activity: None,
                         last_scrollbar: None,
                         scrollbar_overlay: ScrollbarOverlayState::default(),
+                        attention_frame: false,
                         agent_reports_own_state: false,
                         surface_attached: true,
                     },
@@ -1444,6 +1465,7 @@ impl NativeTerminalSurfaceHostState {
             &render_input.snapshot,
             render_input.selection.as_ref(),
             render_input.scrollbar_overlay.as_ref(),
+            render_input.attention_frame,
         )
     }
 
@@ -1477,6 +1499,7 @@ impl NativeTerminalSurfaceHostState {
                 &render_input.snapshot,
                 render_input.selection.as_ref(),
                 render_input.scrollbar_overlay.as_ref(),
+                render_input.attention_frame,
             )
         } else {
             Ok(NativeTerminalSurfaceReceipt::from_snapshot(
@@ -1584,6 +1607,7 @@ impl NativeTerminalSurfaceHost {
         snapshot: &RenderSnapshot,
         selection: Option<&super::renderer::SelectionSnapshot>,
         scrollbar_overlay: Option<&ScrollbarOverlayState>,
+        attention_frame: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         if let Some(bounds) = self.logical_bounds {
             self.target.update_viewport(Some(bounds));
@@ -1650,6 +1674,7 @@ impl NativeTerminalSurfaceHost {
             self.format,
             local_viewport,
             scrollbar_overlay,
+            attention_frame,
         )?;
         frame.present();
         self.target.reveal_after_present();
@@ -2370,6 +2395,58 @@ mod tests {
         assert_eq!(snap.grid[0][0].text, "A");
         assert_eq!(snap.grid[0][99].text, "X");
         drop(sessions);
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn test_set_attention_frame_updates_session_state() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-session-attention-frame";
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(2),
+            gap: None,
+            history: b"hello".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon session");
+
+        // Initial attention frame should be false
+        let render_input = state
+            .render_snapshot_for_session(session_id)
+            .unwrap()
+            .unwrap();
+        assert!(!render_input.attention_frame);
+
+        // Enable attention frame
+        state
+            .set_attention_frame(session_id, true)
+            .expect("set attention frame true");
+        let render_input = state
+            .render_snapshot_for_session(session_id)
+            .unwrap()
+            .unwrap();
+        assert!(render_input.attention_frame);
+
+        // Disable attention frame
+        state
+            .set_attention_frame(session_id, false)
+            .expect("set attention frame false");
+        let render_input = state
+            .render_snapshot_for_session(session_id)
+            .unwrap()
+            .unwrap();
+        assert!(!render_input.attention_frame);
+
         state.teardown();
     }
 }

@@ -6,6 +6,7 @@ export interface NotificationSettings {
   enabled: boolean;
   agentTaskComplete: boolean;
   terminalBell: boolean;
+  attentionFrame: boolean;
   customSoundId: "system" | "none" | "custom" | string;
   customSoundPath: string | null;
   customSoundVolume: number;
@@ -18,6 +19,7 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: true,
   agentTaskComplete: true,
   terminalBell: false,
+  attentionFrame: true,
   customSoundId: "system",
   customSoundPath: null,
   customSoundVolume: 0.8,
@@ -36,6 +38,7 @@ export function loadNotificationSettings(): NotificationSettings {
       enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_NOTIFICATION_SETTINGS.enabled,
       agentTaskComplete: typeof parsed.agentTaskComplete === "boolean" ? parsed.agentTaskComplete : DEFAULT_NOTIFICATION_SETTINGS.agentTaskComplete,
       terminalBell: typeof parsed.terminalBell === "boolean" ? parsed.terminalBell : DEFAULT_NOTIFICATION_SETTINGS.terminalBell,
+      attentionFrame: typeof parsed.attentionFrame === "boolean" ? parsed.attentionFrame : DEFAULT_NOTIFICATION_SETTINGS.attentionFrame,
       customSoundId: typeof parsed.customSoundId === "string" ? parsed.customSoundId : DEFAULT_NOTIFICATION_SETTINGS.customSoundId,
       customSoundPath: typeof parsed.customSoundPath === "string" ? parsed.customSoundPath : null,
       customSoundVolume: typeof parsed.customSoundVolume === "number" ? Math.max(0, Math.min(1, parsed.customSoundVolume)) : DEFAULT_NOTIFICATION_SETTINGS.customSoundVolume,
@@ -108,4 +111,32 @@ export function useNotificationSettings() {
     updateSettings,
     resetSettings: reset,
   };
+}
+
+export function useAttentionFrameEnabled(): boolean {
+  const [attentionFrame, setAttentionFrame] = useState<boolean>(() => loadNotificationSettings().attentionFrame);
+
+  useEffect(() => {
+    const handleUpdate = (e: Event) => {
+      const customEvent = e as CustomEvent<NotificationSettings>;
+      if (customEvent.detail && typeof customEvent.detail.attentionFrame === "boolean") {
+        setAttentionFrame(customEvent.detail.attentionFrame);
+      } else {
+        setAttentionFrame(loadNotificationSettings().attentionFrame);
+      }
+    };
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === NOTIFICATION_SETTINGS_STORAGE_KEY) {
+        setAttentionFrame(loadNotificationSettings().attentionFrame);
+      }
+    };
+    window.addEventListener(NOTIFICATION_SETTINGS_EVENT, handleUpdate);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(NOTIFICATION_SETTINGS_EVENT, handleUpdate);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  return attentionFrame;
 }

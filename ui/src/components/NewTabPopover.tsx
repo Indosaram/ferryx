@@ -1,5 +1,6 @@
 import { useRef, useEffect, useMemo, useState } from "react";
-import { TerminalSquare, Globe, FileText, Smartphone, Settings, Sparkles } from "lucide-react";
+import { TerminalSquare, Globe, FileText, Smartphone, Settings } from "lucide-react";
+import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 import {
   newBrowserTabUrl,
   resolveSupportedBrowserProfileId,
@@ -67,10 +68,14 @@ export function NewTabPopover({
   const browserProfiles = useMemo(() => supportedBrowserProfiles(settings), [settings]);
   const [browserProfileId, setBrowserProfileId] = useState(() => resolveSupportedBrowserProfileId(undefined, settings));
   const [terminalShell, setTerminalShell] = useState("");
-  const launcherAgents = useMemo(
-    () => (agents && agents.length > 0 ? orderAgentsForNewTab(agents, defaultAgentId) : agents),
-    [agents, defaultAgentId],
-  );
+  const launcherAgents = useMemo(() => {
+    if (!agents || agents.length === 0) return agents;
+    // Disabled or not-installed agents never appear in the New Tab menu.
+    // App.tsx already pre-filters via getLaunchableAgents; this guards callers
+    // that pass raw resolved agents. Explicit false only — omitted fields stay visible.
+    const launchable = agents.filter((agent) => agent.enabled !== false && agent.available !== false);
+    return launchable.length > 0 ? orderAgentsForNewTab(launchable, defaultAgentId) : launchable;
+  }, [agents, defaultAgentId]);
 
   useEffect(() => {
     setBrowserProfileId((current) => resolveSupportedBrowserProfileId(current, settings));
@@ -227,6 +232,8 @@ export function NewTabPopover({
             {launcherAgents.map((agent) => {
               const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
               const isDefault = isUsableDefaultAgent(agent, defaultAgentId);
+              const agentLogo = resolveAgentLogo(agent.name);
+              const isMonochrome = isMonochromeAgentLogo(agent.name);
               return (
                 <button
                   key={agent.name}
@@ -238,7 +245,21 @@ export function NewTabPopover({
                   className="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-foreground hover:bg-accent/50 transition-colors group"
                 >
                   <div className="flex items-center gap-2.5">
-                    <Sparkles className="size-4 text-muted-foreground group-hover:text-foreground" />
+                    {agentLogo ? (
+                      <img
+                        src={agentLogo}
+                        alt=""
+                        aria-hidden="true"
+                        data-testid="popover-agent-icon"
+                        data-agent-type={agent.name}
+                        className={`size-4 shrink-0 ${isMonochrome ? "agent-tab-logo--monochrome opacity-80 group-hover:opacity-100" : ""}`}
+                      />
+                    ) : (
+                      <TerminalSquare
+                        data-testid="popover-agent-terminal-icon"
+                        className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground"
+                      />
+                    )}
                     <span className="font-medium">{label}</span>
                   </div>
                   {isDefault ? (

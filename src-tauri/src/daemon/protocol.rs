@@ -198,6 +198,13 @@ pub enum DaemonRequest {
     /// reach the GUI, so remote-issued selections are silently dropped.
     SubscribeRemoteEvents,
     UpgradeBinary,
+    PrepareHandover,
+    #[serde(rename_all = "camelCase")]
+    CommitHandover {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        legacy_socket_path: Option<String>,
+    },
+    AbortHandover,
     Shutdown,
 }
 
@@ -301,6 +308,17 @@ pub enum DaemonResponse {
     UpgradeNotNeeded,
     UpgradeDeferred,
     UpgradeUnsupported,
+    #[serde(rename_all = "camelCase")]
+    PrepareHandoverOk {
+        legacy_socket_path: String,
+        active_sessions: Vec<String>,
+    },
+    CommitHandoverOk,
+    AbortHandoverOk,
+    #[serde(rename_all = "camelCase")]
+    HandoverRejected {
+        reason: String,
+    },
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,
@@ -964,5 +982,58 @@ mod tests {
                 _ => panic!("Mismatch deserializing {expected_type}"),
             }
         }
+    }
+
+    #[test]
+    fn test_handover_protocol_serde_roundtrip() {
+        let prep_req = DaemonRequest::PrepareHandover;
+        let prep_json = serde_json::to_string(&prep_req).expect("serialize PrepareHandover");
+        assert_eq!(prep_json, r#"{"type":"prepareHandover"}"#);
+        let prep_deser: DaemonRequest =
+            serde_json::from_str(&prep_json).expect("deserialize PrepareHandover");
+        assert!(matches!(prep_deser, DaemonRequest::PrepareHandover));
+
+        let commit_req = DaemonRequest::CommitHandover {
+            legacy_socket_path: Some("/tmp/legacy.sock".to_string()),
+        };
+        let commit_json = serde_json::to_string(&commit_req).expect("serialize CommitHandover");
+        assert!(commit_json.contains(r#""legacySocketPath":"/tmp/legacy.sock""#));
+        let commit_deser: DaemonRequest =
+            serde_json::from_str(&commit_json).expect("deserialize CommitHandover");
+        match commit_deser {
+            DaemonRequest::CommitHandover { legacy_socket_path } => {
+                assert_eq!(legacy_socket_path, Some("/tmp/legacy.sock".to_string()));
+            }
+            _ => panic!("Expected CommitHandover"),
+        }
+
+        let abort_req = DaemonRequest::AbortHandover;
+        let abort_json = serde_json::to_string(&abort_req).expect("serialize AbortHandover");
+        assert_eq!(abort_json, r#"{"type":"abortHandover"}"#);
+
+        let prep_resp = DaemonResponse::PrepareHandoverOk {
+            legacy_socket_path: "/tmp/legacy.sock".to_string(),
+            active_sessions: vec!["s1".to_string(), "s2".to_string()],
+        };
+        let prep_resp_json =
+            serde_json::to_string(&prep_resp).expect("serialize PrepareHandoverOk");
+        assert!(prep_resp_json.contains(r#""legacySocketPath":"/tmp/legacy.sock""#));
+        assert!(prep_resp_json.contains(r#""activeSessions":["s1","s2"]"#));
+
+        let commit_resp = DaemonResponse::CommitHandoverOk;
+        let commit_resp_json =
+            serde_json::to_string(&commit_resp).expect("serialize CommitHandoverOk");
+        assert_eq!(commit_resp_json, r#"{"type":"commitHandoverOk"}"#);
+
+        let abort_resp = DaemonResponse::AbortHandoverOk;
+        let abort_resp_json =
+            serde_json::to_string(&abort_resp).expect("serialize AbortHandoverOk");
+        assert_eq!(abort_resp_json, r#"{"type":"abortHandoverOk"}"#);
+
+        let rej_resp = DaemonResponse::HandoverRejected {
+            reason: "Already in progress".to_string(),
+        };
+        let rej_json = serde_json::to_string(&rej_resp).expect("serialize HandoverRejected");
+        assert!(rej_json.contains(r#""reason":"Already in progress""#));
     }
 }

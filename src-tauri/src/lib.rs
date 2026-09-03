@@ -7,8 +7,8 @@ pub mod ipc;
 pub mod native_terminal;
 pub mod notification;
 pub mod remote;
-pub mod ssh;
 pub mod session;
+pub mod ssh;
 pub mod terminal;
 pub mod util;
 pub mod worktree;
@@ -536,7 +536,9 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                     if ipc::native_terminal::scroll_attached_native_terminal(
                                         &surface_host,
                                         &session_id,
-                                        crate::native_terminal::ScrollViewport::Delta(rows as isize),
+                                        crate::native_terminal::ScrollViewport::Delta(
+                                            rows as isize,
+                                        ),
                                     )
                                     .is_ok()
                                     {
@@ -690,7 +692,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                         .create(true)
                         .append(true)
                         .open("/tmp/ferryx-switch-debug.jsonl")
-                        .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()));
+                        .and_then(|mut file| {
+                            std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes())
+                        });
                 }
             }
             #[cfg(not(target_os = "macos"))]
@@ -754,6 +758,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_scroll,
         cmd_native_terminal_scrollbar,
         cmd_native_terminal_set_scrollbar_overlay,
+        cmd_native_terminal_set_attention_frame,
         cmd_native_terminal_select,
         cmd_native_terminal_copy_selection,
         cmd_native_terminal_paste,

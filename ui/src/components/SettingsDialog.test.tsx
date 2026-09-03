@@ -187,7 +187,7 @@ beforeEach(() => {
   native.detectAgents.mockResolvedValue([
     { name: "claude", available: true },
     { name: "codex", available: false },
-    { name: "gemini", available: false },
+    { name: "agy", available: false },
     { name: "opencode", available: true },
     { name: "aider", available: false },
     { name: "cursor-agent", available: false },

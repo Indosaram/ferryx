@@ -7,9 +7,7 @@ fn native_application_menu_is_macos_only() {
         "the native application menu must only be compiled for macOS"
     );
     assert!(
-        APP_LIB.contains(
-            "#[cfg(target_os = \"macos\")]\n            install_app_menu(app)?;"
-        ),
+        APP_LIB.contains("#[cfg(target_os = \"macos\")]\n            install_app_menu(app)?;"),
         "Windows and Linux must not attach the macOS-style menu to their windows"
     );
 }

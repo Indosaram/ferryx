@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +39,16 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
     };
     if !matches!(
         normalized,
-        "claude" | "codex" | "copilot" | "cursor" | "kimi" | "omo" | "gjc"
+        "claude"
+            | "codex"
+            | "copilot"
+            | "cursor"
+            | "kimi"
+            | "omo"
+            | "gjc"
+            | "antigravity"
+            | "opencode"
+            | "pi"
     ) {
         return None;
     }
@@ -48,6 +57,12 @@ pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Opti
         .and_then(|entries| descendant_agent_pid(&entries, root_pid, normalized));
     match agent_pid {
         Some(pid) if normalized == "omo" => omo_session_id_from_environment(pid, normalized),
+        Some(pid) if normalized == "antigravity" => antigravity_session_id(Some(pid), root_pid),
+        None if normalized == "antigravity" => antigravity_session_id(None, root_pid),
+        Some(pid) if normalized == "opencode" => opencode_session_id(Some(pid), root_pid),
+        None if normalized == "opencode" => opencode_session_id(None, root_pid),
+        Some(pid) if normalized == "pi" => pi_session_id(Some(pid), root_pid),
+        None if normalized == "pi" => pi_session_id(None, root_pid),
         Some(pid) => lsof_session_id(pid, normalized),
         None => lsof_session_id(root_pid, normalized),
     }
@@ -106,7 +121,14 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
     match normalized_agent {
         "cursor" => matches!(basename.as_str(), "cursor-agent" | "cursor"),
         "claude" | "codex" | "copilot" | "kimi" => basename == normalized_agent,
+        "antigravity" => basename == "agy",
         "gjc" => basename == "gjc" || args.to_ascii_lowercase().contains("/gjc.js"),
+        "opencode" => basename == "opencode",
+        "pi" => {
+            basename == "pi"
+                || basename == "pi.js"
+                || args.to_ascii_lowercase().contains("/pi-coding-agent")
+        }
         _ => false,
     }
 }
@@ -199,6 +221,8 @@ fn extract_session_id_from_path(agent_type: &str, path: &str) -> Option<String> 
         "cursor" => "/.cursor/chats/",
         "kimi" => "/.kimi/sessions/",
         "omo" => "/.omo/sessions/",
+        "pi" => "/.pi/",
+        "antigravity" => "/.gemini/antigravity-cli/conversations/",
         _ => return None,
     };
     if !normalized.contains(marker) {
@@ -217,6 +241,248 @@ fn uuid_from_session_path(path: &str) -> Option<String> {
                 && part.as_bytes().get(23) == Some(&b'-')
         })
         .map(str::to_string)
+}
+
+fn is_valid_uuid(val: &str) -> bool {
+    let trimmed = val.trim();
+    if trimmed.len() != 36 {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+}
+
+fn normalize_lookup_path(path: &str) -> String {
+    let replaced = path.replace('\\', "/");
+    let trimmed = replaced.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_path_prefix(prefix: &str, target: &str) -> bool {
+    let p = normalize_lookup_path(prefix);
+    let t = normalize_lookup_path(target);
+    if t == p {
+        return true;
+    }
+    if let Some(rest) = t.strip_prefix(&p) {
+        return rest.starts_with('/');
+    }
+    false
+}
+
+pub(crate) fn find_antigravity_conversation_id(json_str: &str, cwd: &str) -> Option<String> {
+    let map: HashMap<String, String> = serde_json::from_str(json_str).ok()?;
+    let target_norm = normalize_lookup_path(cwd);
+
+    // 1. Exact match (comparing normalized path strings)
+    for (key, id) in &map {
+        if normalize_lookup_path(key) == target_norm && is_valid_uuid(id) {
+            return Some(id.trim().to_string());
+        }
+    }
+
+    // 2. Prefix fallback: find key that is a path prefix of cwd with greatest normalized length
+    let mut best_match: Option<(&String, &String, usize)> = None;
+    for (key, id) in &map {
+        if is_path_prefix(key, cwd) && is_valid_uuid(id) {
+            let key_len = normalize_lookup_path(key).len();
+            match best_match {
+                None => best_match = Some((key, id, key_len)),
+                Some((_, _, best_len)) => {
+                    if key_len > best_len {
+                        best_match = Some((key, id, key_len));
+                    }
+                }
+            }
+        }
+    }
+
+    best_match.map(|(_, id, _)| id.trim().to_string())
+}
+
+fn antigravity_session_id(agent_pid: Option<u32>, root_pid: u32) -> Option<String> {
+    let target_cwd = agent_pid
+        .and_then(crate::ipc::terminal::process_cwd)
+        .or_else(|| crate::ipc::terminal::process_cwd(root_pid));
+
+    if let Some(cwd) = target_cwd {
+        let normalized_cwd = crate::daemon::server::normalize_process_cwd(&cwd);
+        let cwd_str = normalized_cwd.to_string_lossy();
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let cache_path = home.join(".gemini/antigravity-cli/cache/last_conversations.json");
+            if let Ok(contents) = std::fs::read_to_string(&cache_path) {
+                if let Some(id) = find_antigravity_conversation_id(&contents, &cwd_str) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+
+    if let Some(pid) = agent_pid {
+        if let Some(id) = lsof_session_id(pid, "antigravity") {
+            return Some(id);
+        }
+    }
+    lsof_session_id(root_pid, "antigravity")
+}
+
+fn opencode_session_id(agent_pid: Option<u32>, root_pid: u32) -> Option<String> {
+    let cwd = agent_pid
+        .and_then(crate::ipc::terminal::process_cwd)
+        .or_else(|| crate::ipc::terminal::process_cwd(root_pid))?;
+    let cwd_str = cwd.to_string_lossy();
+
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let db_path = home.join(".local/share/opencode/opencode.db");
+        if db_path.exists() {
+            if let Some(id) = opencode_session_id_from_sqlite(&db_path, &cwd_str) {
+                return Some(id);
+            }
+        }
+    }
+
+    opencode_session_id_from_cli(&cwd_str)
+}
+
+fn is_valid_opencode_session_id(id: &str) -> bool {
+    let trimmed = id.trim();
+    if !trimmed.starts_with("ses_") || trimmed.len() < 10 || trimmed.len() > 128 {
+        return false;
+    }
+    trimmed["ses_".len()..]
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn opencode_session_id_from_sqlite(db_path: &Path, cwd: &str) -> Option<String> {
+    let escaped_cwd = cwd.replace('\'', "''");
+    let query = format!(
+        "SELECT id FROM session WHERE directory = '{}' ORDER BY time_updated DESC LIMIT 1;",
+        escaped_cwd
+    );
+    let output = crate::util::no_window_command("sqlite3")
+        .arg(db_path)
+        .arg(&query)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let id = stdout.trim().lines().next()?.trim();
+    if is_valid_opencode_session_id(id) {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+fn opencode_session_id_from_cli(cwd: &str) -> Option<String> {
+    let output = crate::util::no_window_command("opencode")
+        .args(["session", "list", "--format", "json", "-n", "10"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    parse_opencode_session_list_json(&stdout, cwd)
+}
+
+pub(crate) fn parse_opencode_session_list_json(json_str: &str, cwd: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct OpencodeSessionItem {
+        id: Option<String>,
+        directory: Option<String>,
+    }
+
+    let items: Vec<OpencodeSessionItem> = serde_json::from_str(json_str).ok()?;
+    for item in items {
+        if let (Some(id), Some(dir)) = (item.id, item.directory) {
+            if is_path_prefix(&dir, cwd) || is_path_prefix(cwd, &dir) {
+                if is_valid_opencode_session_id(&id) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn encode_pi_safe_path(cwd: &str) -> String {
+    let trimmed = cwd.trim_matches(|c| c == '/' || c == '\\');
+    let clean = trimmed.replace(['/', '\\', ':'], "-");
+    format!("--{}--", clean)
+}
+
+fn pi_session_id(agent_pid: Option<u32>, root_pid: u32) -> Option<String> {
+    if let Some(pid) = agent_pid {
+        if let Some(id) = omo_session_id_from_environment(pid, "pi") {
+            return Some(id);
+        }
+        if let Some(id) = lsof_session_id(pid, "pi") {
+            return Some(id);
+        }
+    }
+
+    if let Some(id) = lsof_session_id(root_pid, "pi") {
+        return Some(id);
+    }
+
+    let cwd = agent_pid
+        .and_then(crate::ipc::terminal::process_cwd)
+        .or_else(|| crate::ipc::terminal::process_cwd(root_pid))?;
+    let cwd_str = cwd.to_string_lossy();
+    pi_session_id_from_session_dir(&cwd_str)
+}
+
+fn pi_session_id_from_session_dir(cwd: &str) -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let safe_dir = encode_pi_safe_path(cwd);
+    let session_dir = home.join(".pi/agent/sessions").join(safe_dir);
+    if !session_dir.is_dir() {
+        return None;
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(&session_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "jsonl")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    entries.sort_by_key(|e| {
+        e.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+
+    for entry in entries.iter().rev() {
+        let path = entry.path();
+        let path_str = path.to_string_lossy();
+        if let Some(uuid) = uuid_from_session_path(&path_str) {
+            return Some(uuid);
+        }
+    }
+    None
 }
 
 // GJC (gajae-code) stores managed sessions at
@@ -465,6 +731,20 @@ mod tests {
         assert!(!args_match_agent("copilot", "copilot-agent --resume id"));
         assert!(args_match_agent("kimi", "/usr/local/bin/kimi --session id"));
         assert!(!args_match_agent("kimi", "/usr/local/bin/kimi-cli"));
+        assert!(args_match_agent("antigravity", "/Users/x/.local/bin/agy"));
+        assert!(args_match_agent("antigravity", "agy --conversation id"));
+        assert!(!args_match_agent(
+            "antigravity",
+            "/usr/local/bin/agy-helper"
+        ));
+        assert!(!args_match_agent("antigravity", "antigravity"));
+        assert!(args_match_agent("opencode", "/usr/local/bin/opencode"));
+        assert!(args_match_agent("opencode", "opencode --session id"));
+        assert!(args_match_agent("pi", "/Users/x/.bun/bin/pi"));
+        assert!(args_match_agent(
+            "pi",
+            "node /path/@mariozechner/pi-coding-agent/dist/main.js"
+        ));
         assert!(args_match_agent("gjc", "/usr/local/bin/gjc"));
         assert!(args_match_agent(
             "gjc",
@@ -544,5 +824,123 @@ mod tests {
             session_id_from_env_output("omo", "HOME=/Users/indo PATH=/usr/bin:/bin"),
             None
         );
+    }
+
+    #[test]
+    fn test_antigravity_last_conversations_parser() {
+        let fixture = r#"{
+            "/Users/alice/projects/app": "aaaaaaaa-1111-2222-3333-444444444444",
+            "/Users/alice/projects": "bbbbbbbb-1111-2222-3333-444444444444",
+            "/Users/alice/other": "not-a-uuid",
+            "/Users/alice/proj": "cccccccc-1111-2222-3333-444444444444"
+        }"#;
+
+        // Exact hit
+        assert_eq!(
+            find_antigravity_conversation_id(fixture, "/Users/alice/projects/app"),
+            Some("aaaaaaaa-1111-2222-3333-444444444444".to_string())
+        );
+
+        // Prefix fallback (longest path prefix matches /Users/alice/projects, NOT /Users/alice/proj)
+        assert_eq!(
+            find_antigravity_conversation_id(fixture, "/Users/alice/projects/app/sub/dir"),
+            Some("aaaaaaaa-1111-2222-3333-444444444444".to_string())
+        );
+        assert_eq!(
+            find_antigravity_conversation_id(fixture, "/Users/alice/projects/other-dir"),
+            Some("bbbbbbbb-1111-2222-3333-444444444444".to_string())
+        );
+
+        // Non-path prefix should not match (/Users/alice/project-foo should not match /Users/alice/projects or /Users/alice/proj)
+        assert_eq!(
+            find_antigravity_conversation_id(fixture, "/Users/alice/project-foo"),
+            None
+        );
+
+        // Miss
+        assert_eq!(find_antigravity_conversation_id(fixture, "/var/log"), None);
+
+        // Non-UUID value is rejected
+        assert_eq!(
+            find_antigravity_conversation_id(fixture, "/Users/alice/other"),
+            None
+        );
+    }
+
+    #[test]
+    fn session_discovery_extracts_pi_session_path() {
+        let id = "12345678-1234-1234-1234-123456789abc";
+        assert_eq!(
+            extract_session_id_from_path(
+                "pi",
+                &format!("/Users/me/.pi/agent/sessions/--some-path--/2026-09-02T16-00-00-000Z_{id}.jsonl")
+            ),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            extract_session_id_from_path("pi", "/tmp/unrelated.jsonl"),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_session_list_json_parser_matches_cwd() {
+        let fixture = r#"[
+            {
+                "id": "ses_f9d2d353affewnpwvJ0rOcNZls",
+                "title": "New session",
+                "updated": 1788364377094,
+                "created": 1788364376773,
+                "directory": "/Users/indo/code/project/orca-lite"
+            },
+            {
+                "id": "ses_other1234567890abcdef",
+                "title": "Other",
+                "updated": 1788360000000,
+                "created": 1788360000000,
+                "directory": "/Users/indo/code/other"
+            }
+        ]"#;
+
+        assert_eq!(
+            parse_opencode_session_list_json(fixture, "/Users/indo/code/project/orca-lite"),
+            Some("ses_f9d2d353affewnpwvJ0rOcNZls".to_string())
+        );
+        assert_eq!(
+            parse_opencode_session_list_json(fixture, "/Users/indo/code/other/sub"),
+            Some("ses_other1234567890abcdef".to_string())
+        );
+        assert_eq!(
+            parse_opencode_session_list_json(fixture, "/var/empty"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_encode_pi_safe_path() {
+        assert_eq!(
+            encode_pi_safe_path("/Users/indo/code/project/orca-lite"),
+            "--Users-indo-code-project-orca-lite--"
+        );
+        assert_eq!(
+            encode_pi_safe_path("/Users/indo/code/project/orca-lite/"),
+            "--Users-indo-code-project-orca-lite--"
+        );
+        assert_eq!(
+            encode_pi_safe_path(r"C:\Users\indo\project"),
+            "--C--Users-indo-project--"
+        );
+    }
+
+    #[test]
+    fn opencode_session_id_validation() {
+        assert!(is_valid_opencode_session_id(
+            "ses_f9d2d353affewnpwvJ0rOcNZls"
+        ));
+        assert!(is_valid_opencode_session_id("ses_1234567"));
+        assert!(!is_valid_opencode_session_id("invalid_id"));
+        assert!(!is_valid_opencode_session_id("ses_"));
+        assert!(!is_valid_opencode_session_id("ses_has space"));
+        assert!(!is_valid_opencode_session_id("ses_has;semi"));
     }
 }

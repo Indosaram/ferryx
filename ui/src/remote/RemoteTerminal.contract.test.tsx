@@ -581,6 +581,29 @@ describe("remote terminal grid contract", () => {
     expect(sink).toHaveValue("");
   });
 
+  it("snaps Hangul runs and the cursor overlay onto exact cell boundaries", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    act(() => {
+      socket().onmessage?.({
+        data: JSON.stringify({
+          type: "gridDiff",
+          cols: 12,
+          rows: 2,
+          cursor: { ...hiddenCursor, x: 4, y: 0, visible: true },
+          lines: [{ index: 0, runs: [{ text: "한글", fg: null, bg: null, attrs: 0, cells: 4 }] }],
+        }),
+      } as MessageEvent);
+    });
+
+    const runSpan = surface().querySelector('[data-grid-line="0"] > span');
+    expect(runSpan).toHaveStyle({ display: "inline-block", width: "40px" });
+    expect(surface().querySelector('[data-terminal-cursor="true"]')).toHaveStyle({
+      transform: "translate(40px, 0px)",
+    });
+  });
+
   it("preserves control modifiers for physical navigation keys", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
@@ -673,6 +696,43 @@ describe("remote terminal grid contract", () => {
     socket().send.mockClear();
     fireEvent.wheel(surface(), { deltaY: 0 });
     expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it("auto-focuses its input sink on mount and when activeTabId changes", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const view = render(
+      <RemoteTerminal sessionId="session-123" token="token-abc" activeTabId="tab-a" />,
+    );
+
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+    expect(document.activeElement).toBe(sink);
+
+    // Move focus elsewhere, then switch tabs: focus must return to the sink.
+    sink.blur();
+    expect(document.activeElement).not.toBe(sink);
+
+    view.rerender(
+      <RemoteTerminal sessionId="session-123" token="token-abc" activeTabId="tab-b" />,
+    );
+    expect(document.activeElement).toBe(screen.getByTestId("remote-terminal-input-sink"));
+  });
+
+  it("re-focuses its input sink when re-rendered with a new sessionId", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const view = render(
+      <RemoteTerminal sessionId="session-1" token="token-abc" activeTabId="tab-1" />,
+    );
+
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+    expect(document.activeElement).toBe(sink);
+
+    sink.blur();
+    expect(document.activeElement).not.toBe(sink);
+
+    view.rerender(
+      <RemoteTerminal sessionId="session-2" token="token-abc" activeTabId="tab-2" />,
+    );
+    expect(document.activeElement).toBe(screen.getByTestId("remote-terminal-input-sink"));
   });
 
   it("does not send scroll message on wheel event when socket is not open", () => {

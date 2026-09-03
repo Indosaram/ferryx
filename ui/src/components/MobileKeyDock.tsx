@@ -133,6 +133,9 @@ function KeyButton({
     <button
       type="button"
       onClick={onClick}
+      onPointerDown={(e) => {
+        e.preventDefault();
+      }}
       title={title}
       className={`min-w-[44px] min-h-11 px-2 flex items-center justify-center rounded border text-xs font-mono font-medium transition-all active:scale-95 ${
         active

@@ -15,6 +15,8 @@ any = [
   { contains = ["do you want to proceed?"] },
   { contains = ["requesting permission for:"] },
   { contains = ["confirm tool call"] },
+  { contains = ["wants to run a command"] },
+  { contains = ["allow once"] },
   { contains = ["approve"], any = [{ contains = ["allow all"] }, { contains = ["deny"] }] },
 ]
 

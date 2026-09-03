@@ -40,7 +40,12 @@ mod tests {
     use crate::ssh::SshAuthMethod;
     use crate::ssh::SshHostSource;
 
-    fn host(port: Option<u16>, identity: Option<&str>, jump: Option<&str>, user: Option<&str>) -> SshHost {
+    fn host(
+        port: Option<u16>,
+        identity: Option<&str>,
+        jump: Option<&str>,
+        user: Option<&str>,
+    ) -> SshHost {
         SshHost {
             id: "h".into(),
             label: "l".into(),
@@ -59,10 +64,19 @@ mod tests {
     fn red_probe_argv_shape() {
         assert_eq!(
             probe_argv(&host(None, None, None, None)),
-            vec!["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2.5", "maho-win"]
+            vec![
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=2.5",
+                "maho-win"
+            ]
         );
         assert_eq!(
-            probe_argv(&host(None, None, None, Some("sook"))).last().map(String::as_str),
+            probe_argv(&host(None, None, None, Some("sook")))
+                .last()
+                .map(String::as_str),
             Some("sook@maho-win")
         );
     }
@@ -72,10 +86,25 @@ mod tests {
         let bare = interactive_argv(&host(None, None, None, None));
         assert_eq!(bare, vec!["ssh", "-tt", "maho-win"]);
 
-        let full = interactive_argv(&host(Some(2200), Some("~/.ssh/id_ed25519"), Some("bastion"), Some("sook")));
+        let full = interactive_argv(&host(
+            Some(2200),
+            Some("~/.ssh/id_ed25519"),
+            Some("bastion"),
+            Some("sook"),
+        ));
         assert_eq!(
             full,
-            vec!["ssh", "-tt", "-p", "2200", "-i", "~/.ssh/id_ed25519", "-J", "bastion", "sook@maho-win"]
+            vec![
+                "ssh",
+                "-tt",
+                "-p",
+                "2200",
+                "-i",
+                "~/.ssh/id_ed25519",
+                "-J",
+                "bastion",
+                "sook@maho-win"
+            ]
         );
     }
 }

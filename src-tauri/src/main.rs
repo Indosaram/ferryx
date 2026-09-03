@@ -198,41 +198,42 @@ where
     LaunchMode::Gui
 }
 
-pub fn run_daemon_headless() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn parse_handover_from<I, T>(args: I) -> Option<std::path::PathBuf>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args: Vec<String> = args.into_iter().map(|s| s.as_ref().to_string()).collect();
+    let pos = args.iter().position(|a| a == "--handover-from")?;
+    args.get(pos + 1).map(std::path::PathBuf::from)
+}
+
+pub fn run_daemon_headless(
+    handover_from: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let server = Arc::new(ferryx_lib::daemon::server::DaemonServer::new());
         let server_clone = Arc::clone(&server);
-        let server_task = tokio::spawn(async move { server_clone.run_server().await });
+        let server_task = tokio::spawn(async move {
+            server_clone
+                .run_server_with_handover_and_readiness(handover_from, Some(ready_tx))
+                .await
+        });
 
-        // Ensure server listener is bound and accepting before emitting readiness signal
-        let socket_path = ferryx_lib::daemon::server::get_socket_path();
-        loop {
-            #[cfg(unix)]
-            if socket_path.exists() {
-                if let Ok(_probe) = tokio::net::UnixStream::connect(&socket_path).await {
-                    break;
-                }
+        // Wait for server to bind listener and initialize before emitting readiness signal
+        match ready_rx.await {
+            Ok(()) => {
+                println!("FERRYX_DAEMON_READY");
+                let _ = std::io::stdout().flush();
             }
-            #[cfg(not(unix))]
-            if socket_path.exists() {
-                if let Ok(port_str) = std::fs::read_to_string(&socket_path) {
-                    if let Ok(port) = port_str.trim().parse::<u16>() {
-                        if let Ok(_probe) =
-                            tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await
-                        {
-                            break;
-                        }
-                    }
-                }
+            Err(_) => {
+                // If ready_tx dropped, server_task must have returned an error
             }
-            tokio::task::yield_now().await;
         }
-
-        println!("FERRYX_DAEMON_READY");
-        let _ = std::io::stdout().flush();
 
         match server_task.await {
             Ok(Ok(())) => Ok(()),
@@ -255,7 +256,8 @@ fn main() {
     }
     match parse_launch_mode(&args) {
         LaunchMode::Daemon => {
-            if let Err(e) = run_daemon_headless() {
+            let handover_from = parse_handover_from(&args);
+            if let Err(e) = run_daemon_headless(handover_from) {
                 eprintln!("Ferryx daemon error: {e}");
                 std::process::exit(1);
             }

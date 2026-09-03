@@ -166,6 +166,7 @@ struct RunFragment {
     fg: Option<[u8; 3]>,
     bg: Option<[u8; 3]>,
     attrs: u8,
+    cells: u16,
 }
 
 #[cfg(feature = "native-terminal")]
@@ -195,6 +196,7 @@ fn build_runs(cells: &[CellSnapshot]) -> Vec<RemoteGridRun> {
             fg: cell.fg.map(color_array),
             bg: cell.bg.map(color_array),
             attrs: cell_attrs(cell),
+            cells: if cell.wide == CellWide::Wide { 2 } else { 1 },
         });
     }
 
@@ -207,6 +209,7 @@ fn build_runs(cells: &[CellSnapshot]) -> Vec<RemoteGridRun> {
         if let Some(last) = runs.last_mut() {
             if last.fg == fragment.fg && last.bg == fragment.bg && last.attrs == fragment.attrs {
                 last.text.push_str(&fragment.text);
+                last.cells += fragment.cells;
                 continue;
             }
         }
@@ -215,6 +218,7 @@ fn build_runs(cells: &[CellSnapshot]) -> Vec<RemoteGridRun> {
             fg: fragment.fg,
             bg: fragment.bg,
             attrs: fragment.attrs,
+            cells: fragment.cells,
         });
     }
     runs
@@ -270,6 +274,7 @@ mod tests {
         assert_eq!(line.index, 0);
         assert_eq!(line.runs.len(), 1);
         assert_eq!(line.runs[0].text, "hello");
+        assert_eq!(line.runs[0].cells, 5);
         assert_eq!(line.runs[0].attrs, 0);
         assert_eq!(line.runs[0].fg, None);
         assert_eq!(line.runs[0].bg, None);
@@ -292,6 +297,9 @@ mod tests {
         let line = first_line(&frame);
         assert_eq!(line.runs.len(), 1);
         assert_eq!(line.runs[0].text, "한글");
+        // Wide cells count 2 each so the DOM renderer can snap run boundaries
+        // exactly onto the terminal grid and keep the cursor overlay aligned.
+        assert_eq!(line.runs[0].cells, 4);
     }
 
     #[test]
@@ -352,16 +360,18 @@ mod tests {
             rows: Some(6),
             bytes: b"\x1b[2;1Hnext".to_vec(),
         };
-        mirror
-            .feed_segments(&[seg1, seg2])
-            .expect("feed_segments");
+        mirror.feed_segments(&[seg1, seg2]).expect("feed_segments");
         let frame = mirror.full_frame().expect("full frame");
         let lines = match &frame {
-            RemoteGridFrame::Grid { lines, cols, rows, .. } => {
+            RemoteGridFrame::Grid {
+                lines, cols, rows, ..
+            } => {
                 assert_eq!((*cols, *rows), (50, 6));
                 lines
             }
-            RemoteGridFrame::GridDiff { lines, cols, rows, .. } => {
+            RemoteGridFrame::GridDiff {
+                lines, cols, rows, ..
+            } => {
                 assert_eq!((*cols, *rows), (50, 6));
                 lines
             }

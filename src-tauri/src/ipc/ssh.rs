@@ -1,7 +1,9 @@
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::ssh::config::parse_ssh_config;
 use crate::ssh::exec::probe_argv;
-use crate::ssh::worktree::{parse_worktree_porcelain, remote_add_argv, remote_list_argv, remote_remove_argv};
+use crate::ssh::worktree::{
+    parse_worktree_porcelain, remote_add_argv, remote_list_argv, remote_remove_argv,
+};
 use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -50,7 +52,10 @@ fn load_store(path: &PathBuf) -> SshHostStore {
 fn save_store(path: &PathBuf, store: &SshHostStore) -> Result<(), IpcError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            IpcError::new(IpcErrorCode::IoError, format!("Failed to create ssh store dir: {}", e))
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Failed to create ssh store dir: {}", e),
+            )
         })?;
     }
     let serialized = serde_json::to_string_pretty(store)
@@ -58,7 +63,12 @@ fn save_store(path: &PathBuf, store: &SshHostStore) -> Result<(), IpcError> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serialized.as_bytes())
         .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to write ssh store: {}", e)))
+        .map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Failed to write ssh store: {}", e),
+            )
+        })
 }
 
 fn now_millis() -> u64 {
@@ -88,7 +98,11 @@ pub async fn cmd_ssh_import_config<R: Runtime>(
         tombstones.extend(existing_keys);
         let imported = crate::ssh::config::import_aliases(&parsed, &tombstones);
         for host in imported {
-            if !store.hosts.iter().any(|existing| existing.key() == host.key()) {
+            if !store
+                .hosts
+                .iter()
+                .any(|existing| existing.key() == host.key())
+            {
                 store.hosts.push(host);
             }
         }
@@ -106,7 +120,11 @@ pub async fn cmd_ssh_update_host<R: Runtime>(
     let path = get_ssh_store_path(&app)?;
     run_blocking(move || {
         let mut store = load_store(&path);
-        if let Some(slot) = store.hosts.iter_mut().find(|existing| existing.id == host.id) {
+        if let Some(slot) = store
+            .hosts
+            .iter_mut()
+            .find(|existing| existing.id == host.id)
+        {
             *slot = host;
         } else {
             store.hosts.push(host);
@@ -118,7 +136,10 @@ pub async fn cmd_ssh_update_host<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn cmd_ssh_delete_host<R: Runtime>(app: AppHandle<R>, id: String) -> Result<Vec<SshHost>, IpcError> {
+pub async fn cmd_ssh_delete_host<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
     run_blocking(move || {
         let mut store = load_store(&path);
@@ -174,9 +195,13 @@ pub async fn cmd_ssh_list_remote_worktrees(
             .map_err(|error| IpcError::internal(format!("failed to spawn ssh: {error}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(IpcError::internal(format!("remote worktree list failed: {stderr}")));
+            return Err(IpcError::internal(format!(
+                "remote worktree list failed: {stderr}"
+            )));
         }
-        Ok(parse_worktree_porcelain(&String::from_utf8_lossy(&output.stdout)))
+        Ok(parse_worktree_porcelain(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     })
     .await
 }
@@ -198,7 +223,9 @@ pub async fn cmd_ssh_create_remote_worktree(
             .map_err(|error| IpcError::internal(format!("failed to spawn ssh: {error}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(IpcError::internal(format!("remote worktree create failed: {stderr}")));
+            return Err(IpcError::internal(format!(
+                "remote worktree create failed: {stderr}"
+            )));
         }
         Ok(())
     })
@@ -215,7 +242,9 @@ pub async fn cmd_ssh_delete_remote_worktree(host: SshHost, path: String) -> Resu
             .map_err(|error| IpcError::internal(format!("failed to spawn ssh: {error}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(IpcError::internal(format!("remote worktree remove failed: {stderr}")));
+            return Err(IpcError::internal(format!(
+                "remote worktree remove failed: {stderr}"
+            )));
         }
         Ok(())
     })

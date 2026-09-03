@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { getGroupForTab, layoutReducer, normalizeLayout } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
 import { saveBrowserSettings } from "./browserSettings";
-import { deserializeWorkspaceState, serializeWorkspaceState, WORKSPACE_SESSION_VERSION } from "./sessionPersistence";
+import {
+  deserializeWorkspaceState,
+  migrateLegacyAgentType,
+  serializeWorkspaceState,
+  WORKSPACE_SESSION_VERSION,
+} from "./sessionPersistence";
 
 function workspaceState(): WorkspaceState {
   return {
@@ -1236,5 +1241,172 @@ describe("sessionPersistence v2 serialization and migration", () => {
     const restored = deserializeWorkspaceState("default", serialized, []);
     expect(restored).not.toBeNull();
     expect(restored?.sessions["sess-1"]?.agentType).toBe("omo");
+  });
+
+  describe("migrateLegacyAgentType", () => {
+    it("migrates legacy gemini agent type to antigravity and preserves other inputs", () => {
+      expect(migrateLegacyAgentType("gemini")).toBe("antigravity");
+      expect(migrateLegacyAgentType(" Gemini ")).toBe("antigravity");
+      expect(migrateLegacyAgentType("claude")).toBe("claude");
+      expect(migrateLegacyAgentType(null)).toBeNull();
+      expect(migrateLegacyAgentType(undefined)).toBeUndefined();
+    });
+  });
+
+  it("migrates legacy gemini agentType to antigravity and generates providerSession during restore", () => {
+    const legacySerialized = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: "/workspace/main",
+          worktrees: [
+            { path: "/workspace/main", branch: "main", head: "111", isMain: true, isLocked: false },
+          ],
+          activeWorktreePath: "/workspace/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [
+              {
+                id: "tab-1",
+                kind: "terminal" as const,
+                label: "terminal",
+                terminal: {
+                  primarySessionId: "sess-1",
+                  paneTree: { type: "leaf" as const, leafId: "leaf-1" },
+                  sessionIdsByLeafId: { "leaf-1": "sess-1" },
+                  activeLeafId: "leaf-1",
+                  expandedLeafId: null,
+                },
+              },
+            ],
+          },
+          terminalSessions: {
+            "sess-1": {
+              localSessionId: "sess-1",
+              backendSessionId: "backend-1",
+              cwd: "/workspace/main",
+              worktreePath: "/workspace/main",
+              createdAt: Date.now(),
+              agentType: "gemini",
+              agentSessionId: "c562c206-80a7-4235-9ecf-8d13984183cd",
+              // No providerSession
+            },
+          },
+        },
+      },
+    };
+
+    const restored = deserializeWorkspaceState("default", legacySerialized as any, []);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    expect(restored.sessions["sess-1"]).toBeDefined();
+    expect(restored.sessions["sess-1"].agentType).toBe("antigravity");
+    expect(restored.sessions["sess-1"].agentSessionId).toBe("c562c206-80a7-4235-9ecf-8d13984183cd");
+    expect(restored.sessions["sess-1"].providerSession).toEqual({
+      key: "session_id",
+      id: "c562c206-80a7-4235-9ecf-8d13984183cd",
+    });
+  });
+
+  it("migrates restored activityBySessionId agentType from gemini to antigravity while leaving non-legacy untouched", () => {
+    const legacySerialized = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: "default",
+      workspaces: {
+        default: {
+          workspaceId: "default",
+          repoRoot: "/workspace/main",
+          worktrees: [
+            { path: "/workspace/main", branch: "main", head: "111", isMain: true, isLocked: false },
+          ],
+          activeWorktreePath: "/workspace/main",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [
+              {
+                id: "tab-1",
+                kind: "terminal" as const,
+                label: "terminal",
+                terminal: {
+                  primarySessionId: "sess-1",
+                  paneTree: {
+                    type: "split" as const,
+                    direction: "horizontal" as const,
+                    first: { type: "leaf" as const, leafId: "leaf-1" },
+                    second: { type: "leaf" as const, leafId: "leaf-2" },
+                    ratio: 0.5,
+                  },
+                  sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-2": "sess-2" },
+                  activeLeafId: "leaf-1",
+                  expandedLeafId: null,
+                },
+              },
+            ],
+          },
+          terminalSessions: {
+            "sess-1": {
+              localSessionId: "sess-1",
+              backendSessionId: "backend-1",
+              cwd: "/workspace/main",
+              worktreePath: "/workspace/main",
+              createdAt: Date.now(),
+              agentType: "gemini",
+              agentSessionId: "gemini-sess-1",
+            },
+            "sess-2": {
+              localSessionId: "sess-2",
+              backendSessionId: "backend-2",
+              cwd: "/workspace/main",
+              worktreePath: "/workspace/main",
+              createdAt: Date.now(),
+              agentType: "claude",
+              agentSessionId: "claude-sess-2",
+            },
+          },
+          activityBySessionId: {
+            "sess-1": {
+              state: "done" as const,
+              title: "Gemini finished",
+              isAgent: true,
+              agentType: "gemini",
+            },
+            "sess-2": {
+              state: "done" as const,
+              title: "Claude finished",
+              isAgent: true,
+              agentType: "claude",
+            },
+          },
+        },
+      },
+    };
+
+    const restored = deserializeWorkspaceState("default", legacySerialized as any, []);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    expect(restored.activityBySessionId?.["sess-1"]).toEqual({
+      state: "done",
+      title: "Gemini finished",
+      isAgent: true,
+      agentType: "antigravity",
+    });
+    expect(restored.activityBySessionId?.["sess-2"]).toEqual({
+      state: "done",
+      title: "Claude finished",
+      isAgent: true,
+      agentType: "claude",
+    });
   });
 });

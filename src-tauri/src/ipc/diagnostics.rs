@@ -54,9 +54,7 @@ pub(crate) fn append_boot_trace(
         })?;
     }
     if path.exists() {
-        let size = std::fs::metadata(path)
-            .map(|m| m.len())
-            .unwrap_or_default();
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or_default();
         if size > max_bytes {
             return Ok(());
         }
@@ -82,13 +80,12 @@ pub(crate) fn append_boot_trace(
                 format!("boot trace append failed: {error}"),
             )
         })?;
-    file.write_all(line.as_bytes())
-        .map_err(|error| {
-            IpcError::new(
-                IpcErrorCode::InternalError,
-                format!("boot trace write failed: {error}"),
-            )
-        })?;
+    file.write_all(line.as_bytes()).map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::InternalError,
+            format!("boot trace write failed: {error}"),
+        )
+    })?;
     Ok(())
 }
 
@@ -98,10 +95,8 @@ mod tests {
 
     #[test]
     fn appends_structured_lines() {
-        let dir = std::env::temp_dir().join(format!(
-            "ferryx-boot-trace-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ferryx-boot-trace-test-{}", std::process::id()));
         let path = dir.join("boot-trace.log");
         let _ = std::fs::remove_file(&path);
         append_boot_trace(&path, "boot.start", &json!({"pid": 1}), 1024).unwrap();
@@ -116,10 +111,8 @@ mod tests {
 
     #[test]
     fn skips_append_past_size_cap() {
-        let dir = std::env::temp_dir().join(format!(
-            "ferryx-boot-trace-cap-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ferryx-boot-trace-cap-{}", std::process::id()));
         let path = dir.join("boot-trace.log");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, "x".repeat(2048)).unwrap();

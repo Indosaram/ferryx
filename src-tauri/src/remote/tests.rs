@@ -1518,10 +1518,13 @@ async fn read_server_ws_frame(stream: &mut tokio::net::TcpStream) -> ServerWebSo
     use tokio::io::AsyncReadExt;
 
     let mut header = [0u8; 2];
-    stream
-        .read_exact(&mut header)
-        .await
-        .expect("read websocket frame header");
+    match stream.read_exact(&mut header).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return ServerWebSocketFrame::Close;
+        }
+        Err(e) => panic!("read websocket frame header: {e}"),
+    }
     assert_eq!(
         header[1] & 0x80,
         0,
@@ -2540,12 +2543,11 @@ async fn test_remote_terminal_forced_lag_replays_with_explicit_gap_and_sequence_
         Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
     ));
 
-    let recovered = crate::remote::server::recover_remote_terminal_attachment(
-        &terminal_service,
-        &session_id,
-        None,
-    )
-    .expect("remote lag recovery reattach");
+    let backend: Arc<dyn crate::remote::backend::RemoteSessionBackend> = Arc::new(terminal_service);
+    let recovered =
+        crate::remote::server::recover_remote_terminal_attachment(&backend, &session_id, None)
+            .await
+            .expect("remote lag recovery reattach");
     let gap = recovered
         .snapshot
         .gap
@@ -3608,4 +3610,306 @@ async fn test_concurrent_cold_snapshot_requests_coalesce_to_one_git_discovery() 
     state.set_snapshot_post_build_hook(None);
 
     assert_eq!(state.snapshot_build_count(), 1);
+}
+
+#[tokio::test]
+async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
+        DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::daemon::proxy::{LegacyPeer, SessionRouter};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("set mode 700");
+    }
+    let socket_path = dir.path().join("legacy.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind legacy socket");
+
+    let legacy_session_id = "legacy-peer-session-42".to_string();
+    let legacy_session_clone = legacy_session_id.clone();
+    let legacy_session_exit = legacy_session_id.clone();
+
+    // Spawn mock legacy daemon server
+    let (input_received_tx, mut input_received_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10);
+    let (exit_tx, _) = tokio::sync::broadcast::channel::<()>(5);
+    let exit_tx_for_accept = exit_tx.clone();
+    let mock_server = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+
+            // 1. Handshake
+            if reader.read_line(&mut line).await.is_err() || line.trim().is_empty() {
+                continue;
+            }
+            let hs: DaemonRequest = serde_json::from_str(line.trim()).expect("parse handshake");
+            assert!(matches!(hs, DaemonRequest::Handshake { .. }));
+            let hs_resp = serde_json::to_string(&DaemonResponse::HandshakeOk {
+                epoch: 1,
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                binary_path: None,
+                binary_mtime_ms: None,
+            })
+            .unwrap()
+                + "\n";
+            write_half
+                .write_all(hs_resp.as_bytes())
+                .await
+                .expect("write handshake ok");
+            write_half.flush().await.unwrap();
+
+            // Loop handling requests (DescribeSession, Attach, Write, etc.)
+            line.clear();
+            let legacy_session_for_stream = legacy_session_clone.clone();
+            let legacy_session_for_exit = legacy_session_exit.clone();
+            let input_tx = input_received_tx.clone();
+            let exit_tx = exit_tx_for_accept.clone();
+            let mut exit_rx = exit_tx_for_accept.subscribe();
+
+            tokio::spawn(async move {
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let req: DaemonRequest = serde_json::from_str(line.trim()).expect("parse req");
+                    line.clear();
+                    match req {
+                        DaemonRequest::ListSessions => {
+                            let resp = serde_json::to_string(&DaemonResponse::ListSessionsOk {
+                                epoch: 1,
+                                sessions: vec![legacy_session_for_stream.clone()],
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
+                        DaemonRequest::DescribeSession { session_id } => {
+                            let resp = serde_json::to_string(&DaemonResponse::DescribeSessionOk {
+                                session: DaemonSessionDetails {
+                                    session_id,
+                                    workspace_id: Some("mock-ws".into()),
+                                    worktree: None,
+                                    cwd: Some("/mock/path".into()),
+                                    cols: 80,
+                                    rows: 24,
+                                    running: true,
+                                    start_sequence: Some(1),
+                                    end_sequence: Some(1),
+                                },
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
+                        DaemonRequest::Attach {
+                            session_id: _,
+                            after_sequence: _,
+                        } => {
+                            let resp = serde_json::to_string(&DaemonResponse::AttachOk {
+                                epoch: 1,
+                                session_id: legacy_session_for_stream.clone(),
+                                start_sequence: Some(1),
+                                end_sequence: Some(1),
+                                gap: None,
+                                history: b"legacy history snapshot\n".to_vec(),
+                                pty_cols: Some(80),
+                                pty_rows: Some(24),
+                                history_segments: Vec::new(),
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+
+                            // Send an output stream message
+                            let out = serde_json::to_string(&DaemonStreamMessage::Output {
+                                session_id: std::borrow::Cow::Borrowed(&legacy_session_for_stream),
+                                sequence: 2,
+                                data: std::borrow::Cow::Borrowed(b"legacy live chunk\n"),
+                                metrics_read_unix_micros: None,
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(out.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+
+                            // Keep stream open until exit is triggered
+                            let _ = exit_rx.recv().await;
+                            let exit = serde_json::to_string(&DaemonStreamMessage::Exit {
+                                session_id: std::borrow::Cow::Borrowed(&legacy_session_for_exit),
+                                exit_code: Some(0),
+                            })
+                            .unwrap()
+                                + "\n";
+                            let _ = write_half.write_all(exit.as_bytes()).await;
+                            let _ = write_half.flush().await;
+                            break;
+                        }
+                        DaemonRequest::Write {
+                            session_id: _,
+                            data,
+                        } => {
+                            input_tx.send(data).await.unwrap();
+                            let resp =
+                                serde_json::to_string(&DaemonResponse::WriteOk).unwrap() + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+
+                            // Trigger exit on attach stream after write
+                            let _ = exit_tx.send(());
+                        }
+                        DaemonRequest::Resize { .. } => {
+                            let resp =
+                                serde_json::to_string(&DaemonResponse::ResizeOk).unwrap() + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+    });
+
+    let terminal_service = Arc::new(TerminalService::default());
+    let session_router = Arc::new(SessionRouter::new(terminal_service));
+    let legacy_peer = Arc::new(LegacyPeer::new(
+        socket_path,
+        vec![legacy_session_id.clone()],
+    ));
+    session_router.add_legacy_peer(legacy_peer);
+
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        session_router,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+
+    // Configure and start remote server
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::Tailscale,
+        port: 0,
+        allow_control: true,
+    };
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "LegacyPeerTestDevice")
+        .expect("pair device");
+
+    let (server_handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start remote server");
+
+    // Set active desktop selection to legacy session
+    state.set_active_selection(RemoteActiveDesktopSelection {
+        workspace_id: Some("mock-ws".into()),
+        worktree_slug: None,
+        worktree_label: Some("main".into()),
+        session_id: Some(legacy_session_id.clone()),
+        tab_id: Some("tab-1".into()),
+        terminal_tabs: Vec::new(),
+    });
+
+    // 1. Verify merged session listing / active lookup returns legacy session via HTTP API
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/api/v1/sessions"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("GET /api/v1/sessions");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.text().await.expect("read sessions body");
+    let sessions: Vec<RemoteTerminalSession> =
+        serde_json::from_str(&body).expect("parse sessions json");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, legacy_session_id);
+    assert!(sessions[0].running);
+
+    // 2. Connect WebSocket to legacy session
+    let mut ws = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        open_ws_stream(
+            addr,
+            &format!("/api/v1/terminal/{legacy_session_id}"),
+            Some(&token),
+        ),
+    )
+    .await
+    .expect("connect legacy terminal ws");
+
+    // 3. Read initial snapshot frame
+    let snapshot_frame = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        read_server_ws_frame(&mut ws),
+    )
+    .await
+    .expect("read initial snapshot");
+    let ServerWebSocketFrame::Binary(snapshot_bytes) = snapshot_frame else {
+        panic!("expected binary snapshot frame");
+    };
+    assert!(
+        String::from_utf8_lossy(&snapshot_bytes).contains("legacy history snapshot"),
+        "snapshot must contain legacy history"
+    );
+
+    // 4. Read output frame (the live chunk emitted upon attach)
+    let output_frame = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        read_server_ws_frame(&mut ws),
+    )
+    .await
+    .expect("read output frame");
+    let ServerWebSocketFrame::Binary(output_bytes) = output_frame else {
+        panic!("expected binary output frame");
+    };
+    assert!(
+        String::from_utf8_lossy(&output_bytes).contains("legacy live chunk"),
+        "output must contain live chunk"
+    );
+
+    // 5. Send binary input over WS and verify mock server receives it
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        write_client_ws_frame(&mut ws, 0x02, b"hello legacy peer\n"),
+    )
+    .await
+    .expect("write binary input over ws");
+
+    let received_input =
+        tokio::time::timeout(std::time::Duration::from_secs(3), input_received_rx.recv())
+            .await
+            .expect("receive input on mock server")
+            .expect("input data");
+    assert_eq!(received_input, b"hello legacy peer\n");
+
+    // 6. Verify WS closes cleanly upon exit
+    let close_frame = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        read_server_ws_frame(&mut ws),
+    )
+    .await
+    .expect("read close frame");
+    assert!(
+        matches!(close_frame, ServerWebSocketFrame::Close),
+        "WS must close on exit"
+    );
+
+    server_handle.stop();
+    mock_server.abort();
 }

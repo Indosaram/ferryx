@@ -42,6 +42,123 @@ pub const SCROLLBAR_OVERLAY_RIGHT_INSET_PX: f32 = 5.0;
 pub const SCROLLBAR_OVERLAY_MIN_THUMB_PX: f32 = 24.0;
 pub const SCROLLBAR_OVERLAY_THUMB_ALPHA: f32 = 0.35;
 
+pub const ATTENTION_FRAME_COLOR: [f32; 4] = [253.0 / 255.0, 230.0 / 255.0, 138.0 / 255.0, 0.95];
+pub const ATTENTION_HALO_COLOR: [f32; 4] = [253.0 / 255.0, 230.0 / 255.0, 138.0 / 255.0, 0.22];
+pub const ATTENTION_FRAME_THICKNESS_LOGICAL_PX: f32 = 2.0;
+
+/// Computes physical rectangles forming a pastel glow attention frame inside the viewport edges.
+///
+/// When `include_bottom_band` is `true`:
+/// 8 rectangles are returned (4 halo rectangles underneath, followed by 4 core rectangles).
+/// When `include_bottom_band` is `false`:
+/// 6 rectangles are returned (top/left/right halo and top/left/right core). The bottom core
+/// and bottom halo bands are omitted, and vertical left/right bands extend through the full viewport height.
+///
+/// Geometry:
+/// - If `viewport.width == 0` or `viewport.height == 0` or `thickness <= 0.0`, returns empty vec.
+/// - Halo: thickness `3 * thickness` and color RGB(253, 230, 138) alpha 0.22.
+/// - Core: thickness `thickness` and color RGB(253, 230, 138) alpha 0.95.
+pub fn compute_attention_frame_rects(
+    viewport: PhysicalBounds,
+    thickness: f32,
+    include_bottom_band: bool,
+) -> Vec<RectInstance> {
+    let viewport_w = viewport.width as f32;
+    let viewport_h = viewport.height as f32;
+    if viewport_w <= 0.0 || viewport_h <= 0.0 || thickness <= 0.0 {
+        return Vec::new();
+    }
+
+    let x = viewport.x as f32;
+    let y = viewport.y as f32;
+    let halo_t = (thickness * 3.0).min(viewport_w / 2.0).min(viewport_h / 2.0);
+    let core_t = thickness.min(viewport_w / 2.0).min(viewport_h / 2.0);
+
+    if include_bottom_band {
+        let halo_inner_h = (viewport_h - 2.0 * halo_t).max(0.0);
+        let core_inner_h = (viewport_h - 2.0 * core_t).max(0.0);
+
+        vec![
+            // Halo Top
+            RectInstance {
+                rect: [x, y, viewport_w, halo_t],
+                color: ATTENTION_HALO_COLOR,
+            },
+            // Halo Bottom
+            RectInstance {
+                rect: [x, y + viewport_h - halo_t, viewport_w, halo_t],
+                color: ATTENTION_HALO_COLOR,
+            },
+            // Halo Left
+            RectInstance {
+                rect: [x, y + halo_t, halo_t, halo_inner_h],
+                color: ATTENTION_HALO_COLOR,
+            },
+            // Halo Right
+            RectInstance {
+                rect: [x + viewport_w - halo_t, y + halo_t, halo_t, halo_inner_h],
+                color: ATTENTION_HALO_COLOR,
+            },
+            // Core Top
+            RectInstance {
+                rect: [x, y, viewport_w, core_t],
+                color: ATTENTION_FRAME_COLOR,
+            },
+            // Core Bottom
+            RectInstance {
+                rect: [x, y + viewport_h - core_t, viewport_w, core_t],
+                color: ATTENTION_FRAME_COLOR,
+            },
+            // Core Left
+            RectInstance {
+                rect: [x, y + core_t, core_t, core_inner_h],
+                color: ATTENTION_FRAME_COLOR,
+            },
+            // Core Right
+            RectInstance {
+                rect: [x + viewport_w - core_t, y + core_t, core_t, core_inner_h],
+                color: ATTENTION_FRAME_COLOR,
+            },
+        ]
+    } else {
+        let halo_vertical_h = (viewport_h - halo_t).max(0.0);
+        let core_vertical_h = (viewport_h - core_t).max(0.0);
+
+        vec![
+            // Halo Top
+            RectInstance {
+                rect: [x, y, viewport_w, halo_t],
+                color: ATTENTION_HALO_COLOR,
+            },
+            // Halo Left
+            RectInstance {
+                rect: [x, y + halo_t, halo_t, halo_vertical_h],
+                color: ATTENTION_HALO_COLOR,
+            },
+            // Halo Right
+            RectInstance {
+                rect: [x + viewport_w - halo_t, y + halo_t, halo_t, halo_vertical_h],
+                color: ATTENTION_HALO_COLOR,
+            },
+            // Core Top
+            RectInstance {
+                rect: [x, y, viewport_w, core_t],
+                color: ATTENTION_FRAME_COLOR,
+            },
+            // Core Left
+            RectInstance {
+                rect: [x, y + core_t, core_t, core_vertical_h],
+                color: ATTENTION_FRAME_COLOR,
+            },
+            // Core Right
+            RectInstance {
+                rect: [x + viewport_w - core_t, y + core_t, core_t, core_vertical_h],
+                color: ATTENTION_FRAME_COLOR,
+            },
+        ]
+    }
+}
+
 /// Computes the physical rectangle for the GPU-rendered scrollbar thumb overlay.
 ///
 /// Geometry:
@@ -68,7 +185,9 @@ pub fn compute_scrollbar_overlay_rect(
     }
 
     let raw_thumb_h = viewport_h * (len as f32 / total as f32);
-    let thumb_h = raw_thumb_h.max(SCROLLBAR_OVERLAY_MIN_THUMB_PX).min(viewport_h);
+    let thumb_h = raw_thumb_h
+        .max(SCROLLBAR_OVERLAY_MIN_THUMB_PX)
+        .min(viewport_h);
     let max_offset = (total - len) as f32;
     let scroll_ratio = if max_offset > 0.0 {
         (offset as f32 / max_offset).clamp(0.0, 1.0)
@@ -248,10 +367,19 @@ mod tests {
         let fg = [1.0, 1.0, 1.0, 1.0];
 
         // total <= len means no scrollback
-        assert_eq!(compute_scrollbar_overlay_rect(viewport, 24, 0, 24, fg), None);
-        assert_eq!(compute_scrollbar_overlay_rect(viewport, 10, 0, 24, fg), None);
+        assert_eq!(
+            compute_scrollbar_overlay_rect(viewport, 24, 0, 24, fg),
+            None
+        );
+        assert_eq!(
+            compute_scrollbar_overlay_rect(viewport, 10, 0, 24, fg),
+            None
+        );
         assert_eq!(compute_scrollbar_overlay_rect(viewport, 0, 0, 0, fg), None);
-        assert_eq!(compute_scrollbar_overlay_rect(viewport, 100, 0, 0, fg), None);
+        assert_eq!(
+            compute_scrollbar_overlay_rect(viewport, 100, 0, 0, fg),
+            None
+        );
 
         // Zero viewport size
         let zero_vp = PhysicalBounds {
@@ -260,7 +388,10 @@ mod tests {
             width: 0,
             height: 600,
         };
-        assert_eq!(compute_scrollbar_overlay_rect(zero_vp, 100, 0, 24, fg), None);
+        assert_eq!(
+            compute_scrollbar_overlay_rect(zero_vp, 100, 0, 24, fg),
+            None
+        );
     }
 
     #[test]
@@ -310,5 +441,102 @@ mod tests {
         // thumb_y = 600 - 24 = 576.0
         let rect_bottom = compute_scrollbar_overlay_rect(viewport, 10000, 9976, 24, fg).unwrap();
         assert_eq!(rect_bottom.rect, [789.0, 576.0, 6.0, 24.0]);
+    }
+
+    #[test]
+    fn test_compute_attention_frame_rects_zero_or_negative_returns_empty() {
+        let zero_w = PhysicalBounds {
+            x: 10,
+            y: 20,
+            width: 0,
+            height: 600,
+        };
+        assert!(compute_attention_frame_rects(zero_w, 2.0, true).is_empty());
+        assert!(compute_attention_frame_rects(zero_w, 2.0, false).is_empty());
+
+        let zero_h = PhysicalBounds {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 0,
+        };
+        assert!(compute_attention_frame_rects(zero_h, 2.0, true).is_empty());
+        assert!(compute_attention_frame_rects(zero_h, 2.0, false).is_empty());
+
+        let normal = PhysicalBounds {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600,
+        };
+        assert!(compute_attention_frame_rects(normal, 0.0, true).is_empty());
+        assert!(compute_attention_frame_rects(normal, 0.0, false).is_empty());
+        assert!(compute_attention_frame_rects(normal, -1.0, true).is_empty());
+        assert!(compute_attention_frame_rects(normal, -1.0, false).is_empty());
+    }
+
+    #[test]
+    fn test_compute_attention_frame_rects_exact_geometry() {
+        let viewport = PhysicalBounds {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600,
+        };
+        let thickness = 2.0;
+
+        // Full 4-sided frame mode (include_bottom_band = true) -> 8 rects
+        let rects_full = compute_attention_frame_rects(viewport, thickness, true);
+        assert_eq!(rects_full.len(), 8);
+
+        // Halo band: 4 rects (6px thickness, alpha 0.22)
+        assert_eq!(rects_full[0].rect, [10.0, 20.0, 800.0, 6.0]);
+        assert_eq!(rects_full[0].color, ATTENTION_HALO_COLOR);
+
+        assert_eq!(rects_full[1].rect, [10.0, 614.0, 800.0, 6.0]);
+        assert_eq!(rects_full[1].color, ATTENTION_HALO_COLOR);
+
+        assert_eq!(rects_full[2].rect, [10.0, 26.0, 6.0, 588.0]);
+        assert_eq!(rects_full[2].color, ATTENTION_HALO_COLOR);
+
+        assert_eq!(rects_full[3].rect, [804.0, 26.0, 6.0, 588.0]);
+        assert_eq!(rects_full[3].color, ATTENTION_HALO_COLOR);
+
+        // Core band: 4 rects (2px thickness, alpha 0.95)
+        assert_eq!(rects_full[4].rect, [10.0, 20.0, 800.0, 2.0]);
+        assert_eq!(rects_full[4].color, ATTENTION_FRAME_COLOR);
+
+        assert_eq!(rects_full[5].rect, [10.0, 618.0, 800.0, 2.0]);
+        assert_eq!(rects_full[5].color, ATTENTION_FRAME_COLOR);
+
+        assert_eq!(rects_full[6].rect, [10.0, 22.0, 2.0, 596.0]);
+        assert_eq!(rects_full[6].color, ATTENTION_FRAME_COLOR);
+
+        assert_eq!(rects_full[7].rect, [808.0, 22.0, 2.0, 596.0]);
+        assert_eq!(rects_full[7].color, ATTENTION_FRAME_COLOR);
+
+        // 3-sided frame mode (include_bottom_band = false) -> 6 rects with extended verticals
+        let rects_no_bottom = compute_attention_frame_rects(viewport, thickness, false);
+        assert_eq!(rects_no_bottom.len(), 6);
+
+        // Halo band: Top + Left (extended to full height: 600 - 6 = 594) + Right (extended: 594)
+        assert_eq!(rects_no_bottom[0].rect, [10.0, 20.0, 800.0, 6.0]);
+        assert_eq!(rects_no_bottom[0].color, ATTENTION_HALO_COLOR);
+
+        assert_eq!(rects_no_bottom[1].rect, [10.0, 26.0, 6.0, 594.0]);
+        assert_eq!(rects_no_bottom[1].color, ATTENTION_HALO_COLOR);
+
+        assert_eq!(rects_no_bottom[2].rect, [804.0, 26.0, 6.0, 594.0]);
+        assert_eq!(rects_no_bottom[2].color, ATTENTION_HALO_COLOR);
+
+        // Core band: Top + Left (extended to full height: 600 - 2 = 598) + Right (extended: 598)
+        assert_eq!(rects_no_bottom[3].rect, [10.0, 20.0, 800.0, 2.0]);
+        assert_eq!(rects_no_bottom[3].color, ATTENTION_FRAME_COLOR);
+
+        assert_eq!(rects_no_bottom[4].rect, [10.0, 22.0, 2.0, 598.0]);
+        assert_eq!(rects_no_bottom[4].color, ATTENTION_FRAME_COLOR);
+
+        assert_eq!(rects_no_bottom[5].rect, [808.0, 22.0, 2.0, 598.0]);
+        assert_eq!(rects_no_bottom[5].color, ATTENTION_FRAME_COLOR);
     }
 }

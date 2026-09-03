@@ -1,4 +1,5 @@
 use crate::remote::auth::{write_private_json, AuthManager};
+use crate::remote::backend::RemoteSessionBackend;
 use crate::remote::protocol::{RemoteActiveDesktopSelection, RemoteEventMessage};
 use crate::terminal::TerminalService;
 use crate::worktree::WorkspaceRegistry;
@@ -93,7 +94,7 @@ pub(crate) const WORKSPACE_SNAPSHOT_REFRESH_INTERVAL: std::time::Duration =
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
-    pub terminal_service: Arc<TerminalService>,
+    pub session_backend: Arc<dyn RemoteSessionBackend>,
     pub workspace_registry: WorkspaceRegistry,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
     pub active_session_tx: watch::Sender<Option<String>>,
@@ -118,11 +119,31 @@ impl RemoteGatewayState {
         terminal_service: Arc<TerminalService>,
         workspace_registry: WorkspaceRegistry,
     ) -> Self {
-        Self::new_with_paths(terminal_service, workspace_registry, None, None)
+        Self::new_with_backend(
+            terminal_service as Arc<dyn RemoteSessionBackend>,
+            workspace_registry,
+        )
+    }
+
+    pub fn new_with_backend(
+        session_backend: Arc<dyn RemoteSessionBackend>,
+        workspace_registry: WorkspaceRegistry,
+    ) -> Self {
+        Self::new_with_paths_backend(session_backend, workspace_registry, None, None)
     }
 
     pub fn new_persistent(
         terminal_service: Arc<TerminalService>,
+        workspace_registry: WorkspaceRegistry,
+    ) -> Self {
+        Self::new_persistent_with_backend(
+            terminal_service as Arc<dyn RemoteSessionBackend>,
+            workspace_registry,
+        )
+    }
+
+    pub fn new_persistent_with_backend(
+        session_backend: Arc<dyn RemoteSessionBackend>,
         workspace_registry: WorkspaceRegistry,
     ) -> Self {
         let base = remote_data_dir();
@@ -132,8 +153,8 @@ impl RemoteGatewayState {
                  kept in memory only and lost on exit"
             );
         }
-        Self::new_with_paths(
-            terminal_service,
+        Self::new_with_paths_backend(
+            session_backend,
             workspace_registry,
             base.as_ref().map(|base| base.join("remote-config.json")),
             base.as_ref().map(|base| base.join("remote-auth.json")),
@@ -142,6 +163,20 @@ impl RemoteGatewayState {
 
     pub fn new_with_paths(
         terminal_service: Arc<TerminalService>,
+        workspace_registry: WorkspaceRegistry,
+        config_path: Option<PathBuf>,
+        auth_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_paths_backend(
+            terminal_service as Arc<dyn RemoteSessionBackend>,
+            workspace_registry,
+            config_path,
+            auth_path,
+        )
+    }
+
+    pub fn new_with_paths_backend(
+        session_backend: Arc<dyn RemoteSessionBackend>,
         workspace_registry: WorkspaceRegistry,
         config_path: Option<PathBuf>,
         auth_path: Option<PathBuf>,
@@ -162,7 +197,7 @@ impl RemoteGatewayState {
         Self {
             config: RwLock::new(config),
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
-            terminal_service,
+            session_backend,
             workspace_registry,
             active_selection: RwLock::new(None),
             active_session_tx,
@@ -494,11 +529,13 @@ mod tests {
         let pty = Arc::new(PtyManager::new());
         let hub = Arc::new(TerminalOutputHub::default());
         let terminal = Arc::new(TerminalService::new(pty, hub));
-        let state = RemoteGatewayState::new(Arc::clone(&terminal), WorkspaceRegistry::new());
+        let state = RemoteGatewayState::new_with_backend(
+            Arc::clone(&terminal) as Arc<dyn RemoteSessionBackend>,
+            WorkspaceRegistry::new(),
+        );
 
         assert_eq!(state.config.read().mode, RemoteNetworkMode::Off);
         assert!(!*state.is_running.read());
-        assert!(Arc::ptr_eq(&state.terminal_service, &terminal));
     }
 
     #[test]

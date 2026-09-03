@@ -57,7 +57,7 @@ describe("AgentsSection", () => {
     const branded = screen.getAllByTestId("settings-agent-icon");
     const brandedNames = branded.map((el) => el.getAttribute("data-agent-name"));
     expect(brandedNames).toEqual(
-      expect.arrayContaining(["claude", "codex", "gemini", "opencode", "omo", "cursor-agent"]),
+      expect.arrayContaining(["claude", "codex", "agy", "opencode", "omo", "cursor-agent"]),
     );
     for (const el of branded) {
       expect(el.getAttribute("src")).toBeTruthy();

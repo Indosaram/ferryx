@@ -1,5 +1,5 @@
-use super::SshHost;
 use super::SshAuthMethod;
+use super::SshHost;
 use super::SshHostSource;
 
 const IMPORT_CAP: usize = 100;
@@ -32,8 +32,16 @@ pub fn parse_ssh_config(text: &str) -> Vec<ConfigHost> {
                 if let Some(previous) = current.take() {
                     hosts.push(previous);
                 }
-                let alias = value.split_whitespace().next().unwrap_or_default().to_string();
-                if alias.is_empty() || alias.starts_with('!') || alias.contains('*') || alias.contains('?') {
+                let alias = value
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                if alias.is_empty()
+                    || alias.starts_with('!')
+                    || alias.contains('*')
+                    || alias.contains('?')
+                {
                     current = None;
                 } else {
                     current = Some(ConfigHost {
@@ -108,7 +116,10 @@ fn config_host_to_ssh_host(entry: &ConfigHost) -> Option<SshHost> {
     Some(SshHost {
         id: uuid_like(&entry.alias),
         label: entry.alias.clone(),
-        hostname: entry.hostname.clone().unwrap_or_else(|| entry.alias.clone()),
+        hostname: entry
+            .hostname
+            .clone()
+            .unwrap_or_else(|| entry.alias.clone()),
         username: entry.username.clone(),
         port: entry.port,
         identity_file: entry.identity_file.clone(),
@@ -165,7 +176,8 @@ Host !skip.me *.all
 
     #[test]
     fn red_malformed_lines_are_skipped() {
-        let text = "Host ok\n  Port not-a-number\n  HostName h\nGARBAGE_LINE_WITHOUT_VALUE\nHost two\n";
+        let text =
+            "Host ok\n  Port not-a-number\n  HostName h\nGARBAGE_LINE_WITHOUT_VALUE\nHost two\n";
         let hosts = parse_ssh_config(text);
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0].port, None);

@@ -258,6 +258,20 @@ export function NotificationsSection() {
         </SettingRow>
 
         <SettingRow
+          label="Pane attention border"
+          description="Outline a pane when its agent is blocked or finished and unseen."
+        >
+          <Switch
+            aria-label="Pane attention border"
+            checked={settings.attentionFrame}
+            disabled={!settings.enabled}
+            onCheckedChange={(checked) =>
+              updateSettings({ attentionFrame: checked })
+            }
+          />
+        </SettingRow>
+
+        <SettingRow
           label="Terminal Bell"
           description="Notify when background terminal sessions produce a bell signal."
         >

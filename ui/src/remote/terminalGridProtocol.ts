@@ -16,6 +16,8 @@ export type GridRun = {
   readonly fg: GridColor | null;
   readonly bg: GridColor | null;
   readonly attrs: number;
+  /** Grid columns this run occupies (wide cells count 2). Absent on legacy frames. */
+  readonly cells?: number;
 };
 
 export type GridLine = {
@@ -62,6 +64,47 @@ export function decodeGridAttrs(attrs: number): DecodedGridAttrs {
     underline: (attrs & 4) !== 0,
     inverse: (attrs & 8) !== 0,
   };
+}
+
+/** East Asian Wide / Fullwidth ranges (unicode-width compatible subset). */
+const WIDE_RANGES: readonly (readonly [number, number])[] = [
+  [0x1100, 0x115f], // Hangul Jamo leading consonants
+  [0x2e80, 0x303e], // CJK Radicals .. CJK Symbols and Punctuation
+  [0x3041, 0x33ff], // Hiragana .. CJK Compatibility
+  [0x3400, 0x4dbf], // CJK Extension A
+  [0x4e00, 0x9fff], // CJK Unified Ideographs
+  [0xa000, 0xa4cf], // Yi Syllables and Radicals
+  [0xac00, 0xd7a3], // Hangul Syllables
+  [0xf900, 0xfaff], // CJK Compatibility Ideographs
+  [0xfe10, 0xfe19], // Vertical Forms
+  [0xfe30, 0xfe6f], // CJK Compatibility Forms
+  [0xff00, 0xff60], // Fullwidth Forms
+  [0xffe0, 0xffe6], // Fullwidth Signs
+  [0x1f300, 0x1f64f], // Emoji (wide subset)
+  [0x1f900, 0x1f9ff], // Supplemental Symbols and Pictographs (wide subset)
+  [0x20000, 0x2fffd], // CJK Extension B..
+  [0x30000, 0x3fffd], // CJK Extension G..
+];
+
+/**
+ * Fallback cell-width estimate for server frames that predate the per-run
+ * `cells` field. The daemon reports exact counts; this only matters across a
+ * version skew between the gateway and a cached web client.
+ */
+export function estimateCellWidth(text: string): number {
+  let width = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    let charWidth = 1;
+    for (const [start, end] of WIDE_RANGES) {
+      if (code >= start && code <= end) {
+        charWidth = 2;
+        break;
+      }
+    }
+    width += charWidth;
+  }
+  return width;
 }
 
 export function parseGridFrame(text: string): GridFrame | null {
@@ -152,7 +195,10 @@ function parseRun(value: unknown): GridRun | null {
   const fg = parseColor(value.fg);
   const bg = parseColor(value.bg);
   if (fg === undefined || bg === undefined) return null;
-  return { text: value.text, fg, bg, attrs: value.attrs };
+  const cells = isNonNegativeInteger(value.cells) ? value.cells : undefined;
+  return cells === undefined
+    ? { text: value.text, fg, bg, attrs: value.attrs }
+    : { text: value.text, fg, bg, attrs: value.attrs, cells };
 }
 
 function parseColor(value: unknown): GridColor | null | undefined {

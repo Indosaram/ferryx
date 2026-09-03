@@ -588,7 +588,7 @@ async fn remote_status_after_reopen_persists_config_mode_until_started() {
         "relaunch must not report an active listener"
     );
     assert_eq!(status.mode, RemoteNetworkMode::LocalNetwork);
-    assert_eq!(status.port, 45678);
+    assert_eq!(status.port, crate::remote::state::REMOTE_GATEWAY_PORT);
     assert!(status.bound_address.is_none());
     assert_eq!(status.restart_policy, RemoteRestartPolicy::RestoreListener);
 

@@ -20,6 +20,7 @@ import {
   onNativeTerminalPaste,
   onNativeTerminalScrollbar,
   setNativeTerminalScrollbarOverlay,
+  setNativeTerminalAttentionFrame,
 } from "../lib/tauri";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
@@ -37,6 +38,7 @@ export interface NativeTerminalPaneProps {
   className?: string;
   style?: CSSProperties;
   activity?: TerminalActivity;
+  needsAttention?: boolean;
 }
 
 interface GeometryState {
@@ -132,6 +134,7 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_scroll"
   | "cmd_native_terminal_scrollbar"
   | "cmd_native_terminal_set_scrollbar_overlay"
+  | "cmd_native_terminal_set_attention_frame"
   | "cmd_native_terminal_copy_selection"
   | "cmd_native_terminal_paste"
   | "cmd_native_terminal_clipboard_content"
@@ -260,7 +263,7 @@ function physicalKeyForAltChord(event: ForwardableKeyEvent): string {
   return event.key;
 }
 
-function physicalKeyForCtrlChord(event: {
+export function physicalKeyForCtrlChord(event: {
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey?: boolean;
@@ -417,13 +420,25 @@ export function NativeTerminalPane({
   className,
   style,
   activity,
+  needsAttention = false,
 }: NativeTerminalPaneProps): ReactElement {
-  const translateClearToKillLine = activity?.isAgent === true && activity.state !== "working";
+  const agentDetected = Boolean(
+    (session?.agentType && session.agentType.trim().length > 0) ||
+      session?.providerSession ||
+      activity?.isAgent === true,
+  );
+  const translateClearToKillLine = agentDetected && activity?.state !== "working";
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const scrollbarTrackRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
+  // Last character of the most recent composition commit. macOS WebKit re-delivers a
+  // keydown for the key that TERMINATED a composition (e.g. the space inside "안 ")
+  // after onCompositionEnd has already sent the committed text including that same
+  // character. The matching trailing keydown must be swallowed exactly once, or every
+  // IME-terminated space reaches the PTY twice and word gaps render double-width.
+  const compositionTailCharRef = useRef<string | null>(null);
   const scrollbarDragRef = useRef<ScrollbarDrag | null>(null);
   const pointerDragRef = useRef<TerminalPointerDrag | null>(null);
   const pendingMotionRef = useRef<{
@@ -444,6 +459,8 @@ export function NativeTerminalPane({
   const [error, setError] = useState<string | null>(null);
   const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
   const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
+  const lastKillLineCtrlCRef = useRef(0);
+  const ctrlCExitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isScrollbarHoveredRef = useRef(false);
   const scrollbarRevisionRef = useRef(0);
@@ -490,6 +507,10 @@ export function NativeTerminalPane({
       if (scrollbarHideTimeoutRef.current !== null) {
         clearTimeout(scrollbarHideTimeoutRef.current);
         scrollbarHideTimeoutRef.current = null;
+      }
+      if (ctrlCExitTimeoutRef.current !== null) {
+        clearTimeout(ctrlCExitTimeoutRef.current);
+        ctrlCExitTimeoutRef.current = null;
       }
     };
   }, []);
@@ -646,6 +667,10 @@ export function NativeTerminalPane({
           backendSessionId: currentSessionId,
           hasKeyEvent: "keyEvent" in input && Boolean(input.keyEvent),
           textLength: "text" in input ? (input.text?.length ?? 0) : 0,
+          textCodePoints:
+            "text" in input && input.text !== undefined
+              ? Array.from(input.text).map((c) => c.codePointAt(0)?.toString(16)).join(",")
+              : undefined,
         });
         setError(null);
       } catch (error: unknown) {
@@ -689,6 +714,87 @@ export function NativeTerminalPane({
     void executeInput(false);
   }, [performAttach, targetSessionId, visible]);
 
+  const sendCtrlCClearOrExit = useCallback(() => {
+    if (!translateClearToKillLine) {
+      sendInput({
+        keyEvent: {
+          key: "c",
+          action: "Press",
+          modifiers: {
+            shift: false,
+            ctrl: true,
+            alt: false,
+            superKey: false,
+            capsLock: false,
+            numLock: false,
+          },
+          utf8: null,
+        },
+      });
+      return;
+    }
+
+    const now = Date.now();
+    const isDoublePress = now - lastKillLineCtrlCRef.current < 700;
+    lastKillLineCtrlCRef.current = now;
+
+    if (isDoublePress) {
+      sendInput({
+        keyEvent: {
+          key: "c",
+          action: "Press",
+          modifiers: {
+            shift: false,
+            ctrl: true,
+            alt: false,
+            superKey: false,
+            capsLock: false,
+            numLock: false,
+          },
+          utf8: null,
+        },
+      });
+      if (ctrlCExitTimeoutRef.current !== null) {
+        clearTimeout(ctrlCExitTimeoutRef.current);
+      }
+      ctrlCExitTimeoutRef.current = setTimeout(() => {
+        ctrlCExitTimeoutRef.current = null;
+        sendInput({
+          keyEvent: {
+            key: "c",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        });
+      }, 120);
+      return;
+    }
+
+    sendInput({
+      keyEvent: {
+        key: "u",
+        action: "Press",
+        modifiers: {
+          shift: false,
+          ctrl: true,
+          alt: false,
+          superKey: false,
+          capsLock: false,
+          numLock: false,
+        },
+        utf8: null,
+      },
+    });
+  }, [sendInput, translateClearToKillLine]);
+
   const copySelectionOrInterrupt = useCallback(() => {
     if (!visible || !isTauri() || !targetSessionId) return;
     void invoke<string | null>("cmd_native_terminal_copy_selection", {
@@ -697,28 +803,12 @@ export function NativeTerminalPane({
       .then((text) => {
         if (text && typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
           void navigator.clipboard.writeText(text).catch(() => undefined);
-        } else {
-          sendInput({
-            keyEvent: {
-              key: translateClearToKillLine ? "u" : "c",
-              action: "Press",
-              modifiers: {
-                shift: false,
-                ctrl: true,
-                alt: false,
-                superKey: false,
-                capsLock: false,
-                numLock: false,
-              },
-              utf8: null,
-            },
-          });
         }
       })
       .catch((error: unknown) => {
         reportNativeTerminalIpcFailure("cmd_native_terminal_copy_selection", error);
       });
-  }, [sendInput, targetSessionId, translateClearToKillLine, visible]);
+  }, [targetSessionId, visible]);
 
   const sendPaste = useCallback(
     (text: string) => {
@@ -1043,21 +1133,7 @@ export function NativeTerminalPane({
       ) {
         event.preventDefault();
         inputRef.current?.focus();
-        sendInput({
-          keyEvent: {
-            key: translateClearToKillLine ? "u" : physicalKeyForCtrlChord(forwardable),
-            action: "Press",
-            modifiers: {
-              shift: false,
-              ctrl: true,
-              alt: false,
-              superKey: false,
-              capsLock: false,
-              numLock: false,
-            },
-            utf8: null,
-          },
-        });
+        sendCtrlCClearOrExit();
         return;
       }
       if (
@@ -1155,7 +1231,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [copySelectionOrInterrupt, performNativePasteFallback, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, translateClearToKillLine, visible]);
+  }, [copySelectionOrInterrupt, performNativePasteFallback, sendCtrlCClearOrExit, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -1587,6 +1663,22 @@ export function NativeTerminalPane({
     };
   }, [targetSessionId]);
 
+  useEffect(() => {
+    if (!isTauri() || !targetSessionId) return;
+    setNativeTerminalAttentionFrame(targetSessionId, needsAttention).catch((error: unknown) => {
+      reportNativeTerminalIpcFailure("cmd_native_terminal_set_attention_frame", error);
+    });
+  }, [needsAttention, targetSessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (!isTauri() || !targetSessionId) return;
+      setNativeTerminalAttentionFrame(targetSessionId, false).catch((error: unknown) => {
+        reportNativeTerminalIpcFailure("cmd_native_terminal_set_attention_frame", error);
+      });
+    };
+  }, [targetSessionId]);
+
   return (
     <div
       ref={containerRef}
@@ -1668,6 +1760,9 @@ export function NativeTerminalPane({
                 }
               : undefined
           }
+          onPointerDown={() => {
+            compositionTailCharRef.current = null;
+          }}
           onFocus={() => {
             lastFocusedNativeTerminalSessionId = targetSessionId;
             switchDebug("terminal.surface.focus.sink", {
@@ -1681,6 +1776,7 @@ export function NativeTerminalPane({
               composing: isComposingRef.current,
             });
             isComposingRef.current = false;
+            compositionTailCharRef.current = null;
             setPreedit(null);
             event.currentTarget.value = "";
             sendFocus(false);
@@ -1724,24 +1820,29 @@ export function NativeTerminalPane({
 
             if (isPlainCtrlCChord(event)) {
               event.preventDefault();
-              sendInput({
-                keyEvent: {
-                  key: translateClearToKillLine ? "u" : physicalKeyForCtrlChord(event),
-                  action: "Press",
-                  modifiers: {
-                    shift: false,
-                    ctrl: true,
-                    alt: false,
-                    superKey: false,
-                    capsLock: false,
-                    numLock: false,
-                  },
-                  utf8: null,
-                },
-              });
+              sendCtrlCClearOrExit();
               return;
             }
 
+            if (compositionTailCharRef.current !== null) {
+              const isComposingNow =
+                "nativeEvent" in event
+                  ? event.nativeEvent.isComposing
+                  : (event as unknown as globalThis.KeyboardEvent).isComposing;
+              if (!isComposingNow) {
+                if (event.key === compositionTailCharRef.current) {
+                  // This keydown is WebKit's re-delivery of the key that already terminated
+                  // the composition (isComposing=false); its character was already sent
+                  // inside the committed text. Swallow it exactly once. Keydowns of jamos
+                  // inside a NEW composition arrive with isComposing=true and must never be
+                  // swallowed, so they only disarm when they are not composing.
+                  compositionTailCharRef.current = null;
+                  event.preventDefault();
+                  return;
+                }
+                compositionTailCharRef.current = null;
+              }
+            }
             if (
               !event.nativeEvent.isComposing &&
               event.key !== "Dead" &&
@@ -1800,6 +1901,7 @@ export function NativeTerminalPane({
             if (text) {
               sendInput({ text });
             }
+            compositionTailCharRef.current = text.length > 0 ? text.slice(-1) : null;
           }}
           onInput={(event) => {
             if (isComposingRef.current) {

@@ -2741,7 +2741,7 @@ describe("App project workspace flow", () => {
         },
         worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
         activityBySessionId: {
-          "sess-a": { state: "working", title: "Gemini", isAgent: true, agentType: "gemini" },
+          "sess-a": { state: "working", title: "Antigravity", isAgent: true, agentType: "antigravity" },
           "sess-b": { state: "waiting", title: "Claude", isAgent: true, agentType: "claude" },
         },
       };
@@ -2754,7 +2754,7 @@ describe("App project workspace flow", () => {
         id: "tab-1::leaf-a",
         label: "main (1)",
         activityState: "working",
-        agentType: "gemini",
+        agentType: "antigravity",
         worktreeLabel: "main",
         sessionId: "pty-a",
       });

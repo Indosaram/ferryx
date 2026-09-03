@@ -1,4 +1,5 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
+use crate::remote::backend::RemoteSessionBackend;
 #[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
 #[cfg(feature = "native-terminal")]
@@ -12,10 +13,7 @@ use crate::remote::protocol::{
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
 };
-use crate::terminal::{
-    AttachmentSnapshot, OutputChunk, PtyError, PtySessionState, SessionAttachment, TerminalService,
-    TerminalSignal,
-};
+use crate::terminal::{AttachmentSnapshot, OutputChunk, SessionAttachment, TerminalSignal};
 use crate::worktree::{CreateWorktreeOptions, WorktreeIdentity};
 use axum::{
     extract::{
@@ -134,12 +132,14 @@ fn encode_remote_terminal_frame(
     frame
 }
 
-pub(crate) fn recover_remote_terminal_attachment(
-    terminal_service: &TerminalService,
+pub(crate) async fn recover_remote_terminal_attachment(
+    session_backend: &Arc<dyn RemoteSessionBackend>,
     session_id: &str,
     last_emitted_sequence: Option<u64>,
-) -> Result<SessionAttachment, PtyError> {
-    terminal_service.attach_with_sequence(session_id, Some(last_emitted_sequence.unwrap_or(0)))
+) -> Result<SessionAttachment, String> {
+    session_backend
+        .attach_with_sequence(session_id, Some(last_emitted_sequence.unwrap_or(0)))
+        .await
 }
 
 #[derive(Serialize)]
@@ -464,7 +464,7 @@ fn relative_label(root: &Path, canonical: &Path) -> Option<String> {
         .map(|f| f.to_string_lossy().into_owned())
 }
 
-fn get_active_running_sessions(
+pub(crate) async fn get_active_running_sessions(
     state: &RemoteGatewayState,
     cache: &WorkspaceSnapshotCache,
 ) -> Vec<RemoteTerminalSession> {
@@ -475,31 +475,32 @@ fn get_active_running_sessions(
     let Some(session_id) = active_sel.session_id.as_deref() else {
         return Vec::new();
     };
-    let Some(session) = state.terminal_service.get_session(session_id) else {
+    let Ok(details) = state.session_backend.describe_session(session_id).await else {
         return Vec::new();
     };
-    let running = matches!(
-        session.state(),
-        PtySessionState::Running | PtySessionState::Starting
-    );
-    if !running {
+    if !details.running {
         return Vec::new();
     }
     let (derived_ws, derived_label) =
-        cache.derive_session_metadata(session.worktree_path().as_deref());
-    let workspace_id = active_sel.workspace_id.clone().or(derived_ws);
+        cache.derive_session_metadata(details.worktree_path.as_deref());
+    let workspace_id = active_sel
+        .workspace_id
+        .clone()
+        .or(details.workspace_id)
+        .or(derived_ws);
     let worktree_label = active_sel
         .worktree_slug
         .clone()
         .or_else(|| active_sel.worktree_label.clone())
+        .or(details.worktree_label)
         .or(derived_label);
 
     vec![RemoteTerminalSession {
-        session_id: session.id().to_string(),
+        session_id: details.session_id,
         title: None,
         workspace_id,
         worktree_label,
-        running,
+        running: true,
     }]
 }
 
@@ -519,7 +520,7 @@ async fn list_sessions(
         .workspace_snapshot()
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    let sessions = get_active_running_sessions(&state, &cache);
+    let sessions = get_active_running_sessions(&state, &cache).await;
 
     Ok(Json(sessions))
 }
@@ -560,7 +561,7 @@ async fn get_workspace_state(
             terminal_tabs: Vec::new(),
         });
     let worktrees = cache.worktrees_for(&active_ws, active_selection.as_ref());
-    let sessions = get_active_running_sessions(&state, &cache);
+    let sessions = get_active_running_sessions(&state, &cache).await;
 
     Ok(Json(RemoteWorkspaceState {
         projects,
@@ -848,14 +849,16 @@ async fn ws_terminal_handler(
 
     if let Some((cols, rows)) = requested_geometry {
         state
-            .terminal_service
+            .session_backend
             .resize(&session_id, cols, rows)
+            .await
             .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
     }
 
     let attachment = state
-        .terminal_service
+        .session_backend
         .attach_with_sequence(&session_id, None)
+        .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
     Ok(ws.on_upgrade(move |socket| {
@@ -899,7 +902,7 @@ async fn handle_terminal_socket(
         last_emitted_sequence = snapshot.history_end_sequence;
     }
 
-    let terminal_service = Arc::clone(&state.terminal_service);
+    let session_backend = Arc::clone(&state.session_backend);
     let send_session_id = session_id.clone();
     let mut send_task = tokio::spawn(async move {
         loop {
@@ -916,10 +919,12 @@ async fn handle_terminal_socket(
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     let recovered = match recover_remote_terminal_attachment(
-                        &terminal_service,
+                        &session_backend,
                         &send_session_id,
                         last_emitted_sequence,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(attachment) => attachment,
                         Err(_) => break,
                     };
@@ -938,7 +943,7 @@ async fn handle_terminal_socket(
         }
     });
 
-    let term_service = Arc::clone(&state.terminal_service);
+    let session_backend = Arc::clone(&state.session_backend);
     let session_id_clone = session_id.clone();
     let can_control = device.permission == DevicePermission::Control;
 
@@ -947,7 +952,7 @@ async fn handle_terminal_socket(
             match msg {
                 Message::Binary(bytes) => {
                     if can_control {
-                        let _ = term_service.write_input(&session_id_clone, &bytes);
+                        let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }
                 Message::Text(text) => {
@@ -955,13 +960,15 @@ async fn handle_terminal_socket(
                         match ctrl {
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ = term_service.resize(&session_id_clone, cols, rows);
+                                    let _ =
+                                        session_backend.resize(&session_id_clone, cols, rows).await;
                                 }
                             }
                             ClientControlMessage::Signal { signal } => {
                                 if can_control && signal == "interrupt" {
-                                    let _ = term_service
-                                        .signal(&session_id_clone, TerminalSignal::Interrupt);
+                                    let _ = session_backend
+                                        .signal(&session_id_clone, TerminalSignal::Interrupt)
+                                        .await;
                                 }
                             }
                             ClientControlMessage::Ping => {}
@@ -1041,10 +1048,10 @@ async fn handle_terminal_grid_socket(
         receiver: mut output_rx,
     } = attachment;
 
-    let Some(session) = state.terminal_service.get_session(&session_id) else {
+    let Ok(details) = state.session_backend.describe_session(&session_id).await else {
         return;
     };
-    let (cols, rows) = session.get_size();
+    let (cols, rows) = (details.cols, details.rows);
     let mirror = match RemoteTerminalMirror::new(cols, rows) {
         Ok(mirror) => Arc::new(parking_lot::Mutex::new(mirror)),
         Err(_) => return,
@@ -1083,7 +1090,7 @@ async fn handle_terminal_grid_socket(
         }
     });
 
-    let terminal_service = Arc::clone(&state.terminal_service);
+    let session_backend = Arc::clone(&state.session_backend);
     let send_session_id = session_id.clone();
     let send_mirror = Arc::clone(&mirror);
     let send_tx = outbound_tx.clone();
@@ -1131,19 +1138,22 @@ async fn handle_terminal_grid_socket(
                     pending_bytes.clear();
                     pending_end_sequence = None;
                     let recovered = match recover_remote_terminal_attachment(
-                        &terminal_service,
+                        &session_backend,
                         &send_session_id,
                         last_emitted_sequence,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(attachment) => attachment,
                         Err(_) => break,
                     };
                     output_rx = recovered.receiver;
                     let snapshot = recovered.snapshot;
-                    let Some(session) = terminal_service.get_session(&send_session_id) else {
-                        break;
-                    };
-                    let (cols, rows) = session.get_size();
+                    let (cols, rows) =
+                        match session_backend.describe_session(&send_session_id).await {
+                            Ok(d) => (d.cols, d.rows),
+                            Err(_) => break,
+                        };
 
                     let sent = {
                         let mut mirror = send_mirror.lock();
@@ -1153,7 +1163,10 @@ async fn handle_terminal_grid_socket(
                                 Err(_) => break,
                             };
                             if !snapshot.history_segments.is_empty() {
-                                if replacement.feed_segments(&snapshot.history_segments).is_err() {
+                                if replacement
+                                    .feed_segments(&snapshot.history_segments)
+                                    .is_err()
+                                {
                                     break;
                                 }
                             } else if !snapshot.history.is_empty()
@@ -1207,7 +1220,7 @@ async fn handle_terminal_grid_socket(
         }
     });
 
-    let term_service = Arc::clone(&state.terminal_service);
+    let session_backend = Arc::clone(&state.session_backend);
     let session_id_clone = session_id.clone();
     let can_control = device.permission == DevicePermission::Control;
     let recv_mirror = Arc::clone(&mirror);
@@ -1218,7 +1231,7 @@ async fn handle_terminal_grid_socket(
             match msg {
                 Message::Binary(bytes) => {
                     if can_control {
-                        let _ = term_service.write_input(&session_id_clone, &bytes);
+                        let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }
                 Message::Text(text) => {
@@ -1226,7 +1239,8 @@ async fn handle_terminal_grid_socket(
                         match ctrl {
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ = term_service.resize(&session_id_clone, cols, rows);
+                                    let _ =
+                                        session_backend.resize(&session_id_clone, cols, rows).await;
                                     if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| {
                                         mirror.resize(cols, rows)
                                     }) {
@@ -1236,17 +1250,20 @@ async fn handle_terminal_grid_socket(
                             }
                             ClientControlMessage::Signal { signal } => {
                                 if can_control && signal == "interrupt" {
-                                    let _ = term_service
-                                        .signal(&session_id_clone, TerminalSignal::Interrupt);
+                                    let _ = session_backend
+                                        .signal(&session_id_clone, TerminalSignal::Interrupt)
+                                        .await;
                                 }
                             }
                             ClientControlMessage::Ping => {}
                             ClientControlMessage::Scroll { rows } => {
                                 let clamped_rows = rows.clamp(-50, 50);
                                 if clamped_rows != 0 {
-                                    if !enqueue_grid_operation(&recv_mirror, &recv_tx, move |mirror| {
-                                        mirror.scroll(clamped_rows)
-                                    }) {
+                                    if !enqueue_grid_operation(
+                                        &recv_mirror,
+                                        &recv_tx,
+                                        move |mirror| mirror.scroll(clamped_rows),
+                                    ) {
                                         break;
                                     }
                                 }

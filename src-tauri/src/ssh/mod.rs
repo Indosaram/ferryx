@@ -78,13 +78,19 @@ mod tests {
 
     #[test]
     fn target_with_and_without_user() {
-        assert_eq!(host(Some("sook"), "maho-win", None).target(), "sook@maho-win");
+        assert_eq!(
+            host(Some("sook"), "maho-win", None).target(),
+            "sook@maho-win"
+        );
         assert_eq!(host(None, "maho-win", None).target(), "maho-win");
     }
 
     #[test]
     fn key_includes_user_and_default_port() {
-        assert_eq!(host(Some("sook"), "maho-win", None).key(), "sook@maho-win:22");
+        assert_eq!(
+            host(Some("sook"), "maho-win", None).key(),
+            "sook@maho-win:22"
+        );
         assert_eq!(host(None, "h", Some(2200)).key(), "h:2200");
     }
 

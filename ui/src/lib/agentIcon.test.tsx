@@ -43,7 +43,7 @@ describe("agent icon mapping and resolution contract", () => {
   it("normalizes whitespace and casing for supported agent types", () => {
     expect(resolveAgentLogo("  CLAUDE  ")).toBe(resolveAgentLogo("claude"));
     expect(resolveAgentLogo("OpEnCoDe")).toBe(resolveAgentLogo("opencode"));
-    expect(resolveAgentLogo("  GEMINI ")).toBe(resolveAgentLogo("gemini"));
+    expect(resolveAgentLogo("  ANTIGRAVITY ")).toBe(resolveAgentLogo("antigravity"));
     expect(resolveAgentLogo("PI")).toBe(resolveAgentLogo("pi"));
     expect(resolveAgentLogo("  OmO ")).toBe(resolveAgentLogo("omo"));
     expect(resolveAgentLogo("CODEX")).toBe(SUPPORTED_AGENT_LOGOS.codex);
@@ -71,7 +71,7 @@ describe("agent icon mapping and resolution contract", () => {
       expect(isMonochromeAgentLogo(flat)).toBe(true);
     }
     // Brands that publish a full-color mark must never be filtered.
-    for (const colored of ["claude", "codex", "gemini", "kimi", "copilot", "antigravity", "aider", "crush"]) {
+    for (const colored of ["claude", "codex", "kimi", "copilot", "antigravity", "aider", "crush"]) {
       expect(isMonochromeAgentLogo(colored)).toBe(false);
     }
     expect(isMonochromeAgentLogo("cursor-agent")).toBe(true);

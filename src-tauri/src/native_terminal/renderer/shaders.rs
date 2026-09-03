@@ -100,9 +100,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     } else {
         let cov = textureSample(mask_tex, atlas_sampler, in.uv);
-        let fg = in.color.rgb;
-        let a = in.color.a;
-        return vec4<f32>(fg * cov.rgb * a, cov.a * a);
+        return vec4<f32>(in.color.rgb, cov.a * in.color.a);
     }
 }
 "#;

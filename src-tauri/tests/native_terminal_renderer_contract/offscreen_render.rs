@@ -1,10 +1,11 @@
 //! Contract test for Phase 2 native terminal renderer offscreen frame generation.
 
 use ferryx_lib::native_terminal::composition::PhysicalBounds;
+use ferryx_lib::native_terminal::renderer::font_manager::FontManager;
 use ferryx_lib::native_terminal::renderer::RendererTheme;
 use ferryx_lib::native_terminal::{
-    NativeTerminalRenderer, OffscreenFrame, RenderSnapshot, RendererConfig,
-    ScrollbarOverlayState, ScrollbarState, SelectionSnapshot,
+    CellWide, ColorRgb, CursorSnapshot, CursorVisualStyle, NativeTerminalRenderer, OffscreenFrame,
+    RenderSnapshot, RendererConfig, ScrollbarOverlayState, ScrollbarState, SelectionSnapshot,
 };
 
 #[test]
@@ -42,6 +43,88 @@ fn test_render_snapshot_offscreen_frame_with_ansi_cjk_cursor_selection() {
         "rendered frame must contain non-zero pixel data"
     );
     assert_eq!(frame.rendered_row_count, 24);
+}
+
+#[test]
+fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() {
+    // Given: one opaque cell with deliberately distinct foreground and background channels.
+    let font = FontManager::global();
+    let metrics = font.cell_metrics();
+    let foreground = ColorRgb {
+        r: 214,
+        g: 163,
+        b: 91,
+    };
+    let background = ColorRgb {
+        r: 19,
+        g: 37,
+        b: 73,
+    };
+    let snapshot = RenderSnapshot {
+        cols: 1,
+        rows: 1,
+        cursor: CursorSnapshot {
+            x: 0,
+            y: 0,
+            visible: false,
+            blinking: false,
+            wide_tail: false,
+            visual_style: CursorVisualStyle::Block,
+        },
+        grid: vec![vec![super::snapshot_builder::make_cell(
+            "A",
+            CellWide::Narrow,
+            Some(foreground),
+            Some(background),
+            false,
+            false,
+            false,
+            false,
+        )]],
+    };
+    let config = RendererConfig {
+        cell_width_px: metrics.width_px,
+        cell_height_px: metrics.height_px,
+        device_scale_factor: 1.0,
+        ..Default::default()
+    };
+    let mask = font
+        .rasterize_glyph("A", metrics.width_px, metrics.height_px, false, false)
+        .into_buffer();
+
+    // When: the real WGPU renderer draws that glyph.
+    let mut renderer = NativeTerminalRenderer::new(config).expect("renderer creation");
+    let frame = renderer
+        .render_snapshot(&snapshot, None)
+        .expect("render LCD glyph");
+
+    // Then: covered pixels blend exactly once and uncovered pixels stay the cell background.
+    let bg = [background.r, background.g, background.b];
+    let fg = [foreground.r, foreground.g, foreground.b];
+    let mut covered = 0;
+    let mut uncovered = 0;
+    for (mask_pixel, frame_pixel) in mask.chunks_exact(4).zip(frame.pixels.chunks_exact(4)) {
+        let coverage = mask_pixel[3] as f32 / 255.0;
+        for channel in 0..3 {
+            let expected = bg[channel] as f32 * (1.0 - coverage) + fg[channel] as f32 * coverage;
+            assert!(
+                (frame_pixel[channel] as f32 - expected).abs() <= 2.0,
+                "channel {channel} at coverage {coverage} must blend once: expected {expected}, got {}",
+                frame_pixel[channel]
+            );
+        }
+        assert_eq!(frame_pixel[3], 255, "opaque cell remains opaque");
+        if mask_pixel[3] == 0 {
+            uncovered += 1;
+        } else {
+            covered += 1;
+        }
+    }
+    assert!(covered > 0, "the host font must provide covered glyph pixels");
+    assert!(
+        uncovered > 0,
+        "the glyph cell must retain uncovered background pixels"
+    );
 }
 
 #[test]
@@ -319,5 +402,76 @@ fn test_render_to_offscreen_viewport_with_scrollbar_overlay() {
     assert!(
         with_overlay_pixel[0] > no_overlay_pixel[0],
         "overlay pixel red channel must be brighter due to blended white foreground"
+    );
+}
+
+#[test]
+fn test_render_to_offscreen_viewport_with_attention_frame() {
+    let snapshot: RenderSnapshot = super::snapshot_builder::build_test_snapshot();
+    let surface_w = 800;
+    let surface_h = 480;
+    let viewport = PhysicalBounds {
+        x: 0,
+        y: 0,
+        width: surface_w,
+        height: surface_h,
+    };
+
+    let background = [0.0, 0.0, 0.0, 1.0];
+    let foreground = [1.0, 1.0, 1.0, 1.0];
+    let config = RendererConfig {
+        cell_width_px: 10,
+        cell_height_px: 20,
+        device_scale_factor: 1.0,
+        theme: RendererTheme {
+            background,
+            foreground,
+            ..Default::default()
+        },
+    };
+
+    let mut renderer = NativeTerminalRenderer::new(config).expect("renderer creation");
+
+    let frame_no_attention = renderer
+        .render_to_offscreen_viewport(&snapshot, None, surface_w, surface_h, viewport)
+        .expect("render without attention frame");
+
+    let frame_with_attention = renderer
+        .render_to_offscreen_viewport_with_overlay_and_attention(
+            &snapshot, None, surface_w, surface_h, viewport, None, true,
+        )
+        .expect("render with attention frame");
+
+    // Top border pixel at (x=10, y=1) should be colored with pastel amber (RGB 253, 230, 138)
+    let border_x = 10;
+    let border_y = 1;
+    let border_idx = ((border_y * surface_w + border_x) * 4) as usize;
+
+    let no_att_pixel = &frame_no_attention.pixels[border_idx..border_idx + 4];
+    let with_att_pixel = &frame_with_attention.pixels[border_idx..border_idx + 4];
+
+    assert_ne!(
+        no_att_pixel, with_att_pixel,
+        "pixel at top border must be modified by attention frame"
+    );
+    // Pastel amber red channel is dominant (> 200)
+    assert!(
+        with_att_pixel[0] > 200,
+        "attention frame pixel red channel should reflect pastel amber color"
+    );
+
+    // Halo pixel at (x=10, y=4) is in the 6px halo band but outside the 2px core band
+    let halo_x = 10;
+    let halo_y = 4;
+    let halo_idx = ((halo_y * surface_w + halo_x) * 4) as usize;
+    let no_att_halo = &frame_no_attention.pixels[halo_idx..halo_idx + 4];
+    let with_att_halo = &frame_with_attention.pixels[halo_idx..halo_idx + 4];
+    assert_ne!(
+        no_att_halo, with_att_halo,
+        "pixel in halo band must be modified by attention halo"
+    );
+    assert!(
+        with_att_halo[0] > 30 && with_att_halo[0] < 120,
+        "halo pixel should reflect low-alpha blend"
     );
 }

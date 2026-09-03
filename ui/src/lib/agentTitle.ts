@@ -42,7 +42,6 @@ export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
   { pattern: /\bpi\b/i, type: "pi", name: "Pi" },
   { pattern: /\baider\b/i, type: "aider", name: "Aider" },
   { pattern: /\bcursor\b/i, type: "cursor", name: "Cursor" },
-  { pattern: /\bgemini\b/i, type: "gemini", name: "Gemini CLI" },
   { pattern: /\bgrok\b/i, type: "grok", name: "Grok" },
   { pattern: /\bdevin\b/i, type: "devin", name: "Devin" },
   { pattern: /\bdroid\b/i, type: "droid", name: "Droid" },

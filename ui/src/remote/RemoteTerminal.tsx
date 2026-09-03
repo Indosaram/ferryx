@@ -1,11 +1,12 @@
 import type { CSSProperties } from "react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { useTerminalSettings } from "../lib/terminalSettings";
 import {
   applyGridFrame,
   decodeGridAttrs,
+  estimateCellWidth,
   parseGridFrame,
   type GridColor,
   type GridCursor,
@@ -19,6 +20,7 @@ type RemoteTerminalProps = {
   readonly title?: string;
   readonly onBack?: () => void;
   readonly embedded?: boolean;
+  readonly activeTabId?: string | null;
   readonly onSwipeNextTab?: () => void;
   readonly onSwipePreviousTab?: () => void;
   readonly onSocketLifecycle?: (
@@ -139,17 +141,32 @@ function colorCss(color: GridColor): string {
   return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
 }
 
-function runStyle(run: GridRun, foreground: string, background: string): CSSProperties {
+function runStyle(
+  run: GridRun,
+  foreground: string,
+  background: string,
+  cellWidthPx: number | null,
+): CSSProperties {
   const attrs = decodeGridAttrs(run.attrs);
   const explicitForeground = run.fg ? colorCss(run.fg) : null;
   const explicitBackground = run.bg ? colorCss(run.bg) : null;
-  return {
+  const style: CSSProperties = {
     color: attrs.inverse ? (explicitBackground ?? background) : (explicitForeground ?? undefined),
     backgroundColor: attrs.inverse ? (explicitForeground ?? foreground) : (explicitBackground ?? undefined),
     fontWeight: attrs.bold ? 700 : undefined,
     fontStyle: attrs.italic ? "italic" : undefined,
     textDecorationLine: attrs.underline ? "underline" : undefined,
   };
+  // Snap the run to exactly its grid columns so run boundaries — and therefore
+  // the cursor/preedit overlays positioned at cursor.x * cellWidth — stay
+  // aligned with wide (CJK/Hangul) text rendered at natural glyph width.
+  const cellCount = run.cells ?? estimateCellWidth(run.text);
+  if (cellWidthPx !== null && cellWidthPx > 0 && cellCount > 0) {
+    style.display = "inline-block";
+    style.verticalAlign = "top";
+    style.width = `${cellCount * cellWidthPx}px`;
+  }
+  return style;
 }
 
 function cursorOverlayStyle(cursor: GridCursor, cell: CellMetrics, color: string): CSSProperties {
@@ -208,6 +225,7 @@ export function RemoteTerminal({
   title,
   onBack,
   embedded = false,
+  activeTabId,
   onSwipeNextTab,
   onSwipePreviousTab,
   onSocketLifecycle,
@@ -242,6 +260,20 @@ export function RemoteTerminal({
   useEffect(() => {
     void refreshNativePreferences();
   }, [refreshNativePreferences]);
+
+  const focusInput = useCallback(() => {
+    inputSinkRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useLayoutEffect(() => {
+    focusInput();
+  }, [sessionId, activeTabId, focusInput]);
+
+  useEffect(() => {
+    if (connected) {
+      focusInput();
+    }
+  }, [connected, focusInput]);
 
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
@@ -467,6 +499,7 @@ export function RemoteTerminal({
           } else {
             onSwipePreviousTab?.();
           }
+          focusInput();
         }
       }
       touchStartRef.current = null;
@@ -640,6 +673,10 @@ export function RemoteTerminal({
           ref={inputSinkRef}
           data-testid="remote-terminal-input-sink"
           aria-label="Remote terminal input"
+          autoCapitalize="none"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
           className="pointer-events-none absolute resize-none overflow-hidden border-0 bg-transparent p-0 opacity-0 outline-none"
           style={{
             left: 0,
@@ -685,7 +722,10 @@ export function RemoteTerminal({
             }}
           >
             {line.runs.map((run, runIndex) => (
-              <span key={runIndex} style={runStyle(run, settings.theme.foreground, settings.theme.background)}>
+              <span
+                key={runIndex}
+                style={runStyle(run, settings.theme.foreground, settings.theme.background, cellMetrics.width > 0 ? cellMetrics.width : null)}
+              >
                 {run.text}
               </span>
             ))}

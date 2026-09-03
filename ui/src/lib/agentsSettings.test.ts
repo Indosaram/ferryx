@@ -75,7 +75,7 @@ describe("agentsSettings persistence and pure helpers", () => {
     it("defaults enabled to available when no overrides are set", () => {
       const detections = [
         { name: "claude", available: true },
-        { name: "gemini", available: false },
+        { name: "agy", available: false },
       ];
 
       const resolved = mergeDetections(DEFAULT_AGENT_SETTINGS, detections);
@@ -92,12 +92,12 @@ describe("agentsSettings persistence and pure helpers", () => {
         custom: false,
       });
 
-      const gemini = resolved.find((r) => r.name === "gemini")!;
-      expect(gemini).toEqual({
-        name: "gemini",
+      const antigravity = resolved.find((r) => r.name === "antigravity")!;
+      expect(antigravity).toEqual({
+        name: "antigravity",
         available: false,
         enabled: false,
-        command: "gemini",
+        command: "agy",
         args: "",
         custom: false,
       });
@@ -256,6 +256,8 @@ describe("agentsSettings persistence and pure helpers", () => {
       expect(targets).not.toContain("claude");
       expect(targets).toContain("my-agent-cli");
       expect(targets).toContain("codex");
+      expect(targets).toContain("agy");
+      expect(targets).not.toContain("antigravity");
     });
   });
 
@@ -264,7 +266,7 @@ describe("agentsSettings persistence and pure helpers", () => {
       const resolved = [
         { name: "claude", available: true, enabled: true, command: "claude", args: "", custom: false },
         { name: "codex", available: true, enabled: false, command: "codex", args: "", custom: false },
-        { name: "gemini", available: false, enabled: true, command: "gemini", args: "", custom: false },
+        { name: "antigravity", available: false, enabled: true, command: "agy", args: "", custom: false },
         { name: "aider", available: true, enabled: true, command: "aider", args: "--chat", custom: false },
       ];
 

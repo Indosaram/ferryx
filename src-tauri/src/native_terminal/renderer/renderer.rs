@@ -11,7 +11,10 @@ use super::row_cache::RowCacheManager;
 use super::types::{GlyphAtlasStats, OffscreenFrame, RendererConfig, SelectionSnapshot};
 use crate::native_terminal::composition::PhysicalBounds;
 use crate::native_terminal::error::NativeTerminalError;
-use crate::native_terminal::scroll::{compute_scrollbar_overlay_rect, ScrollbarOverlayState};
+use crate::native_terminal::scroll::{
+    compute_attention_frame_rects, compute_scrollbar_overlay_rect, ScrollbarOverlayState,
+    ATTENTION_FRAME_THICKNESS_LOGICAL_PX,
+};
 use crate::native_terminal::snapshot::RenderSnapshot;
 
 pub struct NativeTerminalRenderer {
@@ -262,6 +265,34 @@ impl NativeTerminalRenderer {
         format: wgpu::TextureFormat,
         viewport: PhysicalBounds,
         scrollbar_overlay: Option<&ScrollbarOverlayState>,
+        attention_frame: bool,
+    ) -> Result<(u16, u16), NativeTerminalError> {
+        self.render_to_surface_viewport_internal(
+            snapshot,
+            selection,
+            view,
+            surface_width_px,
+            surface_height_px,
+            format,
+            viewport,
+            scrollbar_overlay,
+            attention_frame,
+            false,
+        )
+    }
+
+    fn render_to_surface_viewport_internal(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        view: &wgpu::TextureView,
+        surface_width_px: u32,
+        surface_height_px: u32,
+        format: wgpu::TextureFormat,
+        viewport: PhysicalBounds,
+        scrollbar_overlay: Option<&ScrollbarOverlayState>,
+        attention_frame: bool,
+        include_bottom_band: bool,
     ) -> Result<(u16, u16), NativeTerminalError> {
         let (terminal_width_px, terminal_height_px) = self.validate_and_dims(snapshot)?;
         let right = viewport
@@ -329,6 +360,14 @@ impl NativeTerminalRenderer {
                 }
             }
         }
+        if attention_frame {
+            let thickness = ATTENTION_FRAME_THICKNESS_LOGICAL_PX * self.config.device_scale_factor;
+            overlay_instances.extend(compute_attention_frame_rects(
+                viewport,
+                thickness,
+                include_bottom_band,
+            ));
+        }
 
         let mut encoder = self
             .gpu
@@ -393,8 +432,30 @@ impl NativeTerminalRenderer {
         viewport: PhysicalBounds,
         scrollbar_overlay: Option<&ScrollbarOverlayState>,
     ) -> Result<OffscreenFrame, NativeTerminalError> {
+        self.render_to_offscreen_viewport_with_overlay_and_attention(
+            snapshot,
+            selection,
+            surface_width_px,
+            surface_height_px,
+            viewport,
+            scrollbar_overlay,
+            false,
+        )
+    }
+
+    /// Renders snapshot passes with an optional scrollbar overlay and attention frame to an offscreen viewport target.
+    pub fn render_to_offscreen_viewport_with_overlay_and_attention(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        surface_width_px: u32,
+        surface_height_px: u32,
+        viewport: PhysicalBounds,
+        scrollbar_overlay: Option<&ScrollbarOverlayState>,
+        attention_frame: bool,
+    ) -> Result<OffscreenFrame, NativeTerminalError> {
         let target = RenderTarget::new(&self.gpu.device, surface_width_px, surface_height_px);
-        let (rebuilt, reused) = self.render_to_surface_viewport(
+        let (rebuilt, reused) = self.render_to_surface_viewport_internal(
             snapshot,
             selection,
             &target.view,
@@ -403,6 +464,8 @@ impl NativeTerminalRenderer {
             TARGET_FORMAT,
             viewport,
             scrollbar_overlay,
+            attention_frame,
+            true,
         )?;
 
         let mut encoder = self

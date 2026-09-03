@@ -146,8 +146,8 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
     expect(activity?.source).toBe("screen");
   });
 
-  it("3. sets agent identity for supported screen detection manifestId (e.g. gemini, omo, codex, claude, opencode)", () => {
-    for (const agentType of ["gemini", "omo", "codex", "claude", "opencode"] as const) {
+  it("3. sets agent identity for supported screen detection manifestId (e.g. antigravity, omo, codex, claude, opencode)", () => {
+    for (const agentType of ["antigravity", "omo", "codex", "claude", "opencode"] as const) {
       const state = workspaceReducer(stateWithSession("tab-a"), screenAction("working", "rule_working", agentType));
 
       expect(state.activityBySessionId?.["session-a"]).toMatchObject({

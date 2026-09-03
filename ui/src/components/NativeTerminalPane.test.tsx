@@ -48,6 +48,10 @@ const nativeTerminalEventMocks = vi.hoisted(() => ({
   setNativeTerminalScrollbarOverlay: vi.fn(async (sessionId: string, visible: boolean) => {
     nativeTerminalEventMocks.scrollbarOverlayCalls.push({ sessionId, visible });
   }),
+  attentionFrameCalls: [] as Array<{ sessionId: string; attention: boolean }>,
+  setNativeTerminalAttentionFrame: vi.fn(async (sessionId: string, attention: boolean) => {
+    nativeTerminalEventMocks.attentionFrameCalls.push({ sessionId, attention });
+  }),
   onNativeTerminalScrollbar: vi.fn(async (handler: (payload: {
     sessionId: string;
     total: number;
@@ -101,6 +105,7 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   onNativeTerminalCopyOrInterrupt: nativeTerminalEventMocks.onNativeTerminalCopyOrInterrupt,
   onNativeTerminalScrollbar: nativeTerminalEventMocks.onNativeTerminalScrollbar,
   setNativeTerminalScrollbarOverlay: nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay,
+  setNativeTerminalAttentionFrame: nativeTerminalEventMocks.setNativeTerminalAttentionFrame,
   attachTerminal: vi.fn(async (request) => tauriCoreMocks.invoke("cmd_terminal_attach", request)),
 }));
 
@@ -190,6 +195,8 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
     nativeTerminalEventMocks.scrollbarOverlayCalls = [];
     nativeTerminalEventMocks.setNativeTerminalScrollbarOverlay.mockClear();
+    nativeTerminalEventMocks.attentionFrameCalls = [];
+    nativeTerminalEventMocks.setNativeTerminalAttentionFrame.mockClear();
     resizeRecords.length = 0;
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
@@ -3109,7 +3116,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
-  it("copy-or-interrupt event with empty selection sends Ctrl+C to PTY", async () => {
+  it("copy-or-interrupt event with empty selection does not send input to PTY", async () => {
     const session = createSession("term-session-copy-interrupt-empty");
     const writeTextSpy = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -3137,24 +3144,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
         sessionId: "term-session-copy-interrupt-empty",
       });
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-        sessionId: "term-session-copy-interrupt-empty",
-        input: {
-          keyEvent: {
-            key: "c",
-            action: "Press",
-            modifiers: {
-              shift: false,
-              ctrl: true,
-              alt: false,
-              superKey: false,
-              capsLock: false,
-              numLock: false,
-            },
-            utf8: null,
-          },
-        },
-      });
+      const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_native_terminal_send_input",
+      );
+      expect(sendInputCalls).toHaveLength(0);
       expect(writeTextSpy).not.toHaveBeenCalled();
     });
   });
@@ -4175,6 +4168,306 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     });
   });
 
+  it("translates double-press Ctrl+C within 700ms to exit gesture (1x key 'u' then 2x key 'c') when agent is waiting", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-agent-double-ctrlc");
+      const activity: TerminalActivity = {
+        isAgent: true,
+        state: "waiting",
+        title: "Agent Waiting",
+      };
+      const { getByTestId } = render(
+        <NativeTerminalPane
+          sessionId="term-session-agent-double-ctrlc"
+          session={session}
+          activity={activity}
+        />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      tauriCoreMocks.invoke.mockClear();
+
+      // First press -> clear (key "u")
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Second press within 700ms -> exit (immediate key "c", delayed key "c" at 120ms)
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      // Before 120ms: 1x "u" and 1x "c"
+      let sendCalls = tauriCoreMocks.invoke.mock.calls
+        .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+        .map(([, args]) => (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key);
+      expect(sendCalls).toEqual(["u", "c"]);
+
+      // Advance past 120ms
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150);
+      });
+
+      sendCalls = tauriCoreMocks.invoke.mock.calls
+        .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+        .map(([, args]) => (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key);
+      expect(sendCalls).toEqual(["u", "c", "c"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends key 'u' only for two plain Ctrl+C keydowns more than 700ms apart when agent is waiting", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-agent-spaced-ctrlc");
+      const activity: TerminalActivity = {
+        isAgent: true,
+        state: "waiting",
+        title: "Agent Waiting",
+      };
+      const { getByTestId } = render(
+        <NativeTerminalPane
+          sessionId="term-session-agent-spaced-ctrlc"
+          session={session}
+          activity={activity}
+        />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      tauriCoreMocks.invoke.mockClear();
+
+      // First press
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      // Advance 800ms (> 700ms threshold)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+
+      // Second press
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      const sendCalls = tauriCoreMocks.invoke.mock.calls
+        .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+        .map(([, args]) => (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key);
+      expect(sendCalls).toEqual(["u", "u"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends key 'c' twice immediately with no delayed third send for quick plain Ctrl+C in a plain shell", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-plain-shell-double-ctrlc");
+      const { getByTestId } = render(
+        <NativeTerminalPane
+          sessionId="term-session-plain-shell-double-ctrlc"
+          session={session}
+        />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      tauriCoreMocks.invoke.mockClear();
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300);
+      });
+
+      const sendCalls = tauriCoreMocks.invoke.mock.calls
+        .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+        .map(([, args]) => (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key);
+      expect(sendCalls).toEqual(["c", "c"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends key 'c' twice immediately with no delayed third send for quick Ctrl+C when agent is working", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-agent-working-double-ctrlc");
+      const activity: TerminalActivity = {
+        isAgent: true,
+        state: "working",
+        title: "Agent Working",
+      };
+      const { getByTestId } = render(
+        <NativeTerminalPane
+          sessionId="term-session-agent-working-double-ctrlc"
+          session={session}
+          activity={activity}
+        />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      tauriCoreMocks.invoke.mockClear();
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300);
+      });
+
+      const sendCalls = tauriCoreMocks.invoke.mock.calls
+        .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+        .map(([, args]) => (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key);
+      expect(sendCalls).toEqual(["c", "c"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("translates fallback document.body double-press Ctrl+C to exit gesture when agent is waiting", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const session = createSession("term-session-agent-fallback-double-ctrlc");
+      const activity: TerminalActivity = {
+        isAgent: true,
+        state: "waiting",
+        title: "Agent Waiting",
+      };
+      render(
+        <NativeTerminalPane
+          sessionId="term-session-agent-fallback-double-ctrlc"
+          session={session}
+          activity={activity}
+        />,
+      );
+
+      tauriCoreMocks.invoke.mockClear();
+      (document.activeElement as HTMLElement)?.blur?.();
+      expect(document.activeElement).toBe(document.body);
+
+      act(() => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      act(() => {
+        (document.activeElement ?? document).dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "c",
+            code: "KeyC",
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150);
+      });
+
+      const sendCalls = tauriCoreMocks.invoke.mock.calls
+        .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+        .map(([, args]) => (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key);
+      expect(sendCalls).toEqual(["u", "c", "c"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps interrupt key 'c' on plain Ctrl+C when activity indicates agent is working", async () => {
     const session = createSession("term-session-agent-working-ctrlc");
     const activity: TerminalActivity = {
@@ -4275,7 +4568,109 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(sentWithHangul).toBe(false);
   });
 
-  it("translates Cmd+C with empty selection to key 'u' when activity indicates agent is waiting", async () => {
+  it("translates plain Ctrl+C to key 'u' when session has agentType and no activity prop", async () => {
+    const session = {
+      ...createSession("term-session-agent-no-activity-ctrlc"),
+      agentType: "claude",
+    };
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-agent-no-activity-ctrlc"
+        session={session}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const ctrlCEvent = new KeyboardEvent("keydown", {
+      key: "c",
+      code: "KeyC",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(ctrlCEvent);
+    });
+
+    expect(ctrlCEvent.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-agent-no-activity-ctrlc",
+        input: {
+          keyEvent: {
+            key: "u",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+  });
+
+  it("keeps interrupt key 'c' on plain Ctrl+C when session has agentType and activity indicates agent is working", async () => {
+    const session = {
+      ...createSession("term-session-agent-working-override-ctrlc"),
+      agentType: "claude",
+    };
+    const activity: TerminalActivity = {
+      isAgent: true,
+      state: "working",
+      title: "Agent Working",
+    };
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-agent-working-override-ctrlc"
+        session={session}
+        activity={activity}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const ctrlCEvent = new KeyboardEvent("keydown", {
+      key: "c",
+      code: "KeyC",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(ctrlCEvent);
+    });
+
+    expect(ctrlCEvent.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-agent-working-override-ctrlc",
+        input: {
+          keyEvent: {
+            key: "c",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
+  });
+
+  it("does not send input or write clipboard on Cmd+C with empty selection when activity indicates agent is waiting", async () => {
     const session = createSession("term-session-cmdc-empty-waiting");
     const activity: TerminalActivity = {
       isAgent: true,
@@ -4320,25 +4715,67 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
         sessionId: "term-session-cmdc-empty-waiting",
       });
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-        sessionId: "term-session-cmdc-empty-waiting",
-        input: {
-          keyEvent: {
-            key: "u",
-            action: "Press",
-            modifiers: {
-              shift: false,
-              ctrl: true,
-              alt: false,
-              superKey: false,
-              capsLock: false,
-              numLock: false,
-            },
-            utf8: null,
-          },
-        },
-      });
+      const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_native_terminal_send_input",
+      );
+      expect(sendInputCalls).toHaveLength(0);
       expect(writeTextSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("copies selection to clipboard on Cmd+C with non-empty selection without sending input when agent is waiting", async () => {
+    const session = {
+      ...createSession("term-session-cmdc-selection-agent"),
+      agentType: "claude",
+    };
+    const activity: TerminalActivity = {
+      isAgent: true,
+      state: "waiting",
+      title: "Agent Waiting",
+    };
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(), writeText: writeTextSpy },
+    });
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_copy_selection") {
+        return "copied selection text";
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane
+        sessionId="term-session-cmdc-selection-agent"
+        session={session}
+        activity={activity}
+      />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const copyShortcut = new KeyboardEvent("keydown", {
+      key: "c",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(copyShortcut);
+    });
+
+    expect(copyShortcut.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-cmdc-selection-agent",
+      });
+      expect(writeTextSpy).toHaveBeenCalledWith("copied selection text");
+      const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_native_terminal_send_input",
+      );
+      expect(sendInputCalls).toHaveLength(0);
     });
   });
 
@@ -4389,4 +4826,173 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     expect(sendInputCalls).toHaveLength(0);
   });
 
+  it("syncs attention frame state to backend when needsAttention changes or component unmounts", async () => {
+    const session = createSession("term-session-attention");
+
+    const { rerender, unmount } = render(
+      <NativeTerminalPane sessionId="term-session-attention" session={session} needsAttention={true} />,
+    );
+
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.setNativeTerminalAttentionFrame).toHaveBeenCalledWith(
+        "term-session-attention",
+        true,
+      );
+    });
+
+    rerender(
+      <NativeTerminalPane sessionId="term-session-attention" session={session} needsAttention={false} />,
+    );
+
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.setNativeTerminalAttentionFrame).toHaveBeenCalledWith(
+        "term-session-attention",
+        false,
+      );
+    });
+
+    nativeTerminalEventMocks.setNativeTerminalAttentionFrame.mockClear();
+
+    rerender(
+      <NativeTerminalPane sessionId="term-session-attention" session={session} needsAttention={true} />,
+    );
+
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.setNativeTerminalAttentionFrame).toHaveBeenCalledWith(
+        "term-session-attention",
+        true,
+      );
+    });
+
+    unmount();
+
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.setNativeTerminalAttentionFrame).toHaveBeenCalledWith(
+        "term-session-attention",
+        false,
+      );
+    });
+  });
+
+  it("swallows the keydown that terminates an IME composition", async () => {
+    const session = createSession("term-session-ime-swallow");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-swallow" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink");
+    sink.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      fireEvent.compositionEnd(sink, { data: "안 " });
+      fireEvent.keyDown(sink, { key: " " });
+    });
+
+    const textSends = tauriCoreMocks.invoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => args?.input?.text)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(textSends).toEqual(["안 "]);
+  });
+
+  it("still sends standalone spaces after a committed composition", async () => {
+    const session = createSession("term-session-ime-standalone-space");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-standalone-space" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink");
+    sink.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      fireEvent.compositionEnd(sink, { data: "안 " });
+      fireEvent.keyDown(sink, { key: " " });
+      fireEvent.keyDown(sink, { key: " " });
+    });
+
+    const textSends = tauriCoreMocks.invoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => args?.input?.text)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(textSends).toEqual(["안 ", " "]);
+  });
+
+  it("disarms the tail suppression when a different key arrives", async () => {
+    const session = createSession("term-session-ime-disarm");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-disarm" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink");
+    sink.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      fireEvent.compositionEnd(sink, { data: "안" });
+      fireEvent.keyDown(sink, { key: "x" });
+      fireEvent.keyDown(sink, { key: " " });
+    });
+
+    const textSends = tauriCoreMocks.invoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => args?.input?.text)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(textSends).toEqual(["안", "x", " "]);
+  });
+
+  it("sends plain space without any composition", async () => {
+    const session = createSession("term-session-ime-plain-space");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-plain-space" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink");
+    sink.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      fireEvent.keyDown(sink, { key: " " });
+    });
+
+    const textSends = tauriCoreMocks.invoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => args?.input?.text)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(textSends).toEqual([" "]);
+  });
+
+  it("does not swallow the first jamo of a new composition after a jamo-tailed commit", async () => {
+    const session = createSession("term-session-ime-jamo-tail");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-jamo-tail" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink");
+    sink.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      fireEvent.compositionEnd(sink, { data: "ㅇ" });
+      fireEvent.keyDown(sink, { key: "ㅇ", isComposing: true });
+    });
+
+    const textSendsAfterJamo = tauriCoreMocks.invoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => args?.input?.text)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(textSendsAfterJamo).toEqual(["ㅇ"]);
+
+    act(() => {
+      fireEvent.keyDown(sink, { key: " " });
+    });
+
+    const textSendsAfterSpace = tauriCoreMocks.invoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => args?.input?.text)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(textSendsAfterSpace).toEqual(["ㅇ", " "]);
+  });
 });

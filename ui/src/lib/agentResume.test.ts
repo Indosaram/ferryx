@@ -23,7 +23,6 @@ describe("agentResume adapter module", () => {
       expect(PROVIDER_SESSION_ID_MAX_LENGTH).toBe(512);
       expect(RESUMABLE_TUI_AGENTS).toContain("claude");
       expect(RESUMABLE_TUI_AGENTS).toContain("codex");
-      expect(RESUMABLE_TUI_AGENTS).toContain("gemini");
       expect(RESUMABLE_TUI_AGENTS).toContain("antigravity");
       expect(RESUMABLE_TUI_AGENTS).toContain("opencode");
       expect(RESUMABLE_TUI_AGENTS).toContain("pi");
@@ -165,14 +164,19 @@ describe("agentResume adapter module", () => {
       });
     });
 
-    it("extracts conversation_id for antigravity", () => {
-      expect(extractAgentProviderSession("antigravity", { conversationId: "agy-conv-99" })).toEqual({
-        key: "conversation_id",
-        id: "agy-conv-99",
+    it("extracts session_id for opencode, mimo-code, antigravity, droid, grok, devin, omp, omo, kimi, copilot, cursor, cursor-agent", () => {
+      expect(extractAgentProviderSession("codex", { session_id: "s-1" })).toEqual({
+        key: "session_id",
+        id: "s-1",
       });
-    });
-
-    it("extracts session_id for opencode, mimo-code, gemini, droid, grok, devin, omp, omo, kimi, copilot, cursor, cursor-agent", () => {
+      expect(extractAgentProviderSession("opencode", { session_id: "s-1" })).toEqual({
+        key: "session_id",
+        id: "s-1",
+      });
+      expect(extractAgentProviderSession("antigravity", { session_id: "agy-sess-1" })).toEqual({
+        key: "session_id",
+        id: "agy-sess-1",
+      });
       expect(extractAgentProviderSession("opencode", { sessionID: "opencode-sess-1" })).toEqual({
         key: "session_id",
         id: "opencode-sess-1",
@@ -192,10 +196,6 @@ describe("agentResume adapter module", () => {
       expect(extractAgentProviderSession("cursor-agent", { session_id: "cursor-agent-sess-1" })).toEqual({
         key: "session_id",
         id: "cursor-agent-sess-1",
-      });
-      expect(extractAgentProviderSession("gemini", { session_id: "gemini-sess-1" })).toEqual({
-        key: "session_id",
-        id: "gemini-sess-1",
       });
       expect(extractAgentProviderSession("grok", { sessionId: "grok-sess-1" })).toEqual({
         key: "session_id",
@@ -220,9 +220,7 @@ describe("agentResume adapter module", () => {
     });
 
     it("requires transcript path (session_file) for pi and prime-agent", () => {
-      // Given: pi with session_id but missing session_file
       expect(extractAgentProviderSession("pi", { session_id: "pi-sess-1" })).toBeNull();
-      // Given: pi with session_id and session_file
       expect(
         extractAgentProviderSession("pi", {
           session_id: "pi-sess-1",
@@ -233,7 +231,6 @@ describe("agentResume adapter module", () => {
         id: "pi-sess-1",
         transcriptPath: "/home/user/.pi/sessions/pi-sess-1.json",
       });
-      // Prime agent
       expect(extractAgentProviderSession("prime-agent", { session_id: "prime-1" })).toBeNull();
       expect(
         extractAgentProviderSession("prime-agent", {
@@ -259,7 +256,6 @@ describe("agentResume adapter module", () => {
     it("identifies supported resumable agents", () => {
       expect(isResumableTuiAgent("claude")).toBe(true);
       expect(isResumableTuiAgent("codex")).toBe(true);
-      expect(isResumableTuiAgent("gemini")).toBe(true);
       expect(isResumableTuiAgent("antigravity")).toBe(true);
       expect(isResumableTuiAgent("opencode")).toBe(true);
       expect(isResumableTuiAgent("pi")).toBe(true);
@@ -310,13 +306,8 @@ describe("agentResume adapter module", () => {
         expect(getAgentResumeArgv("codex", providerSession)).toEqual(["codex", "resume", "session-name-or-uuid"]);
       });
 
-      it("produces exact argv for gemini: gemini --resume <id>", () => {
-        const providerSession: AgentProviderSession = { key: "session_id", id: "gemini-sess-5" };
-        expect(getAgentResumeArgv("gemini", providerSession)).toEqual(["gemini", "--resume", "gemini-sess-5"]);
-      });
-
       it("produces exact argv for antigravity: agy --conversation <id>", () => {
-        const providerSession: AgentProviderSession = { key: "conversation_id", id: "conv-agy-789" };
+        const providerSession: AgentProviderSession = { key: "session_id", id: "conv-agy-789" };
         expect(getAgentResumeArgv("antigravity", providerSession)).toEqual(["agy", "--conversation", "conv-agy-789"]);
       });
 
@@ -441,12 +432,12 @@ describe("agentResume adapter module", () => {
         expect(getAgentResumeArgv("omo", badSession)).toBeNull();
       });
 
-      it("rejects wrong provider key (e.g. conversation_id for claude, session_id for antigravity)", () => {
+      it("rejects wrong provider key (e.g. conversation_id for claude or antigravity)", () => {
         const convForClaude: AgentProviderSession = { key: "conversation_id", id: "conv-123" };
         expect(getAgentResumeArgv("claude", convForClaude)).toBeNull();
 
-        const sessForAgy: AgentProviderSession = { key: "session_id", id: "sess-123" };
-        expect(getAgentResumeArgv("antigravity", sessForAgy)).toBeNull();
+        const convForAgy: AgentProviderSession = { key: "conversation_id", id: "conv-123" };
+        expect(getAgentResumeArgv("antigravity", convForAgy)).toBeNull();
       });
 
       it("rejects pi and prime-agent when transcriptPath is missing", () => {
@@ -457,7 +448,7 @@ describe("agentResume adapter module", () => {
 
       it("rejects 'latest' as a session ID", () => {
         const latestSession: AgentProviderSession = { key: "session_id", id: "latest" };
-        expect(getAgentResumeArgv("gemini", latestSession)).toBeNull();
+        expect(getAgentResumeArgv("antigravity", latestSession)).toBeNull();
         expect(getAgentResumeArgv("claude", latestSession)).toBeNull();
       });
 

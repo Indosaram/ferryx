@@ -472,6 +472,7 @@ export const RemoteApp: React.FC = () => {
                   tabId: firstWaiting.tabId,
                   sessionId: firstWaiting.sessionId,
                 });
+                document.querySelector<HTMLTextAreaElement>('textarea[data-testid="remote-terminal-input-sink"]')?.focus({ preventScroll: true });
               }}
               className="flex h-5 items-center gap-1 rounded bg-status-warning/15 px-1.5 text-[11px] font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
             >
@@ -526,6 +527,7 @@ export const RemoteApp: React.FC = () => {
             key={`${effectiveSessionId}:${terminalRetryGeneration}`}
             sessionId={effectiveSessionId}
             token={token}
+            activeTabId={model.context.activeTabId}
             onBack={() => undefined}
             embedded
             onSwipePreviousTab={handleSwipePreviousTab}

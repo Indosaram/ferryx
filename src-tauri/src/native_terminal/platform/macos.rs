@@ -78,7 +78,9 @@ fn switch_debug_log(event: &str, details: serde_json::Value) {
         .create(true)
         .append(true)
         .open("/tmp/ferryx-switch-debug.jsonl")
-        .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()));
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes())
+        });
 }
 
 /// Reads the file paths offered by a drag session, mirroring wry's
@@ -87,9 +89,10 @@ fn switch_debug_log(event: &str, details: serde_json::Value) {
 #[allow(deprecated)] // NSFilenamesPboardType matches wry's collect_paths; logging must mirror what the webview sees.
 fn drag_info_paths(drag_info: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<String> {
     let pb = drag_info.draggingPasteboard();
-    let filenames_type: Retained<NSPasteboardType> =
-        unsafe { Retained::retain(NSFilenamesPboardType as *const NSPasteboardType as *mut NSPasteboardType) }
-            .expect("NSFilenamesPboardType is a non-null static");
+    let filenames_type: Retained<NSPasteboardType> = unsafe {
+        Retained::retain(NSFilenamesPboardType as *const NSPasteboardType as *mut NSPasteboardType)
+    }
+    .expect("NSFilenamesPboardType is a non-null static");
     let types = NSArray::from_retained_slice(&[filenames_type]);
     let mut paths = Vec::new();
     if pb.availableTypeFromArray(&types).is_some() {

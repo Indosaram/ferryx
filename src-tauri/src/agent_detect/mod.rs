@@ -240,7 +240,7 @@ all = [
         }
     }
 
-    // 8. per-agent realistic screens: for omo, opencode, codex, claude, gemini —
+    // 8. per-agent realistic screens: for omo, opencode, codex, claude, antigravity —
     // a working screen, a blocked/permission screen, and an idle screen each reach the expected state
     #[test]
     fn test_per_agent_realistic_screens() {
@@ -384,40 +384,6 @@ all = [
         };
         assert_eq!(
             engine.detect(&claude_idle, None).map(|d| d.state),
-            Some(AgentActivity::Idle)
-        );
-
-        // --- GEMINI ---
-        let gemini_working = ScreenInput {
-            rows: vec![
-                "Generating answer...".to_string(),
-                "esc to cancel".to_string(),
-            ],
-            title: "gemini".to_string(),
-        };
-        assert_eq!(
-            engine.detect(&gemini_working, None).map(|d| d.state),
-            Some(AgentActivity::Working)
-        );
-
-        let gemini_blocked = ScreenInput {
-            rows: vec![
-                "Allow execution of write_file?".to_string(),
-                "Apply this change".to_string(),
-            ],
-            title: "gemini".to_string(),
-        };
-        assert_eq!(
-            engine.detect(&gemini_blocked, None).map(|d| d.state),
-            Some(AgentActivity::Blocked)
-        );
-
-        let gemini_idle = ScreenInput {
-            rows: vec!["Ready for queries.".to_string()],
-            title: "◇ Ready (orca-lite)".to_string(),
-        };
-        assert_eq!(
-            engine.detect(&gemini_idle, None).map(|d| d.state),
             Some(AgentActivity::Idle)
         );
 

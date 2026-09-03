@@ -263,6 +263,17 @@ export function serializeWorkspaceState(
   };
 }
 
+/**
+ * Persisted-before-retirement sessions carry agentType "gemini"; restore maps it
+ * to "antigravity" so old panes get the Antigravity resume affordance
+ * (agy --conversation <id>) instead of a dead "cannot be reconnected" card.
+ */
+export function migrateLegacyAgentType(agentType: string | null | undefined): string | null | undefined {
+  if (agentType == null) return agentType;
+  if (agentType.trim().toLowerCase() === "gemini") return "antigravity";
+  return agentType;
+}
+
 export function deserializeWorkspaceState(
   workspaceId: string,
   persistedSession: PersistedWorkspaceSession,
@@ -400,7 +411,7 @@ export function deserializeWorkspaceState(
     const matchingWorktree = worktrees.find((wt) => wt.path === worktreePath);
     const activity = ws.activityBySessionId?.[localSessionId];
     const fallbackAgentType = activity?.isAgent && activity?.agentType ? activity.agentType : null;
-    const agentType = sess.agentType ?? fallbackAgentType;
+    const agentType = migrateLegacyAgentType(sess.agentType) ?? migrateLegacyAgentType(fallbackAgentType);
     const agentSessionId = sess.agentSessionId ?? null;
     const legacyProviderKey = agentType ? providerSessionKeyForAgent(agentType) : null;
     const normalizedLegacyId = agentSessionId ? normalizeSessionId(agentSessionId) : null;
@@ -648,7 +659,7 @@ export function deserializeWorkspaceState(
           state: isInFlightClaim ? "done" : activity.state,
           title: activity.title || "",
           isAgent: Boolean(activity.isAgent),
-          ...(activity.agentType ? { agentType: activity.agentType } : {}),
+          ...(activity.agentType ? { agentType: migrateLegacyAgentType(activity.agentType) ?? activity.agentType } : {}),
           ...(activity.source ? { source: activity.source } : {}),
         };
       }

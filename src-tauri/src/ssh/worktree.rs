@@ -44,7 +44,9 @@ pub fn parse_worktree_porcelain(output: &str) -> Vec<RemoteWorktree> {
         };
         match (key, value) {
             ("HEAD", Some(value)) => entry.head = Some(value.to_string()),
-            ("branch", Some(value)) => entry.branch = Some(value.trim_start_matches("refs/heads/").to_string()),
+            ("branch", Some(value)) => {
+                entry.branch = Some(value.trim_start_matches("refs/heads/").to_string())
+            }
             ("bare", _) => entry.bare = true,
             ("detached", _) => entry.detached = true,
             _ => {}
@@ -84,7 +86,11 @@ pub fn remote_add_argv(
 }
 
 pub fn remote_remove_argv(host: &SshHost, path: &str) -> Vec<String> {
-    vec!["ssh".to_string(), host.target(), format!("git worktree remove {path}")]
+    vec![
+        "ssh".to_string(),
+        host.target(),
+        format!("git worktree remove {path}"),
+    ]
 }
 
 #[cfg(test)]
@@ -121,7 +127,9 @@ mod tests {
 
     #[test]
     fn red_malformed_porcelain_tolerated() {
-        let parsed = parse_worktree_porcelain("noworktreekey here\n\nworktree /only/path\n\nworktree /b\nbare\n");
+        let parsed = parse_worktree_porcelain(
+            "noworktreekey here\n\nworktree /only/path\n\nworktree /b\nbare\n",
+        );
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].path, "/only/path");
         assert!(parsed[1].bare);
@@ -133,10 +141,15 @@ mod tests {
             remote_list_argv(&host()),
             vec!["ssh", "sook@maho-win", "git worktree list --porcelain"]
         );
-        let add = remote_add_argv(&host(), "/srv/wt", "ws1", "slug-a", Some("origin/main")).expect("valid");
+        let add = remote_add_argv(&host(), "/srv/wt", "ws1", "slug-a", Some("origin/main"))
+            .expect("valid");
         assert_eq!(
             add,
-            vec!["ssh", "sook@maho-win", "git worktree add -b orca/ws1/slug-a /srv/wt origin/main"]
+            vec![
+                "ssh",
+                "sook@maho-win",
+                "git worktree add -b orca/ws1/slug-a /srv/wt origin/main"
+            ]
         );
         let no_base = remote_add_argv(&host(), "/srv/wt2", "ws1", "slug-b", None).expect("valid");
         assert_eq!(

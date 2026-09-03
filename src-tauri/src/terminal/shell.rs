@@ -131,15 +131,8 @@ pub fn resolve_agent_resume_plan(
                 args: vec!["resume".to_string(), validated_id],
             })
         }
-        "gemini" => {
-            ensure_key(AgentProviderSessionKey::SessionId)?;
-            Ok(ShellCommandPlan {
-                program: "gemini".to_string(),
-                args: vec!["--resume".to_string(), validated_id],
-            })
-        }
         "antigravity" => {
-            ensure_key(AgentProviderSessionKey::ConversationId)?;
+            ensure_key(AgentProviderSessionKey::SessionId)?;
             Ok(ShellCommandPlan {
                 program: "agy".to_string(),
                 args: vec!["--conversation".to_string(), validated_id],
@@ -670,16 +663,8 @@ mod tests {
                 vec!["resume", "sess-2"],
             ),
             (
-                "gemini",
-                AgentProviderSessionKey::SessionId,
-                "sess-3",
-                None,
-                "gemini",
-                vec!["--resume", "sess-3"],
-            ),
-            (
                 "antigravity",
-                AgentProviderSessionKey::ConversationId,
+                AgentProviderSessionKey::SessionId,
                 "conv-4",
                 None,
                 "agy",
@@ -939,12 +924,12 @@ mod tests {
         assert!(matches!(err1, AgentResumeError::InvalidKey { .. }));
 
         let session_agy_wrong = AgentProviderSession {
-            key: AgentProviderSessionKey::SessionId,
+            key: AgentProviderSessionKey::ConversationId,
             id: "conv-1".to_string(),
             transcript_path: None,
         };
         let err2 = resolve_agent_resume_plan("antigravity", &session_agy_wrong)
-            .expect_err("antigravity requires conversation_id");
+            .expect_err("antigravity requires session_id");
         assert!(matches!(err2, AgentResumeError::InvalidKey { .. }));
     }
 

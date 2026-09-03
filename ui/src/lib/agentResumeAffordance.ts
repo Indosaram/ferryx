@@ -74,9 +74,7 @@ export function extractNormalizedProviderSession(session: TerminalSession): Agen
     return normalizeAgentProviderSession(session.providerSession);
   }
   if (typeof session.agentSessionId === "string" && session.agentSessionId.trim().length > 0) {
-    const rawAgent = session.agentType?.trim().toLowerCase() ?? "";
-    const key = rawAgent === "antigravity" ? "conversation_id" : "session_id";
-    return normalizeAgentProviderSession({ key, id: session.agentSessionId });
+    return normalizeAgentProviderSession({ key: "session_id", id: session.agentSessionId });
   }
   return null;
 }

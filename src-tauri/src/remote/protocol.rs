@@ -184,6 +184,10 @@ pub struct RemoteGridRun {
     pub fg: Option<[u8; 3]>,
     pub bg: Option<[u8; 3]>,
     pub attrs: u8,
+    /// Grid columns this run occupies (wide cells count 2). Lets DOM renderers
+    /// snap run boundaries to the terminal grid so the cursor overlay aligns
+    /// with CJK/Hangul text.
+    pub cells: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,7 +234,8 @@ mod tests {
             serde_json::from_str(r#"{"type":"scroll","rows":-5}"#).expect("deserialize negative");
         assert_eq!(deserialized_neg, ClientControlMessage::Scroll { rows: -5 });
 
-        let malformed = serde_json::from_str::<ClientControlMessage>(r#"{"type":"scroll","rows":"abc"}"#);
+        let malformed =
+            serde_json::from_str::<ClientControlMessage>(r#"{"type":"scroll","rows":"abc"}"#);
         assert!(malformed.is_err());
     }
 }

@@ -393,10 +393,7 @@ mod tests {
             .into_buffer();
         assert_eq!(mask.len(), 1024);
 
-        let ink_sum: u64 = mask
-            .chunks_exact(4)
-            .map(|px| px[3] as u64)
-            .sum();
+        let ink_sum: u64 = mask.chunks_exact(4).map(|px| px[3] as u64).sum();
         let density = (ink_sum as f64) / 255.0 / 256.0;
 
         // Thin on this machine is ~0.098, Regular (wght=400) is ~0.188

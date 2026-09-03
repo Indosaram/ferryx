@@ -565,6 +565,7 @@ fn native_terminal_commands_are_registered_in_tauri_generate_handler() {
         "cmd_native_terminal_scroll",
         "cmd_native_terminal_scrollbar",
         "cmd_native_terminal_set_scrollbar_overlay",
+        "cmd_native_terminal_set_attention_frame",
         "cmd_native_terminal_select",
         "cmd_native_terminal_copy_selection",
         "cmd_native_terminal_paste",

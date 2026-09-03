@@ -173,6 +173,102 @@ describe("NewTabPopover", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("hides agents explicitly disabled or not installed from the menu", () => {
+    const onLaunchAgent = vi.fn();
+    const agents = [
+      { name: "claude", command: "claude", args: "", enabled: true, available: true },
+      { name: "codex", command: "codex", args: "", enabled: false, available: true },
+      { name: "antigravity", command: "agy", args: "", enabled: true, available: false },
+      { name: "opencode", command: "opencode", args: "", enabled: false, available: false },
+      // omitted fields = legacy callers, stays visible
+      { name: "aider", command: "aider", args: "" },
+    ];
+
+    render(
+      <NewTabPopover
+        open={true}
+        onClose={vi.fn()}
+        onNewTerminal={vi.fn()}
+        onNewBrowser={vi.fn()}
+        agents={agents}
+        onLaunchAgent={onLaunchAgent}
+      />,
+    );
+
+    expect(screen.getByText("Claude")).toBeInTheDocument();
+    expect(screen.getByText("Aider")).toBeInTheDocument();
+    expect(screen.queryByText("Codex")).not.toBeInTheDocument();
+    expect(screen.queryByText("Antigravity")).not.toBeInTheDocument();
+    expect(screen.queryByText("Opencode")).not.toBeInTheDocument();
+  });
+
+  it("omits the entire AGENTS section when every provided agent is disabled or unavailable", () => {
+    const agents = [
+      { name: "codex", command: "codex", args: "", enabled: false, available: true },
+      { name: "antigravity", command: "agy", args: "", enabled: true, available: false },
+    ];
+
+    render(
+      <NewTabPopover
+        open={true}
+        onClose={vi.fn()}
+        onNewTerminal={vi.fn()}
+        onNewBrowser={vi.fn()}
+        agents={agents}
+      />,
+    );
+
+    expect(screen.queryByText("AGENTS")).not.toBeInTheDocument();
+  });
+
+  it("renders real brand logo icons for agents, not a generic placeholder", () => {
+    const agents = [
+      { name: "claude", command: "claude", args: "" },
+      { name: "opencode", command: "opencode", args: "" },
+      { name: "cursor-agent", command: "cursor-agent", args: "" },
+    ];
+
+    render(
+      <NewTabPopover
+        open={true}
+        onClose={vi.fn()}
+        onNewTerminal={vi.fn()}
+        onNewBrowser={vi.fn()}
+        agents={agents}
+      />,
+    );
+
+    // Vite inlines SVGs as data URIs, so assert the resolved agent-type mapping
+    // (claude direct, opencode monochrome, cursor-agent -> cursor alias)
+    const agentsSection = screen.getByText("AGENTS").parentElement as HTMLElement;
+    const logoImages = Array.from(
+      agentsSection.querySelectorAll('[data-testid="popover-agent-icon"]'),
+    );
+    const types = logoImages.map((img) => img.getAttribute("data-agent-type") ?? "");
+    expect(types).toEqual(["claude", "opencode", "cursor-agent"]);
+    expect(logoImages.every((img) => img.getAttribute("src")?.startsWith("data:image"))).toBe(true);
+    const opencodeImg = logoImages[1];
+    expect(opencodeImg.className).toContain("agent-tab-logo--monochrome");
+    const claudeImg = logoImages[0];
+    expect(claudeImg.className).not.toContain("agent-tab-logo--monochrome");
+  });
+
+  it("falls back to the terminal icon for an unrecognized agent name", () => {
+    const agents = [{ name: "mystery-cli", command: "mystery-cli", args: "" }];
+
+    render(
+      <NewTabPopover
+        open={true}
+        onClose={vi.fn()}
+        onNewTerminal={vi.fn()}
+        onNewBrowser={vi.fn()}
+        agents={agents}
+      />,
+    );
+
+    expect(screen.getByTestId("popover-agent-terminal-icon")).toBeInTheDocument();
+  });
+
   it("closes on Escape key", () => {
     const onClose = vi.fn();
     render(
@@ -272,6 +368,7 @@ describe("NewTabPopover", () => {
   });
 
   it("keeps natural agent order and omits the Default badge when defaultAgentId is missing", () => {
+    // omitted enabled/available fields = legacy caller shape, agents stay visible
     const agents = [
       { name: "claude", command: "claude", args: "" },
       { name: "aider", command: "aider", args: "" },
@@ -284,11 +381,11 @@ describe("NewTabPopover", () => {
         onNewTerminal={vi.fn()}
         onNewBrowser={vi.fn()}
         agents={agents}
-        defaultAgentId="gemini"
+        defaultAgentId="antigravity"
       />,
     );
 
-    expectNaturalAgentOrder();
+    expectNaturalAgentOrder(["Claude", "Aider"]);
 
     rerender(
       <NewTabPopover
@@ -300,7 +397,7 @@ describe("NewTabPopover", () => {
         defaultAgentId={null}
       />,
     );
-    expectNaturalAgentOrder();
+    expectNaturalAgentOrder(["Claude", "Aider"]);
 
     rerender(
       <NewTabPopover
@@ -312,10 +409,10 @@ describe("NewTabPopover", () => {
         defaultAgentId="none"
       />,
     );
-    expectNaturalAgentOrder();
+    expectNaturalAgentOrder(["Claude", "Aider"]);
   });
 
-  it("keeps natural agent order and omits the Default badge when the default is disabled or unavailable", () => {
+  it("hides the default agent and omits the Default badge when the default is disabled or unavailable", () => {
     const disabledDefault = [
       { name: "claude", command: "claude", args: "", enabled: true, available: true },
       { name: "aider", command: "aider", args: "", enabled: false, available: true },
@@ -335,7 +432,7 @@ describe("NewTabPopover", () => {
         defaultAgentId="aider"
       />,
     );
-    expectNaturalAgentOrder();
+    expectNaturalAgentOrder(["Claude"]);
 
     rerender(
       <NewTabPopover
@@ -347,7 +444,7 @@ describe("NewTabPopover", () => {
         defaultAgentId="aider"
       />,
     );
-    expectNaturalAgentOrder();
+    expectNaturalAgentOrder(["Claude"]);
   });
 });
 
@@ -355,9 +452,9 @@ function agentLaunchButtons() {
   return within(screen.getByText("AGENTS").parentElement as HTMLElement).getAllByRole("button");
 }
 
-function expectNaturalAgentOrder() {
+function expectNaturalAgentOrder(expectedLabels: string[]) {
   const buttons = agentLaunchButtons();
-  expect(buttons.map((button) => button.textContent)).toEqual(["Claude", "Aider"]);
+  expect(buttons.map((button) => button.textContent)).toEqual(expectedLabels);
   const agentsSection = screen.getByText("AGENTS").parentElement as HTMLElement;
   expect(within(agentsSection).queryByText("Default")).not.toBeInTheDocument();
 }

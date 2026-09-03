@@ -12,8 +12,7 @@ fn clean_dev_builds_bundled_remote_assets_before_starting_vite() {
         "clean dev must use the owned frontend runner before tauri-build validates bundled remote assets"
     );
     assert_eq!(
-        config["bundle"]["resources"]["../ui/dist"],
-        "ui/dist",
+        config["bundle"]["resources"]["../ui/dist"], "ui/dist",
         "release bundles must continue shipping the remote SPA"
     );
 }
