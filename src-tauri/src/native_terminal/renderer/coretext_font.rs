@@ -6,6 +6,7 @@ pub mod macos {
     use std::ffi::c_void;
     use std::ptr;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
 
     use objc2_core_foundation::{
         kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFRange, CFRetained,
@@ -46,6 +47,8 @@ pub mod macos {
         pub fn CTFontCopyVariationAxes(font: &CTFont) -> *const c_void;
         pub fn CTFontCopyVariation(font: &CTFont) -> *const c_void;
         pub fn CTFontCopyPostScriptName(font: &CTFont) -> CFRetained<CFString>;
+        pub fn CTFontCopyFamilyName(font: &CTFont) -> CFRetained<CFString>;
+        pub fn CTFontCopyFullName(font: &CTFont) -> CFRetained<CFString>;
         pub fn CTFontCreateCopyWithAttributes(
             font: &CTFont,
             size: CGFloat,
@@ -100,6 +103,96 @@ pub mod macos {
         if !LOGGED_ERROR.swap(true, Ordering::Relaxed) {
             tracing::warn!("CoreText font system error: {msg}");
         }
+    }
+
+    /// Fixed-pitch family that ships with every macOS install. Used whenever nothing the user
+    /// configured is actually installed, so the grid is never measured from a proportional face.
+    pub const PLATFORM_MONOSPACE_FAMILY: &str = "Menlo";
+
+    static LOGGED_MISSING_FAMILIES: Mutex<Option<String>> = Mutex::new(None);
+
+    /// `new()` re-runs on every font-size change, so only log a given set of missing families once.
+    fn log_missing_families_once(missing: &[String]) {
+        let joined = missing.join(", ");
+        let mut last_logged = match LOGGED_MISSING_FAMILIES.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if last_logged.as_deref() != Some(joined.as_str()) {
+            tracing::warn!(
+                "CoreText: configured font families are not installed and were skipped: {joined}"
+            );
+            *last_logged = Some(joined);
+        }
+    }
+
+    /// CSS-style generic keywords that reach us from the preference layer: the Rust default is
+    /// `"monospace"` and the Ghostty importer appends it. CoreText knows nothing about these
+    /// keywords (it hands back Helvetica for them), so they must map to a concrete family.
+    fn is_generic_monospace_keyword(name: &str) -> bool {
+        name.eq_ignore_ascii_case("monospace") || name.eq_ignore_ascii_case("ui-monospace")
+    }
+
+    /// `CTFontCreateWithName` never fails: for a name that is not installed CoreText silently
+    /// substitutes the system default (Helvetica, proportional). Returns true only when the font
+    /// really is the one asked for — by family, full or PostScript name, case-insensitively.
+    pub fn font_matches_requested_name(font: &CTFont, requested: &str) -> bool {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return false;
+        }
+        let names = unsafe {
+            [
+                CTFontCopyFamilyName(font).to_string(),
+                CTFontCopyFullName(font).to_string(),
+                CTFontCopyPostScriptName(font).to_string(),
+            ]
+        };
+        names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(requested))
+    }
+
+    /// Keeps only the configured families CoreText can actually supply on this machine, mapping
+    /// generic keywords to [`PLATFORM_MONOSPACE_FAMILY`] and dropping duplicates.
+    ///
+    /// Returns `(primary, remaining installed fallbacks)`. Missing families are excluded from the
+    /// fallback list too: left in, they would resolve to Helvetica in `resolve_font_for_char`
+    /// step 2 and hijack any glyph the primary face lacks.
+    pub fn resolve_installed_families(
+        family_names: &[String],
+        font_size: f64,
+    ) -> (String, Vec<String>) {
+        let mut installed: Vec<String> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
+        for name in family_names {
+            let candidate = if is_generic_monospace_keyword(name) {
+                PLATFORM_MONOSPACE_FAMILY.to_string()
+            } else {
+                name.clone()
+            };
+            let cf_name = CFString::from_str(&candidate);
+            let font = unsafe { CTFont::with_name(&cf_name, font_size, ptr::null()) };
+            if font_matches_requested_name(&font, &candidate) {
+                if !installed
+                    .iter()
+                    .any(|seen| seen.eq_ignore_ascii_case(&candidate))
+                {
+                    installed.push(candidate);
+                }
+            } else {
+                missing.push(name.clone());
+            }
+        }
+        if !missing.is_empty() {
+            log_missing_families_once(&missing);
+        }
+
+        let mut installed = installed.into_iter();
+        let primary = installed
+            .next()
+            .unwrap_or_else(|| PLATFORM_MONOSPACE_FAMILY.to_string());
+        (primary, installed.collect())
     }
 
     /// Checks if the given font has a glyph mapping for character `ch`.
@@ -314,6 +407,9 @@ pub mod macos {
         pub font_family: String,
         pub font_size: f32,
         pub family_names: Vec<String>,
+        /// First configured family CoreText can actually supply here (else
+        /// [`PLATFORM_MONOSPACE_FAMILY`]); the cell grid is measured from this face.
+        pub resolved_primary_name: String,
         pub primary_regular: CFRetained<CTFont>,
         pub primary_bold: CFRetained<CTFont>,
         pub primary_italic: CFRetained<CTFont>,
@@ -344,13 +440,9 @@ pub mod macos {
                 .filter(|name| !name.is_empty())
                 .collect();
 
-            let primary_name = family_names
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "Menlo".to_string());
-            let configured_fallbacks = family_names.iter().skip(1).cloned().collect();
-
             let fs = font_size as f64;
+            let (primary_name, configured_fallbacks) =
+                resolve_installed_families(&family_names, fs);
             let primary_regular = create_styled_font(&primary_name, fs, false, false);
             let primary_bold = create_styled_font(&primary_name, fs, true, false);
             let primary_italic = create_styled_font(&primary_name, fs, false, true);
@@ -360,6 +452,7 @@ pub mod macos {
                 font_family: font_family.to_string(),
                 font_size,
                 family_names,
+                resolved_primary_name: primary_name,
                 primary_regular,
                 primary_bold,
                 primary_italic,
@@ -389,12 +482,7 @@ pub mod macos {
             let font = if (scale - 1.0).abs() < 1e-4 {
                 self.primary_regular.clone()
             } else {
-                let primary_name = self
-                    .family_names
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Menlo".to_string());
-                create_styled_font(&primary_name, effective_size, false, false)
+                create_styled_font(&self.resolved_primary_name, effective_size, false, false)
             };
 
             let ascent = unsafe { CTFontGetAscent(&font) };
@@ -542,6 +630,123 @@ pub mod macos {
                     None
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A family name no machine has installed, so CoreText substitutes Helvetica for it.
+        const MISSING_FAMILY: &str = "Ferryx Definitely Not Installed 7f3a";
+
+        fn font_named(name: &str) -> CFRetained<CTFont> {
+            let cf_name = CFString::from_str(name);
+            unsafe { CTFont::with_name(&cf_name, 13.0, ptr::null()) }
+        }
+
+        fn advance_of(font: &CTFont, ch: char) -> f64 {
+            let unichar: UniChar = ch as u16;
+            let mut glyph: CGGlyph = 0;
+            assert!(
+                unsafe { CTFontGetGlyphsForCharacters(font, &unichar, &mut glyph, 1) },
+                "font has no glyph for {ch:?}"
+            );
+            let mut advance = CGSize {
+                width: 0.0,
+                height: 0.0,
+            };
+            unsafe { CTFontGetAdvancesForGlyphs(font, 0, &glyph, &mut advance, 1) };
+            advance.width
+        }
+
+        #[test]
+        fn detects_coretexts_silent_substitution_for_unknown_names() {
+            assert!(!font_matches_requested_name(
+                &font_named(MISSING_FAMILY),
+                MISSING_FAMILY
+            ));
+
+            let menlo = font_named("Menlo");
+            assert!(font_matches_requested_name(&menlo, "Menlo"));
+            assert!(font_matches_requested_name(&menlo, "menlo"));
+            assert!(font_matches_requested_name(&menlo, "Menlo-Regular"));
+            assert!(!font_matches_requested_name(&menlo, "Monaco"));
+            assert!(!font_matches_requested_name(&menlo, ""));
+        }
+
+        #[test]
+        fn missing_primary_is_skipped_in_favour_of_the_first_installed_family() {
+            let system = CoreTextFontSystem::new(&format!("{MISSING_FAMILY}, Menlo, Monaco"), 13.0);
+
+            assert_eq!(system.resolved_primary_name, "Menlo");
+            assert_eq!(system.configured_fallbacks, vec!["Monaco".to_string()]);
+            assert!(font_matches_requested_name(
+                &system.primary_regular,
+                "Menlo"
+            ));
+        }
+
+        #[test]
+        fn generic_monospace_keyword_resolves_to_a_fixed_pitch_face() {
+            // "monospace" is the preference-layer default and what the Ghostty importer appends.
+            let system = CoreTextFontSystem::new("monospace", 13.0);
+            assert_eq!(system.resolved_primary_name, PLATFORM_MONOSPACE_FAMILY);
+
+            let font = &system.primary_regular;
+            let (i, w, m) = (
+                advance_of(font, 'i'),
+                advance_of(font, 'W'),
+                advance_of(font, 'M'),
+            );
+            assert!(
+                (i - w).abs() < 1e-6 && (w - m).abs() < 1e-6,
+                "expected fixed pitch, got i={i} W={w} M={m}"
+            );
+        }
+
+        #[test]
+        fn nothing_installed_falls_back_to_the_platform_monospace_family() {
+            let system = CoreTextFontSystem::new(
+                &format!("{MISSING_FAMILY}, {MISSING_FAMILY} Two, monospace"),
+                13.0,
+            );
+            assert_eq!(system.resolved_primary_name, PLATFORM_MONOSPACE_FAMILY);
+            assert!(system.configured_fallbacks.is_empty());
+
+            let empty = CoreTextFontSystem::new("", 13.0);
+            assert_eq!(empty.resolved_primary_name, PLATFORM_MONOSPACE_FAMILY);
+        }
+
+        #[test]
+        fn missing_families_never_reach_the_configured_fallback_tier() {
+            let system = CoreTextFontSystem::new(&format!("Menlo, {MISSING_FAMILY}, Monaco"), 13.0);
+            assert_eq!(system.resolved_primary_name, "Menlo");
+            assert_eq!(system.configured_fallbacks, vec!["Monaco".to_string()]);
+        }
+
+        #[test]
+        fn cell_metrics_come_from_the_resolved_primary_at_every_scale() {
+            let via_missing =
+                CoreTextFontSystem::new(&format!("{MISSING_FAMILY}, monospace"), 13.0);
+            let menlo = CoreTextFontSystem::new("Menlo", 13.0);
+            for scale in [1.0_f32, 2.0] {
+                assert_eq!(
+                    via_missing.cell_metrics_for_scale(scale),
+                    menlo.cell_metrics_for_scale(scale)
+                );
+            }
+            // Helvetica's 'M' would give an 11px cell at 13pt; Menlo's gives 8px.
+            assert_eq!(menlo.cell_metrics_for_scale(1.0).width_px, 8);
+        }
+
+        #[test]
+        fn hangul_still_resolves_through_the_coretext_cascade() {
+            let mut system = CoreTextFontSystem::new("monospace", 13.0);
+            let font = system
+                .resolve_font_for_char('한', false, false, 1.0)
+                .expect("CoreText cascade must supply a Hangul face");
+            assert!(font_has_glyph(&font, '한'));
         }
     }
 }
