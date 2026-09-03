@@ -1,4 +1,9 @@
 //! WGSL shader source code for background rects and textured glyph quads.
+//!
+//! The glyph compositing rules these shaders implement (UNORM swapchain, gamma
+//! pre-compensated coverage, grayscale-only masks, and the two regressions that
+//! contract prevents) are documented in
+//! `docs/reference/NATIVE_TERMINAL_GLYPH_COMPOSITING.md`.
 
 pub const BG_SHADER_SRC: &str = r#"
 struct ScreenUniform {
