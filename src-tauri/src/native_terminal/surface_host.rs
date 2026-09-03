@@ -823,12 +823,34 @@ impl NativeTerminalSurfaceHostState {
         };
 
         let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+            let prior_scrollbar = session.terminal.scrollbar().ok();
+            let prior_scroll_ratio = prior_scrollbar.and_then(|sb| {
+                let max_offset = sb.total.saturating_sub(sb.len);
+                if max_offset > 0 && sb.offset < max_offset {
+                    Some(sb.offset as f64 / max_offset as f64)
+                } else {
+                    None
+                }
+            });
+
             session.terminal.resize(
                 layout.cols,
                 layout.rows,
                 cell_metrics.width_px,
                 cell_metrics.height_px,
             )?;
+
+            if let Some(ratio) = prior_scroll_ratio {
+                if let Ok(new_sb) = session.terminal.scrollbar() {
+                    let new_max_offset = new_sb.total.saturating_sub(new_sb.len);
+                    if new_max_offset > 0 {
+                        let target_offset = (ratio * new_max_offset as f64).round() as usize;
+                        let _ = session
+                            .terminal
+                            .scroll_viewport(crate::native_terminal::ScrollViewport::Row(target_offset));
+                    }
+                }
+            }
             true
         } else {
             false
@@ -900,12 +922,34 @@ impl NativeTerminalSurfaceHostState {
             }
             .layout(metrics)?;
             let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+                let prior_scrollbar = session.terminal.scrollbar().ok();
+                let prior_scroll_ratio = prior_scrollbar.and_then(|sb| {
+                    let max_offset = sb.total.saturating_sub(sb.len);
+                    if max_offset > 0 && sb.offset < max_offset {
+                        Some(sb.offset as f64 / max_offset as f64)
+                    } else {
+                        None
+                    }
+                });
+
                 session.terminal.resize(
                     layout.cols,
                     layout.rows,
                     metrics.width_px,
                     metrics.height_px,
                 )?;
+
+                if let Some(ratio) = prior_scroll_ratio {
+                    if let Ok(new_sb) = session.terminal.scrollbar() {
+                        let new_max_offset = new_sb.total.saturating_sub(new_sb.len);
+                        if new_max_offset > 0 {
+                            let target_offset = (ratio * new_max_offset as f64).round() as usize;
+                            let _ = session
+                                .terminal
+                                .scroll_viewport(crate::native_terminal::ScrollViewport::Row(target_offset));
+                        }
+                    }
+                }
                 true
             } else {
                 false
@@ -1611,6 +1655,19 @@ impl NativeTerminalSurfaceHost {
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         if let Some(bounds) = self.logical_bounds {
             self.target.update_viewport(Some(bounds));
+            let scale_factor = bounds.scale_factor;
+            let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
+            let renderer_config = RendererConfig {
+                cell_width_px: cell_metrics.width_px,
+                cell_height_px: cell_metrics.height_px,
+                device_scale_factor: if scale_factor.is_finite() && scale_factor > 0.0 {
+                    scale_factor as f32
+                } else {
+                    1.0
+                },
+                theme: RendererTheme::from(cached_terminal_preferences().as_ref()),
+            };
+            self.renderer.update_config(renderer_config)?;
         }
         let surface_size =
             PhysicalSize::new(layout.physical_bounds.width, layout.physical_bounds.height);
@@ -1626,8 +1683,8 @@ impl NativeTerminalSurfaceHost {
         let local_viewport = PhysicalBounds {
             x: 0,
             y: 0,
-            width: layout.physical_bounds.width,
-            height: layout.physical_bounds.height,
+            width: surface_size.width,
+            height: surface_size.height,
         };
 
         let frame = match self.surface.get_current_texture() {
@@ -2446,6 +2503,97 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!render_input.attention_frame);
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn resize_preserves_scrollback_ratio_when_scrolled_up() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-scroll-ratio-session";
+        let cell_metrics = font_manager::derived_cell_metrics();
+
+        let request = |cols, rows| NativeTerminalBoundsRequest {
+            session_id: session_id.to_string(),
+            bounds: LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: cols as f64 * cell_metrics.width_px as f64,
+                height: rows as f64 * cell_metrics.height_px as f64,
+                scale_factor: 1.0,
+            },
+        };
+
+        state
+            .prepare_session_layout(request(80, 24), cell_metrics)
+            .expect("create initial grid");
+
+        // Feed enough lines to create a substantial scrollback buffer
+        let mut text = String::new();
+        for i in 0..100 {
+            text.push_str(&format!("Line number {}\r\n", i));
+        }
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: text.into_bytes(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon session");
+
+        // Now scroll up to half of scrollback
+        let initial_sb = {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).unwrap();
+            session.terminal.scrollbar().unwrap()
+        };
+        let initial_max = initial_sb.total.saturating_sub(initial_sb.len);
+        assert!(initial_max > 0, "must have scrollback lines");
+
+        let half_offset = (initial_max / 2) as usize;
+        {
+            let mut sessions = state.sessions.lock();
+            let session = sessions.get_mut(session_id).unwrap();
+            session
+                .terminal
+                .scroll_viewport(crate::native_terminal::ScrollViewport::Row(half_offset))
+                .unwrap();
+        }
+
+        // Resize the terminal height (e.g. 24 -> 30)
+        state
+            .prepare_session_layout(request(80, 30), cell_metrics)
+            .expect("resize grid");
+
+        // Check that after resize, we are still scrolled up near half rather than reset to 0 or max_offset
+        let new_sb = {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).unwrap();
+            session.terminal.scrollbar().unwrap()
+        };
+        let new_max = new_sb.total.saturating_sub(new_sb.len);
+        assert!(new_max > 0);
+        // Ensure new_sb.offset is not reset to max_offset (which represents bottom)
+        assert!(
+            new_sb.offset < new_max,
+            "viewport must remain scrolled up, not snapped to bottom"
+        );
+        let ratio = new_sb.offset as f64 / new_max as f64;
+        assert!(
+            (ratio - 0.5).abs() < 0.1,
+            "viewport scroll ratio should be preserved near 0.5, got {}",
+            ratio
+        );
 
         state.teardown();
     }

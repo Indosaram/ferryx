@@ -302,10 +302,22 @@ impl MacosCompositorTarget {
 
         // Configure layer-backing
         view.setWantsLayer(true);
+        let backing_scale = view.window_backing_scale_factor();
         let layer: Option<&AnyObject> = unsafe { msg_send![&view, layer] };
         if let Some(layer) = layer {
             unsafe {
                 let _: () = msg_send![layer, setOpaque: true];
+                let scale: f64 = if backing_scale.is_finite() && backing_scale > 0.0 {
+                    backing_scale
+                } else {
+                    1.0
+                };
+                let _: () = msg_send![layer, setContentsScale: scale];
+                let gravity = NSString::from_str("topLeft");
+                let _: () = msg_send![layer, setContentsGravity: &*gravity];
+                let nearest = NSString::from_str("nearest");
+                let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
+                let _: () = msg_send![layer, setMinificationFilter: &*nearest];
             }
         }
 
@@ -374,6 +386,14 @@ impl MacosCompositorTarget {
                         if let Some(layer) = layer {
                             let scale: f64 = bounds.scale_factor;
                             let _: () = msg_send![layer, setContentsScale: scale];
+                            let gravity = NSString::from_str("topLeft");
+                            let _: () = msg_send![layer, setContentsGravity: &*gravity];
+                            let nearest = NSString::from_str("nearest");
+                            let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
+                            let _: () = msg_send![layer, setMinificationFilter: &*nearest];
+                            let drawable_w = (appkit_frame.width * scale).round();
+                            let drawable_h = (appkit_frame.height * scale).round();
+                            let _: () = msg_send![layer, setDrawableSize: NSSize::new(drawable_w, drawable_h)];
                         }
                     }
                 } else {
@@ -398,6 +418,14 @@ impl MacosCompositorTarget {
                         if let Some(layer) = layer {
                             let scale: f64 = bounds.scale_factor;
                             let _: () = msg_send![layer, setContentsScale: scale];
+                            let gravity = NSString::from_str("topLeft");
+                            let _: () = msg_send![layer, setContentsGravity: &*gravity];
+                            let nearest = NSString::from_str("nearest");
+                            let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
+                            let _: () = msg_send![layer, setMinificationFilter: &*nearest];
+                            let drawable_w = (appkit_frame.width * scale).round();
+                            let drawable_h = (appkit_frame.height * scale).round();
+                            let _: () = msg_send![layer, setDrawableSize: NSSize::new(drawable_w, drawable_h)];
                         }
                     }
                 } else {
