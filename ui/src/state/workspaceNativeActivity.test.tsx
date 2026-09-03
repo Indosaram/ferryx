@@ -12,6 +12,7 @@ const nativeListeners = vi.hoisted(() => ({
   title: new Set<(payload: NativeTerminalTitlePayload) => void>(),
   bell: new Set<(payload: NativeTerminalBellPayload) => void>(),
   agentState: new Set<(payload: NativeTerminalAgentStatePayload) => void>(),
+  focus: new Set<(sessionId: string) => void>(),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -20,6 +21,7 @@ vi.mock("../lib/tauri", () => ({
   closeTerminal: vi.fn(async () => undefined),
   getTerminalCwd: vi.fn(async () => "/repo/main"),
   waitForTerminalExit: vi.fn(async () => undefined),
+  discoverAgentProviderSession: vi.fn(async () => null),
   onNativeTerminalTitle: vi.fn(async (handler: (payload: NativeTerminalTitlePayload) => void) => {
     nativeListeners.title.add(handler);
     return () => nativeListeners.title.delete(handler);
@@ -31,6 +33,10 @@ vi.mock("../lib/tauri", () => ({
   onNativeTerminalAgentState: vi.fn(async (handler: (payload: NativeTerminalAgentStatePayload) => void) => {
     nativeListeners.agentState.add(handler);
     return () => nativeListeners.agentState.delete(handler);
+  }),
+  onNativeTerminalFocus: vi.fn(async (handler: (sessionId: string) => void) => {
+    nativeListeners.focus.add(handler);
+    return () => nativeListeners.focus.delete(handler);
   }),
 }));
 
@@ -48,9 +54,10 @@ const worktree: Worktree = {
 };
 
 function services(): WorkspaceServices {
+  let backendCounter = 1;
   return {
     ensureTerminalEvents: vi.fn(async () => undefined),
-    spawnTerminal: vi.fn(async () => "backend-1"),
+    spawnTerminal: vi.fn(async () => `backend-${backendCounter++}`),
     getTerminalCwd: vi.fn(async () => worktree.path),
     closeTerminal: vi.fn(async () => undefined),
     waitForTerminalExit: vi.fn(async () => undefined),
@@ -65,10 +72,20 @@ function emitNativeBell(payload: NativeTerminalBellPayload): void {
   for (const listener of nativeListeners.bell) listener(payload);
 }
 
+function emitNativeAgentState(payload: NativeTerminalAgentStatePayload): void {
+  for (const listener of nativeListeners.agentState) listener(payload);
+}
+
+function emitNativeFocus(sessionId: string): void {
+  for (const listener of nativeListeners.focus) listener(sessionId);
+}
+
 describe("workspace store native activity subscription", () => {
   beforeEach(() => {
     nativeListeners.title.clear();
     nativeListeners.bell.clear();
+    nativeListeners.agentState.clear();
+    nativeListeners.focus.clear();
   });
 
   it("turns a native title event addressed by BACKEND session id into tab activity", async () => {
@@ -148,5 +165,43 @@ describe("workspace store native activity subscription", () => {
     });
 
     expect(received).toHaveLength(1);
+  });
+
+  it("marks a finished session's activity as seen when native focus event is emitted for its backend session", async () => {
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services: services() }));
+
+    let tab1Id = "";
+    await act(async () => {
+      const opened = await result.current.openTab(worktree);
+      if (!opened) throw new Error("expected openTab to return a tab id");
+      tab1Id = opened;
+    });
+
+    const tab1 = result.current.state.layout.tabs.find((candidate) => candidate.id === tab1Id);
+    const session1Id = tab1 && tab1.kind !== "browser" ? tab1.sessionId : "";
+    expect(session1Id).not.toBe("");
+
+    // Open a second tab so tab1 is inactive (backgrounded)
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+
+    await waitFor(() => expect(nativeListeners.focus.size).toBeGreaterThan(0));
+
+    // Agent finishes in tab1 while backgrounded -> unseen done activity
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "r1", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "r2", manifestId: "omo" });
+    });
+
+    expect(result.current.state.activityBySessionId?.[session1Id]?.state).toBe("done");
+    expect(result.current.state.activityBySessionId?.[session1Id]?.seen).toBeFalsy();
+
+    // Clicking / focusing the pane emits native focus with the backend session ID
+    act(() => {
+      emitNativeFocus("backend-1");
+    });
+
+    expect(result.current.state.activityBySessionId?.[session1Id]?.seen).toBe(true);
   });
 });

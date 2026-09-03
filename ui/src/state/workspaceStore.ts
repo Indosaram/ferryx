@@ -11,7 +11,7 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import { worktreeIdentity } from "../lib/types";
@@ -166,7 +166,8 @@ export type WorkspaceAction =
   | { type: "MARK_TAB_UNREAD"; tabId: string }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
   | { type: "MARK_WORKTREE_UNREAD"; worktreePath: string }
-  | { type: "CLEAR_WORKTREE_UNREAD"; worktreePath: string };
+  | { type: "CLEAR_WORKTREE_UNREAD"; worktreePath: string }
+  | { type: "MARK_SESSION_ACTIVITY_SEEN"; sessionId: string };
 
 type UseWorkspaceStoreOptions = {
   workspaceId?: string;
@@ -307,6 +308,7 @@ export function useWorkspaceStore({
     let unlistenTitle: (() => void) | undefined;
     let unlistenBell: (() => void) | undefined;
     let unlistenAgentState: (() => void) | undefined;
+    let unlistenFocus: (() => void) | undefined;
     const fallbackAttemptedAgents = new Map<string, Set<string>>();
     let subscribed = true;
 
@@ -394,12 +396,24 @@ export function useWorkspaceStore({
       })
       .catch(() => undefined);
 
+    void onNativeTerminalFocus((backendSessionId) => {
+      const resolved = resolveSession(backendSessionId);
+      if (!resolved) return;
+      dispatch({ type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: resolved.sessionId });
+    })
+      .then((unlisten) => {
+        if (subscribed) unlistenFocus = unlisten;
+        else unlisten();
+      })
+      .catch(() => undefined);
+
     return () => {
       subscribed = false;
       unsubscribeLifecycle();
       unlistenTitle?.();
       unlistenBell?.();
       unlistenAgentState?.();
+      unlistenFocus?.();
     };
   }, [dispatch]);
 
@@ -1790,6 +1804,17 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...(updatedAgentType ? { agentType: updatedAgentType } : {}),
             ...(updatedProviderSession ? { providerSession: updatedProviderSession } : {}),
           },
+        },
+      };
+    }
+    case "MARK_SESSION_ACTIVITY_SEEN": {
+      const activity = state.activityBySessionId?.[action.sessionId];
+      if (!activity || activity.state !== "done" || activity.seen) return state;
+      return {
+        ...state,
+        activityBySessionId: {
+          ...state.activityBySessionId,
+          [action.sessionId]: { ...activity, seen: true },
         },
       };
     }

@@ -361,4 +361,62 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
     state = workspaceReducer(state, titleAction("codex"));
     expect(state.activityBySessionId?.["session-a"]).toBeUndefined();
   });
+
+  describe("MARK_SESSION_ACTIVITY_SEEN", () => {
+    it("flips an unseen done activity to seen while leaving unreadTabIds and unreadWorktreePaths untouched", () => {
+      let state = stateWithSession("tab-b");
+      state = workspaceReducer(state, screenAction("working", "spinner_working", "omo"));
+      state = workspaceReducer(state, screenAction("idle", "prompt_idle", "omo"));
+
+      expect(state.activityBySessionId?.["session-a"]).toMatchObject({ state: "done" });
+      expect(state.activityBySessionId?.["session-a"]?.seen).toBeFalsy();
+      expect(state.unreadTabIds["tab-a"]).toBe(true);
+      expect(state.unreadWorktreePaths[worktree.path]).toBe(true);
+
+      const nextState = workspaceReducer(state, {
+        type: "MARK_SESSION_ACTIVITY_SEEN",
+        sessionId: "session-a",
+      });
+
+      expect(nextState.activityBySessionId?.["session-a"]?.seen).toBe(true);
+      expect(nextState.activityBySessionId?.["session-a"]?.state).toBe("done");
+      // unreadTabIds / unreadWorktreePaths are owned by tab-switch flow and must not be touched
+      expect(nextState.unreadTabIds["tab-a"]).toBe(true);
+      expect(nextState.unreadWorktreePaths[worktree.path]).toBe(true);
+    });
+
+    it("leaves working, waiting, already-seen entries and unknown session ids untouched (referential equality)", () => {
+      let state = stateWithSession("tab-b");
+      // Unknown session id
+      expect(
+        workspaceReducer(state, { type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: "non-existent" }),
+      ).toBe(state);
+
+      // Working activity
+      state = workspaceReducer(state, screenAction("working", "spinner_working", "omo"));
+      expect(
+        workspaceReducer(state, { type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: "session-a" }),
+      ).toBe(state);
+
+      // Waiting (blocked) activity
+      state = workspaceReducer(state, screenAction("blocked", "question_blocked", "omo"));
+      expect(
+        workspaceReducer(state, { type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: "session-a" }),
+      ).toBe(state);
+
+      // Done but already seen
+      state = workspaceReducer(state, screenAction("idle", "prompt_idle", "omo"));
+      const seenState = workspaceReducer(state, {
+        type: "MARK_SESSION_ACTIVITY_SEEN",
+        sessionId: "session-a",
+      });
+      expect(seenState.activityBySessionId?.["session-a"]?.seen).toBe(true);
+      expect(
+        workspaceReducer(seenState, {
+          type: "MARK_SESSION_ACTIVITY_SEEN",
+          sessionId: "session-a",
+        }),
+      ).toBe(seenState);
+    });
+  });
 });
