@@ -100,7 +100,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     } else {
         let cov = textureSample(mask_tex, atlas_sampler, in.uv);
-        return vec4<f32>(in.color.rgb, cov.a * in.color.a);
+        // The swapchain is UNORM, so the GPU blends coverage directly on sRGB-encoded
+        // channels. A linear ramp therefore lands edge pixels far darker than their
+        // photometric share (0.5 coverage -> 21% light), thinning every stroke. The
+        // exponent pre-compensates that encoding.
+        let coverage = pow(cov.a, 0.7142857) * in.color.a;
+        return vec4<f32>(in.color.rgb, coverage);
     }
 }
 "#;

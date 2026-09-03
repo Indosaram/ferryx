@@ -45,6 +45,9 @@ fn test_render_snapshot_offscreen_frame_with_ansi_cjk_cursor_selection() {
     assert_eq!(frame.rendered_row_count, 24);
 }
 
+/// Matches the coverage exponent applied by the glyph fragment shader.
+const TEXT_COVERAGE_EXPONENT: f32 = 0.7142857;
+
 #[test]
 fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() {
     // Given: one opaque cell with deliberately distinct foreground and background channels.
@@ -103,27 +106,41 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
     let fg = [foreground.r, foreground.g, foreground.b];
     let mut covered = 0;
     let mut uncovered = 0;
+    let mut partial_gain = 0.0f32;
+    let mut partial_count = 0;
     for (mask_pixel, frame_pixel) in mask.chunks_exact(4).zip(frame.pixels.chunks_exact(4)) {
-        let coverage = mask_pixel[3] as f32 / 255.0;
+        let raw = mask_pixel[3] as f32 / 255.0;
+        let coverage = raw.powf(TEXT_COVERAGE_EXPONENT);
         for channel in 0..3 {
             let expected = bg[channel] as f32 * (1.0 - coverage) + fg[channel] as f32 * coverage;
             assert!(
                 (frame_pixel[channel] as f32 - expected).abs() <= 2.0,
-                "channel {channel} at coverage {coverage} must blend once: expected {expected}, got {}",
+                "channel {channel} at coverage {raw} must blend once: expected {expected}, got {}",
                 frame_pixel[channel]
             );
         }
         assert_eq!(frame_pixel[3], 255, "opaque cell remains opaque");
-        if mask_pixel[3] == 0 {
-            uncovered += 1;
-        } else {
-            covered += 1;
+        match mask_pixel[3] {
+            0 => uncovered += 1,
+            255 => covered += 1,
+            _ => {
+                let naive = bg[0] as f32 * (1.0 - raw) + fg[0] as f32 * raw;
+                partial_gain += frame_pixel[0] as f32 - naive;
+                partial_count += 1;
+                covered += 1;
+            }
         }
     }
     assert!(covered > 0, "the host font must provide covered glyph pixels");
     assert!(
         uncovered > 0,
         "the glyph cell must retain uncovered background pixels"
+    );
+    assert!(partial_count > 0, "antialiased edge pixels must exist");
+    assert!(
+        partial_gain / partial_count as f32 > 4.0,
+        "edge pixels must be lifted above the gamma-naive ramp, got mean gain {}",
+        partial_gain / partial_count as f32
     );
 }
 
