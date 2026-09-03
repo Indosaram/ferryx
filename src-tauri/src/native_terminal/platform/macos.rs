@@ -391,9 +391,6 @@ impl MacosCompositorTarget {
                             let nearest = NSString::from_str("nearest");
                             let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
                             let _: () = msg_send![layer, setMinificationFilter: &*nearest];
-                            let drawable_w = (appkit_frame.width * scale).round();
-                            let drawable_h = (appkit_frame.height * scale).round();
-                            let _: () = msg_send![layer, setDrawableSize: NSSize::new(drawable_w, drawable_h)];
                         }
                     }
                 } else {
@@ -423,9 +420,6 @@ impl MacosCompositorTarget {
                             let nearest = NSString::from_str("nearest");
                             let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
                             let _: () = msg_send![layer, setMinificationFilter: &*nearest];
-                            let drawable_w = (appkit_frame.width * scale).round();
-                            let drawable_h = (appkit_frame.height * scale).round();
-                            let _: () = msg_send![layer, setDrawableSize: NSSize::new(drawable_w, drawable_h)];
                         }
                     }
                 } else {
