@@ -109,7 +109,13 @@ export const WorktreeRow = memo(function WorktreeRow({
 
       <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-55 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
         {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
-        <IconButton label="Delete worktree" size="sm" disabled={!canDelete} onClick={() => onDelete(worktree)}>
+        <IconButton
+          label="Delete worktree"
+          size="sm"
+          disabled={!canDelete}
+          onClick={() => onDelete(worktree)}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
           <Trash2 className="size-3" />
         </IconButton>
       </div>

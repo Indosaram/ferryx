@@ -206,4 +206,15 @@ describe("Sidebar drag reorder", () => {
     expect(JSON.parse(localStorage.getItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY) ?? "{}"))
       .toEqual({ alpha: [first.path, second.path] });
   });
+
+  it("does not render separate reorder grip handles and makes rows directly draggable", () => {
+    renderSidebar();
+
+    expect(screen.queryByRole("button", { name: /reorder/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/reorder project/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/reorder worktree/i)).not.toBeInTheDocument();
+
+    const projectButton = screen.getByRole("button", { name: "alpha" });
+    expect(projectButton).toBeInTheDocument();
+  });
 });

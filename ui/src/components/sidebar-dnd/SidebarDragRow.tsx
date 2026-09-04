@@ -1,6 +1,5 @@
 import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical } from "lucide-react";
 import { memo, type CSSProperties, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
@@ -34,7 +33,6 @@ export const SidebarDragRow = memo(function SidebarDragRow({
   dragging = false,
   overlay = false,
 }: SidebarDragRowProps) {
-  const project = kind === "project";
   const style = transform
     ? { ...wrapperStyle, transform: CSS.Transform.toString(transform), transition }
     : transition
@@ -53,25 +51,19 @@ export const SidebarDragRow = memo(function SidebarDragRow({
         wrapperClassName,
         dragging && !overlay &&
           "z-10 opacity-25 before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-7 before:rounded-md before:bg-worktree-sidebar-accent/35",
-        overlay && "rounded-md border border-worktree-sidebar-ring/70 bg-worktree-sidebar shadow-lg",
+        overlay && "rounded-md border border-worktree-sidebar-ring/70 bg-worktree-sidebar shadow-lg cursor-grabbing",
       )}
     >
-      <button
+      <div
         ref={setActivatorNodeRef}
-        type="button"
-        aria-label={`Reorder ${kind}`}
-        className={cn(
-          "absolute left-0 top-0 z-10 flex shrink-0 touch-none cursor-grab items-center justify-center rounded-sm text-muted-foreground/55 transition-colors",
-          "hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground active:cursor-grabbing",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-worktree-sidebar-ring",
-          project ? "size-5" : "h-7 w-4",
-        )}
         {...attributes}
         {...listeners}
+        role={undefined}
+        tabIndex={undefined}
+        className="min-w-0 select-none"
       >
-        <GripVertical aria-hidden="true" className="size-3" />
-      </button>
-      <div className={cn("min-w-0", !project && "pl-4")}>{children}</div>
+        {children}
+      </div>
     </div>
   );
 });

@@ -360,7 +360,10 @@ export function Sidebar({
                 return (
                   <SortableProjectSection key={project.workspaceId} workspaceId={project.workspaceId} header={header}>
                     {expanded ? (
-                      <div className="pl-3 pr-0.5 pt-0.5">
+                      <div
+                        className="pl-3 pr-0.5 pt-0.5"
+                        onPointerDown={(event) => event.stopPropagation()}
+                      >
                         <SortableContext
                           items={projectWorktrees.map((row) => worktreeSortableId(project.workspaceId, row.path))}
                           strategy={verticalListSortingStrategy}
@@ -476,11 +479,12 @@ function ProjectHeader({
   inert = false,
 }: ProjectHeaderProps) {
   return (
-    <div className="group/project flex h-7 w-full items-center gap-0.5 rounded-md pl-5 pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground">
+    <div className="group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground">
       <button
         type="button"
         disabled={inert}
         onClick={onToggle}
+        onPointerDown={(event) => event.stopPropagation()}
         aria-expanded={expanded}
         aria-label={`${expanded ? "Collapse" : "Expand"} ${project.workspaceId}`}
         className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
@@ -526,6 +530,7 @@ function ProjectHeader({
           disabled={inert}
           className="size-5 opacity-55 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
           onClick={onCreateWorktree}
+          onPointerDown={(event) => event.stopPropagation()}
         >
           <FolderPlus className="size-3" />
         </IconButton>
