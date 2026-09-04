@@ -99,6 +99,7 @@ interface NativeMouseEvent {
   readonly ctrlKey: boolean;
   readonly altKey: boolean;
   readonly metaKey: boolean;
+  readonly timeStamp?: number;
   readonly getModifierState: (key: "CapsLock" | "NumLock") => boolean;
 }
 
@@ -247,12 +248,19 @@ function shouldForwardKey(event: ForwardableKeyEvent): boolean {
   );
 }
 
-function physicalKeyForAltChord(event: ForwardableKeyEvent): string {
-  if (!event.altKey || event.key.length !== 1) {
+export function physicalKeyForModifierChord(event: {
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  key: string;
+  code?: string;
+}): string {
+  if (!event.ctrlKey && !event.altKey && !event.metaKey) {
     return event.key;
   }
 
-  const code = event.code;
+  const code = event.code ?? "";
   if (/^Key[A-Z]$/.test(code)) {
     const letter = code.slice(3);
     return event.shiftKey ? letter : letter.toLowerCase();
@@ -271,20 +279,7 @@ export function physicalKeyForCtrlChord(event: {
   key: string;
   code?: string;
 }): string {
-  if (!event.ctrlKey || event.altKey) {
-    return event.key;
-  }
-
-  const code = event.code ?? "";
-  if (/^Key[A-Z]$/.test(code)) {
-    const letter = code.slice(3);
-    return event.shiftKey ? letter : letter.toLowerCase();
-  }
-  if (/^Digit[0-9]$/.test(code)) {
-    return code.slice(5);
-  }
-
-  return event.key;
+  return physicalKeyForModifierChord(event);
 }
 
 function isPlainCtrlCChord(event: {
@@ -358,6 +353,39 @@ export function dragDropPositionToLogical(
 ): { x: number; y: number } {
   const scale = isMacos ? 1 : devicePixelRatio;
   return { x: position.x / scale, y: position.y / scale };
+}
+
+/**
+ * Snaps a pane rect so its native surface lands on whole device pixels.
+ *
+ * `getBoundingClientRect()` returns fractional CSS geometry for every pane
+ * except the first one: later panes inherit `container_x + ratio * W + 1px
+ * divider`, which is fractional in the general case. The AppKit frame keeps
+ * those fractions (`platform/macos.rs::update_viewport`) while the wgpu
+ * drawable is sized from `SurfaceCompositionLayout::compute`, which rounds to
+ * integer physical pixels. Layer box != drawableSize makes CoreAnimation
+ * resample the whole pane bilinearly, so its text reads softer than the first
+ * pane's. At DPR 1 a 0.5 px offset is a full 50/50 blend of neighbouring
+ * pixels, which is exactly what the softness looks like.
+ *
+ * Edges are snapped, not sizes: `x`, `y`, `x + width` and `y + height` are each
+ * rounded and the size is taken as the difference. Rounding the size instead
+ * would let a pane creep over its neighbour, whereas snapping edges preserves
+ * the 1 px divider gap exactly, because `round(aR + 1) === round(aR) + 1`.
+ */
+export function snapBoundsToDevicePixels(
+  bounds: TerminalBounds,
+  scaleFactor: number,
+): TerminalBounds {
+  if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return bounds;
+
+  const snapEdge = (value: number) => Math.round(value * scaleFactor) / scaleFactor;
+  const left = snapEdge(bounds.x);
+  const top = snapEdge(bounds.y);
+  const right = snapEdge(bounds.x + bounds.width);
+  const bottom = snapEdge(bounds.y + bounds.height);
+
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 /**
@@ -596,21 +624,21 @@ export function NativeTerminalPane({
         ? window.devicePixelRatio
         : 1;
 
-    const physicalWidth = Math.round(rect.width * scaleFactor);
-    const physicalHeight = Math.round(rect.height * scaleFactor);
+    // The single chokepoint feeding both `cmd_native_terminal_attach` and
+    // `cmd_native_terminal_set_bounds`, so snapping here covers every path that
+    // can place a native surface at a fractional offset.
+    const bounds = snapBoundsToDevicePixels(
+      { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      scaleFactor,
+    );
+
+    const physicalWidth = Math.round(bounds.width * scaleFactor);
+    const physicalHeight = Math.round(bounds.height * scaleFactor);
     if (physicalWidth < 1 || physicalHeight < 1) {
       return null;
     }
 
-    return {
-      bounds: {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-      },
-      scaleFactor,
-    };
+    return { bounds, scaleFactor };
   }, []);
 
   const performAttach = useCallback((targetId: string, force = false): Promise<void> => {
@@ -891,11 +919,18 @@ export function NativeTerminalPane({
   const sendMouse = useCallback((
     event: NativeMouseEvent,
     action: "Press" | "Motion" | "Release",
-    button: "Left" | null,
+    button: "Left" | "Right" | null,
   ) => {
     const viewport = viewportRef.current;
     if (!visible || !isTauri() || !targetSessionId || !viewport) return;
     const rect = viewport.getBoundingClientRect();
+    const timestampNs = Math.round(
+      (typeof event.timeStamp === "number" && event.timeStamp > 0
+        ? event.timeStamp
+        : typeof performance !== "undefined" && typeof performance.now === "function"
+          ? performance.now()
+          : 0) * 1_000_000,
+    );
     void invoke<{ readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt }>("cmd_native_terminal_mouse", {
       sessionId: targetSessionId,
       event: {
@@ -913,6 +948,7 @@ export function NativeTerminalPane({
           capsLock: event.getModifierState("CapsLock"),
           numLock: event.getModifierState("NumLock"),
         },
+        timestampNs,
       },
     })
       .then((receipt: { readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt } | undefined) => {
@@ -1169,7 +1205,7 @@ export function NativeTerminalPane({
         inputRef.current?.focus();
         sendInput({
           keyEvent: {
-            key: physicalKeyForAltChord(forwardable),
+            key: physicalKeyForModifierChord(forwardable),
             action: "Press",
             modifiers: {
               shift: forwardable.shiftKey,
@@ -1897,7 +1933,7 @@ export function NativeTerminalPane({
             event.preventDefault();
             sendInput({
               keyEvent: {
-                key: physicalKeyForAltChord(forwardable),
+                key: physicalKeyForModifierChord(forwardable),
                 action: "Press",
                 modifiers: {
                   shift: event.shiftKey,

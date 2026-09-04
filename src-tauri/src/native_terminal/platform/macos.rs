@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{define_class, msg_send, MainThreadMarker};
+use objc2::{define_class, msg_send, sel, MainThreadMarker};
 #[allow(deprecated)] // NSFilenamesPboardType mirrors wry's drag payload collection.
 use objc2_app_kit::NSFilenamesPboardType;
 use objc2_app_kit::{
@@ -269,6 +269,87 @@ pub struct MacosCompositorTarget {
 unsafe impl Send for MacosCompositorTarget {}
 unsafe impl Sync for MacosCompositorTarget {}
 
+/// Positions the child view for `bounds`, or hides it when there is none.
+///
+/// Shared by both `update_viewport` paths so the main-thread and dispatched
+/// branches cannot drift apart.
+unsafe fn apply_viewport(view: &FerryxNativeTerminalView, bounds: Option<LogicalBounds>) {
+    unsafe {
+        let Some(bounds) = bounds else {
+            view.setHidden(true);
+            view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)));
+            return;
+        };
+        let Some(superview) = view.superview() else {
+            return;
+        };
+        let superview_bounds = superview.bounds();
+        let is_flipped = superview.isFlipped();
+        let appkit_frame = bounds.to_appkit_frame(superview_bounds.size.height, is_flipped);
+        view.setFrame(NSRect::new(
+            NSPoint::new(appkit_frame.x, appkit_frame.y),
+            NSSize::new(appkit_frame.width, appkit_frame.height),
+        ));
+        configure_terminal_layers(view, bounds.scale_factor);
+    }
+}
+
+/// Applies the compositing properties that keep terminal pixels unresampled.
+///
+/// `contentsScale` belongs on the NSView backing layer: wgpu-hal's KVO observer
+/// watches that key and forwards it to the Metal layer it owns.
+///
+/// The gravity and filter properties must NOT stay there. wgpu-hal 24
+/// (`src/metal/layer_observer.rs`) parents the real `CAMetalLayer` subclass as a
+/// **sublayer** of the backing layer and syncs only `contentsScale` and
+/// `bounds`; its own `setContentsGravity: kCAGravityTopLeft` is commented out
+/// upstream, so that layer keeps `kCAGravityResize` with `kCAFilterLinear`.
+/// Setting them on the backing layer is inert, which left the drawable stretched
+/// into the layer box and every glyph resampled whenever the two disagreed --
+/// the split-pane softness. Walking the sublayers instead makes a transient
+/// mismatch crop one edge rather than blur the whole frame.
+///
+/// `setDrawableSize:` is deliberately never sent: the backing layer does not
+/// implement it and that call is the `199761a` SIGABRT.
+unsafe fn configure_terminal_layers(view: &AnyObject, scale_factor: f64) {
+    unsafe {
+        let layer: Option<&AnyObject> = msg_send![view, layer];
+        let Some(layer) = layer else {
+            return;
+        };
+
+        let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        let _: () = msg_send![layer, setContentsScale: scale];
+
+        let sublayers: Option<&AnyObject> = msg_send![layer, sublayers];
+        let Some(sublayers) = sublayers else {
+            return;
+        };
+        let count: usize = msg_send![sublayers, count];
+        let gravity = NSString::from_str("topLeft");
+        let nearest = NSString::from_str("nearest");
+        for index in 0..count {
+            let sublayer: Option<&AnyObject> = msg_send![sublayers, objectAtIndex: index];
+            let Some(sublayer) = sublayer else {
+                continue;
+            };
+            // `drawableSize` is CAMetalLayer-only, so it identifies the render
+            // target without depending on wgpu's generated subclass name.
+            let is_metal_layer: bool = msg_send![sublayer, respondsToSelector: sel!(drawableSize)];
+            if !is_metal_layer {
+                continue;
+            }
+            let _: () = msg_send![sublayer, setContentsGravity: &*gravity];
+            let _: () = msg_send![sublayer, setMagnificationFilter: &*nearest];
+            let _: () = msg_send![sublayer, setMinificationFilter: &*nearest];
+        }
+    }
+}
+
 impl MacosCompositorTarget {
     /// Creates a layer-backed child view above WKWebView in the window content view.
     pub fn new<R: Runtime>(window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
@@ -307,19 +388,12 @@ impl MacosCompositorTarget {
         if let Some(layer) = layer {
             unsafe {
                 let _: () = msg_send![layer, setOpaque: true];
-                let scale: f64 = if backing_scale.is_finite() && backing_scale > 0.0 {
-                    backing_scale
-                } else {
-                    1.0
-                };
-                let _: () = msg_send![layer, setContentsScale: scale];
-                let gravity = NSString::from_str("topLeft");
-                let _: () = msg_send![layer, setContentsGravity: &*gravity];
-                let nearest = NSString::from_str("nearest");
-                let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
-                let _: () = msg_send![layer, setMinificationFilter: &*nearest];
             }
         }
+        // The Metal layer does not exist until wgpu creates the surface, so this
+        // only lands `contentsScale` here; every later `update_viewport` call
+        // configures the Metal sublayer once it is present.
+        unsafe { configure_terminal_layers(&view, backing_scale) };
 
         // Initially hidden until an active terminal layout is positioned
         view.setHidden(true);
@@ -371,61 +445,10 @@ impl MacosCompositorTarget {
         if let Some(mtm) = MainThreadMarker::new() {
             let _ = mtm;
             let view = unsafe { &*(view_ptr as *const FerryxNativeTerminalView) };
-            unsafe {
-                if let Some(bounds) = bounds {
-                    if let Some(superview) = view.superview() {
-                        let superview_bounds = superview.bounds();
-                        let is_flipped = superview.isFlipped();
-                        let appkit_frame =
-                            bounds.to_appkit_frame(superview_bounds.size.height, is_flipped);
-                        view.setFrame(NSRect::new(
-                            NSPoint::new(appkit_frame.x, appkit_frame.y),
-                            NSSize::new(appkit_frame.width, appkit_frame.height),
-                        ));
-                        let layer: Option<&AnyObject> = msg_send![view, layer];
-                        if let Some(layer) = layer {
-                            let scale: f64 = bounds.scale_factor;
-                            let _: () = msg_send![layer, setContentsScale: scale];
-                            let gravity = NSString::from_str("topLeft");
-                            let _: () = msg_send![layer, setContentsGravity: &*gravity];
-                            let nearest = NSString::from_str("nearest");
-                            let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
-                            let _: () = msg_send![layer, setMinificationFilter: &*nearest];
-                        }
-                    }
-                } else {
-                    view.setHidden(true);
-                    view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)));
-                }
-            }
+            unsafe { apply_viewport(view, bounds) };
         } else {
             dispatch2::DispatchQueue::main().exec_async(move || unsafe {
-                let view = &*(view_ptr as *const FerryxNativeTerminalView);
-                if let Some(bounds) = bounds {
-                    if let Some(superview) = view.superview() {
-                        let superview_bounds = superview.bounds();
-                        let is_flipped = superview.isFlipped();
-                        let appkit_frame =
-                            bounds.to_appkit_frame(superview_bounds.size.height, is_flipped);
-                        view.setFrame(NSRect::new(
-                            NSPoint::new(appkit_frame.x, appkit_frame.y),
-                            NSSize::new(appkit_frame.width, appkit_frame.height),
-                        ));
-                        let layer: Option<&AnyObject> = msg_send![view, layer];
-                        if let Some(layer) = layer {
-                            let scale: f64 = bounds.scale_factor;
-                            let _: () = msg_send![layer, setContentsScale: scale];
-                            let gravity = NSString::from_str("topLeft");
-                            let _: () = msg_send![layer, setContentsGravity: &*gravity];
-                            let nearest = NSString::from_str("nearest");
-                            let _: () = msg_send![layer, setMagnificationFilter: &*nearest];
-                            let _: () = msg_send![layer, setMinificationFilter: &*nearest];
-                        }
-                    }
-                } else {
-                    view.setHidden(true);
-                    view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)));
-                }
+                apply_viewport(&*(view_ptr as *const FerryxNativeTerminalView), bounds)
             });
         }
     }

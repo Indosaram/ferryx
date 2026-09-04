@@ -12,6 +12,7 @@ import {
   NativeTerminalPane,
   dragDropPositionToLogical,
   resetNativeTerminalPaneForTest,
+  snapBoundsToDevicePixels,
 } from "./NativeTerminalPane";
 
 const tauriCoreMocks = vi.hoisted(() => ({
@@ -340,6 +341,50 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
   });
 });
 
+describe("snapBoundsToDevicePixels", () => {
+  it("leaves an already pixel-aligned rect untouched", () => {
+    expect(snapBoundsToDevicePixels({ x: 319, y: 44, width: 1617, height: 900 }, 1)).toEqual({
+      x: 319,
+      y: 44,
+      width: 1617,
+      height: 900,
+    });
+  });
+
+  it("treats a half CSS pixel as aligned at 2x because it is a whole device pixel", () => {
+    expect(snapBoundsToDevicePixels({ x: 10.5, y: 20, width: 800, height: 600 }, 2)).toEqual({
+      x: 10.5,
+      y: 20,
+      width: 800,
+      height: 600,
+    });
+  });
+
+  it("snaps the fractional origin a later split pane inherits", () => {
+    // Pane B of the reported 4-pane layout: 3840px display, 319px sidebar.
+    expect(
+      snapBoundsToDevicePixels({ x: 1936.8432, y: 44, width: 951.5784, height: 900 }, 1),
+    ).toEqual({ x: 1937, y: 44, width: 951, height: 900 });
+  });
+
+  it("preserves the 1px divider gap between adjacent panes", () => {
+    const paneA = snapBoundsToDevicePixels({ x: 319, y: 44, width: 1616.8432, height: 900 }, 1);
+    const paneB = snapBoundsToDevicePixels(
+      { x: 319 + 1616.8432 + 1, y: 44, width: 951.5784, height: 900 },
+      1,
+    );
+
+    expect(paneB.x - (paneA.x + paneA.width)).toBe(1);
+  });
+
+  it("returns the rect unchanged when the scale factor is not usable", () => {
+    const bounds = { x: 1936.8432, y: 44, width: 951.5784, height: 900 };
+
+    expect(snapBoundsToDevicePixels(bounds, 0)).toEqual(bounds);
+    expect(snapBoundsToDevicePixels(bounds, Number.NaN)).toEqual(bounds);
+  });
+});
+
 describe("NativeTerminalPane geometry reporting contract", () => {
   let originalPixelRatio: number;
   let originalGetBoundingClientRect: typeof HTMLElement.prototype.getBoundingClientRect;
@@ -401,6 +446,32 @@ describe("NativeTerminalPane geometry reporting contract", () => {
         height: 600,
       },
       scaleFactor: 2,
+    });
+  });
+
+  it("snaps a fractional split-pane rect to whole device pixels before attaching", async () => {
+    Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: 1 });
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return {
+        x: 1936.8432,
+        y: 44.5,
+        width: 951.5784,
+        height: 900.25,
+        top: 44.5,
+        bottom: 944.75,
+        left: 1936.8432,
+        right: 2888.4216,
+        toJSON: () => ({}),
+      } as DOMRect;
+    };
+
+    const session = createSession("term-session-fractional");
+    render(<NativeTerminalPane sessionId="term-session-fractional" session={session} />);
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_attach", {
+      sessionId: "term-session-fractional",
+      bounds: { x: 1937, y: 45, width: 951, height: 900 },
+      scaleFactor: 1,
     });
   });
 
@@ -1100,6 +1171,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           capsLock: false,
           numLock: false,
         },
+        timestampNs: expect.any(Number),
       },
     });
   });
@@ -1185,6 +1257,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           capsLock: false,
           numLock: false,
         },
+        timestampNs: expect.any(Number),
       },
     });
     expect(mouseCalls.find(([, args]) => args.event.action === "Release")?.[1]).toEqual({
@@ -1201,6 +1274,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           capsLock: false,
           numLock: false,
         },
+        timestampNs: expect.any(Number),
       },
     });
   });
@@ -4686,6 +4760,48 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
         (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key === "ㅊ",
     );
     expect(sentWithHangul).toBe(false);
+  });
+
+  it("normalizes Korean layout Ctrl+L (key ㅣ and code KeyL) to key 'l' instead of 'ㅣ'", async () => {
+    const session = createSession("term-session-korean-ctrll");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-korean-ctrll" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const koreanCtrlL = new KeyboardEvent("keydown", {
+      key: "ㅣ",
+      code: "KeyL",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea.dispatchEvent(koreanCtrlL);
+    });
+
+    expect(koreanCtrlL.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-korean-ctrll",
+        input: {
+          keyEvent: {
+            key: "l",
+            action: "Press",
+            modifiers: {
+              shift: false,
+              ctrl: true,
+              alt: false,
+              superKey: false,
+              capsLock: false,
+              numLock: false,
+            },
+            utf8: null,
+          },
+        },
+      });
+    });
   });
 
   it("translates plain Ctrl+C to key 'u' when session has agentType and no activity prop", async () => {
