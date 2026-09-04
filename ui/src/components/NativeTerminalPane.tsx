@@ -39,6 +39,7 @@ export interface NativeTerminalPaneProps {
   style?: CSSProperties;
   activity?: TerminalActivity;
   needsAttention?: boolean;
+  active?: boolean;
 }
 
 interface GeometryState {
@@ -421,6 +422,7 @@ export function NativeTerminalPane({
   style,
   activity,
   needsAttention = false,
+  active,
 }: NativeTerminalPaneProps): ReactElement {
   const agentDetected = Boolean(
     (session?.agentType && session.agentType.trim().length > 0) ||
@@ -515,7 +517,7 @@ export function NativeTerminalPane({
     };
   }, []);
 
-  const updateImeAnchor = (receipt: NativeTerminalReceipt | undefined) => {
+  const updateImeAnchor = useCallback((receipt: NativeTerminalReceipt | undefined) => {
     if (!receipt) {
       return;
     }
@@ -531,7 +533,7 @@ export function NativeTerminalPane({
       width: receipt.cellWidthPx / scaleFactor,
       height: receipt.cellHeightPx / scaleFactor,
     });
-  };
+  }, []);
 
   const updateScrollbar = useCallback((metrics: NativeTerminalScrollbarPayload | undefined) => {
     if (!metrics) return;
@@ -555,7 +557,7 @@ export function NativeTerminalPane({
       });
   }, [targetSessionId, visible]);
 
-  const sendFocus = (focused: boolean) => {
+  const sendFocus = useCallback((focused: boolean) => {
     if (!visible || !isTauri() || !targetSessionId) {
       return;
     }
@@ -568,7 +570,22 @@ export function NativeTerminalPane({
       .catch((error: unknown) => {
         reportNativeTerminalIpcFailure("cmd_native_terminal_set_focus", error);
       });
-  };
+  }, [targetSessionId, updateImeAnchor, visible]);
+
+  useEffect(() => {
+    if (!visible || !targetSessionId) return;
+    if (active) {
+      lastFocusedNativeTerminalSessionId = targetSessionId;
+      inputRef.current?.focus();
+      if (isTauri()) {
+        sendFocus(true);
+      }
+    } else {
+      if (isTauri()) {
+        sendFocus(false);
+      }
+    }
+  }, [active, sendFocus, targetSessionId, visible]);
 
   const measureGeometry = useCallback((): GeometryState | null => {
     const element = viewportRef.current;
@@ -1066,11 +1083,17 @@ export function NativeTerminalPane({
         lastFocusedNativeTerminalSessionId ?? mountedNativeTerminalSessionCounts.keys().next().value;
       const ownsInput = targetedPane
         ? targetedPane === containerRef.current
-        : hoveredPane
-          ? hoveredPane === containerRef.current
-          : fallbackSessionId === targetSessionId;
+        : active !== undefined
+          ? active
+          : hoveredPane
+            ? hoveredPane === containerRef.current
+            : fallbackSessionId === targetSessionId;
       const canClaimInput =
-        ownsInput && (!activeEl || activeEl === document.body || !isEditableElement(activeEl));
+        ownsInput &&
+        (!activeEl ||
+          activeEl === document.body ||
+          !isEditableElement(activeEl) ||
+          activeEl === inputRef.current);
       const activeElement = `${activeEl?.tagName ?? ""}/${activeEl?.getAttribute("data-testid") ?? ""}`;
       switchDebug("terminal.surface.input.capture", {
         key: typeof event.key === "string" ? event.key.slice(0, 120) : String(event.key).slice(0, 120),
@@ -1231,7 +1254,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [copySelectionOrInterrupt, performNativePasteFallback, sendCtrlCClearOrExit, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
+  }, [active, copySelectionOrInterrupt, performNativePasteFallback, sendCtrlCClearOrExit, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -1317,6 +1340,7 @@ export function NativeTerminalPane({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     let focusFrame: number | undefined;
+    let focusTimer: number | undefined;
     void onNativeTerminalFocus((sessionId) => {
       if (disposed || sessionId !== targetSessionId) return;
       lastFocusedNativeTerminalSessionId = targetSessionId;
@@ -1335,6 +1359,12 @@ export function NativeTerminalPane({
           activeElement: document.activeElement?.getAttribute("data-testid") ?? document.activeElement?.tagName,
         });
       });
+      if (focusTimer !== undefined) clearTimeout(focusTimer);
+      focusTimer = window.setTimeout(() => {
+        focusTimer = undefined;
+        if (disposed) return;
+        inputRef.current?.focus();
+      }, 40);
     }).then((listener) => {
       if (disposed) listener();
       else unlisten = listener;
@@ -1343,6 +1373,7 @@ export function NativeTerminalPane({
     return () => {
       disposed = true;
       if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+      if (focusTimer !== undefined) clearTimeout(focusTimer);
       unlisten?.();
     };
   }, [targetSessionId, visible]);

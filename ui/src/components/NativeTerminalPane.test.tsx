@@ -3462,6 +3462,126 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 });
 
+describe("active prop and pane focus event dispatch", () => {
+  let restorePaneRect: () => void;
+
+  beforeEach(() => {
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
+    restorePaneRect = stubPaneRect();
+    tauriCoreMocks.invoke.mockReset();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+    tauriCoreMocks.isTauri.mockReset();
+    tauriCoreMocks.isTauri.mockReturnValue(true);
+    resizeRecords.length = 0;
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+  });
+
+  afterEach(() => {
+    restorePaneRect();
+    cleanup();
+    vi.unstubAllGlobals();
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
+  });
+
+  it("focuses the input sink and sends focus when active becomes true", async () => {
+    const session = createSession("session-active-test", "backend-active-test");
+    const { getByTestId, rerender } = render(
+      <NativeTerminalPane sessionId="session-active-test" session={session} active={false} />,
+    );
+
+    const sink = getByTestId("native-terminal-focus-sink");
+    expect(document.activeElement).not.toBe(sink);
+
+    rerender(
+      <NativeTerminalPane sessionId="session-active-test" session={session} active={true} />,
+    );
+
+    expect(document.activeElement).toBe(sink);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_focus", {
+      sessionId: "backend-active-test",
+      focused: true,
+    });
+  });
+
+  it("sends focus false when active transitions to false", async () => {
+    const session = createSession("session-active-false-test", "backend-active-false-test");
+    const { rerender } = render(
+      <NativeTerminalPane sessionId="session-active-false-test" session={session} active={true} />,
+    );
+
+    tauriCoreMocks.invoke.mockClear();
+
+    rerender(
+      <NativeTerminalPane sessionId="session-active-false-test" session={session} active={false} />,
+    );
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_focus", {
+      sessionId: "backend-active-false-test",
+      focused: false,
+    });
+  });
+
+  it("claims window keydown and forwards input to the active pane when document.activeElement is document.body", async () => {
+    const session = createSession("session-claim-test", "backend-claim-test");
+    render(
+      <NativeTerminalPane sessionId="session-claim-test" session={session} active={true} />,
+    );
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "a",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "backend-claim-test",
+        input: { text: "a" },
+      });
+    });
+  });
+
+  it("does not claim fallback keydown when active is false even if hovered", async () => {
+    const session = createSession("session-inactive-test", "backend-inactive-test");
+    render(
+      <NativeTerminalPane sessionId="session-inactive-test" session={session} active={false} />,
+    );
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "z",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      sessionId: "backend-inactive-test",
+      input: { text: "z" },
+    });
+  });
+});
+
 describe("NativeTerminalPane daemon and session identity mapping", () => {
   let restorePaneRect: () => void;
   beforeEach(() => {

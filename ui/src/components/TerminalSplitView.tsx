@@ -57,6 +57,14 @@ import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
 
+function isInteractiveTarget(target: HTMLElement | null): boolean {
+  return Boolean(
+    target?.closest(
+      "button, input, select, textarea:not([data-testid='native-terminal-focus-sink']), [contenteditable='true'], [role='search']",
+    ),
+  );
+}
+
 export const FALLBACK_SESSION: TerminalSession = {
   id: "",
   cwd: "",
@@ -879,6 +887,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onFocusPane,
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
+  const leafRef = React.useRef<HTMLDivElement | null>(null);
+  const focusFrameRef = React.useRef<number | null>(null);
+  const focusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const droppable = useDroppable({
     id: `pane-leaf:${tab.id}:${leafId}`,
     data: { type: "pane-leaf", tabId: tab.id, leafId },
@@ -894,6 +905,34 @@ const PaneLeafView = React.memo(function PaneLeafView({
     },
   });
 
+  React.useEffect(() => {
+    return () => {
+      if (focusFrameRef.current !== null) cancelAnimationFrame(focusFrameRef.current);
+      if (focusTimerRef.current !== null) clearTimeout(focusTimerRef.current);
+    };
+  }, []);
+
+  const focusPaneInput = React.useCallback(() => {
+    onFocusPane(tab.id, leafId);
+    const focusSink = () => {
+      const sink = leafRef.current?.querySelector<HTMLTextAreaElement>(
+        'textarea[data-testid="native-terminal-focus-sink"]',
+      );
+      sink?.focus({ preventScroll: true });
+    };
+    focusSink();
+    if (focusFrameRef.current !== null) cancelAnimationFrame(focusFrameRef.current);
+    focusFrameRef.current = requestAnimationFrame(() => {
+      focusFrameRef.current = null;
+      focusSink();
+    });
+    if (focusTimerRef.current !== null) clearTimeout(focusTimerRef.current);
+    focusTimerRef.current = setTimeout(() => {
+      focusTimerRef.current = null;
+      focusSink();
+    }, 40);
+  }, [leafId, onFocusPane, tab.id]);
+
   // Native compositor child views paint above WKWebView on macOS, so DOM drop feedback
   // cannot cover a live terminal surface. Only the targeted pane paints feedback, so only
   // it yields its surface -- every other terminal keeps rendering during the drag.
@@ -906,7 +945,10 @@ const PaneLeafView = React.memo(function PaneLeafView({
   return (
     <NativeTerminalVisibilityProvider visible={!showsDropFeedback}>
     <div
-      ref={droppable.setNodeRef}
+      ref={(node) => {
+        droppable.setNodeRef(node);
+        leafRef.current = node;
+      }}
       className={`relative flex h-full w-full min-h-0 min-w-0 overflow-hidden bg-terminal ${
         droppable.isOver ? "ring-2 ring-primary/80 ring-inset" : ""
       }`}
@@ -914,7 +956,14 @@ const PaneLeafView = React.memo(function PaneLeafView({
       data-leaf-id={leafId}
       data-tab-id={tab.id}
       data-dnd-type="pane-leaf"
-      onClick={() => onFocusPane(tab.id, leafId)}
+      onPointerDown={(event) => {
+        if (isInteractiveTarget(event.target as HTMLElement | null)) return;
+        focusPaneInput();
+      }}
+      onClick={(event) => {
+        if (isInteractiveTarget(event.target as HTMLElement | null)) return;
+        focusPaneInput();
+      }}
       onMouseMove={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
         const relativeY = event.clientY - rect.top;
@@ -978,6 +1027,15 @@ const PaneLeafView = React.memo(function PaneLeafView({
         } ${draggable.isDragging ? "opacity-30" : ""}`}
         data-testid="pane-toolbar"
         data-dnd-type="pane"
+        onPointerDown={(event) => {
+          if (isInteractiveTarget(event.target as HTMLElement | null)) return;
+          focusPaneInput();
+          draggable.listeners?.onPointerDown?.(event);
+        }}
+        onClick={(event) => {
+          if (isInteractiveTarget(event.target as HTMLElement | null)) return;
+          focusPaneInput();
+        }}
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={() => setIsHoveredTop(false)}
       >

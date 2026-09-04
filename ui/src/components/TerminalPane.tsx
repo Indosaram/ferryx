@@ -66,7 +66,7 @@ function resolveAffordanceErrorDescription(affordance: ReturnType<typeof getAgen
 export function TerminalPane({
   session,
   sessions,
-  active: _active,
+  active,
   activity,
   needsAttention,
   searchOpen,
@@ -133,6 +133,7 @@ export function TerminalPane({
       <NativeTerminalPane
         sessionId={session.id}
         session={session}
+        active={active}
         activity={activity}
         needsAttention={needsAttention}
       />
