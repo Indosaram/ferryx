@@ -78,6 +78,16 @@ pub mod macos {
         }
     }
 
+    /// Exact `UNAuthorizationOptions` bit set passed to
+    /// `requestAuthorizationWithOptions_completionHandler` by [`MacosPermissionProvider::request`].
+    ///
+    /// Exposed so tests can assert the real machine-consumed option bits (not source prose).
+    pub fn authorization_options() -> UNAuthorizationOptions {
+        UNAuthorizationOptions::Alert
+            | UNAuthorizationOptions::Sound
+            | UNAuthorizationOptions::Badge
+    }
+
     pub fn map_authorization_status(status: UNAuthorizationStatus) -> NotificationAuthorization {
         match status {
             UNAuthorizationStatus::NotDetermined => NotificationAuthorization::NotDetermined,
@@ -202,7 +212,7 @@ pub mod macos {
                     let _ = tx.try_send(outcome);
                 });
 
-            let options = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
+            let options = authorization_options();
             let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
                 let center = UNUserNotificationCenter::currentNotificationCenter();
                 center.requestAuthorizationWithOptions_completionHandler(options, &handler);

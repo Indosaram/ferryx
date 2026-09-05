@@ -156,7 +156,7 @@ export function NotificationsSection() {
 
   const isAuthorized = auth === "authorized" || auth === "provisional";
   const isDenied = auth === "denied";
-  const isNotDetermined = auth === "not-determined" || auth === "unknown";
+  const canRequestPermission = auth !== "unavailable";
 
   let permissionBadgeClass =
     "border-status-warning/20 bg-status-warning/10 text-status-warning";
@@ -196,7 +196,7 @@ export function NotificationsSection() {
               {auth}
             </Badge>
           </div>
-          {isNotDetermined || isDenied ? (
+          {canRequestPermission ? (
             <Button
               type="button"
               variant="link"

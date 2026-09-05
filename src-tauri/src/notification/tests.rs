@@ -576,6 +576,37 @@ fn current_platform_is_detected() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn macos_authorization_request_includes_badge_alert_and_sound() {
+    use objc2_user_notifications::UNAuthorizationOptions;
+
+    // Assert the exact option bits actually handed to requestAuthorizationWithOptions, not source
+    // text. Badge was omitted, silently stripping dock-badge permission from the one explicit
+    // authorization prompt.
+    let options = crate::notification::permission::macos::authorization_options();
+
+    assert!(
+        options.contains(UNAuthorizationOptions::Badge),
+        "authorization options must request Badge"
+    );
+    assert!(
+        options.contains(UNAuthorizationOptions::Alert),
+        "authorization options must retain Alert"
+    );
+    assert!(
+        options.contains(UNAuthorizationOptions::Sound),
+        "authorization options must retain Sound"
+    );
+    // No implicit extras: exactly the explicit alert/sound/badge trio.
+    assert_eq!(
+        options,
+        UNAuthorizationOptions::Alert
+            | UNAuthorizationOptions::Sound
+            | UNAuthorizationOptions::Badge,
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn macos_submits_through_user_notifications_not_the_legacy_bridge() {
     // usernoted refuses to serve one process over both APIs: querying UNUserNotificationCenter for
     // permission makes us a "modern" client, so submitting over the legacy NSUserNotification

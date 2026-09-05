@@ -49,6 +49,34 @@ describe("NotificationsSection", () => {
     expect(screen.getByTestId("notification-permission-status")).toHaveAttribute("data-permission-state", "denied");
   });
 
+  it("lets an already-authorized user re-request permission without triggering it on mount or focus", async () => {
+    native.getNotificationPermissionStatus.mockResolvedValue({ authorization: "authorized", authoritative: true, supported: true });
+    await act(async () => { render(<NotificationsSection />); });
+
+    expect(screen.getByTestId("notification-permission-status")).toHaveAttribute("data-permission-state", "authorized");
+    const requestButton = screen.getByRole("button", { name: /request permission/i });
+    expect(requestButton).toBeInTheDocument();
+
+    expect(native.requestNotificationPermission).not.toHaveBeenCalled();
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(native.requestNotificationPermission).not.toHaveBeenCalled();
+
+    const statusCallsBeforeClick = native.getNotificationPermissionStatus.mock.calls.length;
+    await act(async () => { fireEvent.click(requestButton); });
+
+    expect(native.requestNotificationPermission).toHaveBeenCalledTimes(1);
+    expect(native.getNotificationPermissionStatus.mock.calls.length).toBe(statusCallsBeforeClick + 1);
+  });
+
+  it("offers no request permission action when notifications are unavailable on this platform", async () => {
+    native.getNotificationPermissionStatus.mockResolvedValue({ authorization: "authorized", authoritative: true, supported: false });
+    await act(async () => { render(<NotificationsSection />); });
+
+    expect(screen.getByTestId("notification-permission-status")).toHaveAttribute("data-permission-state", "unavailable");
+    expect(screen.queryByRole("button", { name: /request permission/i })).not.toBeInTheDocument();
+    expect(native.requestNotificationPermission).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["system", "system"], ["none", "silent"], ["custom", "silent"],
   ])("passes the selected %s sound mode to the native test notification", async (customSoundId, sound) => {
