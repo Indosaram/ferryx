@@ -950,13 +950,19 @@ impl NativeTerminalSurfaceHostState {
                 session.surface_attached = true;
             }
             let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
-            self.prepare_session_layout(
+            if let Err(error) = self.prepare_session_layout(
                 NativeTerminalBoundsRequest {
                     session_id: session_id.to_string(),
                     bounds,
                 },
                 metrics,
-            )?;
+            ) {
+                tracing::warn!(
+                    session_id,
+                    ?error,
+                    "initial bounds layout failed during attach; falling back to default dimensions"
+                );
+            }
         }
         self.attach_daemon_attachment(session_id, attachment, app)
     }
@@ -986,61 +992,76 @@ impl NativeTerminalSurfaceHostState {
         session.surface_attached = true;
         let resized_dimensions = if let Some(bounds) = bounds {
             let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
-            let layout = NativeTerminalBoundsRequest {
+            let layout = match (NativeTerminalBoundsRequest {
                 session_id: session_id.to_string(),
                 bounds,
             }
-            .layout(metrics)?;
-            let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
-                let prior_scrollbar = session.terminal.scrollbar().ok();
-                let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
-                    let max_offset = sb.total.saturating_sub(sb.len);
-                    max_offset == 0
-                        || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
-                });
-                let prior_scroll_ratio = if is_at_bottom {
+            .layout(metrics))
+            {
+                Ok(layout) => Some(layout),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        ?error,
+                        "bounds layout failed during reattach; keeping existing dimensions"
+                    );
                     None
-                } else {
-                    prior_scrollbar.and_then(|sb| {
-                        let max_offset = sb.total.saturating_sub(sb.len);
-                        if max_offset > 0 {
-                            Some(sb.offset as f64 / max_offset as f64)
-                        } else {
-                            None
-                        }
-                    })
-                };
-
-                session.terminal.resize(
-                    layout.cols,
-                    layout.rows,
-                    metrics.width_px,
-                    metrics.height_px,
-                )?;
-
-                if let Some(ratio) = prior_scroll_ratio {
-                    if let Ok(new_sb) = session.terminal.scrollbar() {
-                        let new_max_offset = new_sb.total.saturating_sub(new_sb.len);
-                        if new_max_offset > 0 {
-                            let target_offset = (ratio * new_max_offset as f64).round() as usize;
-                            let _ = session
-                                .terminal
-                                .scroll_viewport(crate::native_terminal::ScrollViewport::Row(target_offset));
-                        }
-                    }
-                } else {
-                    let _ = session
-                        .terminal
-                        .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 }
-                true
-            } else {
-                false
             };
-            session.layout = Some(layout);
-            session.logical_bounds = Some(bounds);
-            session.cell_metrics = Some(metrics);
-            resized.then_some((layout.cols, layout.rows))
+            if let Some(layout) = layout {
+                let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+                    let prior_scrollbar = session.terminal.scrollbar().ok();
+                    let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
+                        let max_offset = sb.total.saturating_sub(sb.len);
+                        max_offset == 0
+                            || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
+                    });
+                    let prior_scroll_ratio = if is_at_bottom {
+                        None
+                    } else {
+                        prior_scrollbar.and_then(|sb| {
+                            let max_offset = sb.total.saturating_sub(sb.len);
+                            if max_offset > 0 {
+                                Some(sb.offset as f64 / max_offset as f64)
+                            } else {
+                                None
+                            }
+                        })
+                    };
+
+                    session.terminal.resize(
+                        layout.cols,
+                        layout.rows,
+                        metrics.width_px,
+                        metrics.height_px,
+                    )?;
+
+                    if let Some(ratio) = prior_scroll_ratio {
+                        if let Ok(new_sb) = session.terminal.scrollbar() {
+                            let new_max_offset = new_sb.total.saturating_sub(new_sb.len);
+                            if new_max_offset > 0 {
+                                let target_offset = (ratio * new_max_offset as f64).round() as usize;
+                                let _ = session
+                                    .terminal
+                                    .scroll_viewport(crate::native_terminal::ScrollViewport::Row(target_offset));
+                            }
+                        }
+                    } else {
+                        let _ = session
+                            .terminal
+                            .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                    }
+                    true
+                } else {
+                    false
+                };
+                session.layout = Some(layout);
+                session.logical_bounds = Some(bounds);
+                session.cell_metrics = Some(metrics);
+                resized.then_some((layout.cols, layout.rows))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -2986,6 +3007,102 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn attach_daemon_attachment_with_bounds_tolerates_invalid_initial_bounds() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-invalid-bounds-attach";
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"hello\r\n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        let invalid_bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            scale_factor: 1.0,
+        };
+
+        let result = state.attach_daemon_attachment_with_bounds::<tauri::Wry>(
+            session_id,
+            attachment,
+            None,
+            Some(invalid_bounds),
+        );
+        assert!(
+            result.is_ok(),
+            "attach must succeed with fallback dimensions even if initial bounds are invalid"
+        );
+
+        let dims = {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            session.terminal.dimensions().expect("terminal dimensions")
+        };
+        assert_eq!(dims, (80, 24), "terminal should fall back to daemon PTY dimensions");
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn reattach_existing_session_with_bounds_tolerates_invalid_bounds() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-invalid-bounds-reattach";
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"hello\r\n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("initial attach");
+
+        // Reattach with invalid bounds (0 height/width)
+        let invalid_bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            scale_factor: 1.0,
+        };
+
+        let result = state.reattach_existing_session_with_bounds(session_id, Some(invalid_bounds));
+        assert!(
+            result.is_ok_and(|rebound| rebound),
+            "reattach must succeed and return true even with invalid bounds"
+        );
+
+        let dims = {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            session.terminal.dimensions().expect("terminal dimensions")
+        };
+        assert_eq!(dims, (80, 24), "terminal should keep existing dimensions");
 
         state.teardown();
     }
