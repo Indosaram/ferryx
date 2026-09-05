@@ -667,8 +667,8 @@ export async function requestNotificationPermission(): Promise<import('./types')
   return invokeCommand<import('./types').NotificationPermissionRequest>('cmd_notification_request_permission');
 }
 
-export async function probeNotificationDelivery(sendTest?: boolean): Promise<import('./types').NotificationProbeResult> {
-  return invokeCommand<import('./types').NotificationProbeResult>('cmd_notification_probe_delivery', { sendTest });
+export async function probeNotificationDelivery(sendTest?: boolean, sound: "system" | "silent" = "system"): Promise<import('./types').NotificationProbeResult> {
+  return invokeCommand<import('./types').NotificationProbeResult>('cmd_notification_probe_delivery', { sendTest, sound });
 }
 
 export async function openNotificationSystemSettings(): Promise<import('./types').OpenSystemSettingsResult> {
@@ -728,7 +728,7 @@ export async function playNotificationSound(args: {
   // The backend player resolves a file path. The built-in "system" sound rides the
   // OS banner and "none" is muted, so without a custom file there is nothing to play
   // and invoking would only fail the required `path` argument.
-  if (!args.customSoundPath) {
+  if (args.soundId === "none" || args.soundId === "system" || !args.customSoundPath) {
     return { played: false };
   }
   return invokeCommand<import('./types').PlaySoundResult>('cmd_notification_play_sound', {
@@ -783,6 +783,12 @@ export type RemoteTerminalTabInfo = {
 };
 
 export type FocusedTerminalPayload = {
+  attentionInventory?: Array<{
+    workspaceId: string;
+    worktreeSlug: string | null;
+    worktreeLabel: string | null;
+    state: "waiting" | "done" | "working" | null;
+  }>;
   workspaceId: string;
   worktreeSlug?: string | null;
   worktreeLabel?: string | null;
@@ -805,6 +811,7 @@ export async function publishFocusedTerminal(payload: FocusedTerminalPayload | n
       sessionId: payload?.backendSessionId ?? null,
       tabId,
       terminalTabs,
+      attentionInventory: payload?.attentionInventory ?? [],
     },
   });
 }

@@ -29,6 +29,11 @@ describe("cmd_notification_play_sound wire contract", () => {
     expect(args).toHaveProperty("path", "/custom/bell.mp3");
   });
 
+  it.each(["none", "system"])("does not replay a retained custom path in %s mode", async (soundId) => {
+    expect(await playNotificationSound({ soundId, customSoundPath: "/old.wav" })).toMatchObject({ played: false });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it("does not invoke the player when no custom sound file is configured", async () => {
     const result = await playNotificationSound({
       soundId: "system",

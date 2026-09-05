@@ -668,6 +668,14 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(screen.queryByTestId("attention-frame-corner-right")).not.toBeInTheDocument();
   });
 
+  it("dismisses both native and DOM attention for an acknowledged waiting pane", () => {
+    render(<TerminalSplitView layout={singleTabLayout()}
+      sessions={{ "session-1": session("session-1", "backend-1") }}
+      activityBySessionId={{ "session-1": { state: "waiting", title: "", isAgent: true, seen: true } }} />);
+    expect(screen.getByTestId("terminal-pane")).toHaveAttribute("data-needs-attention", "false");
+    expect(screen.queryByTestId("attention-frame-bottom")).not.toBeInTheDocument();
+  });
+
   it("renders no amber ring and passes needsAttention=false when attentionFrame setting is false", () => {
     saveNotificationSettings({ attentionFrame: false });
     const layout = singleTabLayout();

@@ -44,6 +44,15 @@ beforeEach(() => localStorage.clear());
 afterEach(cleanup);
 
 describe("Sidebar project activity", () => {
+  it("shows project attention for unseen done without a bell unread flag", () => {
+    render(<Sidebar projects={projects} activeProjectId="default"
+      worktrees={[defaultWorktree]} agents={[]} activePath={defaultWorktree.path}
+      activityByWorktreePath={{ [defaultWorktree.path]: summary({ doneCount: 1, hasDone: true }) }}
+      onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} onOpenCommandPalette={vi.fn()} />);
+    const project = screen.getByRole("button", { name: "default" });
+    expect(within(project).getByTestId("project-attention-indicator")).toHaveAttribute("data-attention-state", "done");
+  });
+
   it("shows the aggregated running count and attention state on each registered project header", () => {
     render(
       <Sidebar

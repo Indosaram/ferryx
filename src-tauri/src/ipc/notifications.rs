@@ -12,7 +12,7 @@ use crate::notification::{
     open_system_notification_settings, picked_audio_file, DispatchNotificationRequest,
     DispatchNotificationResult, NativeNotificationBackend, NotificationAudioPlayer,
     NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
-    NotificationProbeResult, NotificationService, OpenSystemSettingsResult, PickedAudioFile,
+    NotificationProbeResult, NotificationService, NotificationSound, OpenSystemSettingsResult, PickedAudioFile,
     PlaySoundResult, SetBadgeCountResult, SUPPORTED_AUDIO_EXTENSIONS,
 };
 use std::path::PathBuf;
@@ -101,9 +101,10 @@ pub async fn cmd_notification_request_permission<R: Runtime>(
 pub async fn cmd_notification_probe_delivery<R: Runtime>(
     app: AppHandle<R>,
     send_test: Option<bool>,
+    sound: Option<NotificationSound>,
 ) -> Result<NotificationProbeResult, IpcError> {
     let send_test = send_test.unwrap_or(false);
-    run_blocking(move || Ok(service_for(&app).probe_delivery(send_test))).await
+    run_blocking(move || Ok(service_for(&app).probe_delivery(send_test, sound.unwrap_or_default()))).await
 }
 
 /// Open the OS notification settings page for rorca.

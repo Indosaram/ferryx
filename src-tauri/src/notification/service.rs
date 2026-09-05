@@ -8,7 +8,7 @@ use super::model::{
     format_notification, DispatchNotificationRequest, DispatchNotificationResult,
     NotificationContent, NotificationDispatchReason, NotificationPermissionRequestDto,
     NotificationPermissionStatusDto, NotificationProbeOutcome, NotificationProbeResult,
-    NotificationSource,
+    NotificationSource, NotificationSound,
 };
 use super::permission::{platform_permission_provider, NotificationPermissionProvider};
 
@@ -99,7 +99,7 @@ impl NotificationService {
     ///
     /// Reports `submitted`, never `visibly-delivered`: Focus and
     /// Do-Not-Disturb can suppress a banner with no signal back to rorca.
-    pub fn probe_delivery(&self, send_test: bool) -> NotificationProbeResult {
+    pub fn probe_delivery(&self, send_test: bool, sound: NotificationSound) -> NotificationProbeResult {
         let status = self.permissions.status();
 
         let outcome = match preflight(&status) {
@@ -128,6 +128,7 @@ impl NotificationService {
 
         let content = format_notification(&DispatchNotificationRequest {
             source: NotificationSource::Test,
+            sound,
             ..Default::default()
         });
 
@@ -427,7 +428,7 @@ mod tests {
             Arc::clone(&backend),
         );
 
-        let probe = service.probe_delivery(false);
+        let probe = service.probe_delivery(false, NotificationSound::System);
 
         assert_eq!(probe.outcome, NotificationProbeOutcome::Ready);
         assert!(!probe.test_submitted);
@@ -442,7 +443,7 @@ mod tests {
             Arc::clone(&backend),
         );
 
-        let probe = service.probe_delivery(true);
+        let probe = service.probe_delivery(true, NotificationSound::System);
 
         assert_eq!(probe.outcome, NotificationProbeOutcome::Submitted);
         assert!(probe.test_submitted);
@@ -461,7 +462,7 @@ mod tests {
             Arc::clone(&backend),
         );
 
-        let probe = service.probe_delivery(true);
+        let probe = service.probe_delivery(true, NotificationSound::System);
 
         assert_eq!(probe.outcome, NotificationProbeOutcome::BlockedBySystem);
         assert!(!probe.test_submitted);
@@ -478,7 +479,7 @@ mod tests {
             Arc::clone(&backend),
         );
 
-        let probe = service.probe_delivery(true);
+        let probe = service.probe_delivery(true, NotificationSound::System);
 
         assert_eq!(probe.outcome, NotificationProbeOutcome::PermissionRequired);
         assert!(!probe.test_submitted);
@@ -493,7 +494,7 @@ mod tests {
             Arc::clone(&backend),
         );
 
-        let probe = service.probe_delivery(true);
+        let probe = service.probe_delivery(true, NotificationSound::System);
 
         assert_eq!(probe.outcome, NotificationProbeOutcome::Failed);
         assert!(!probe.test_submitted);

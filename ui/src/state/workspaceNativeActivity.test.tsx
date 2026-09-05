@@ -1,5 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearWorkspaceSnapshot, getWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
 
 import type { NativeTerminalAgentStatePayload, NativeTerminalBellPayload, NativeTerminalTitlePayload, Worktree } from "../lib/types";
 
@@ -81,11 +83,49 @@ function emitNativeFocus(sessionId: string): void {
 }
 
 describe("workspace store native activity subscription", () => {
+  afterEach(() => vi.restoreAllMocks());
   beforeEach(() => {
+    clearWorkspaceSnapshot();
+    clearHmrWorkspaceState();
     nativeListeners.title.clear();
     nativeListeners.bell.clear();
     nativeListeners.agentState.clear();
     nativeListeners.focus.clear();
+  });
+
+  it("keeps active-pane completion unread while the whole window is unfocused", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "unfocused", initialWorktrees: [worktree], services: services() }));
+    await act(async () => { await result.current.openTab(worktree); });
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "test", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "test", manifestId: "omo" });
+    });
+    expect(Object.values(result.current.state.activityBySessionId ?? {})[0]?.seen).toBe(false);
+    expect(result.current.unreadBadgeCount).toBe(1);
+  });
+
+  it("routes parked project edges and bells immediately without replay on project switch", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const svc = services();
+    const { result, rerender } = renderHook(({ workspaceId }) => useWorkspaceStore({ workspaceId, initialWorktrees: [worktree], services: svc }),
+      { initialProps: { workspaceId: "project-a" } });
+    await act(async () => { await result.current.openTab(worktree); });
+    const received: string[] = [];
+    const bells = vi.fn();
+    result.current.subscribeActivityNotification((event) => received.push(`${event.workspaceId}:${event.previousState}:${event.state}`));
+    result.current.subscribeTerminalBell(bells);
+    rerender({ workspaceId: "project-b" });
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "test", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "test", manifestId: "omo" });
+      emitNativeBell({ sessionId: "backend-1", count: 1 });
+    });
+    expect(Object.values(getWorkspaceSnapshot("project-a")?.activityBySessionId ?? {})[0]?.seen).toBe(false);
+    expect(received).toEqual(["project-a:undefined:working", "project-a:working:done"]);
+    expect(bells).toHaveBeenCalledTimes(1);
+    rerender({ workspaceId: "project-a" });
+    expect(received).toHaveLength(2);
   });
 
   it("turns a native title event addressed by BACKEND session id into tab activity", async () => {

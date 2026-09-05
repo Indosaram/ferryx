@@ -33,9 +33,20 @@ pub struct RemoteTerminalTabInfo {
     pub session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorktreeAttention {
+    pub workspace_id: String,
+    pub worktree_slug: Option<String>,
+    pub worktree_label: Option<String>,
+    pub state: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteActiveDesktopSelection {
+    #[serde(default)]
+    pub attention_inventory: Vec<RemoteWorktreeAttention>,
     #[serde(default)]
     pub workspace_id: Option<String>,
     #[serde(default)]

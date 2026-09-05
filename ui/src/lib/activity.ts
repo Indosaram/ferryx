@@ -19,6 +19,8 @@ export type TerminalActivity = {
    * tab keeps its agent brand icon.
    */
   seen?: boolean;
+  /** This attention episode came from automatic restoration, not new agent work. */
+  notificationSuppressed?: boolean;
 };
 
 export type ActivitySummary = {
@@ -54,8 +56,10 @@ export function summarizeActivities(
 
   for (const activity of activities) {
     if (activity.state === "working") workingCount += 1;
-    else if (activity.state === "waiting") waitingCount += 1;
-    else if (!activity.seen) doneCount += 1;
+    else if (!activity.seen) {
+      if (activity.state === "waiting") waitingCount += 1;
+      else doneCount += 1;
+    }
 
     if (activity.agentType !== undefined) {
       const rank = stateRank(activity.state);

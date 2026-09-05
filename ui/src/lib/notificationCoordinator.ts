@@ -14,12 +14,13 @@ export function isWindowForegroundFocused(): boolean {
 export interface NotificationCoordinatorOptions {
   isWindowFocused?: () => boolean;
   getSettings?: () => NotificationSettings;
-  onMarkTabUnread?: (tabId: string) => void;
-  onMarkWorktreeUnread?: (path: string) => void;
+  onMarkTabUnread?: (tabId: string, workspaceId?: string) => void;
+  onMarkWorktreeUnread?: (path: string, workspaceId?: string) => void;
   onError?: (error: unknown, source: 'sound' | 'dispatch') => void;
 }
 
 export interface TerminalBellEventParams {
+  workspaceId?: string;
   sessionId?: string;
   tabId?: string;
   worktreeId?: string;
@@ -30,6 +31,8 @@ export interface TerminalBellEventParams {
 }
 
 export interface AgentStateChangeEventParams {
+  workspaceId?: string;
+  notificationSuppressed?: boolean;
   sessionId?: string;
   tabId?: string;
   worktreeId?: string;
@@ -86,10 +89,10 @@ export class NotificationCoordinator {
       const wtPath = params.worktreePath || params.worktreeId;
 
       if (tabId && this.options.onMarkTabUnread) {
-        this.options.onMarkTabUnread(tabId);
+        this.options.onMarkTabUnread(tabId, params.workspaceId);
       }
       if (wtPath && this.options.onMarkWorktreeUnread) {
-        this.options.onMarkWorktreeUnread(wtPath);
+        this.options.onMarkWorktreeUnread(wtPath, params.workspaceId);
       }
 
       if (settings.enabled && settings.terminalBell) {
@@ -103,7 +106,7 @@ export class NotificationCoordinator {
           .then((result) => {
             // A custom sound that did not play is a real failure; the default
             // "system" sound intentionally reports played:false (it rides the OS banner).
-            if (result && settings.customSoundPath && !result.played) {
+            if (result && settings.customSoundId !== 'none' && settings.customSoundId !== 'system' && settings.customSoundPath && !result.played && result.reason !== 'deduped') {
               this.options.onError?.(
                 new Error(`notification sound not played (${result.reason ?? 'unknown'})`),
                 'sound',
@@ -116,6 +119,7 @@ export class NotificationCoordinator {
 
         const dispatchArgs: DispatchNotificationArgs = {
           source: 'terminal-bell',
+          sound: settings.customSoundId === 'system' ? 'system' : 'silent',
           worktreeLabel: params.worktreeLabel || params.worktreeId,
           terminalTitle: params.terminalTitle,
         };
@@ -151,7 +155,7 @@ export class NotificationCoordinator {
       effectivePrev !== 'waiting' &&
       effectivePrev !== 'done';
 
-    if (!isCompletionEdge) {
+    if (!isCompletionEdge || params.notificationSuppressed) {
       return;
     }
 
@@ -165,10 +169,10 @@ export class NotificationCoordinator {
       const wtPath = params.worktreePath || params.worktreeId;
 
       if (tabId && this.options.onMarkTabUnread) {
-        this.options.onMarkTabUnread(tabId);
+        this.options.onMarkTabUnread(tabId, params.workspaceId);
       }
       if (wtPath && this.options.onMarkWorktreeUnread) {
-        this.options.onMarkWorktreeUnread(wtPath);
+        this.options.onMarkWorktreeUnread(wtPath, params.workspaceId);
       }
 
       if (settings.enabled && settings.agentTaskComplete) {
@@ -180,7 +184,7 @@ export class NotificationCoordinator {
           })
         )
           .then((result) => {
-            if (result && settings.customSoundPath && !result.played) {
+            if (result && settings.customSoundId !== 'none' && settings.customSoundId !== 'system' && settings.customSoundPath && !result.played && result.reason !== 'deduped') {
               this.options.onError?.(
                 new Error(`notification sound not played (${result.reason ?? 'unknown'})`),
                 'sound',
@@ -193,6 +197,8 @@ export class NotificationCoordinator {
 
         const dispatchArgs: DispatchNotificationArgs = {
           source: 'agent-task-complete',
+          attentionReason: next === 'waiting' ? 'waiting' : 'done',
+          sound: settings.customSoundId === 'system' ? 'system' : 'silent',
           worktreeLabel: params.worktreeLabel || params.worktreeId,
           terminalTitle: params.terminalTitle,
           agentLabel: params.agentLabel,

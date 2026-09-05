@@ -80,6 +80,7 @@ describe("terminal bell", () => {
     expect(soundMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock).toHaveBeenCalledWith({
       source: "terminal-bell",
+      sound: "system",
       worktreeLabel: "wt-a",
       terminalTitle: "vim",
     });
@@ -211,6 +212,37 @@ describe("terminal bell", () => {
 });
 
 describe("agent state change", () => {
+  it("sends distinct waiting and completion reasons with an explicit native sound mode", () => {
+    const { instance } = coordinator();
+    instance.handleAgentStateChange({ sessionId: "waiting", previousState: "working", nextState: "waiting" });
+    instance.handleAgentStateChange({ sessionId: "done", previousState: "working", nextState: "done", settings: settings({ customSoundId: "none", customSoundPath: "/old.wav" }) });
+    expect(dispatchMock.mock.calls.map(([req]) => [req.attentionReason, req.sound])).toEqual([
+      ["waiting", "system"], ["done", "silent"],
+    ]);
+  });
+
+  it("does not report expected custom sound deduplication as a playback error", async () => {
+    const onError = vi.fn();
+    soundMock.mockResolvedValueOnce({ played: false, reason: "deduped" });
+    const { instance } = coordinator({ onError, getSettings: () => settings({ customSoundId: "custom", customSoundPath: "/bell.wav" }) });
+    instance.handleAgentStateChange({ sessionId: "dedupe", previousState: "working", nextState: "done" });
+    await soundMock.mock.results[0].value;
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("consumes restore suppression without sound, unread marks, or a delayed alert", () => {
+    const { instance, marks } = coordinator();
+    instance.handleAgentStateChange({ sessionId: "restore", nextState: "working" });
+    instance.handleAgentStateChange({ sessionId: "restore", tabId: "tab", nextState: "done", notificationSuppressed: true });
+    instance.handleAgentStateChange({ sessionId: "restore", tabId: "tab", nextState: "done" });
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(soundMock).not.toHaveBeenCalled();
+    expect(marks.tabs).toEqual([]);
+    instance.handleAgentStateChange({ sessionId: "restore", nextState: "working" });
+    instance.handleAgentStateChange({ sessionId: "restore", nextState: "done" });
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("notifies on the running to waiting completion edge", () => {
     const { instance, marks } = coordinator({
       getSettings: () => settings({ agentTaskComplete: true }),
@@ -230,6 +262,8 @@ describe("agent state change", () => {
     expect(marks).toEqual({ tabs: ["t1"], worktrees: ["/repo/wt-a"] });
     expect(dispatchMock).toHaveBeenCalledWith({
       source: "agent-task-complete",
+      attentionReason: "waiting",
+      sound: "system",
       worktreeLabel: "wt-a",
       terminalTitle: "codex run",
       agentLabel: "codex",

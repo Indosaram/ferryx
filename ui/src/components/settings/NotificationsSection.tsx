@@ -80,6 +80,9 @@ export function NotificationsSection() {
 
   useEffect(() => {
     void refreshPermission();
+    const onFocus = () => { void refreshPermission(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [refreshPermission]);
 
   const handleRequestPermission = async () => {
@@ -130,7 +133,7 @@ export function NotificationsSection() {
     setIsTesting(true);
     setTestResult(null);
     try {
-      const result = await probeNotificationDelivery(true);
+      const result = await probeNotificationDelivery(true, settings.customSoundId === "system" ? "system" : "silent");
       setTestResult(describeProbeOutcome(result?.outcome));
       // "system" delivers the OS default sound with the banner and "none" is muted;
       // only an explicit custom file goes through the audio player.
@@ -147,7 +150,9 @@ export function NotificationsSection() {
     }
   };
 
-  const auth = permissionStatus?.authorization ?? "unknown";
+  const auth = permissionStatus?.supported === false ? "unavailable"
+    : permissionStatus?.authoritative === false ? "unknown"
+    : permissionStatus?.authorization ?? "unknown";
 
   const isAuthorized = auth === "authorized" || auth === "provisional";
   const isDenied = auth === "denied";
@@ -181,6 +186,8 @@ export function NotificationsSection() {
               OS Permission Status:
             </span>
             <Badge
+              data-testid="notification-permission-status"
+              data-permission-state={auth}
               variant="outline"
               className={`gap-1 px-2 py-0.5 text-[11px] font-medium ${permissionBadgeClass}`}
             >
@@ -200,7 +207,7 @@ export function NotificationsSection() {
               Request Permission
             </Button>
           ) : null}
-          {isDenied ? (
+          {permissionStatus?.canOpenSettings ? (
             <Button
               type="button"
               variant="link"

@@ -270,8 +270,8 @@ pub(crate) struct WorkspaceSnapshotCache {
 fn activity_rank(state: &str) -> u8 {
     match state {
         "waiting" | "blocked" => 3,
-        "working" => 2,
-        "done" => 1,
+        "done" => 2,
+        "working" => 1,
         _ => 0,
     }
 }
@@ -288,8 +288,8 @@ pub(crate) fn compute_attention_rollup<'a>(
     }
     match best_rank {
         3 => Some("waiting".to_string()),
-        2 => Some("working".to_string()),
-        1 => Some("done".to_string()),
+        2 => Some("done".to_string()),
+        1 => Some("working".to_string()),
         _ => None,
     }
 }
@@ -322,6 +322,13 @@ fn compute_worktree_attention(
     selection: Option<&RemoteActiveDesktopSelection>,
 ) -> Option<String> {
     let sel = selection?;
+    if let Some(entry) = sel.attention_inventory.iter().find(|entry| {
+        entry.workspace_id == workspace_id
+            && entry.worktree_slug.as_deref() == wt_slug
+            && (wt_slug.is_some() || entry.worktree_label.as_deref() == wt_label)
+    }) {
+        return compute_attention_rollup(entry.state.as_deref());
+    }
     if !worktree_matches_selection(workspace_id, wt_slug, wt_label, sel) {
         return None;
     }
@@ -330,6 +337,23 @@ fn compute_worktree_attention(
             .iter()
             .filter_map(|tab| tab.activity_state.as_deref()),
     )
+}
+
+#[cfg(test)]
+mod attention_inventory_tests {
+    use super::*;
+
+    #[test]
+    fn remote_attention_inventory_keeps_other_projects_and_unseen_done() {
+        let selection: RemoteActiveDesktopSelection = serde_json::from_value(serde_json::json!({
+            "workspaceId": "active", "worktreeLabel": "main",
+            "attentionInventory": [
+                { "workspaceId": "parked", "worktreeSlug": null, "worktreeLabel": "main", "state": "done" }
+            ]
+        })).unwrap();
+        assert_eq!(compute_worktree_attention("parked", None, Some("main"), Some(&selection)).as_deref(), Some("done"));
+        assert_eq!(compute_attention_rollup(["working", "done"]).as_deref(), Some("done"));
+    }
 }
 
 impl WorkspaceSnapshotCache {
@@ -561,6 +585,7 @@ async fn get_workspace_state(
         .clone()
         .unwrap_or(RemoteActiveDesktopSelection {
             workspace_id: Some(active_ws.clone()),
+            attention_inventory: Vec::new(),
             worktree_slug: None,
             worktree_label: None,
             session_id: None,

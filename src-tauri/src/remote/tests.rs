@@ -1247,6 +1247,7 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
     crate::ipc::remote::cmd_remote_set_active_selection(
         app.state(),
         crate::ipc::remote::SetActiveDesktopSelectionRequest {
+            attention_inventory: Vec::new(),
             workspace_id: Some("ws-gui".into()),
             worktree_slug: None,
             worktree_label: Some("main".into()),
@@ -2731,6 +2732,7 @@ async fn test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage()
     };
 
     let selection = RemoteActiveDesktopSelection {
+        attention_inventory: Vec::new(),
         workspace_id: Some("proj-1".to_string()),
         worktree_slug: Some("feat".to_string()),
         worktree_label: Some("feature-cool".to_string()),
@@ -2852,6 +2854,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         worktree_slug: Some("feature-tab".to_string()),
         worktree_label: Some("feature-tab".to_string()),
         session_id: None,
+        attention_inventory: Vec::new(),
         tab_id: Some("tab-term-selected".to_string()),
         terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
             id: "tab-term-selected".to_string(),
@@ -2929,6 +2932,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         worktree_slug: None,
         worktree_label: Some("main".to_string()),
         session_id: None,
+        attention_inventory: Vec::new(),
         tab_id: Some("tab-primary-2".to_string()),
         terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
             id: "tab-primary-2".to_string(),
@@ -2974,6 +2978,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         worktree_label: Some("feature-tab".to_string()),
         session_id: Some("sess-1".to_string()),
         tab_id: Some("tab-term-selected".to_string()),
+        attention_inventory: Vec::new(),
         terminal_tabs: vec![
             crate::remote::protocol::RemoteTerminalTabInfo {
                 id: "tab-term-selected".to_string(),
@@ -3079,13 +3084,21 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
         .expect("pair ctrl");
 
     // 1. Set active selection with multiple tabs having done, working, and waiting states.
-    // Rollup rank: waiting (3) > working (2) > done (1).
+    // Rollup rank: waiting (3) > unseen done (2) > working (1).
     let sel_json = serde_json::json!({
         "workspaceId": workspace_id,
         "worktreeSlug": "feat-agent",
         "worktreeLabel": "feat-agent",
         "sessionId": "sess-active",
         "activeTabId": "tab-3",
+        "attentionInventory": [{
+            "workspaceId": workspace_id,
+            "worktreeSlug": null,
+            "worktreeLabel": manager.list_worktrees().expect("list worktrees").iter()
+                .find(|worktree| worktree.orca_info().is_none())
+                .and_then(|worktree| worktree.branch_short_name()).map(str::to_string),
+            "state": "done"
+        }],
         "tabs": [
             {
                 "tabId": "tab-1",
@@ -3165,7 +3178,7 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
         .iter()
         .find(|wt| wt["worktreeSlug"].is_null())
         .expect("find primary worktree");
-    assert!(primary_wt["attention"].is_null());
+    assert_eq!(primary_wt["attention"], "done");
 
     // Verify projects worktree attention rollup as well
     let projects = state_val["projects"].as_array().expect("projects array");
@@ -3177,7 +3190,7 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
         .expect("find feat-agent in project");
     assert_eq!(proj_wt["attention"], "waiting");
 
-    // 2. Rank test: Remove waiting tab, leaving working and done -> attention should be working
+    // 2. Rank test: Unseen done stays above working.
     let sel_working = serde_json::json!({
         "workspaceId": workspace_id,
         "worktreeSlug": "feat-agent",
@@ -3217,7 +3230,7 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
         .iter()
         .find(|wt| wt["worktreeSlug"] == "feat-agent")
         .unwrap();
-    assert_eq!(feat_wt2["attention"], "working");
+    assert_eq!(feat_wt2["attention"], "done");
 
     // 3. Rank test: Only done tab -> attention should be done
     let sel_done = serde_json::json!({
@@ -3338,6 +3351,7 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
         worktree_label: Some("feat-agent".to_string()),
         session_id: Some("sess-active".to_string()),
         tab_id: Some("tab-1".to_string()),
+        attention_inventory: Vec::new(),
         terminal_tabs: vec![
             crate::remote::protocol::RemoteTerminalTabInfo {
                 id: "tab-1".to_string(),
@@ -3925,6 +3939,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
         session_id: Some(legacy_session_id.clone()),
         tab_id: Some("tab-1".into()),
         terminal_tabs: Vec::new(),
+        attention_inventory: Vec::new(),
     });
 
     // 1. Verify merged session listing / active lookup returns legacy session via HTTP API

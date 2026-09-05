@@ -118,6 +118,13 @@ vi.mock("./lib/tauri", () => ({
 
 const workspaceStoreModule = await import("./state/workspaceStore");
 type ActivityNotificationTarget = import("./state/workspaceStore").ActivityNotificationTarget;
+type ActivityNotificationEvent = import("./state/workspaceStore").ActivityNotificationEvent;
+const activityListeners = new Set<(event: ActivityNotificationEvent) => void>();
+function emitActivityTargets(): void {
+  for (const target of currentActivityTargets) {
+    for (const listener of activityListeners) listener({ ...target, previousState: "working" });
+  }
+}
 
 const markTabUnread = vi.fn();
 const markWorktreeUnread = vi.fn();
@@ -156,6 +163,7 @@ const storeState = {
     { path: "/repo/feature", branch: "refs/heads/feature" },
   ],
   unreadTabIds: {} as Record<string, boolean>,
+  unreadWorktreePaths: {} as Record<string, boolean>,
 };
 
 let currentActivityTargets: ActivityNotificationTarget[] = [];
@@ -229,6 +237,7 @@ describe("App notification coordinator wiring", () => {
     markTabUnread.mockReset();
     markWorktreeUnread.mockReset();
     bellListeners.clear();
+    activityListeners.clear();
     currentActivityTargets = [];
 
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -240,6 +249,10 @@ describe("App notification coordinator wiring", () => {
       tabActivity: {},
       worktreeActivity: {},
       activityNotificationTargets: currentActivityTargets,
+      subscribeActivityNotification: (listener: (event: ActivityNotificationEvent) => void) => {
+        activityListeners.add(listener);
+        return () => { activityListeners.delete(listener); };
+      },
       markTabUnread,
       markWorktreeUnread,
       clearTabUnread: vi.fn(),
@@ -299,8 +312,8 @@ describe("App notification coordinator wiring", () => {
       }),
     );
     expect(native.playNotificationSound).toHaveBeenCalledTimes(1);
-    expect(markTabUnread).toHaveBeenCalledWith("tab-1");
-    expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main");
+    expect(markTabUnread).toHaveBeenCalledWith("tab-1", undefined);
+    expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main", undefined);
   });
 
   it("CRITERION 2b: clicking the bell button while the window is FOCUSED calls dispatchNotification ZERO times", async () => {
@@ -351,6 +364,7 @@ describe("App notification coordinator wiring", () => {
       },
     ];
 
+    emitActivityTargets();
     rerender(<App />);
 
     expect(native.dispatchNotification).toHaveBeenCalledTimes(1);
@@ -363,8 +377,8 @@ describe("App notification coordinator wiring", () => {
       }),
     );
     expect(native.playNotificationSound).toHaveBeenCalledTimes(1);
-    expect(markTabUnread).toHaveBeenCalledWith("tab-1");
-    expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main");
+    expect(markTabUnread).toHaveBeenCalledWith("tab-1", undefined);
+    expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main", undefined);
   });
 
   it("uses native background focus when the DOM incorrectly reports focused", async () => {
@@ -399,13 +413,14 @@ describe("App notification coordinator wiring", () => {
       },
     ];
 
+    emitActivityTargets();
     rerender(<App />);
 
     expect(native.dispatchNotification).toHaveBeenCalledWith(
       expect.objectContaining({ source: "agent-task-complete" }),
     );
-    expect(markTabUnread).toHaveBeenCalledWith("tab-1");
-    expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main");
+    expect(markTabUnread).toHaveBeenCalledWith("tab-1", undefined);
+    expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main", undefined);
   });
 
   it("CRITERION 1b: a background agent transitioning working -> done while FOCUSED dispatches nothing", async () => {
@@ -441,6 +456,7 @@ describe("App notification coordinator wiring", () => {
       },
     ];
 
+    emitActivityTargets();
     rerender(<App />);
 
     expect(native.dispatchNotification).not.toHaveBeenCalled();

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -37,6 +37,26 @@ describe("NotificationsSection", () => {
   afterEach(() => {
     cleanup();
     resetNotificationSettings();
+  });
+
+  it("never paints non-authoritative permission as authorized and refreshes on return", async () => {
+    native.getNotificationPermissionStatus.mockResolvedValue({ authorization: "authorized", authoritative: false, supported: true });
+    await act(async () => { render(<NotificationsSection />); });
+    expect(screen.getByTestId("notification-permission-status")).toHaveAttribute("data-permission-state", "unknown");
+    native.getNotificationPermissionStatus.mockResolvedValue({ authorization: "denied", authoritative: true, supported: true });
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(native.getNotificationPermissionStatus).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("notification-permission-status")).toHaveAttribute("data-permission-state", "denied");
+  });
+
+  it.each([
+    ["system", "system"], ["none", "silent"], ["custom", "silent"],
+  ])("passes the selected %s sound mode to the native test notification", async (customSoundId, sound) => {
+    saveNotificationSettings({ enabled: true, customSoundId, customSoundPath: "/retained.wav" });
+    native.probeNotificationDelivery.mockResolvedValue({ outcome: "submitted", testSubmitted: true });
+    await act(async () => { render(<NotificationsSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /send test notification/i })); });
+    expect(native.probeNotificationDelivery).toHaveBeenCalledWith(true, sound);
   });
 
   it("disables send test notification button when notifications are disabled", async () => {

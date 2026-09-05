@@ -468,7 +468,7 @@ type ProjectHeaderProps = {
   active: boolean;
   expanded: boolean;
   activity: ActivitySummary;
-  attentionState: "waiting" | "unread" | null;
+  attentionState: "waiting" | "done" | "unread" | null;
   onToggle?: () => void;
   onSelect?: () => void;
   onCreateWorktree?: () => void;
@@ -618,9 +618,10 @@ function ProjectHeader({
   );
 }
 
-function projectAttentionState(activity: ActivitySummary): "waiting" | "unread" | null {
+function projectAttentionState(activity: ActivitySummary): "waiting" | "done" | "unread" | null {
   if (activity.hasWaiting) return "waiting";
-  return activity.hasUnread ? "unread" : null;
+  if (activity.hasUnread) return "unread";
+  return activity.hasDone ? "done" : null;
 }
 
 function summarizeProjectActivity(

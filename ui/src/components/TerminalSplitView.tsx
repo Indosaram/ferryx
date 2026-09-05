@@ -951,7 +951,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   const showsDropFeedback = dropFeedbackLeafId === leafId;
   const attentionFrameEnabled = useAttentionFrameEnabled();
   const needsAttention = attentionFrameEnabled && Boolean(
-    activity && (activity.state === "waiting" || (activity.state === "done" && !activity.seen)),
+    activity && !activity.seen && (activity.state === "waiting" || activity.state === "done"),
   );
 
   return (

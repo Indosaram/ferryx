@@ -30,6 +30,22 @@ pub enum NotificationSource {
     Test,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotificationSound {
+    #[default]
+    System,
+    Silent,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotificationAttentionReason {
+    Waiting,
+    #[default]
+    Done,
+}
+
 /// Why a dispatch did not result in a submitted notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -45,6 +61,10 @@ pub enum NotificationDispatchReason {
 #[serde(rename_all = "camelCase")]
 pub struct DispatchNotificationRequest {
     pub source: NotificationSourceField,
+    #[serde(default)]
+    pub sound: NotificationSound,
+    #[serde(default)]
+    pub attention_reason: NotificationAttentionReason,
     #[serde(default)]
     pub notification_id: Option<String>,
     #[serde(default)]
@@ -96,6 +116,7 @@ impl DispatchNotificationResult {
 pub struct NotificationContent {
     pub title: String,
     pub body: String,
+    pub sound: NotificationSound,
 }
 
 /// Host platform, reported so the UI can explain platform differences.
@@ -359,13 +380,14 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
 
     let (title, body) = match request.source {
         NotificationSource::AgentTaskComplete => {
-            let title = match agent {
-                Some(agent) => format!("{agent} finished"),
-                None => "Agent finished".to_string(),
+            let (action, fallback) = match request.attention_reason {
+                NotificationAttentionReason::Waiting => ("needs input", "Input or approval needed"),
+                NotificationAttentionReason::Done => ("finished", "Task complete"),
             };
+            let title = format!("{} {action}", agent.as_deref().unwrap_or("Agent"));
             let body = worktree
                 .or(workspace)
-                .unwrap_or_else(|| "Task complete".to_string());
+                .unwrap_or_else(|| fallback.to_string());
             (title, body)
         }
         NotificationSource::TerminalBell => {
@@ -388,6 +410,7 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
     NotificationContent {
         title: truncate_text(&title, MAX_TITLE_LEN),
         body: truncate_text(&body, MAX_BODY_LEN),
+        sound: request.sound,
     }
 }
 

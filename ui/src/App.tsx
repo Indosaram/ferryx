@@ -21,7 +21,6 @@ import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, type BrowserShortcutAct
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
-import type { TerminalActivityState } from "./lib/activity";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
@@ -92,9 +91,9 @@ import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState } from "./state/hmrWorkspaceState";
-import { clearWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
+import { clearWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { selectGlobalUnreadBadgeCount, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { selectGlobalUnreadBadgeCount, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
@@ -271,7 +270,19 @@ export function App() {
 export function deriveFocusedTerminal(
   workspaceId: string,
   state: WorkspaceState,
+  snapshots: ReadonlyArray<readonly [string, WorkspaceState]> = [],
 ): FocusedTerminalPayload | null {
+  const attentionInventory = [[workspaceId, state] as const, ...snapshots.filter(([id]) => id !== workspaceId)]
+    .flatMap(([id, snapshot]) => {
+      const summaries = selectWorktreeActivitySummaries(snapshot);
+      return snapshot.worktrees.map((worktree) => {
+        const activity = summaries[worktree.path];
+        const attention: "waiting" | "done" | "working" | null = activity?.hasWaiting ? "waiting"
+          : activity?.hasDone ? "done" : activity?.hasWorking ? "working" : null;
+        return { workspaceId: id, worktreeSlug: worktreeIdentity(worktree)?.slug ?? null,
+          worktreeLabel: worktree.branch?.replace(/^refs\/heads\//, "") ?? null, state: attention };
+      });
+    });
   const focusedGroup = state.layout.focusedGroupId
     ? state.layout.tabGroups?.[state.layout.focusedGroupId]
     : undefined;
@@ -305,9 +316,9 @@ export function deriveFocusedTerminal(
     ? foundWorktree.branch.replace(/^refs\/heads\//, "")
     : (focusedTab?.label ?? null);
 
-  const terminalTabs = state.layout.tabs.flatMap((tab) => {
+  const terminalTabs = [state.layout, ...Object.values(state.worktreeLayouts ?? {})].flatMap((ownerLayout) => ownerLayout.tabs.flatMap((tab) => {
     if (tab.kind === "browser") return [];
-    const layout = state.layout.layoutsByTabId?.[tab.id];
+    const layout = ownerLayout.layoutsByTabId?.[tab.id];
     const leafIds = layout?.root ? collectLeafIds(layout.root) : [];
     const paneSessionIds = leafIds.length > 0
       ? leafIds.map((leafId) => ({ leafId, sessionId: layout?.sessionIdsByLeafId?.[leafId] ?? "" }))
@@ -331,16 +342,16 @@ export function deriveFocusedTerminal(
       return {
         id: remotePaneId(tab.id, multiPane ? leafId : null),
         label: multiPane ? `${baseLabel} (${index + 1})` : baseLabel,
-        ...(activity?.state ? { activityState: activity.state } : {}),
+        ...(activity && (activity.state === "working" || !activity.seen) ? { activityState: activity.state } : {}),
         ...(activity?.agentType ? { agentType: activity.agentType } : {}),
         ...(paneSlug ? { worktreeSlug: paneSlug } : {}),
         ...(paneLabel ? { worktreeLabel: paneLabel } : {}),
         ...(backendSessionId ? { sessionId: backendSessionId } : {}),
       };
     });
-  });
+  }));
 
-  if (terminalTabs.length === 0) return null;
+  if (terminalTabs.length === 0 && !attentionInventory.some((entry) => entry.state !== null)) return null;
 
   const focusedLayout = focusedTab ? state.layout.layoutsByTabId?.[focusedTab.id] : undefined;
   const focusedLeafIds = focusedLayout?.root ? collectLeafIds(focusedLayout.root) : [];
@@ -350,6 +361,7 @@ export function deriveFocusedTerminal(
 
   return {
     workspaceId,
+    attentionInventory,
     worktreeSlug: worktreeSlug ?? null,
     worktreeLabel: worktreeLabel ?? null,
     backendSessionId: session?.backendSessionId ?? null,
@@ -493,9 +505,12 @@ function WorkspaceApp({
     tabActivity,
     worktreeActivity,
     unreadBadgeCount: unreadBadgeCountFromStore,
-    activityNotificationTargets,    markTabUnread,
+    activityNotificationTargets,
+    markTabUnread,
     markWorktreeUnread,
     subscribeTerminalBell,
+    subscribeActivityNotification,
+    parkedActivityVersion,
     openTab,
     createBrowserTab,
     duplicateBrowserTab,
@@ -539,8 +554,8 @@ function WorkspaceApp({
   const coordinatorRef = useRef<NotificationCoordinator | null>(null);
   if (!coordinatorRef.current) {
     coordinatorRef.current = new NotificationCoordinator({
-      onMarkTabUnread: (tabId) => markTabUnreadRef.current?.(tabId),
-      onMarkWorktreeUnread: (path) => markWorktreeUnreadRef.current?.(path),
+      onMarkTabUnread: (tabId, owner) => markTabUnreadRef.current?.(tabId, owner),
+      onMarkWorktreeUnread: (path, owner) => markWorktreeUnreadRef.current?.(path, owner),
       isWindowFocused: () => getNativeWindowFocused() ?? isWindowForegroundFocused(),
       onError: (err) => reportRuntimeErrorRef.current(err),
     });
@@ -549,30 +564,13 @@ function WorkspaceApp({
   const activityNotificationTargetsRef = useRef(activityNotificationTargets);
   activityNotificationTargetsRef.current = activityNotificationTargets;
 
-  const lastAgentStatesRef = useRef<Map<string, TerminalActivityState>>(new Map());
+  useEffect(() => subscribeActivityNotification((event) => {
+    coordinatorRef.current?.handleAgentStateChange({ ...event, nextState: event.state });
+  }), [subscribeActivityNotification]);
 
-  useEffect(() => {
-    const targets = activityNotificationTargets ?? [];
-    for (const target of targets) {
-      const previousState = lastAgentStatesRef.current.get(target.sessionId);
-      if (previousState !== target.state) {
-        lastAgentStatesRef.current.set(target.sessionId, target.state);
-        coordinatorRef.current?.handleAgentStateChange({
-          sessionId: target.sessionId,
-          tabId: target.tabId,
-          worktreePath: target.worktreePath,
-          worktreeLabel: target.worktreeLabel,
-          agentLabel: target.agentLabel,
-          terminalTitle: target.terminalTitle,
-          nextState: target.state,
-        });
-      }
-    }
-  }, [activityNotificationTargets]);
-
-  const handleTerminalBell = useCallback((sessionId: string, tabId: string) => {
+  const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget?: import("./state/workspaceStore").ActivityNotificationTarget) => {
     const targets = activityNotificationTargetsRef.current ?? [];
-    const target = targets.find(
+    const target = eventTarget ?? targets.find(
       (candidate) => candidate.sessionId === sessionId,
     );
     let worktreePath = target?.worktreePath;
@@ -591,6 +589,7 @@ function WorkspaceApp({
     }
 
     coordinatorRef.current?.handleTerminalBell({
+      workspaceId: target?.workspaceId,
       sessionId,
       tabId,
       worktreePath,
@@ -1040,8 +1039,8 @@ function WorkspaceApp({
   } | null>(null);
 
   const focusedTerminalPayload = useMemo(
-    () => deriveFocusedTerminal(activeProject.workspaceId, state),
-    [activeProject.workspaceId, state],
+    () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots()),
+    [activeProject.workspaceId, state, parkedActivityVersion],
   );
   const publishedTerminalPayloadKey = useRef<string | null>(null);
 

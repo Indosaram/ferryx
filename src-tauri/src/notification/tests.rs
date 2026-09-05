@@ -6,6 +6,27 @@ use super::model::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn notification_wire_preserves_sound_and_attention_reason() {
+    let parsed: DispatchNotificationRequest = serde_json::from_value(json!({
+        "source": "agent-task-complete", "sound": "silent", "attentionReason": "waiting"
+    })).unwrap();
+    let wire = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(wire["sound"], "silent");
+    assert_eq!(wire["attentionReason"], "waiting");
+    let content = serde_json::to_value(format_notification(&parsed)).unwrap();
+    assert_eq!(content["sound"], "silent");
+}
+
+#[test]
+fn notification_fallback_does_not_claim_permission() {
+    use super::permission::{DesktopFallbackPermissionProvider, NotificationPermissionProvider};
+    let status = DesktopFallbackPermissionProvider.status();
+    assert_eq!(status.authorization, NotificationAuthorization::Unknown);
+    assert_eq!(status.alerts_enabled, None);
+    assert_eq!(status.sounds_enabled, None);
+}
+
 fn request(source: NotificationSource) -> DispatchNotificationRequest {
     DispatchNotificationRequest {
         source,
@@ -563,6 +584,7 @@ fn macos_submits_through_user_notifications_not_the_legacy_bridge() {
     let content = NotificationContent {
         title: "Agent finished".into(),
         body: "omo completed a task".into(),
+        sound: NotificationSound::System,
     };
 
     let outcome = crate::notification::permission::macos::submit_notification(&content);

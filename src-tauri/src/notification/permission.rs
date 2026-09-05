@@ -40,21 +40,12 @@ impl NotificationPermissionProvider for DesktopFallbackPermissionProvider {
     fn status(&self) -> NotificationPermissionStatusDto {
         let platform = NotificationPlatform::current();
         let can_open_settings = matches!(platform, NotificationPlatform::Windows);
-        NotificationPermissionStatusDto {
-            platform,
-            supported: true,
-            authorization: NotificationAuthorization::Authorized,
-            alerts_enabled: Some(true),
-            sounds_enabled: Some(true),
-            requested: true,
-            authoritative: false,
-            can_open_settings,
-        }
+        NotificationPermissionStatusDto::non_authoritative(platform, can_open_settings)
     }
 
     fn request(&self) -> NotificationPermissionRequestDto {
         NotificationPermissionRequestDto {
-            granted: true,
+            granted: false,
             status: self.status(),
             error: None,
         }
@@ -63,24 +54,20 @@ impl NotificationPermissionProvider for DesktopFallbackPermissionProvider {
 
 #[cfg(target_os = "macos")]
 pub mod macos {
-    use super::super::model::NotificationContent;
+    pub use super::super::macos_submission::submit_notification;
     use super::*;
     use block2::RcBlock;
-    use objc2_foundation::NSString;
     use objc2_foundation::{NSBundle, NSError};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
-        UNNotificationRequest, UNNotificationSetting, UNNotificationSettings,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting, UNNotificationSettings,
         UNUserNotificationCenter,
     };
     use std::ptr::NonNull;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
     const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
     const STATUS_CACHE_TTL: Duration = Duration::from_secs(10);
-    static SUBMISSION_COUNTER: AtomicU64 = AtomicU64::new(0);
     static STATUS_CACHE: std::sync::Mutex<
         Option<(NotificationPermissionStatusDto, std::time::Instant)>,
     > = std::sync::Mutex::new(None);
@@ -110,45 +97,6 @@ pub mod macos {
         }
     }
 
-    /// Submit one notification through `UNUserNotificationCenter`.
-    ///
-    /// `usernoted` refuses to serve a single process over both notification APIs: querying
-    /// authorization already registers us as a modern client, so a legacy `NSUserNotification`
-    /// submission is denied ("You can't mix modern clients with legacy clients"). Submitting here
-    /// keeps the process on one API.
-    pub fn submit_notification(content: &NotificationContent) -> Result<(), String> {
-        if !has_bundle_identity() {
-            return Err("notifications require a bundled .app".into());
-        }
-
-        let identifier = format!(
-            "ferryx-{}-{}",
-            std::process::id(),
-            SUBMISSION_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
-            let native = unsafe { UNMutableNotificationContent::new() };
-            unsafe {
-                native.setTitle(&NSString::from_str(&content.title));
-                native.setBody(&NSString::from_str(&content.body));
-            }
-            let request = unsafe {
-                UNNotificationRequest::requestWithIdentifier_content_trigger(
-                    &NSString::from_str(&identifier),
-                    &native,
-                    None,
-                )
-            };
-            let center = UNUserNotificationCenter::currentNotificationCenter();
-            unsafe { center.addNotificationRequest_withCompletionHandler(&request, None) };
-        }));
-
-        if dispatched.is_err() {
-            return Err("UNUserNotificationCenter submission raised an exception".into());
-        }
-        Ok(())
-    }
-
     pub fn has_bundle_identity() -> bool {
         // Only consider it a real bundled macOS app if the bundle identifier is present
         // AND the bundle path is actually inside a .app wrapper directory.
@@ -163,15 +111,10 @@ pub mod macos {
     }
 
     pub fn dev_fallback_status() -> NotificationPermissionStatusDto {
-        NotificationPermissionStatusDto {
-            platform: NotificationPlatform::Macos,
-            supported: true,
-            authorization: NotificationAuthorization::Authorized,
-            alerts_enabled: Some(true),
-            sounds_enabled: Some(true),
-            requested: true,
-            authoritative: false,
-            can_open_settings: true,
+        if has_bundle_identity() {
+            NotificationPermissionStatusDto::non_authoritative(NotificationPlatform::Macos, true)
+        } else {
+            NotificationPermissionStatusDto::unsupported(NotificationPlatform::Macos)
         }
     }
 
@@ -241,11 +184,10 @@ pub mod macos {
 
         fn request(&self) -> NotificationPermissionRequestDto {
             if !has_bundle_identity() {
-                // In dev mode / unbundled mode, grant immediately so dev testing works
                 return NotificationPermissionRequestDto {
-                    granted: true,
+                    granted: false,
                     status: dev_fallback_status(),
-                    error: None,
+                    error: Some("notifications require a bundled .app".into()),
                 };
             }
 

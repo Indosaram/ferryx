@@ -104,8 +104,8 @@ function parseActivityState(value: unknown): "working" | "waiting" | "done" | un
 
 function attentionRank(state?: "working" | "waiting" | "done"): number {
   if (state === "waiting") return 3;
-  if (state === "working") return 2;
-  if (state === "done") return 1;
+  if (state === "done") return 2;
+  if (state === "working") return 1;
   return 0;
 }
 

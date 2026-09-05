@@ -133,6 +133,7 @@ const workspace = {
       { path: "/repo/docs", branch: "refs/heads/docs" },
     ] as Array<{ path: string; branch: string | null }>,
     unreadTabIds: {} as Record<string, boolean>,
+    unreadWorktreePaths: {} as Record<string, boolean>,
   },
 };
 
@@ -377,6 +378,7 @@ describe("App project workspace flow", () => {
       createBrowserTab: workspace.createBrowserTab,
       dispatchWorkspaceAction: workspace.dispatchWorkspaceAction,
       subscribeTerminalBell: () => () => undefined,
+      subscribeActivityNotification: () => () => undefined,
     })) as any);
     localStorage.clear();
     native.createWorktree.mockReset();
@@ -2304,6 +2306,7 @@ describe("App project workspace flow", () => {
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
         subscribeTerminalBell: () => () => undefined,
+        subscribeActivityNotification: () => () => undefined,
       }) as unknown as ReturnType<typeof workspaceStoreModule.useWorkspaceStore>);
 
       const { rerender } = render(<App />);
@@ -2572,6 +2575,7 @@ describe("App project workspace flow", () => {
       ensureSessionBackends: workspace.ensureSessionBackends,
       createBrowserTab: workspace.createBrowserTab,
       subscribeTerminalBell: () => () => undefined,
+      subscribeActivityNotification: () => () => undefined,
     })) as any);
 
     render(<App />);
@@ -2639,6 +2643,7 @@ describe("App project workspace flow", () => {
       ensureSessionBackends: workspace.ensureSessionBackends,
       createBrowserTab: workspace.createBrowserTab,
       subscribeTerminalBell: () => () => undefined,
+      subscribeActivityNotification: () => () => undefined,
     })) as any);
 
     try {
@@ -2664,6 +2669,8 @@ describe("App project workspace flow", () => {
     it("derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           focusedGroupId: "group-2",
@@ -2710,6 +2717,10 @@ describe("App project workspace flow", () => {
       const result = deriveFocusedTerminal("orca-lite", sampleState);
       expect(result).toEqual({
         workspaceId: "orca-lite",
+        attentionInventory: [
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "main", state: null },
+          { workspaceId: "orca-lite", worktreeSlug: "feature-branch", worktreeLabel: "orca/orca-lite/feature-branch", state: null },
+        ],
         worktreeSlug: "feature-branch",
         worktreeLabel: "orca/orca-lite/feature-branch",
         backendSessionId: "backend-pty-3b",
@@ -2751,6 +2762,8 @@ describe("App project workspace flow", () => {
     it("publishes terminal tabs from every worktree with safe labels", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const result = deriveFocusedTerminal("orca-lite", {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           activeTabId: "tab-active",
@@ -2793,6 +2806,8 @@ describe("App project workspace flow", () => {
     it("publishes the primary worktree with no managed slug", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const result = deriveFocusedTerminal("orca-lite", {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           activeTabId: "tab-main",
@@ -2859,6 +2874,8 @@ describe("App project workspace flow", () => {
     it("exposes every split pane of a tab as its own remote entry addressed by leaf", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const splitState: any = {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           activeTabId: "tab-1",
@@ -2918,6 +2935,8 @@ describe("App project workspace flow", () => {
     it("keeps a single-pane tab addressed by its plain tab id", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const singleState: any = {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           activeTabId: "tab-1",
@@ -2944,6 +2963,8 @@ describe("App project workspace flow", () => {
     it("derives per-tab activityState and agentType when present in activityBySessionId", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           activeTabId: "tab-1",
@@ -2992,6 +3013,8 @@ describe("App project workspace flow", () => {
     it("keeps publishing the terminal inventory with an empty focus when a browser tab is active", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           activeTabId: "browser-tab-1",
@@ -3018,6 +3041,8 @@ describe("App project workspace flow", () => {
     it("returns null only when the desktop has no terminal tab at all", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const result = deriveFocusedTerminal("orca-lite", {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
         activeWorktreePath: "/repo/main",
         layout: {
           activeTabId: "browser-tab-1",
@@ -3082,6 +3107,7 @@ describe("App project workspace flow", () => {
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
         subscribeTerminalBell: () => () => undefined,
+        subscribeActivityNotification: () => () => undefined,
       })) as any);
 
       render(<App />);
@@ -3090,6 +3116,12 @@ describe("App project workspace flow", () => {
       const lastCall = native.publishFocusedTerminal.mock.calls.at(-1)?.[0];
       expect(lastCall).toEqual({
         workspaceId: "orca-lite",
+        attentionInventory: [
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "main", state: null },
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "feature", state: null },
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "bugfix", state: null },
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "docs", state: null },
+        ],
         worktreeSlug: null,
         worktreeLabel: "main",
         backendSessionId: "pty-focused-live",
@@ -3183,6 +3215,7 @@ describe("App project workspace flow", () => {
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
         subscribeTerminalBell: () => () => undefined,
+        subscribeActivityNotification: () => () => undefined,
       }));
 
       render(<App />);
@@ -3191,6 +3224,12 @@ describe("App project workspace flow", () => {
       const lastCall = native.publishFocusedTerminal.mock.calls.at(-1)?.[0];
       expect(lastCall).toEqual({
         workspaceId: "orca-lite",
+        attentionInventory: [
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "main", state: "waiting" },
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "feature", state: null },
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "bugfix", state: null },
+          { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "docs", state: null },
+        ],
         worktreeSlug: null,
         worktreeLabel: "main",
         backendSessionId: "pty-1",
@@ -3252,6 +3291,7 @@ describe("App project workspace flow", () => {
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
         subscribeTerminalBell: () => () => undefined,
+        subscribeActivityNotification: () => () => undefined,
       });
 
       storeSpy.mockImplementation(mockStore);
@@ -3542,6 +3582,7 @@ describe("App project workspace flow", () => {
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
         subscribeTerminalBell: () => () => undefined,
+        subscribeActivityNotification: () => () => undefined,
       }));
 
       render(<App />);
@@ -3575,6 +3616,7 @@ describe("App project workspace flow", () => {
         restoreWorkspace: workspace.restoreWorkspace,
         createBrowserTab: workspace.createBrowserTab,
         subscribeTerminalBell: () => () => undefined,
+        subscribeActivityNotification: () => () => undefined,
       }));
 
       render(<App />);

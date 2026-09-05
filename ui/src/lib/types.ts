@@ -468,6 +468,8 @@ export interface NotificationPermissionRequest {
 
 export interface DispatchNotificationArgs {
   source?: NotificationSource | string;
+  sound?: "system" | "silent";
+  attentionReason?: "waiting" | "done";
   title?: string;
   body?: string;
   notificationId?: string;

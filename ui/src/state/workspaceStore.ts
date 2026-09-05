@@ -15,6 +15,8 @@ import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getT
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
+import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
+import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
 import { worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
@@ -174,7 +176,7 @@ export type WorkspaceAction =
     }
   | { type: "APPLY_PROVIDER_SESSION_IF_MISSING"; sessionId: string; providerSession: AgentProviderSession; agentType?: string }
   | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null }
-  | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string }
+  | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string; observed?: boolean }
   | {
       type: "SESSION_SCREEN_ACTIVITY";
       tabId: string;
@@ -183,8 +185,9 @@ export type WorkspaceAction =
       ruleId: string;
       manifestId?: string;
       providerSession?: AgentProviderSession | null;
+      observed?: boolean;
     }
-  | { type: "MARK_TAB_UNREAD"; tabId: string }
+  | { type: "MARK_TAB_UNREAD"; tabId: string; observed?: boolean }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
   | { type: "MARK_WORKTREE_UNREAD"; worktreePath: string }
   | { type: "CLEAR_WORKTREE_UNREAD"; worktreePath: string }
@@ -237,7 +240,8 @@ export function useWorkspaceStore({
    * Bell subscribers keyed by nothing: the native bell event is global, so App registers one
    * listener here instead of a per-pane prop that only exists for the mounted foreground tab.
    */
-  const bellListenersRef = useRef(new Set<(sessionId: string, tabId: string) => void>());
+  const bellListenersRef = useRef(new Set<(sessionId: string, tabId: string, target?: ActivityNotificationTarget) => void>());
+  const activityListenersRef = useRef(new Set<(event: ActivityNotificationEvent) => void>());
   const mountedWorkspaceIdRef = useRef(workspaceId);
   // Snapshots of parked workspaces live outside React state, so a change there has to be announced
   // for the sidebar's cross-workspace activity to recompute.
@@ -275,14 +279,29 @@ export function useWorkspaceStore({
   stateRef.current = renderedState;
   mountedWorkspaceIdRef.current = workspaceId;
 
+  const emitActivityChanges = useCallback((previous: WorkspaceState, next: WorkspaceState) => {
+    for (const target of selectActivityNotificationTargets(next)) {
+      const previousState = previous.activityBySessionId?.[target.sessionId]?.state;
+      if (previousState === target.state) continue;
+      for (const listener of activityListenersRef.current) listener({ ...target, previousState });
+    }
+  }, []);
+
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
-      const nextState = workspaceReducer(stateRef.current, action);
+      const previous = stateRef.current;
+      const contextualAction = action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY" || action.type === "MARK_TAB_UNREAD"
+        ? { ...action, observed: getNativeWindowFocused() ?? isWindowForegroundFocused() }
+        : action;
+      const nextState = workspaceReducer(previous, contextualAction);
       stateRef.current = nextState;
       const owningWorkspaceId = nextState.workspaceId ?? mountedWorkspaceIdRef.current;
       setHmrWorkspaceState(owningWorkspaceId, nextState);
       setWorkspaceSnapshot(owningWorkspaceId, nextState);
-      reactDispatch(action);
+      reactDispatch(contextualAction);
+      if (action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY") {
+        emitActivityChanges(previous, nextState);
+      }
     },
     [],
   );
@@ -334,10 +353,15 @@ export function useWorkspaceStore({
         if (snapshotWorkspaceId === mountedWorkspaceId) continue;
         const resolved = locateSession(snapshot, backendSessionId);
         if (!resolved) continue;
-        const nextState = workspaceReducer(snapshot, build(resolved));
+        const action = build(resolved);
+        const nextState = workspaceReducer(snapshot,
+          action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY"
+            ? { ...action, observed: false } : action);
         if (nextState === snapshot) return true;
         setWorkspaceSnapshot(snapshotWorkspaceId, nextState);
+        setHmrWorkspaceState(snapshotWorkspaceId, nextState);
         bumpParkedActivity();
+        emitActivityChanges(snapshot, nextState);
         return true;
       }
       return false;
@@ -370,9 +394,15 @@ export function useWorkspaceStore({
       .catch(() => undefined);
 
     void onNativeTerminalBell((payload) => {
-      const resolved = resolveSession(payload.sessionId);
-      if (!resolved) return;
-      bellListenersRef.current.forEach((listener) => listener(resolved.sessionId, resolved.tabId));
+      const mounted = stateRef.current;
+      for (const snapshot of [mounted, ...listWorkspaceSnapshots()
+        .filter(([id]) => id !== mounted.workspaceId).map(([, state]) => state)]) {
+        const resolved = locateSession(snapshot, payload.sessionId);
+        if (!resolved) continue;
+        const target = notificationTarget(snapshot, resolved.sessionId, resolved.tabId);
+        bellListenersRef.current.forEach((listener) => listener(resolved.sessionId, resolved.tabId, target));
+        return;
+      }
     })
       .then((unlisten) => {
         if (subscribed) unlistenBell = unlisten;
@@ -1031,13 +1061,28 @@ export function useWorkspaceStore({
     [dispatch],
   );
 
-  const subscribeTerminalBell = useCallback((listener: (sessionId: string, tabId: string) => void) => {
+  const subscribeTerminalBell = useCallback((listener: (sessionId: string, tabId: string, target?: ActivityNotificationTarget) => void) => {
     const listeners = bellListenersRef.current;
     listeners.add(listener);
     return () => {
       listeners.delete(listener);
     };
   }, []);
+
+  const subscribeActivityNotification = useCallback((listener: (event: ActivityNotificationEvent) => void) => {
+    activityListenersRef.current.add(listener);
+    return () => { activityListenersRef.current.delete(listener); };
+  }, []);
+
+  const dispatchToOwner = useCallback((action: WorkspaceAction, owner?: string) => {
+    if (!owner || owner === mountedWorkspaceIdRef.current) { dispatch(action); return; }
+    const snapshot = getWorkspaceSnapshot(owner);
+    if (!snapshot) return;
+    const next = workspaceReducer(snapshot, action.type === "MARK_TAB_UNREAD" ? { ...action, observed: false } : action);
+    setWorkspaceSnapshot(owner, next);
+    setHmrWorkspaceState(owner, next);
+    bumpParkedActivity();
+  }, [dispatch, bumpParkedActivity]);
 
   const createBrowserTab = useCallback(
     async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string; profileId?: string; browserId?: string }) => {
@@ -1204,9 +1249,11 @@ export function useWorkspaceStore({
     restoreWorkspace,
     updateSessionTitleActivity,
     subscribeTerminalBell,
-    markTabUnread: (tabId: string) => dispatch({ type: "MARK_TAB_UNREAD", tabId }),
+    subscribeActivityNotification,
+    parkedActivityVersion,
+    markTabUnread: (tabId: string, owner?: string) => dispatchToOwner({ type: "MARK_TAB_UNREAD", tabId }, owner),
     clearTabUnread: (tabId: string) => dispatch({ type: "CLEAR_TAB_UNREAD", tabId }),
-    markWorktreeUnread: (worktreePath: string) => dispatch({ type: "MARK_WORKTREE_UNREAD", worktreePath }),
+    markWorktreeUnread: (worktreePath: string, owner?: string) => dispatchToOwner({ type: "MARK_WORKTREE_UNREAD", worktreePath }, owner),
     clearWorktreeUnread: (worktreePath: string) => dispatch({ type: "CLEAR_WORKTREE_UNREAD", worktreePath }),
   };
 }
@@ -1356,6 +1403,8 @@ export function selectGlobalUnreadBadgeCount(
 }
 
 export type ActivityNotificationTarget = {
+  workspaceId?: string;
+  notificationSuppressed?: boolean;
   sessionId: string;
   tabId: string;
   worktreePath: string;
@@ -1364,6 +1413,22 @@ export type ActivityNotificationTarget = {
   terminalTitle: string;
   state: TerminalActivityState;
 };
+
+export type ActivityNotificationEvent = ActivityNotificationTarget & { previousState?: TerminalActivityState };
+
+function notificationTarget(state: WorkspaceState, sessionId: string, tabId: string): ActivityNotificationTarget {
+  const activity = state.activityBySessionId?.[sessionId];
+  const worktreePath = sessionWorktreePath(state.sessions[sessionId]);
+  const worktree = state.worktrees.find((candidate) => candidate.path === worktreePath);
+  const parsed = parseAgentTitle(activity?.title ?? "");
+  return {
+    workspaceId: state.workspaceId, sessionId, tabId, worktreePath,
+    worktreeLabel: worktree ? workspaceName(worktree) : "",
+    agentLabel: parsed?.isAgent ? parsed.name : agentDisplayNameForType(activity?.isAgent ? activity.agentType : undefined),
+    terminalTitle: activity?.title ?? "", state: activity?.state ?? "done",
+    notificationSuppressed: activity?.notificationSuppressed,
+  };
+}
 
 export function selectActivityNotificationTargets(state: WorkspaceState): ActivityNotificationTarget[] {
   const targets: ActivityNotificationTarget[] = [];
@@ -1384,6 +1449,8 @@ export function selectActivityNotificationTargets(state: WorkspaceState): Activi
       : agentDisplayNameForType(activity.isAgent ? activity.agentType : undefined);
 
     targets.push({
+      workspaceId: state.workspaceId,
+      notificationSuppressed: activity.notificationSuppressed,
       sessionId,
       tabId,
       worktreePath,
@@ -1537,13 +1604,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "SELECT_WORKTREE": {
       if (!state.worktrees.some((worktree) => worktree.path === action.path)) return state;
       if (action.path === state.activeWorktreePath) {
-        const unreadWorktreePaths = { ...state.unreadWorktreePaths };
-        delete unreadWorktreePaths[action.path];
-        const unreadTabIds = { ...state.unreadTabIds };
-        for (const tab of state.layout.tabs) {
-          delete unreadTabIds[tab.id];
-        }
-        return { ...state, unreadTabIds, unreadWorktreePaths };
+        return state.layout.activeTabId
+          ? workspaceReducer(state, { type: "ACTIVATE_TAB", tabId: state.layout.activeTabId })
+          : state;
       }
 
       const nextWorktreeLayouts = { ...(state.worktreeLayouts ?? {}) };
@@ -1553,23 +1616,18 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const nextLayout = nextWorktreeLayouts[action.path] ?? createLayoutState();
       delete nextWorktreeLayouts[action.path];
 
-      const unreadWorktreePaths = { ...state.unreadWorktreePaths };
-      delete unreadWorktreePaths[action.path];
-      const unreadTabIds = { ...state.unreadTabIds };
-      for (const tab of nextLayout.tabs) {
-        delete unreadTabIds[tab.id];
-      }
-      return {
+      const selected = {
         ...state,
         activeWorktreePath: action.path,
         layout: nextLayout,
         worktreeLayouts: nextWorktreeLayouts,
-        unreadTabIds,
-        unreadWorktreePaths,
       };
+      return nextLayout.activeTabId
+        ? workspaceReducer(selected, { type: "ACTIVATE_TAB", tabId: nextLayout.activeTabId })
+        : selected;
     }
     case "MARK_TAB_UNREAD": {
-      if (isTabVisible(state, action.tabId)) return state;
+      if (action.observed !== false && isTabVisible(state, action.tabId)) return state;
       const worktreePath = getTabWorktreePath(state, action.tabId);
       return {
         ...state,
@@ -1807,7 +1865,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case "FOCUS_PANE": {
       const layout = layoutReducer(state.layout, { type: "FOCUS_PANE", tabId: action.tabId, leafId: action.leafId });
-      return layout === state.layout ? state : { ...state, layout };
+      const focused = acknowledgeTabCompletions({ ...state, layout }, action.tabId);
+      return workspaceReducer(focused, { type: "CLEAR_TAB_UNREAD", tabId: action.tabId });
     }
     case "SET_PANE_RATIO": {
       const layout = layoutReducer(state.layout, {
@@ -1962,7 +2021,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         source: "screen",
         agentSource,
       };
-      const nextState = applySessionActivity(state, action.tabId, action.sessionId, activity);
+      const nextState = applySessionActivity(state, action.tabId, action.sessionId, activity, action.observed);
       const session = nextState.sessions[action.sessionId];
       if (!session) return nextState;
 
@@ -2021,7 +2080,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             source: "screen",
             agentSource,
           };
-          return applySessionActivity(state, action.tabId, action.sessionId, activity);
+          return applySessionActivity(state, action.tabId, action.sessionId, activity, action.observed);
         }
         if (!previous) return state;
         const activityBySessionId = { ...(state.activityBySessionId ?? {}) };
@@ -2074,7 +2133,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         source: isScreenSource ? "screen" : (previous?.source ?? "title"),
         agentSource,
       };
-      return applySessionActivity(state, action.tabId, action.sessionId, activity);
+      return applySessionActivity(state, action.tabId, action.sessionId, activity, action.observed);
     }
   }
 }
@@ -2140,6 +2199,7 @@ function applySessionActivity(
   tabId: string,
   sessionId: string,
   activity: TerminalActivity,
+  observed = true,
 ): WorkspaceState {
   const previous = state.activityBySessionId?.[sessionId];
   if (
@@ -2162,10 +2222,11 @@ function applySessionActivity(
   const suppression = state.attentionSuppressions?.[sessionId] === true && isAttentionState;
   const acknowledged =
     isAttentionState &&
-    (activity.seen === true || suppression || isSessionActivelyObserved(state, tabId, sessionId));
+    (activity.seen === true || (wasAttentionState && previous?.seen === true) || suppression || (observed && isSessionActivelyObserved(state, tabId, sessionId)));
   const stored: TerminalActivity = {
     ...activity,
     ...(isAttentionState ? { seen: acknowledged } : {}),
+    ...(isAttentionState ? { notificationSuppressed: suppression || (wasAttentionState && previous?.notificationSuppressed === true) } : {}),
   };
 
   let nextState: WorkspaceState = {
@@ -2180,7 +2241,7 @@ function applySessionActivity(
       : {}),
   };
 
-  if (isAttentionState && !wasAttentionState && !suppression && !isTabVisible(state, tabId)) {
+  if (isAttentionState && !wasAttentionState && !suppression && (!observed || !isTabVisible(state, tabId))) {
     const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,

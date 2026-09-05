@@ -7,6 +7,8 @@
 pub mod audio;
 pub mod badge;
 pub mod model;
+#[cfg(target_os = "macos")]
+mod macos_submission;
 pub mod permission;
 pub mod service;
 
