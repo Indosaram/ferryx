@@ -1,0 +1,72 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/push
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/features/ferryx/push/client.test.ts (3 tests | 3 failed) 15ms
+   × push client boundaries > accepts only same origin exact task links 11ms
+     → expected null to be 'https://ferryx.test/#task=YWJj' // Object.is equality
+   × push client boundaries > denied permission never subscribes 1ms
+     → expected 'enabled' to be 'denied' // Object.is equality
+   × push client boundaries > server unsubscribe precedes local removal and failure preserves subscription 1ms
+     → promise resolved "'disabled'" instead of rejecting
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/push/client.test.ts > push client boundaries > accepts only same origin exact task links
+AssertionError: expected null to be 'https://ferryx.test/#task=YWJj' // Object.is equality
+
+- Expected: 
+"https://ferryx.test/#task=YWJj"
+
++ Received: 
+null
+
+ ❯ src/features/ferryx/push/client.test.ts:5:66
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/features/ferryx/push/client.test.ts > push client boundaries > denied permission never subscribes
+AssertionError: expected 'enabled' to be 'denied' // Object.is equality
+
+Expected: "denied"
+Received: "enabled"
+
+ ❯ src/features/ferryx/push/client.test.ts:11:35
+      9|     vi.stubGlobal("isSecureContext", true); vi.stubGlobal("Notificatio…
+     10|     const subscribe = vi.fn(); const client = new PushClient({request:…
+     11|     expect(await client.enable()).toBe("denied"); expect(subscribe).no…
+       |                                   ^
+     12|   });
+     13|   it("server unsubscribe precedes local removal and failure preserves …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/features/ferryx/push/client.test.ts > push client boundaries > server unsubscribe precedes local removal and failure preserves subscription
+AssertionError: promise resolved "'disabled'" instead of rejecting
+
+- Expected: 
+Error {
+  "message": "rejected promise",
+}
+
++ Received: 
+"disabled"
+
+ ❯ src/features/ferryx/push/client.test.ts:16:34
+     14|     let removed = false; const subscription = { endpoint: "https://pus…
+     15|     const client = new PushClient({request: async () => { throw new Er…
+     16|     await expect(client.disable()).rejects.toThrow("offline"); expect(…
+       |                                  ^
+     17|   });
+     18| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  20:03:52
+   Duration  1.86s (transform 63ms, setup 367ms, collect 23ms, tests 15ms, environment 723ms, prepare 88ms)
+
+error: script "test" exited with code 1

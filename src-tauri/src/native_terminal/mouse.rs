@@ -57,6 +57,8 @@ pub struct MouseEvent {
     pub position: MousePosition,
     pub modifiers: KeyModifiers,
     pub size: Option<MouseRendererSize>,
+    #[serde(default)]
+    pub timestamp_ns: Option<u64>,
 }
 
 #[cfg(test)]
@@ -82,5 +84,17 @@ mod tests {
         let size = event.size.expect("mouse renderer size");
         assert_eq!(size.screen_width, 1000);
         assert_eq!(size.cell_height, 20);
+        assert_eq!(event.timestamp_ns, None);
+
+        let json_with_timestamp = r#"{
+            "action": "Press",
+            "button": "Left",
+            "position": { "x": 12.5, "y": 6.0 },
+            "modifiers": { "shift": false, "ctrl": false, "alt": false, "superKey": false, "capsLock": false, "numLock": false },
+            "timestampNs": 1234567890
+        }"#;
+        let event_ts: MouseEvent =
+            serde_json::from_str(json_with_timestamp).expect("deserialize with timestampNs");
+        assert_eq!(event_ts.timestamp_ns, Some(1234567890));
     }
 }

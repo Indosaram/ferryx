@@ -1,0 +1,157 @@
+    Blocking waiting for file lock on build directory
+   Compiling ferryx v2026.902.2 (/Users/indo/code/project/orca-lite/src-tauri)
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> src/notification/permission.rs:130:26
+    |
+130 |             let native = unsafe { UNMutableNotificationContent::new() };
+    |                          ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> src/notification/permission.rs:131:13
+    |
+131 |             unsafe {
+    |             ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/notification/permission.rs:135:27
+    |
+135 |             let request = unsafe {
+    |                           ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/notification/permission.rs:143:13
+    |
+143 |             unsafe { center.addNotificationRequest_withCompletionHandler(&request, None) };
+    |             ^^^^^^ unnecessary `unsafe` block
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:27:5
+   |
+26 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+27 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 10 warnings (run `cargo fix --lib -p ferryx` to apply 1 suggestion)
+warning: unused import: `Path`
+ --> tests/../src/ferryx_scope/ssh/helper.rs:4:71
+  |
+4 | use std::{collections::{HashMap, VecDeque}, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, Mutex, Condvar}};
+  |                                                                       ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `CommandBuilder` and `PtySize`
+ --> tests/../src/ferryx_scope/ssh/helper.rs:5:20
+  |
+5 | use portable_pty::{CommandBuilder, PtySize};
+  |                    ^^^^^^^^^^^^^^  ^^^^^^^
+
+warning: fields `next`, `bytes`, `chunks`, and `exited` are never read
+  --> tests/../src/ferryx_scope/ssh/helper.rs:26:17
+   |
+26 | struct Output { next: u64, bytes: usize, chunks: VecDeque<(u64, Vec<u8>)>, exited: bool }
+   |        ------   ^^^^       ^^^^^         ^^^^^^                            ^^^^^^
+   |        |
+   |        fields in this struct
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple fields are never read
+  --> tests/../src/ferryx_scope/ssh/helper.rs:28:5
+   |
+27 | struct Session {
+   |        ------- fields in this struct
+28 |     target: TargetRef, pid: u32, cwd: PathBuf,
+   |     ^^^^^^             ^^^       ^^^
+29 |     master: Box<dyn portable_pty::MasterPty + Send>, writer: Box<dyn Write + Send>, child: Box<dyn portable_pty::Child + Send + Sync>,
+   |     ^^^^^^                                           ^^^^^^                         ^^^^^
+30 |     output: Arc<(Mutex<Output>, Condvar)>,
+   |     ^^^^^^
+
+warning: fields `root`, `host`, `owner`, `epoch`, `sessions`, and `projects` are never read
+  --> tests/../src/ferryx_scope/ssh/helper.rs:32:22
+   |
+32 | ...ct Runtime { root: PathBuf, host: String, owner: String, epoch: Epoch, token: String, sessions: Mutex<HashMap<String, Session>>, projects: M...
+   |       -------   ^^^^           ^^^^          ^^^^^          ^^^^^                        ^^^^^^^^                                   ^^^^^^^^
+   |       |
+   |       fields in this struct
+
+warning: `ferryx` (test "scoped_ssh") generated 5 warnings (run `cargo fix --test "scoped_ssh" -p ferryx` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 58s
+     Running tests/scoped_ssh.rs (src-tauri/target/debug/deps/scoped_ssh-b8f6e7d73ce051be)
+
+running 3 tests
+test options_honor_port_key_jump_and_noninteractive_trust ... ok
+test corrupt_store_is_not_rewritten ... ok
+test ssh::helper::tests::retained_pty_survives_bridge_eof_and_replays ... FAILED
+
+failures:
+
+---- ssh::helper::tests::retained_pty_survives_bridge_eof_and_replays stdout ----
+
+thread 'ssh::helper::tests::retained_pty_survives_bridge_eof_and_replays' (14494535) panicked at tests/../src/ferryx_scope/ssh/helper.rs:54:70:
+called `Result::unwrap()` on an `Err` value: "UNSUPPORTED"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ssh::helper::tests::retained_pty_survives_bridge_eof_and_replays
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test scoped_ssh`
+
+EXIT:101

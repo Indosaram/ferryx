@@ -1,0 +1,52 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/chat
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/features/ferryx/chat/ManagedChat.test.tsx (1 test | 1 failed) 17ms
+   × managed chat surface > preserves drafts on failed send, respects IME, revokes and renders terminal fallback 16ms
+     → Unable to find an element by: [data-testid="chat-composer"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"chat-mode"[39m
+    [36m/>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ✓ src/features/ferryx/chat/drafts.test.ts (1 test) 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/chat/ManagedChat.test.tsx > managed chat surface > preserves drafts on failed send, respects IME, revokes and renders terminal fallback
+TestingLibraryElementError: Unable to find an element by: [data-testid="chat-composer"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"chat-mode"[39m
+    [36m/>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/features/ferryx/chat/ManagedChat.test.tsx:14:25
+     12|   const props={target,kind:"managed" as const,service,storage:localSto…
+     13|   const view=render(<ManagedChat {...props}/>);
+     14|   const composer=screen.getByTestId("chat-composer");
+       |                         ^
+     15|   fireEvent.change(composer,{target:{value:"retained"}});
+     16|   fireEvent.compositionStart(composer); fireEvent.keyDown(composer,{ke…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 1 passed (2)
+   Start at  19:38:46
+   Duration  2.18s (transform 81ms, setup 392ms, collect 137ms, tests 19ms, environment 945ms, prepare 95ms)
+
+error: script "test" exited with code 1

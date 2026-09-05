@@ -6,6 +6,7 @@ pub mod dag;
 pub mod debug;
 pub mod diagnostics;
 pub mod error;
+pub mod native_menu;
 #[cfg(feature = "native-terminal")]
 pub mod native_terminal;
 #[cfg(not(feature = "native-terminal"))]
@@ -42,6 +43,7 @@ pub use dag::*;
 pub use debug::*;
 pub use diagnostics::*;
 pub use error::*;
+pub use native_menu::*;
 #[cfg(feature = "native-terminal")]
 pub use native_terminal::*;
 #[cfg(not(feature = "native-terminal"))]

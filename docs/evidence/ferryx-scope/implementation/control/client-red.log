@@ -1,0 +1,46 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/control
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/features/ferryx/control/selection.test.tsx (1 test) 115ms
+ ✓ src/features/ferryx/control/control.test.tsx (2 tests) 24ms
+ ❯ src/features/ferryx/control/client.test.ts (2 tests | 1 failed) 9ms
+   ✓ uses the actual host-qualified endpoint and bearer mutation envelope 3ms
+   × rejects malformed inventory at the transport boundary 6ms
+     → promise resolved "{ revision: 1, …(3) }" instead of rejecting
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/control/client.test.ts > rejects malformed inventory at the transport boundary
+AssertionError: promise resolved "{ revision: 1, …(3) }" instead of rejecting
+
+- Expected
++ Received
+
+- Error {
+-   "message": "rejected promise",
++ {
++   "completeness": "complete",
++   "items": [
++     {
++       "target": {
++         "epoch": 42,
++       },
++     },
++   ],
++   "revision": 1,
++   "unavailableHosts": [],
+  }
+
+ ❯ src/features/ferryx/control/client.test.ts:15:29
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 4 passed (5)
+   Start at  19:59:56
+   Duration  3.79s (transform 108ms, setup 464ms, collect 1.32s, tests 148ms, environment 790ms, prepare 148ms)
+
+error: script "test" exited with code 1

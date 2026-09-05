@@ -1,0 +1,71 @@
+    Blocking waiting for file lock on build directory
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:27:5
+   |
+26 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+27 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 6 warnings (run `cargo fix --lib -p ferryx` to apply 1 suggestion)
+   Compiling ferryx v2026.902.2 (/Users/indo/code/project/orca-lite/src-tauri)
+error[E0599]: no method named `is_closed` found for enum `tokio::sync::mpsc::error::TrySendError<T>` in the current scope
+   --> tests/../src/ferryx_scope/chat/mod.rs:129:78
+    |
+129 |   self.tx.try_send(Action::Request(method.into(),params,tx)).map_err(|e|if e.is_closed(){ChatError::Exited}else{ChatError::Limit})?;
+    |                                                                              ^^^^^^^^^ method not found in `tokio::sync::mpsc::error::TrySendError<Action>`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `ferryx` (test "scoped_chat") due to 1 previous error
+
+EXIT:101

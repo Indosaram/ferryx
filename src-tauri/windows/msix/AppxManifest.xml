@@ -6,14 +6,14 @@
   IgnorableNamespaces="uap rescap">
 
   <Identity
-    Name="Ferryx"
-    Publisher="CN=Ferryx, O=Ferryx, C=US"
+    Name="ProjectMaho.Ferryx"
+    Publisher="CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36"
     Version="0.1.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Ferryx</DisplayName>
-    <PublisherDisplayName>Ferryx</PublisherDisplayName>
+    <PublisherDisplayName>Project Maho</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>Ultra-lightweight workspace and AI agent launcher powered by Tauri v2 and Rust</Description>
   </Properties>

@@ -1,0 +1,80 @@
+warning: fields `retained` and `capacity` are never read
+  --> src-tauri/tests/../src/ferryx_scope/control/mod.rs:28:5
+   |
+24 | pub struct Inventory {
+   |            --------- fields in this struct
+...
+28 |     retained: VecDeque<ScopeEvent<Value>>,
+   |     ^^^^^^^^
+29 |     capacity: usize,
+   |     ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `create`, `execute`, and `read` are never used
+  --> src-tauri/tests/../src/ferryx_scope/control/service.rs:10:8
+   |
+ 9 | pub trait ControlBackend: Send + Sync {
+   |           -------------- methods in this trait
+10 |     fn create(&self, params: Value) -> BoxFuture<'_, Result<Agent>>;
+   |        ^^^^^^
+11 |     fn execute(&self, target: TargetRef, operation: String, params: Value) -> BoxFuture<'_, Result<Value>>;
+   |        ^^^^^^^
+12 |     fn read(&self, target: TargetRef, limit: usize) -> BoxFuture<'_, Result<Value>>;
+   |        ^^^^
+
+warning: field `receipts` is never read
+  --> src-tauri/tests/../src/ferryx_scope/control/service.rs:20:5
+   |
+14 | pub struct Service {
+   |            ------- field in this struct
+...
+20 |     receipts: Mutex<HashMap<(String, String), (Value, Result<Value>)>>,
+   |     ^^^^^^^^
+
+warning: methods `list`, `read`, and `backend` are never used
+  --> src-tauri/tests/../src/ferryx_scope/control/service.rs:42:18
+   |
+23 | impl Service {
+   | ------------ methods in this implementation
+...
+42 |     pub async fn list(&self, token: &str) -> Result<InventorySnapshot<Agent>> {
+   |                  ^^^^
+...
+51 |     pub async fn read(&self, token: &str, target: TargetRef, limit: usize) -> Result<Value> {
+   |                  ^^^^
+...
+58 |     fn backend(&self, host: &str) -> Result<Arc<dyn ControlBackend>> { self.backends.read().get(host).cloned().ok_or_else(|| error(ScopeE...
+   |        ^^^^^^^
+
+warning: 4 warnings emitted
+
+
+running 3 tests
+
+thread 'global_waiting_and_stale_epoch_and_completion_provenance' (14604470) panicked at src-tauri/tests/scoped_control.rs:20:5:
+assertion `left == right` failed
+  left: 0
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'atomic_snapshot_delta_gap_and_tombstone' (14604468) panicked at src-tauri/tests/scoped_control.rs:31:27:
+called `Result::unwrap()` on an `Err` value: Empty
+test global_waiting_and_stale_epoch_and_completion_provenance ... FAILED
+test atomic_snapshot_delta_gap_and_tombstone ... FAILED
+
+thread 'control::service_tests::roles_dedupe_wait_and_revoke' (14604469) panicked at src-tauri/tests/../src/ferryx_scope/control/service_tests.rs:22:5:
+assertion `left == right` failed
+  left: Unsupported
+ right: Forbidden
+test control::service_tests::roles_dedupe_wait_and_revoke ... FAILED
+
+failures:
+
+failures:
+    atomic_snapshot_delta_gap_and_tombstone
+    control::service_tests::roles_dedupe_wait_and_revoke
+    global_waiting_and_stale_epoch_and_completion_provenance
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

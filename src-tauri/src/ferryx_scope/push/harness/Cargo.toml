@@ -1,0 +1,27 @@
+[package]
+name = "ferryx-push-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+web-push = { version = "=0.11.0", default-features = false }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+rand = "0.8"
+thiserror = "2"
+tracing = "0.1"
+tempfile = "3"
+jwt-simple = { version = "=0.12.11", default-features = false, features = ["pure-rust"] }
+ece = "=2.3.1"
+
+[workspace]

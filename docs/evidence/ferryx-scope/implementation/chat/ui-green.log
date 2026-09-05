@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/chat
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/features/ferryx/chat/drafts.test.ts (1 test) 2ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  19:34:31
+   Duration  1.64s (transform 60ms, setup 304ms, collect 14ms, tests 2ms, environment 725ms, prepare 76ms)
+

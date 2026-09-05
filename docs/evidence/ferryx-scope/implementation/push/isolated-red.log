@@ -1,0 +1,70 @@
+    Updating crates.io index
+    Blocking waiting for file lock on package cache
+     Locking 282 packages to latest compatible versions
+      Adding base64 v0.22.1 (available: v0.23.1)
+      Adding crypto-common v0.1.6 (available: v0.1.7)
+      Adding jwt-simple v0.12.11 (available: v0.12.17)
+      Adding matchit v0.8.4 (available: v0.8.6)
+      Adding rand v0.8.8 (available: v0.10.2)
+      Adding reqwest v0.12.28 (available: v0.13.4)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+ Downloading crates ...
+warning: spurious network error (3 tries remaining): failed to get successful HTTP response from `https://static.crates.io/crates/elliptic-curve/0.13.8/download` (146.75.50.137), got 502
+body:
+I/O error
+warning: spurious network error (3 tries remaining): failed to get successful HTTP response from `https://static.crates.io/crates/ece/2.3.1/download` (146.75.50.137), got 502
+body:
+I/O error
+warning: spurious network error (3 tries remaining): failed to get successful HTTP response from `https://static.crates.io/crates/aes/0.9.3/download` (146.75.50.137), got 502
+body:
+I/O error
+  Downloaded aes-keywrap v0.9.0
+  Downloaded const-oid v0.6.2
+  Downloaded der_derive v0.4.1
+  Downloaded hmac-sha256 v1.1.14
+  Downloaded ff v0.13.1
+  Downloaded universal-hash v0.6.1
+  Downloaded sponge-cursor v0.1.0
+  Downloaded sec1_decode v0.1.0
+  Downloaded rfc6979 v0.4.0
+  Downloaded inout v0.2.2
+  Downloaded web-push v0.11.0
+  Downloaded synstructure v0.12.6
+  Downloaded p256 v0.13.2
+  Downloaded ml-dsa v0.1.1
+  Downloaded keccak v0.2.2
+  Downloaded crypto-bigint v0.5.5
+  Downloaded k256 v0.13.4
+  Downloaded cc v1.4.5
+  Downloaded ed25519-compact v2.4.2
+  Downloaded blake2b_simd v1.0.5
+  Downloaded p384 v0.13.1
+  Downloaded aes-gcm v0.11.1
+  Downloaded superboring v0.1.14
+  Downloaded sec1 v0.7.3
+  Downloaded shake v0.1.0
+  Downloaded primeorder v0.13.6
+  Downloaded polyval v0.7.3
+  Downloaded module-lattice v0.2.3
+  Downloaded ecdsa v0.16.9
+  Downloaded der v0.4.5
+  Downloaded ctr v0.10.1
+  Downloaded group v0.13.0
+  Downloaded ghash v0.6.0
+  Downloaded generic-array v0.14.9
+  Downloaded hmac-sha1-compact v1.1.7
+  Downloaded pem v0.8.3
+  Downloaded hmac-sha512 v1.1.12
+  Downloaded ct-codecs v1.1.7
+  Downloaded cipher v0.5.2
+  Downloaded aead v0.6.1
+  Downloaded binstring v0.1.7
+  Downloaded coarsetime v0.1.37
+  Downloaded base16ct v0.2.0
+  Downloaded jwt-simple v0.12.11
+  Downloaded ece v2.3.1
+  Downloaded aes v0.9.3
+  Downloaded elliptic-curve v0.13.8
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory

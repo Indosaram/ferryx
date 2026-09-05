@@ -581,6 +581,7 @@ mod tests {
             position: MousePosition { x, y: 10.0 },
             modifiers: Default::default(),
             size: Some(size),
+            timestamp_ns: None,
         };
 
         terminal
@@ -599,5 +600,185 @@ mod tests {
                 .expect("read selected terminal text"),
             Some("select".to_string()),
         );
+    }
+
+    #[test]
+    fn native_terminal_double_click_selects_word_and_triple_click_selects_line() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"hello world ferryx\r\n")
+            .expect("write selectable terminal text");
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x, time_ns| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y: 10.0 },
+            modifiers: Default::default(),
+            size: Some(size),
+            timestamp_ns: Some(time_ns),
+        };
+
+        // Click 1 on "world" (x = 75.0, col 7, 'o')
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 75.0, 1_000_000_000))
+            .expect("first press");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 75.0, 1_050_000_000))
+            .expect("first release");
+        // Single click without drag should not select any text
+        assert_eq!(
+            terminal.selection_text().expect("query selection text"),
+            None,
+        );
+
+        // Click 2 (double click) within 200ms at same location
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 75.0, 1_200_000_000))
+            .expect("second press (double click)");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 75.0, 1_250_000_000))
+            .expect("second release");
+        assert_eq!(
+            terminal.selection_text().expect("query word selection"),
+            Some("world".to_string()),
+        );
+
+        // Click 3 (triple click) within 150ms at same location
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 75.0, 1_350_000_000))
+            .expect("third press (triple click)");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 75.0, 1_400_000_000))
+            .expect("third release");
+        assert_eq!(
+            terminal.selection_text().expect("query line selection"),
+            Some("hello world ferryx".to_string()),
+        );
+
+        // Click 4 after interval expired (> 500ms, e.g. at 2.5s) resets to single click and clears selection
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 75.0, 2_500_000_000))
+            .expect("single press after timeout");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 75.0, 2_550_000_000))
+            .expect("single release after timeout");
+        assert_eq!(
+            terminal.selection_text().expect("query cleared selection"),
+            None,
+        );
+    }
+
+    #[test]
+    fn native_terminal_double_click_drag_extends_selection_by_word() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"alpha beta gamma delta epsilon\r\n")
+            .expect("write selectable terminal text");
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x, time_ns: Option<u64>| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y: 10.0 },
+            modifiers: Default::default(),
+            size: Some(size),
+            timestamp_ns: time_ns,
+        };
+
+        // Double click on "beta" (col 7, x = 75.0)
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 75.0, Some(1_000_000_000)))
+            .expect("press 1");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 75.0, Some(1_050_000_000)))
+            .expect("release 1");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 75.0, Some(1_200_000_000)))
+            .expect("press 2 (double click)");
+        assert_eq!(
+            terminal.selection_text().expect("query word selection"),
+            Some("beta".to_string()),
+        );
+
+        // Drag to "delta" (col 19, x = 195.0) - should extend selection to full words "beta gamma delta"
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Motion, 195.0, None))
+            .expect("drag motion");
+        assert_eq!(
+            terminal.selection_text().expect("query word drag selection"),
+            Some("beta gamma delta".to_string()),
+        );
+
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 195.0, None))
+            .expect("release drag");
+        assert_eq!(
+            terminal.selection_text().expect("query final selection"),
+            Some("beta gamma delta".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_selection_with_scrollback() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        for i in 0..50 {
+            terminal.feed(format!("line {}\r\n", i).as_bytes()).unwrap();
+        }
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x, y, time_ns| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y },
+            modifiers: Default::default(),
+            size: Some(size),
+            timestamp_ns: Some(time_ns),
+        };
+
+        // Double click on row 10 in the visible viewport (which has line 37)
+        let y = 10.0 * 20.0 + 10.0;
+        terminal.handle_mouse_gesture(&event(MouseAction::Press, 15.0, y, 1_000_000_000)).unwrap();
+        terminal.handle_mouse_gesture(&event(MouseAction::Release, 15.0, y, 1_050_000_000)).unwrap();
+        terminal.handle_mouse_gesture(&event(MouseAction::Press, 15.0, y, 1_150_000_000)).unwrap();
+        terminal.handle_mouse_gesture(&event(MouseAction::Release, 15.0, y, 1_200_000_000)).unwrap();
+
+        assert_eq!(terminal.selection_text().unwrap(), Some("line".to_string()));
+        // Viewport selection range must map to row 10 of the visible viewport
+        assert_eq!(terminal.selection_range().unwrap(), Some((0, 10, 3, 10)));
+
+        // Scroll to top: line 37 is now below the viewport, so viewport selection range is None
+        terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Top).unwrap();
+        assert_eq!(terminal.selection_range().unwrap(), None);
+        // But the active selection text remains retained
+        assert_eq!(terminal.selection_text().unwrap(), Some("line".to_string()));
+
+        // Scroll back to bottom: line 37 is visible at row 10 again
+        terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom).unwrap();
+        assert_eq!(terminal.selection_range().unwrap(), Some((0, 10, 3, 10)));
     }
 }

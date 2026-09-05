@@ -87,17 +87,24 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
     let mut cache = HashMap::new();
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(64);
 
+    // Only journal directories are watched. Falling back to the project root would arm a
+    // recursive watch over an entire source tree for every session root we track.
     let watch_target = if root.join(".omo/senpi-task/dag").exists() {
         root.join(".omo/senpi-task/dag")
     } else if root.join("runs").exists()
         || root.ends_with(".omo/senpi-task/dag")
         || root.ends_with("dag")
-        || root.exists()
     {
         root.clone()
     } else {
         root.join(".omo/senpi-task/dag")
     };
+
+    // Hydrate before arming: starting a filesystem watch can stall for seconds on a loaded
+    // host, and the current inventory must not wait on it.
+    if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
+        return;
+    }
 
     let tx_clone = notify_tx.clone();
     let watcher_res = RecommendedWatcher::new(
@@ -131,6 +138,7 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
         _ => (true, None),
     };
 
+    // Second pass: anything written while the watch was arming produced no event.
     if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
         return;
     }
@@ -207,7 +215,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let _handle = spawn_dag_watcher(temp_dir.path().to_path_buf(), tx);
 
-        let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let first = tokio::time::timeout(Duration::from_secs(20), rx.recv())
             .await
             .expect("first snapshot receive must not time out")
             .expect("first snapshot must be received");
@@ -222,7 +230,7 @@ mod tests {
             FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"completed\"");
         std::fs::write(&file_path, &updated_json).expect("write updated json");
 
-        let second = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let second = tokio::time::timeout(Duration::from_secs(20), rx.recv())
             .await
             .expect("second snapshot receive must not time out")
             .expect("second snapshot must be received");
@@ -230,6 +238,28 @@ mod tests {
         assert_eq!(tagged_project_second, tagged_project);
         assert_eq!(second.status, DagRunStatus::Completed);
         assert_ne!((tagged_project, first), (tagged_project_second, second));
+    }
+
+    #[tokio::test]
+    async fn test_dag_watcher_reports_journal_created_after_start() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let _handle = spawn_dag_watcher(temp_dir.path().to_path_buf(), tx);
+
+        let runs_dir = temp_dir.path().join(".omo/senpi-task/dag/runs");
+        std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+        std::fs::write(
+            runs_dir.join("dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.json"),
+            FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"running\""),
+        )
+        .expect("write journal");
+
+        let (tagged_project, snapshot) = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("snapshot receive must not time out")
+            .expect("snapshot must be received");
+        assert_eq!(tagged_project, temp_dir.path().to_string_lossy().to_string());
+        assert_eq!(snapshot.status, DagRunStatus::Running);
     }
 
     #[tokio::test]

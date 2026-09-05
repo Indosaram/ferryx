@@ -22,6 +22,14 @@ export type GroupBodyDropData = {
   groupId: string;
 };
 
+/** The whole tab strip (including its blank area). Distinct from the pane body below it. */
+export type TabStripDropData = {
+  type: "tab-strip";
+  groupId: string;
+  /** Current tab count; drops append at the end of the strip regardless of source index. */
+  tabCount: number;
+};
+
 export type GroupEdgeDropData = {
   type: "group-edge";
   groupId: string;
@@ -42,7 +50,13 @@ export type PaneEdgeDropData = {
 };
 
 export type WorkspaceDragData = TabDragData | PaneDragData;
-export type WorkspaceDropData = TabDragData | GroupBodyDropData | GroupEdgeDropData | PaneLeafDropData | PaneEdgeDropData;
+export type WorkspaceDropData =
+  | TabDragData
+  | TabStripDropData
+  | GroupBodyDropData
+  | GroupEdgeDropData
+  | PaneLeafDropData
+  | PaneEdgeDropData;
 
 export type WorkspaceDropCommand =
   | {
@@ -130,6 +144,13 @@ export function isWorkspaceDropData(value: unknown): value is WorkspaceDropData 
       );
     case "group-body":
       return "groupId" in value && typeof value.groupId === "string";
+    case "tab-strip":
+      return (
+        "groupId" in value &&
+        typeof value.groupId === "string" &&
+        "tabCount" in value &&
+        typeof value.tabCount === "number"
+      );
     case "group-edge":
       return "groupId" in value && typeof value.groupId === "string" && "edge" in value && isTabDropEdge(value.edge);
     case "pane-leaf":
@@ -204,6 +225,13 @@ export function resolveWorkspaceDropCommand(
           tabId: active.tabId,
           targetGroupId: over.groupId,
         };
+      case "tab-strip":
+        return {
+          type: "move-tab-to-group",
+          tabId: active.tabId,
+          targetGroupId: over.groupId,
+          targetIndex: over.tabCount,
+        };
       case "pane-leaf":
         return null;
     }
@@ -252,6 +280,14 @@ export function resolveWorkspaceDropCommand(
           leafId: sourceLeafId,
           targetGroupId: over.groupId,
         };
+      case "tab-strip":
+        return {
+          type: "detach-pane-to-tab",
+          sourceTabId: active.tabId,
+          leafId: sourceLeafId,
+          targetGroupId: over.groupId,
+          targetIndex: over.tabCount,
+        };
       case "pane-leaf":
         if (over.tabId !== active.tabId || over.leafId === sourceLeafId) return null;
         return {
@@ -273,7 +309,9 @@ export function dropPriority(active: WorkspaceDragData, over: WorkspaceDropData)
     if (over.type === "pane-edge") return over.edge === "left" || over.edge === "right" ? 0 : 1;
     if (over.type === "group-edge") return over.edge === "left" || over.edge === "right" ? 2 : 3;
     if (over.type === "tab") return 4;
-    if (over.type === "group-body") return 5;
+    // Whole-strip append loses to an indexed tab target so existing tabs win.
+    if (over.type === "tab-strip") return 5;
+    if (over.type === "group-body") return 6;
     return 100;
   }
 
@@ -281,6 +319,8 @@ export function dropPriority(active: WorkspaceDragData, over: WorkspaceDropData)
   if (over.type === "tab") return 2;
   if (over.type === "group-body") return 3;
   if (over.type === "pane-leaf") return 4;
+  // Whole-strip append loses to an indexed tab target so existing tabs win.
+  if (over.type === "tab-strip") return 5;
   return 100;
 }
 

@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/ssh
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/features/ferryx/ssh/components.test.tsx (1 test) 142ms
+ ✓ src/features/ferryx/ssh/model.test.ts (2 tests) 3ms
+
+ Test Files  2 passed (2)
+      Tests  3 passed (3)
+   Start at  19:40:07
+   Duration  4.16s (transform 101ms, setup 586ms, collect 1.61s, tests 145ms, environment 882ms, prepare 114ms)
+

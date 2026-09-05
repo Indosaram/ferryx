@@ -30,6 +30,7 @@ fn test_mouse_encode_rejects_nan_coordinate() {
         },
         modifiers: KeyModifiers::default(),
         size: Some(valid_size),
+        timestamp_ns: None,
     };
     let res_nan = term.encode_mouse(&event_nan);
 
@@ -67,6 +68,7 @@ fn test_mouse_encode_rejects_infinity_coordinate() {
         },
         modifiers: KeyModifiers::default(),
         size: Some(valid_size),
+        timestamp_ns: None,
     };
     let res_inf = term.encode_mouse(&event_inf);
 
@@ -101,6 +103,7 @@ fn test_mouse_encode_rejects_zero_cell_width() {
         position: MousePosition { x: 10.0, y: 10.0 },
         modifiers: KeyModifiers::default(),
         size: Some(zero_cell_width),
+        timestamp_ns: None,
     };
     let res_zero_w = term.encode_mouse(&event_zero_w);
 
@@ -135,6 +138,7 @@ fn test_mouse_encode_rejects_zero_cell_height() {
         position: MousePosition { x: 10.0, y: 10.0 },
         modifiers: KeyModifiers::default(),
         size: Some(zero_cell_height),
+        timestamp_ns: None,
     };
     let res_zero_h = term.encode_mouse(&event_zero_h);
 
@@ -167,6 +171,7 @@ fn test_mouse_encode_disabled_and_sgr_enabled_tracking() {
         position: MousePosition { x: 25.0, y: 45.0 }, // Col 3, Row 3 in 1-based VT coords
         modifiers: KeyModifiers::default(),
         size: Some(mouse_size),
+        timestamp_ns: None,
     };
 
     // 1. By default, mouse tracking is disabled in the terminal -> empty encoding

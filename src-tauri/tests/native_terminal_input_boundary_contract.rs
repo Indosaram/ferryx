@@ -220,6 +220,7 @@ async fn production_mouse_boundary_rejects_detached_and_unattached_session() {
         position: MousePosition { x: 10.0, y: 20.0 },
         modifiers: KeyModifiers::default(),
         size: None,
+        timestamp_ns: None,
     };
 
     let encoded = encode_attached_native_mouse(&state, session_id, &mouse_event)
@@ -718,4 +719,62 @@ async fn production_input_boundary_encodes_ctrl_v_image_paste_shortcut_to_pty_by
         encoded_release.is_empty(),
         "key release must not emit duplicate bytes to the PTY"
     );
+}
+
+#[tokio::test]
+async fn test_double_click_selection_via_surface_host_boundary() {
+    use ferryx_lib::ipc::native_terminal::{
+        select_attached_native_terminal_with_mouse, copy_attached_native_selection,
+    };
+    use ferryx_lib::native_terminal::{MouseRendererSize, MousePosition, MouseEvent, MouseAction, MouseButton};
+
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "test-double-click-session";
+    let (_tx, attachment) = create_attachment(session_id);
+
+    state
+        .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+        .expect("attach native daemon stream state");
+
+    // Feed text into session terminal
+    state
+        .with_session_terminal(session_id, |term| {
+            term.feed(b"hello world ferryx\r\n")
+        })
+        .expect("feed text");
+
+    let size = MouseRendererSize {
+        screen_width: 800,
+        screen_height: 480,
+        cell_width: 10,
+        cell_height: 20,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    };
+
+    let event = |action, time_ns| MouseEvent {
+        action,
+        button: (action == MouseAction::Press).then_some(MouseButton::Left),
+        position: MousePosition { x: 75.0, y: 10.0 }, // Col 7 = 'o' in "world"
+        modifiers: Default::default(),
+        size: Some(size),
+        timestamp_ns: Some(time_ns),
+    };
+
+    // Click 1
+    select_attached_native_terminal_with_mouse(&state, session_id, &event(MouseAction::Press, 1_000_000_000)).expect("press 1");
+    select_attached_native_terminal_with_mouse(&state, session_id, &event(MouseAction::Release, 1_050_000_000)).expect("release 1");
+
+    let sel1 = copy_attached_native_selection(&state, session_id).expect("copy sel 1");
+    println!("AFTER CLICK 1: {:?}", sel1);
+
+    // Click 2
+    select_attached_native_terminal_with_mouse(&state, session_id, &event(MouseAction::Press, 1_200_000_000)).expect("press 2");
+    select_attached_native_terminal_with_mouse(&state, session_id, &event(MouseAction::Release, 1_250_000_000)).expect("release 2");
+
+    let sel2 = copy_attached_native_selection(&state, session_id).expect("copy sel 2");
+    println!("AFTER CLICK 2: {:?}", sel2);
+    assert_eq!(sel2, "world".to_string());
 }

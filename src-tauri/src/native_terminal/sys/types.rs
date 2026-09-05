@@ -370,6 +370,9 @@ pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG: c_int = 2;
 // GhosttySelectionGestureEventOption constants matching `ghostty/vt/selection.h`.
 pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF: c_int = 0;
 pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION: c_int = 1;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE: c_int = 2;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS: c_int = 3;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS: c_int = 4;
 pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY: c_int = 8;
 
 /// Mouse encoder geometry matching `ghostty/vt/mouse/encoder.h`.

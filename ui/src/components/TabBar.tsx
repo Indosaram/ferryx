@@ -1,3 +1,4 @@
+import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, horizontalListSortingStrategy } from "@dnd-kit/sortable";
 import { Plus } from "lucide-react";
 import React, { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -318,10 +319,16 @@ export function TabBar({
 
   const sortableItems = useMemo(() => tabs.map((tab) => `tab:${tab.id}`), [tabs]);
 
+  // The whole strip (including its blank area) is a drop target so a pane dragged onto the
+  // tab row detaches into a new appended tab. Indexed tab targets outrank this via dropPriority.
+  const strip = useDroppable({ id: `tab-strip:${groupId}`, data: { type: "tab-strip", groupId, tabCount: tabs.length } });
+
   return (
     <div
+      ref={strip.setNodeRef}
       data-testid="tab-strip"
       data-tab-group-id={groupId}
+      data-dnd-type="tab-strip"
       onPointerDown={startWindowDrag}
       className="relative flex h-tabbar shrink-0 items-stretch border-b border-border bg-card pr-1 select-none"
     >

@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/design/session.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/features/ferryx/design/session.test.ts (3 tests) 5ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  19:55:09
+   Duration  4.76s (transform 404ms, setup 1.14s, collect 104ms, tests 5ms, environment 1.81s, prepare 326ms)
+

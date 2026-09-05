@@ -16,6 +16,7 @@ import { Toaster, toast } from "./components/ui/sonner";
 import { IconButton } from "./components/ui/IconButton";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
+import { collectDagWatchRoots } from "./lib/dagWatchRoots";
 import { newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, type BrowserShortcutAction } from "./lib/browserTauri";
 import { useGeneralSettings } from "./lib/generalSettings";
@@ -659,20 +660,30 @@ function WorkspaceApp({
   );
   const inactiveProjectWorktreesRef = useRef(inactiveProjectWorktrees);
 
-  // Dag journals: watch every known project root and worktree so any omo graph run
-  // anywhere lights up the activity badge, regardless of which cwd the app started in.
+  // Dag journals: watch every known project root, worktree and live session root so any omo
+  // graph run anywhere lights up the activity badge, regardless of which cwd the app started in.
   const dagWatchedPathsRef = useRef<Set<string>>(new Set());
   const activeWorktreePathsKey = state.worktrees.map((worktree) => worktree.path).join("\n");
   const projectRootsKey = projects.map((project) => project.repoRoot).join("\n");
+  const sessionDagRootsKey = useMemo(
+    () =>
+      collectDagWatchRoots({ projectRoots: [], worktreePaths: [], sessions: state.sessions })
+        .sort()
+        .join("\n"),
+    [state.sessions],
+  );
   useEffect(() => {
-    const paths = new Set<string>();
-    for (const project of projectsRef.current) paths.add(project.repoRoot);
-    for (const worktrees of Object.values(inactiveProjectWorktreesRef.current)) {
-      for (const worktree of worktrees) paths.add(worktree.path);
-    }
-    for (const path of activeWorktreePathsKey.split("\n")) {
-      if (path.length > 0) paths.add(path);
-    }
+    const paths = collectDagWatchRoots({
+      projectRoots: projectsRef.current.map((project) => project.repoRoot),
+      worktreePaths: [
+        ...Object.values(inactiveProjectWorktreesRef.current).flatMap((worktrees) =>
+          worktrees.map((worktree) => worktree.path),
+        ),
+        ...activeWorktreePathsKey.split("\n"),
+        ...sessionDagRootsKey.split("\n"),
+      ],
+      sessions: [],
+    });
     for (const path of paths) {
       if (dagWatchedPathsRef.current.has(path)) continue;
       dagWatchedPathsRef.current.add(path);
@@ -686,7 +697,7 @@ function WorkspaceApp({
           dagWatchedPathsRef.current.delete(path);
         });
     }
-  }, [inactiveProjectWorktrees, activeWorktreePathsKey, projectRootsKey]);
+  }, [inactiveProjectWorktrees, activeWorktreePathsKey, projectRootsKey, sessionDagRootsKey]);
 
   useEffect(() => {
     let disposed = false;

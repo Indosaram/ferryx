@@ -92,20 +92,21 @@ Ferryx provides an automated PowerShell tool `scripts/build-msix.ps1` and config
 
 1. **Microsoft Partner Center Account**: Register a developer account at [partner.microsoft.com](https://partner.microsoft.com/dashboard).
 2. **App Name Reservation**: In Partner Center dashboard, navigate to **Apps and games** -> **New product** -> **MSIX or PWA app** and reserve `Ferryx`.
-3. **Product Identity Retrieval**: Navigate to **Product management** -> **Product Identity** to obtain:
-   - **Package/Identity/Name** (e.g., `Indosaram.Ferryx`)
-   - **Package/Identity/Publisher** (e.g., `CN=12345678-ABCD-EF01-2345-6789ABCDEF01`)
-   - **Package/Properties/PublisherDisplayName** (e.g., `Indosaram`)
+3. **Product Identity Retrieval**: In Partner Center under **Product management** -> **Product Identity**:
+   - **Package/Identity/Name**: `ProjectMaho.Ferryx`
+   - **Package Family Name (PFN)**: `ProjectMaho.Ferryx_s4dtschhe0d3e`
+   - **Package/Identity/Publisher**: `CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36`
+   - **Package/Properties/PublisherDisplayName**: `Project Maho`
 
 ### Step-by-Step Packaging Procedure
 
 #### 1. Configure Package Identity
-Update `src-tauri/windows/msix/AppxManifest.xml` with your Partner Center identity, or supply them as arguments to `build-msix.ps1`:
+Configured in `src-tauri/windows/msix/AppxManifest.xml` and default parameters in `scripts/build-msix.ps1`:
 
 ```xml
 <Identity
-  Name="Indosaram.Ferryx"
-  Publisher="CN=12345678-ABCD-EF01-2345-6789ABCDEF01"
+  Name="ProjectMaho.Ferryx"
+  Publisher="CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36"
   Version="0.1.0.0"
   ProcessorArchitecture="x64" />
 ```

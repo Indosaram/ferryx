@@ -9,6 +9,7 @@ import {
   useSensor,
   useSensors,
   type CollisionDetection,
+  type Modifier,
   type DragCancelEvent,
   type DragEndEvent,
   type DragOverEvent,
@@ -16,6 +17,7 @@ import {
   type UniqueIdentifier,
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { getEventCoordinates } from "@dnd-kit/utilities";
 import { Columns2, Rows2, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 
@@ -82,6 +84,40 @@ export const FALLBACK_SESSION: TerminalSession = {
 };
 
 export const workspaceCollisionDetection: CollisionDetection = (args) => createWorkspaceCollisionDetection()(args);
+
+/**
+ * The drag overlay keeps the activator offset of the full-size pane it grabbed, so once the
+ * tab-mode preview shrinks to a bounded tab it drifts far from the pointer. Re-center the
+ * bounded overlay on the cursor using the pointer position captured at drag start.
+ */
+export const snapOverlayToPointer: Modifier = ({
+  activatorEvent,
+  activeNodeRect,
+  draggingNodeRect,
+  windowRect,
+  transform,
+}) => {
+  // Origin comes from the source pane the overlay is positioned at; size from the measured
+  // (tab-bounded) wrapper. The returned transform is the delta from that origin.
+  const overlayRect = draggingNodeRect ?? activeNodeRect;
+  if (!activeNodeRect || !overlayRect || !activatorEvent) return transform;
+  const activator = getEventCoordinates(activatorEvent);
+  if (!activator) return transform;
+  let x = transform.x + activator.x - activeNodeRect.left - overlayRect.width / 2;
+  let y = transform.y + activator.y - activeNodeRect.top - overlayRect.height / 2;
+  // Clamp the predicted absolute position (activeNodeRect + delta) so the whole preview stays
+  // inside the viewport when the pointer is near an edge.
+  if (windowRect) {
+    const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
+    x = clamp(x, -activeNodeRect.left, windowRect.width - activeNodeRect.left - overlayRect.width);
+    y = clamp(y, -activeNodeRect.top, windowRect.height - activeNodeRect.top - overlayRect.height);
+  }
+  return { ...transform, x, y };
+};
+
+// Lets the tab-mode overlay wrapper shrink to its tab-sized child (bounded by min-w-tab/max-w-tab
+// and h-tabbar) so the pointer-snap modifier measures a tab, not the full pane it was grabbed from.
+const TAB_OVERLAY_STYLE: React.CSSProperties = { width: "max-content", height: "auto" };
 
 /**
  * `isRedundantSplit` drops targets whose drop would rebuild the current tree, so the
@@ -228,6 +264,8 @@ export function TerminalSplitView({
   const activeDragRef = useRef<WorkspaceDragData | null>(null);
   const [activeDrag, setActiveDrag] = useState<WorkspaceDragData | null>(null);
   const [dropFeedbackLeafId, setDropFeedbackLeafId] = useState<string | null>(null);
+  // When a pane hovers the tab row, its drag overlay previews as a tab instead of a pane.
+  const [paneOverTabRow, setPaneOverTabRow] = useState(false);
   const previewedTabIdRef = useRef<string | null>(null);
 
   const sensors = useSensors(
@@ -263,6 +301,7 @@ export function TerminalSplitView({
     activeDragRef.current = null;
     setActiveDrag(null);
     setDropFeedbackLeafId(null);
+    setPaneOverTabRow(false);
     dragSnapshotRef.current = null;
     previewedTabIdRef.current = null;
   };
@@ -290,6 +329,12 @@ export function TerminalSplitView({
         ? overData.leafId
         : null,
     );
+
+    if (active?.type === "pane") {
+      setPaneOverTabRow(
+        isWorkspaceDropData(overData) && (overData.type === "tab" || overData.type === "tab-strip"),
+      );
+    }
 
     if (!active || active.type !== "tab" || !isWorkspaceDropData(overData)) return;
 
@@ -444,11 +489,16 @@ export function TerminalSplitView({
     dropFeedbackLeafId,
   };
 
-  const overlayLabel =
+  const overlay: { kind: "tab" | "pane"; label: string } | null =
     activeDrag?.type === "tab"
-      ? normalizedLayout.tabs.find((tab) => tab.id === activeDrag.tabId)?.label ?? "Tab"
+      ? { kind: "tab", label: normalizedLayout.tabs.find((tab) => tab.id === activeDrag.tabId)?.label ?? "Tab" }
       : activeDrag?.type === "pane"
-        ? "Terminal pane"
+        ? paneOverTabRow
+          ? {
+              kind: "tab",
+              label: normalizedLayout.tabs.find((tab) => tab.id === activeDrag.tabId)?.label ?? "Terminal pane",
+            }
+          : { kind: "pane", label: "Terminal pane" }
         : null;
 
   return (
@@ -489,10 +539,22 @@ export function TerminalSplitView({
           />
         )}
       </div>
-      <DragOverlay dropAnimation={null}>
-        {overlayLabel ? (
-          <div data-testid="workspace-drag-overlay" className="rounded border border-border bg-card px-3 py-1.5 text-xs text-foreground shadow-lg">
-            {overlayLabel}
+      <DragOverlay
+        dropAnimation={null}
+        modifiers={overlay?.kind === "tab" ? [snapOverlayToPointer] : undefined}
+        style={overlay?.kind === "tab" ? TAB_OVERLAY_STYLE : undefined}
+      >
+        {overlay ? (
+          <div
+            data-testid="workspace-drag-overlay"
+            data-preview-kind={overlay.kind}
+            className={
+              overlay.kind === "tab"
+                ? "flex h-tabbar min-w-tab max-w-tab items-center gap-1.5 truncate rounded border border-border bg-accent px-2 text-[12px] text-foreground shadow-lg"
+                : "rounded border border-border bg-card px-3 py-1.5 text-xs text-foreground shadow-lg"
+            }
+          >
+            {overlay.label}
           </div>
         ) : null}
       </DragOverlay>

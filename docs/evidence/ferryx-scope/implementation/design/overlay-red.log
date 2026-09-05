@@ -1,0 +1,135 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/design/overlay.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/features/ferryx/design/overlay.test.ts (6 tests | 6 failed) 14ms
+   × normalizes reverse drag and clips the viewport 6ms
+     → expected { x: 130, y: 80, width: -140, …(1) } to deeply equal { Object (x, y, ...) }
+   × selects DOM metadata, suppresses page click, removes overlay and handlers 3ms
+     → expected [] to have a length of 1 but got +0
+   × cancels or invalidates on Escape once and removes handlers 1ms
+     → expected [] to deeply equal [ { type: 'cancelled', …(1) } ]
+   × cancels or invalidates on resize once and removes handlers 1ms
+     → expected [] to deeply equal [ { type: 'invalidated', …(1) } ]
+   × cancels or invalidates on scroll once and removes handlers 1ms
+     → expected [] to deeply equal [ { type: 'invalidated', …(1) } ]
+   × cancels or invalidates on pagehide once and removes handlers 1ms
+     → expected [] to deeply equal [ { type: 'invalidated', …(1) } ]
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/design/overlay.test.ts > normalizes reverse drag and clips the viewport
+AssertionError: expected { x: 130, y: 80, width: -140, …(1) } to deeply equal { Object (x, y, ...) }
+
+- Expected
++ Received
+
+  {
+-   "height": 40,
+-   "width": 100,
+-   "x": 0,
+-   "y": 20,
++   "height": -60,
++   "width": -140,
++   "x": 130,
++   "y": 80,
+  }
+
+ ❯ src/features/ferryx/design/overlay.test.ts:9:52
+      7| afterEach(() => { dispose(); document.body.replaceChildren(); });
+      8| it("normalizes reverse drag and clips the viewport", () => {
+      9|   expect(normalizeRect(130, 80, -10, 20, 100, 60)).toEqual({ x: 0, y: …
+       |                                                    ^
+     10|   expect(() => normalizeRect(1, 1, 1, 2, 100, 60)).toThrow();
+     11|   expect(() => normalizeRect(NaN, 1, 2, 3, 100, 60)).toThrow();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  src/features/ferryx/design/overlay.test.ts > selects DOM metadata, suppresses page click, removes overlay and handlers
+AssertionError: expected [] to have a length of 1 but got +0
+
+- Expected
++ Received
+
+- 1
++ 0
+
+ ❯ src/features/ferryx/design/overlay.test.ts:20:18
+     18|   dispose = installDesignOverlay(identity, "element", e => events.push…
+     19|   button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancel…
+     20|   expect(events).toHaveLength(1);
+       |                  ^
+     21|   expect(events[0]).toMatchObject({ type: "selected", selection: { ide…
+     22|   expect(clicks).toBe(0);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+ FAIL  src/features/ferryx/design/overlay.test.ts > cancels or invalidates on Escape once and removes handlers
+AssertionError: expected [] to deeply equal [ { type: 'cancelled', …(1) } ]
+
+- Expected
++ Received
+
+- [
+-   {
+-     "identity": {
+-       "browserId": "b",
+-       "generation": "1",
+-       "operationId": "op",
+-       "viewportRevision": 1,
+-       "webviewLabel": "instance",
+-     },
+-     "type": "cancelled",
+-   },
+- ]
++ []
+
+ ❯ src/features/ferryx/design/overlay.test.ts:31:18
+     29|   else window.dispatchEvent(new Event(reason));
+     30|   window.dispatchEvent(new Event("resize"));
+     31|   expect(events).toEqual([{ type: reason === "Escape" ? "cancelled" : …
+       |                  ^
+     32|   expect(document.querySelector("[data-ferryx-design-overlay]")).toBeN…
+     33| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯
+
+ FAIL  src/features/ferryx/design/overlay.test.ts > cancels or invalidates on resize once and removes handlers
+ FAIL  src/features/ferryx/design/overlay.test.ts > cancels or invalidates on scroll once and removes handlers
+ FAIL  src/features/ferryx/design/overlay.test.ts > cancels or invalidates on pagehide once and removes handlers
+AssertionError: expected [] to deeply equal [ { type: 'invalidated', …(1) } ]
+
+- Expected
++ Received
+
+- [
+-   {
+-     "identity": {
+-       "browserId": "b",
+-       "generation": "1",
+-       "operationId": "op",
+-       "viewportRevision": 1,
+-       "webviewLabel": "instance",
+-     },
+-     "type": "invalidated",
+-   },
+- ]
++ []
+
+ ❯ src/features/ferryx/design/overlay.test.ts:31:18
+     29|   else window.dispatchEvent(new Event(reason));
+     30|   window.dispatchEvent(new Event("resize"));
+     31|   expect(events).toEqual([{ type: reason === "Escape" ? "cancelled" : …
+       |                  ^
+     32|   expect(document.querySelector("[data-ferryx-design-overlay]")).toBeN…
+     33| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed (6)
+   Start at  19:16:10
+   Duration  2.31s (transform 75ms, setup 698ms, collect 29ms, tests 14ms, environment 1.04s, prepare 389ms)
+
+error: script "test" exited with code 1

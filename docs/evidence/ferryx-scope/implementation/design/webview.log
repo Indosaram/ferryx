@@ -1,0 +1,2 @@
+{"status":"passed","boundary":"Bun.WebView WebKit injected actual page","assertions":12,"pngBytes":3517,"nativeAppCapture":false}
+{"cleanup":"private WebView closed; data URL only; no listeners, ports, files, PTYs or daemon"}

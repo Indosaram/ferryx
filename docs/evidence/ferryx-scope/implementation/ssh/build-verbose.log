@@ -1,0 +1,481 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+       Fresh unicode-ident v1.0.24
+       Fresh cfg-if v1.0.4
+       Fresh find-msvc-tools v0.1.11
+       Fresh shlex v2.0.1
+       Fresh proc-macro2 v1.0.107
+       Fresh cc v1.4.3
+       Fresh itoa v1.0.18
+       Fresh memchr v2.8.3
+       Fresh quote v1.0.47
+       Fresh litemap v0.8.3
+       Fresh scopeguard v1.2.0
+       Fresh writeable v0.6.4
+       Fresh syn v3.0.3
+       Fresh syn v2.0.119
+       Fresh serde_core v1.0.229
+       Fresh lock_api v0.4.14
+       Fresh utf8_iter v1.0.4
+       Fresh serde_derive v1.0.229
+       Fresh synstructure v0.13.2
+       Fresh zerovec-derive v0.11.5
+       Fresh displaydoc v0.2.7
+       Fresh bytes v1.12.1
+       Fresh siphasher v1.0.3
+       Fresh zerofrom-derive v0.1.7
+       Fresh yoke-derive v0.8.2
+       Fresh zerofrom v0.1.8
+       Fresh icu_properties_data v2.3.0
+       Fresh icu_normalizer_data v2.3.0
+       Fresh phf_generator v0.13.1
+       Fresh autocfg v1.5.1
+       Fresh zmij v1.0.23
+       Fresh http v1.5.0
+       Fresh thiserror-impl v2.0.20
+       Fresh libc v0.2.189
+       Fresh thiserror v2.0.20
+       Fresh objc2-encode v4.1.0
+       Fresh time-core v0.1.9
+       Fresh equivalent v1.0.2
+       Fresh num-conv v0.2.2
+       Fresh hashbrown v0.17.1
+       Fresh phf_macros v0.13.1
+       Fresh powerfmt v0.2.0
+       Fresh smallvec v1.15.2
+       Fresh indexmap v2.14.0
+       Fresh winnow v1.0.4
+       Fresh base64 v0.22.1
+       Fresh phf_codegen v0.13.1
+       Fresh toml_writer v1.1.2+spec-1.1.0
+       Fresh toml_parser v1.1.3+spec-1.1.0
+       Fresh ident_case v1.0.1
+       Fresh strsim v0.11.1
+       Fresh darling_core v0.23.0
+       Fresh objc2-exception-helper v0.1.1
+       Fresh thiserror-impl v1.0.69
+       Fresh byteorder v1.5.0
+       Fresh typeid v1.0.3
+       Fresh objc2 v0.6.4
+       Fresh darling_macro v0.23.0
+       Fresh thiserror v1.0.69
+       Fresh aho-corasick v1.1.5
+       Fresh regex-syntax v0.8.11
+       Fresh new_debug_unreachable v1.0.6
+       Fresh unic-common v0.9.0
+       Fresh bitflags v1.3.2
+       Fresh fnv v1.0.7
+       Fresh unic-char-range v0.9.0
+       Fresh regex-automata v0.4.18
+       Fresh unic-ucd-version v0.9.0
+       Fresh serde v1.0.229
+       Fresh darling v0.23.0
+       Fresh unic-char-property v0.9.0
+       Fresh string_cache_codegen v0.6.1
+       Fresh alloc-no-stdlib v2.0.4
+       Fresh precomputed-hash v0.1.1
+       Fresh regex v1.13.1
+       Fresh serde_with_macros v3.22.0
+       Fresh alloc-stdlib v0.2.4
+       Fresh unic-ucd-ident v0.9.0
+       Fresh block2 v0.6.2
+       Fresh quick-xml v0.41.0
+       Fresh same-file v1.0.6
+       Fresh once_cell v1.21.4
+       Fresh anyhow v1.0.104
+       Fresh string_cache v0.9.0
+       Fresh brotli-decompressor v5.0.3
+       Fresh walkdir v2.5.0
+       Fresh dispatch2 v0.3.1
+       Fresh log v0.4.33
+       Fresh dtoa v1.0.11
+       Fresh dunce v1.0.5
+       Fresh ctor-proc-macro v0.0.7
+       Fresh web_atoms v0.2.6
+       Fresh dtoa-short v0.3.5
+       Fresh objc2-core-foundation v0.3.2
+       Fresh brotli v8.0.4
+       Fresh ctor v0.8.0
+       Fresh tendril v0.5.1
+       Fresh cssparser-macros v0.6.1
+       Fresh derive_more-impl v2.1.1
+       Fresh stable_deref_trait v1.2.1
+       Fresh glob v0.3.4
+       Fresh cssparser v0.36.0
+       Fresh derive_more v2.1.1
+       Fresh yoke v0.8.3
+       Fresh markup5ever v0.38.0
+       Fresh servo_arc v0.4.3
+       Fresh serde_derive_internals v0.29.1
+       Fresh hashbrown v0.12.3
+       Fresh rustc-hash v2.1.3
+       Fresh bitflags v2.13.1
+       Fresh html5ever v0.38.0
+       Fresh schemars_derive v0.8.22
+       Fresh indexmap v1.9.3
+       Fresh selectors v0.36.1
+       Fresh camino v1.2.5
+       Fresh cargo-platform v0.1.9
+       Fresh foldhash v0.2.0
+       Fresh base64 v0.21.7
+       Fresh version_check v0.9.5
+       Fresh dyn-clone v1.0.20
+       Fresh cargo_metadata v0.19.2
+       Fresh swift-rs v1.0.8
+       Fresh schemars v0.8.22
+       Fresh dom_query v0.27.0
+       Fresh zerovec v0.11.8
+       Fresh objc2-foundation v0.3.2
+       Fresh errno v0.3.14
+       Fresh pin-project-lite v0.2.17
+       Fresh parking_lot_core v0.9.12
+       Fresh heck v0.5.0
+       Fresh core-foundation-sys v0.8.7
+       Fresh tinystr v0.8.4
+       Fresh parking_lot v0.12.5
+       Fresh option-ext v0.2.0
+       Fresh icu_locale_core v2.3.0
+       Fresh potential_utf v0.1.6
+       Fresh zerotrie v0.2.5
+       Fresh bytemuck_derive v1.12.0
+       Fresh percent-encoding v2.3.2
+       Fresh icu_provider v2.3.0
+       Fresh icu_collections v2.3.0
+       Fresh bytemuck v1.25.2
+       Fresh signal-hook-registry v1.4.8
+       Fresh tokio-macros v2.7.2
+       Fresh mio v1.2.2
+       Fresh socket2 v0.6.5
+       Fresh tokio v1.53.1
+       Fresh icu_properties v2.3.0
+       Fresh icu_normalizer v2.3.0
+       Fresh form_urlencoded v1.2.2
+       Fresh rustc_version v0.4.1
+       Fresh toml_datetime v0.7.5+spec-1.1.0
+       Fresh futures-core v0.3.34
+       Fresh typenum v1.20.1
+       Fresh winnow v0.7.15
+       Fresh embed-resource v3.0.11
+       Fresh idna_adapter v1.2.2
+       Fresh arrayvec v0.7.8
+       Fresh tauri-plugin v2.6.3
+       Fresh generic-array v0.14.7
+       Fresh toml v0.9.12+spec-1.1.0
+       Fresh idna v1.1.0
+       Fresh tauri-winres v0.3.6
+       Fresh objc2-app-kit v0.3.2
+       Fresh foreign-types-macros v0.2.4
+       Fresh cargo_toml v0.22.3
+       Fresh raw-window-handle v0.6.2
+       Fresh foreign-types-shared v0.3.1
+       Fresh simd-adler32 v0.3.10
+       Fresh crypto-common v0.1.7
+       Fresh serde_json v1.0.151
+       Fresh block-buffer v0.10.4
+       Fresh tauri-build v2.6.3
+       Fresh foreign-types v0.5.0
+       Fresh url v2.5.8
+       Fresh time-macros v0.2.32
+       Fresh getrandom v0.4.3
+       Fresh deranged v0.5.8
+       Fresh cfg_aliases v0.2.2
+       Fresh lazy_static v1.5.0
+       Fresh adler2 v2.0.1
+       Fresh time v0.3.55
+       Fresh crc32fast v1.5.0
+       Fresh digest v0.10.7
+       Fresh miniz_oxide v0.8.9
+       Fresh uuid v1.24.1
+       Fresh fdeflate v0.3.7
+       Fresh core-foundation v0.10.1
+       Fresh tracing-core v0.1.36
+       Fresh flate2 v1.1.9
+       Fresh num-traits v0.2.19
+       Fresh getrandom v0.3.4
+       Fresh symphonia-core v0.5.5
+       Fresh dpi v0.1.2
+       Fresh getrandom v0.2.17
+       Fresh tracing-attributes v0.1.31
+       Fresh futures-sink v0.3.34
+       Fresh cfb v0.7.3
+       Fresh crossbeam-utils v0.8.22
+       Fresh tracing v0.1.44
+       Fresh jsonptr v0.6.3
+       Fresh erased-serde v0.4.10
+       Fresh http-body v1.1.0
+       Fresh phf_shared v0.13.1
+       Fresh futures-macro v0.3.34
+       Fresh serde_spanned v1.1.1
+       Fresh toml_datetime v1.1.1+spec-1.1.0
+       Fresh encoding_rs v0.8.35
+       Fresh zeroize v1.9.0
+       Fresh slab v0.4.12
+       Fresh futures-task v0.3.34
+       Fresh rustls-pki-types v1.15.1
+       Fresh futures-util v0.3.34
+       Fresh symphonia-metadata v0.5.5
+       Fresh phf v0.13.1
+       Fresh toml v1.1.4+spec-1.1.0
+       Fresh httparse v1.10.1
+       Fresh crossbeam-channel v0.5.16
+       Fresh json-patch v3.0.1
+       Fresh serde-untagged v0.1.9
+       Fresh zerocopy v0.8.56
+       Fresh cookie v0.18.2
+       Fresh infer v0.19.0
+       Fresh png v0.17.16
+       Fresh core-graphics-types v0.2.0
+       Fresh plist v1.10.0
+       Fresh urlpattern v0.3.0
+       Fresh objc2-web-kit v0.3.2
+       Fresh dirs-sys v0.5.0
+       Fresh serde_with v3.22.0
+       Fresh semver v1.0.28
+       Fresh mime v0.3.17
+       Fresh untrusted v0.9.0
+       Fresh tower-service v0.3.3
+       Fresh ring v0.17.14
+       Fresh dirs v6.0.0
+       Fresh tauri-utils v2.9.3
+       Fresh ppv-lite86 v0.2.21
+       Fresh core-graphics v0.25.0
+       Fresh ico v0.5.0
+       Fresh png v0.18.1
+       Fresh unicode-segmentation v1.13.3
+       Fresh pxfm v0.1.30
+       Fresh try-lock v0.2.5
+       Fresh moxcms v0.8.1
+       Fresh wry v0.55.1
+       Fresh keyboard-types v0.7.0
+       Fresh tao v0.35.3
+       Fresh want v0.3.1
+       Fresh tauri-codegen v2.6.3
+       Fresh rustls-webpki v0.103.15
+       Fresh tauri-runtime v2.11.3
+       Fresh sync_wrapper v1.0.2
+       Fresh futures-channel v0.3.34
+       Fresh core-foundation v0.9.4
+       Fresh serialize-to-javascript-impl v0.1.2
+       Fresh byteorder-lite v0.1.0
+       Fresh tower-layer v0.3.3
+       Fresh httpdate v1.0.3
+       Fresh atomic-waker v1.1.2
+       Fresh subtle v2.6.1
+       Fresh tauri-macros v2.6.3
+       Fresh serialize-to-javascript v0.1.2
+       Fresh rustls v0.23.43
+       Fresh hyper v1.11.0
+       Fresh image v0.25.10
+       Fresh rustversion v1.0.23
+       Fresh core-graphics-types v0.1.3
+       Fresh tauri-runtime-wry v2.11.4
+       Fresh muda v0.19.3
+       Fresh symphonia-utils-xiph v0.5.5
+       Fresh rand_core v0.9.5
+       Fresh window-vibrancy v0.6.0
+       Fresh serde_repr v0.1.21
+       Fresh embed_plist v1.2.2
+       Fresh ipnet v2.12.1
+       Fresh hyper-util v0.1.20
+       Fresh rand_chacha v0.9.0
+       Fresh tauri v2.11.5
+       Fresh objc-sys v0.3.5
+       Fresh strum_macros v0.26.4
+       Fresh tower v0.5.3
+       Fresh http-body-util v0.1.5
+       Fresh objc2-core-audio-types v0.3.2
+       Fresh malloc_buf v0.0.6
+       Fresh cpufeatures v0.2.17
+       Fresh termcolor v1.4.1
+       Fresh bit-vec v0.8.0
+       Fresh unicode-width v0.1.14
+       Fresh paste v1.0.15
+       Fresh objc2-core-audio v0.3.2
+       Fresh objc v0.2.7
+       Fresh rand v0.9.5
+       Fresh bit-set v0.8.0
+       Fresh codespan-reporting v0.11.1
+       Fresh rustix v1.1.4
+       Fresh strum v0.26.3
+       Fresh objc2 v0.5.2
+       Fresh tokio-rustls v0.26.4
+       Fresh webpki-roots v1.0.9
+       Fresh security-framework-sys v2.17.0
+       Fresh rustc-hash v1.1.0
+       Fresh block v0.1.6
+       Fresh unicode-xid v0.2.6
+       Fresh hexf-parse v0.2.1
+       Fresh hyper-rustls v0.27.9
+       Fresh naga v24.0.0
+       Fresh security-framework v3.7.0
+       Fresh metal v0.31.0
+       Fresh block2 v0.5.1
+       Fresh objc2-audio-toolbox v0.3.2
+       Fresh sha1 v0.10.7
+       Fresh tower-http v0.6.11
+       Fresh tokio-util v0.7.19
+       Fresh num-integer v0.1.47
+       Fresh wgpu-types v24.0.0
+       Fresh ioctl-rs v0.1.6
+       Fresh termios v0.2.2
+       Fresh filetime v0.2.29
+       Fresh serial-core v0.4.0
+       Fresh libloading v0.8.9
+       Fresh litrs v1.0.0
+       Fresh dispatch v0.2.0
+       Fresh data-encoding v2.11.1
+       Fresh unicase v2.9.0
+       Fresh extended v0.1.0
+       Fresh profiling v1.0.18
+       Fresh ryu v1.0.23
+       Fresh symphonia-format-riff v0.5.5
+       Fresh serde_urlencoded v0.7.1
+       Fresh wgpu-hal v24.0.4
+       Fresh objc2-foundation v0.2.2
+       Fresh tungstenite v0.29.0
+       Fresh document-features v0.2.12
+       Fresh serial-unix v0.4.0
+       Fresh num-bigint v0.4.8
+       Fresh memoffset v0.6.5
+       Fresh coreaudio-rs v0.14.2
+       Fresh mac-notification-sys v0.6.15
+       Fresh rustls-platform-verifier v0.7.0
+       Fresh xattr v1.6.1
+       Fresh symphonia-codec-vorbis v0.5.5
+       Fresh symphonia-format-ogg v0.5.5
+       Fresh symphonia-bundle-flac v0.5.5
+       Fresh symphonia-format-isomp4 v0.5.5
+       Fresh symphonia-bundle-mp3 v0.5.5
+       Fresh symphonia-codec-pcm v0.5.5
+       Fresh rand_core v0.6.4
+       Fresh symphonia-codec-aac v0.5.5
+       Fresh objc2-osa-kit v0.3.2
+       Fresh serde_spanned v0.6.9
+       Fresh toml_datetime v0.6.3
+       Fresh mach2 v0.5.0
+       Fresh instant v0.1.13
+       Fresh dasp_sample v0.11.0
+       Fresh winnow v0.5.40
+       Fresh pin-utils v0.1.0
+       Fresh fastrand v2.5.0
+       Fresh cpal v0.17.3
+       Fresh toml_edit v0.20.2
+       Fresh nix v0.25.1
+       Fresh notify-types v1.0.1
+       Fresh tempfile v3.27.0
+       Fresh osakit v0.3.1
+       Fresh rand_chacha v0.3.1
+       Fresh symphonia v0.5.5
+       Fresh tar v0.4.46
+       Fresh reqwest v0.13.4
+       Fresh notify-rust v4.18.0
+       Fresh serial v0.4.0
+       Fresh num-rational v0.4.2
+       Fresh wgpu-core v24.0.5
+       Fresh tokio-tungstenite v0.29.0
+       Fresh rfd v0.16.0
+       Fresh objc2-app-kit v0.2.2
+       Fresh tauri-plugin-fs v2.5.1
+       Fresh axum-core v0.5.6
+       Fresh core-graphics v0.23.2
+       Fresh tracing-log v0.2.0
+       Fresh sharded-slab v0.1.7
+       Fresh filedescriptor v0.8.3
+       Fresh fsevent-sys v4.1.0
+       Fresh serde_path_to_error v0.1.20
+       Fresh thread_local v1.1.10
+       Fresh minisign-verify v0.2.5
+       Fresh downcast-rs v1.2.1
+       Fresh cursor-icon v1.2.0
+       Fresh static_assertions v1.1.0
+       Fresh smol_str v0.2.2
+       Fresh nu-ansi-term v0.50.3
+       Fresh matchit v0.8.4
+       Fresh shell-words v1.1.1
+       Fresh notify v7.0.0
+       Fresh winit v0.30.13
+       Fresh axum v0.8.9
+       Fresh tracing-subscriber v0.3.23
+       Fresh portable-pty v0.8.1
+       Fresh wgpu v24.0.5
+       Fresh tauri-plugin-updater v2.10.1
+       Fresh tauri-plugin-dialog v2.7.2
+       Fresh mime_guess v2.0.5
+       Fresh tauri-plugin-notification v2.3.3
+       Fresh rodio v0.22.2
+       Fresh toml v0.8.2
+       Fresh rand v0.8.7
+       Fresh tauri-plugin-process v2.3.1
+       Fresh reqwest v0.12.28
+       Fresh sha2 v0.10.9
+       Fresh objc2-user-notifications v0.3.2
+       Fresh objc2-core-text v0.3.2
+       Fresh objc2-core-graphics v0.3.2
+       Fresh pollster v0.4.0
+       Fresh tokio-stream v0.1.19
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:27:5
+   |
+26 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+27 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+       Fresh tokio-test v0.4.5
+warning: `ferryx` (lib) generated 6 warnings (run `cargo fix --lib -p ferryx` to apply 1 suggestion)
+       Dirty ferryx v2026.902.2 (/Users/indo/code/project/orca-lite/src-tauri): the file `tests/scoped_ssh.rs` has changed (1788605702.466534894s, 1m 1s after last build at 1788605641.435008899s)
+   Compiling ferryx v2026.902.2 (/Users/indo/code/project/orca-lite/src-tauri)
+     Running `CARGO=/Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo CARGO_BIN_EXE_ferryx=/Users/indo/code/project/orca-lite/src-tauri/target/debug/ferryx CARGO_CRATE_NAME=scoped_ssh CARGO_MANIFEST_DIR=/Users/indo/code/project/orca-lite/src-tauri CARGO_MANIFEST_PATH=/Users/indo/code/project/orca-lite/src-tauri/Cargo.toml CARGO_PKG_AUTHORS='Ferryx Contributors' CARGO_PKG_DESCRIPTION='Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)' CARGO_PKG_HOMEPAGE='https://ferryx.app' CARGO_PKG_LICENSE='MIT OR Apache-2.0' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=ferryx CARGO_PKG_README='' CARGO_PKG_REPOSITORY='https://github.com/ferryx/ferryx' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=2026.902.2 CARGO_PKG_VERSION_MAJOR=2026 CARGO_PKG_VERSION_MINOR=902 CARGO_PKG_VERSION_PATCH=2 CARGO_PKG_VERSION_PRE='' CARGO_PRIMARY_PACKAGE=1 CARGO_SBOM_PATH='' CARGO_TARGET_TMPDIR=/Users/indo/code/project/orca-lite/src-tauri/target/tmp DYLD_FALLBACK_LIBRARY_PATH='/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps:/Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/lib:/Users/indo/lib:/usr/local/lib:/usr/lib' OUT_DIR=/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/ferryx-084f4f91f5de301d/out TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin /Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name scoped_ssh --edition=2021 tests/scoped_ssh.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --cfg 'feature="default"' --cfg 'feature="native-terminal"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "native-terminal"))' -C metadata=8f6dce8701c3f14a -C extra-filename=-6f44e15cb9a4126e --out-dir /Users/indo/code/project/orca-lite/src-tauri/target/debug/deps -C incremental=/Users/indo/code/project/orca-lite/src-tauri/target/debug/incremental -L dependency=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps --extern anyhow=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libanyhow-403bb8d72015634b.rlib --extern axum=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libaxum-72cf3a1828eed8ed.rlib --extern base64=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libbase64-80c574e62179e036.rlib --extern block2=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libblock2-a95d7714029fc6af.rlib --extern bytemuck=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libbytemuck-ffec6afde89e14ba.rlib --extern cookie=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libcookie-1f2764459b201e6c.rlib --extern dispatch2=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libdispatch2-0c1256f691bf5699.rlib --extern ferryx_lib=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libferryx_lib.rlib --extern futures_util=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libfutures_util-03a0f88a76c6da96.rlib --extern libc=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/liblibc-e7009e86dfa866b8.rlib --extern mime_guess=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libmime_guess-cbaff3fc8699d3de.rlib --extern notify=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libnotify-890cde09aa57c77a.rlib --extern objc2=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2-abe127b4b1f59122.rlib --extern objc2_app_kit=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_app_kit-8cd2d27c4af4c971.rlib --extern objc2_core_foundation=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_core_foundation-79699f4f987b0d0f.rlib --extern objc2_core_graphics=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_core_graphics-a673355792ec83c9.rlib --extern objc2_core_text=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_core_text-1650106aa2129c82.rlib --extern objc2_foundation=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_foundation-6cd4d4443f971772.rlib --extern objc2_user_notifications=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_user_notifications-a6212d2e8b0aab51.rlib --extern objc2_web_kit=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_web_kit-04a940a754cee404.rlib --extern parking_lot=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libparking_lot-be57c354c2a75552.rlib --extern png=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libpng-0ab228d84434124c.rlib --extern pollster=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libpollster-1cab98c545690edb.rlib --extern portable_pty=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libportable_pty-5d505d3a621742c8.rlib --extern rand=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/librand-0ff9790f54dcc333.rlib --extern raw_window_handle=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libraw_window_handle-d2b7daba74cb5f7a.rlib --extern regex=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libregex-568f98faeabe2cf5.rlib --extern reqwest=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libreqwest-f529c50cb65eb08d.rlib --extern rodio=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/librodio-51257b6a90cea2fa.rlib --extern serde=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libserde-f7b28c04594d2a92.rlib --extern serde_json=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libserde_json-62fd70741f4479ce.rlib --extern sha2=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libsha2-25b91f29147bc908.rlib --extern tauri=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtauri-ddb79d0442129906.rlib --extern tauri_plugin_dialog=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtauri_plugin_dialog-753044d848dfe7b8.rlib --extern tauri_plugin_notification=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtauri_plugin_notification-698311a52305b1da.rlib --extern tauri_plugin_process=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtauri_plugin_process-be170949ed1852f1.rlib --extern tauri_plugin_updater=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtauri_plugin_updater-e6ab0464b5c8f3b9.rlib --extern tempfile=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtempfile-c7db3596d67131bb.rlib --extern thiserror=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libthiserror-a6e0c3025f081993.rlib --extern time=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtime-ff84ebd80ec253ed.rlib --extern tokio=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtokio-1f071ae97c0aad19.rlib --extern tokio_test=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtokio_test-209a08399f7b8284.rlib --extern toml=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtoml-d1b7682c3b3c8403.rlib --extern tower_http=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtower_http-3b85bbcc15c4de25.rlib --extern tracing=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtracing-b3b64a517b8b70f2.rlib --extern tracing_subscriber=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtracing_subscriber-9a0af2dc5e068e3e.rlib --extern uuid=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libuuid-bc57179d8b9f1b01.rlib --extern wgpu=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libwgpu-0bdd5dc608552f9a.rlib --extern winit=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libwinit-8d0f0ee268b943f2.rlib -L native=/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/ferryx-084f4f91f5de301d/out/ghostty_vt/lib -L native=/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/objc2-exception-helper-371ac7c93f170094/out -L native=/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/ring-7ec8b95f3a2a5308/out -L native=/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/mac-notification-sys-4557d9573029bf13/out --cfg desktop --cfg dev --check-cfg 'cfg(desktop)' --check-cfg 'cfg(mobile)' --check-cfg 'cfg(dev)'`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 56.08s
+     Running `CARGO=/Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo CARGO_MANIFEST_DIR=/Users/indo/code/project/orca-lite/src-tauri CARGO_MANIFEST_PATH=/Users/indo/code/project/orca-lite/src-tauri/Cargo.toml CARGO_PKG_AUTHORS='Ferryx Contributors' CARGO_PKG_DESCRIPTION='Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)' CARGO_PKG_HOMEPAGE='https://ferryx.app' CARGO_PKG_LICENSE='MIT OR Apache-2.0' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=ferryx CARGO_PKG_README='' CARGO_PKG_REPOSITORY='https://github.com/ferryx/ferryx' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=2026.902.2 CARGO_PKG_VERSION_MAJOR=2026 CARGO_PKG_VERSION_MINOR=902 CARGO_PKG_VERSION_PATCH=2 CARGO_PKG_VERSION_PRE='' DYLD_FALLBACK_LIBRARY_PATH='/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/ferryx-084f4f91f5de301d/out/ghostty_vt/lib:/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/mac-notification-sys-4557d9573029bf13/out:/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/objc2-exception-helper-371ac7c93f170094/out:/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/ring-7ec8b95f3a2a5308/out:/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps:/Users/indo/code/project/orca-lite/src-tauri/target/debug:/Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib:/Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/lib:/Users/indo/lib:/usr/local/lib:/usr/lib' OUT_DIR=/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/ferryx-084f4f91f5de301d/out TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin /Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/scoped_ssh-6f44e15cb9a4126e`

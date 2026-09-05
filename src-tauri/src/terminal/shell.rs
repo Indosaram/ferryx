@@ -362,6 +362,10 @@ where
 }
 
 fn is_on_path(exe: &str) -> bool {
+    let search_paths = crate::ipc::agents::search_paths();
+    if search_paths.iter().any(|dir| dir.join(exe).is_file()) {
+        return true;
+    }
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
             let full = dir.join(exe);
@@ -402,13 +406,20 @@ pub fn resolve_startup_command(
     preference: Option<&str>,
     startup: Option<&TerminalStartup>,
 ) -> Result<CommandBuilder, AgentResumeError> {
-    let plan = resolve_startup_command_pure(
+    let mut plan = resolve_startup_command_pure(
         preference,
         startup,
         TargetPlatform::CURRENT,
         is_on_path,
         |var| std::env::var(var).ok(),
     )?;
+    if !plan.program.contains('/') && !plan.program.contains('\\') {
+        if let Some(resolved) =
+            crate::ipc::agents::resolve_binary(&plan.program, &crate::ipc::agents::search_paths())
+        {
+            plan.program = resolved.to_string_lossy().to_string();
+        }
+    }
     let mut cmd = CommandBuilder::new(&plan.program);
     for arg in &plan.args {
         cmd.arg(arg);
@@ -1000,6 +1011,21 @@ mod tests {
         let cmd =
             resolve_startup_command(None, Some(&startup)).expect("resolve startup command builder");
         let _ = cmd; // CommandBuilder constructed without executing the process
+    }
+
+    #[test]
+    fn test_resolve_startup_command_omo_resolves_executable_path() {
+        let startup = TerminalStartup::AgentResume {
+            agent_type: "omo".to_string(),
+            provider_session: AgentProviderSession {
+                key: AgentProviderSessionKey::SessionId,
+                id: "sess-omo-abc".to_string(),
+                transcript_path: None,
+            },
+        };
+        let cmd = resolve_startup_command(None, Some(&startup))
+            .expect("resolve omo startup command builder");
+        let _ = cmd;
     }
 
     #[test]

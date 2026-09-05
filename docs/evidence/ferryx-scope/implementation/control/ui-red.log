@@ -1,0 +1,71 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/control
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/features/ferryx/control/control.test.tsx (2 tests | 2 failed) 49ms
+   × global inventory > rejects stale deltas and requires reset on gaps 7ms
+     → expected true to be false // Object.is equality
+   × global inventory > renders both hosts and selects full identity without changing another client 41ms
+     → Unable to find an element by: [data-testid="waiting-target"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mdata-testid[39m=[32m"waiting-inbox"[39m
+    [36m/>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/control/control.test.tsx > global inventory > rejects stale deltas and requires reset on gaps
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ src/features/ferryx/control/control.test.tsx:12:134
+     10|     const s = new InventoryClientState();
+     11|     s.bootstrap({revision: 4, items: [agent("a")], completeness: "comp…
+     12|     expect(s.delta({sequence: 3, revision: 3, target: agent("a").targe…
+       |                                                                                                                                      ^
+     13|     expect(s.snapshot.items[0].state).toBe("waiting");
+     14|     expect(s.delta({sequence: 6, revision: 6, target: agent("a").targe…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/features/ferryx/control/control.test.tsx > global inventory > renders both hosts and selects full identity without changing another client
+TestingLibraryElementError: Unable to find an element by: [data-testid="waiting-target"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mdata-testid[39m=[32m"waiting-inbox"[39m
+    [36m/>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:109:15
+ ❯ src/features/ferryx/control/control.test.tsx:20:25
+     18|     a.bootstrap({revision: 1, items: [agent("a"), agent("b")], complet…
+     19|     render(<AttentionInbox snapshot={a.snapshot} isUnread={row => a.un…
+     20|     const rows = screen.getAllByTestId("waiting-target");
+       |                         ^
+     21|     expect(rows).toHaveLength(2);
+     22|     fireEvent.click(rows[1]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  19:27:32
+   Duration  4.05s (transform 125ms, setup 484ms, collect 167ms, tests 49ms, environment 1.04s, prepare 134ms)
+
+error: script "test" exited with code 1

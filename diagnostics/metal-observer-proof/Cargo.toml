@@ -1,0 +1,12 @@
+[package]
+name = "metal_observer_proof"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+objc = "0.2.7"
+core-graphics-types = "0.1"
+
+[[bin]]
+name = "metal_observer_proof"
+path = "src/main.rs"

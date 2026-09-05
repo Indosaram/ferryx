@@ -23,6 +23,9 @@ use super::sys::types::{
     GHOSTTY_FORMATTER_FORMAT_PLAIN, GHOSTTY_NO_VALUE, GHOSTTY_POINT_TAG_SCREEN,
     GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,
+    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
+    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS,
+    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS,
     GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS,
     GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE, GHOSTTY_SELECTION_ORDER_FORWARD, GHOSTTY_SUCCESS,
     GHOSTTY_TERMINAL_DATA_SELECTION, GHOSTTY_TERMINAL_OPT_SELECTION,
@@ -234,13 +237,38 @@ pub fn selection_range(
     };
     NativeTerminalError::from_c_result(end_result, "ghostty_terminal_point_from_grid_ref(End)")?;
 
-    let start_row = u16::try_from(start.y).map_err(|_| {
-        NativeTerminalError::InvalidValue("selection start row exceeds u16 API range".to_string())
-    })?;
-    let end_row = u16::try_from(end.y).map_err(|_| {
-        NativeTerminalError::InvalidValue("selection end row exceeds u16 API range".to_string())
-    })?;
-    Ok(Some((start.x, start_row, end.x, end_row)))
+    let sb = super::scroll::query_scrollbar(handle)?;
+    let offset = sb.offset as u64;
+    let v_rows = sb.len as u64;
+    let start_y = start.y as u64;
+    let end_y = end.y as u64;
+
+    let (min_y, max_y, min_x, max_x) = if (start_y, start.x) <= (end_y, end.x) {
+        (start_y, end_y, start.x, end.x)
+    } else {
+        (end_y, start_y, end.x, start.x)
+    };
+
+    if max_y < offset || min_y >= offset + v_rows {
+        return Ok(None);
+    }
+
+    let cols = super::queries::query_cols(handle)?;
+    let rows = super::queries::query_rows(handle)?;
+
+    let (v_start_col, v_start_row) = if min_y < offset {
+        (0, 0)
+    } else {
+        (min_x, (min_y - offset) as u16)
+    };
+
+    let (v_end_col, v_end_row) = if max_y >= offset + v_rows {
+        (cols.saturating_sub(1), rows.saturating_sub(1))
+    } else {
+        (max_x, (max_y - offset) as u16)
+    };
+
+    Ok(Some((v_start_col, v_start_row, v_end_col, v_end_row)))
 }
 
 pub fn create_selection_gesture() -> Result<SelectionGestureGuard, NativeTerminalError> {
@@ -351,6 +379,56 @@ pub fn apply_mouse_gesture(
             NativeTerminalError::from_c_result(
                 res,
                 "ghostty_selection_gesture_event_set(Position)",
+            )?;
+
+            // Maximum repeat-click distance in surface pixels. Set comfortably to 2 cell widths or min 16px.
+            let repeat_distance: f64 = (cell_width as f64 * 2.0).max(16.0);
+            // SAFETY: Category: Foreign Option Configuration. repeat_distance is valid stack storage.
+            let res = unsafe {
+                ghostty_selection_gesture_event_set(
+                    event_guard.0.as_ptr(),
+                    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
+                    &repeat_distance as *const f64 as *const c_void,
+                )
+            };
+            NativeTerminalError::from_c_result(
+                res,
+                "ghostty_selection_gesture_event_set(RepeatDistance)",
+            )?;
+
+            // Maximum interval between repeat clicks in nanoseconds: 500ms default.
+            let repeat_interval_ns: u64 = 500_000_000;
+            // SAFETY: Category: Foreign Option Configuration. repeat_interval_ns is valid stack storage.
+            let res = unsafe {
+                ghostty_selection_gesture_event_set(
+                    event_guard.0.as_ptr(),
+                    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS,
+                    &repeat_interval_ns as *const u64 as *const c_void,
+                )
+            };
+            NativeTerminalError::from_c_result(
+                res,
+                "ghostty_selection_gesture_event_set(RepeatIntervalNs)",
+            )?;
+
+            // Monotonic event time in nanoseconds. Uses wire timestamp if provided or falls back to system monotonic clock.
+            let time_ns: u64 = event.timestamp_ns.unwrap_or_else(|| {
+                use std::sync::LazyLock;
+                use std::time::Instant;
+                static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+                START.elapsed().as_nanos() as u64
+            });
+            // SAFETY: Category: Foreign Option Configuration. time_ns is valid stack storage.
+            let res = unsafe {
+                ghostty_selection_gesture_event_set(
+                    event_guard.0.as_ptr(),
+                    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS,
+                    &time_ns as *const u64 as *const c_void,
+                )
+            };
+            NativeTerminalError::from_c_result(
+                res,
+                "ghostty_selection_gesture_event_set(TimeNs)",
             )?;
 
             let mut selection = GhosttySelection::default();
@@ -526,6 +604,7 @@ mod tests {
             position: MousePosition { x: 10.0, y: 10.0 },
             modifiers: Default::default(),
             size: None,
+            timestamp_ns: None,
         };
 
         let error = terminal

@@ -154,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position: MousePosition { x, y },
         modifiers: Default::default(),
         size: Some(size),
+        timestamp_ns: None,
     };
 
     let press_ev = make_mouse_event(MouseAction::Press, 5.0, 10.0);

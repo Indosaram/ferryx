@@ -1,0 +1,40 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/ssh
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/features/ferryx/ssh/model.test.ts (2 tests) 3ms
+ ❯ src/features/ferryx/ssh/components.test.tsx (1 test | 1 failed) 38ms
+   × keeps removed host reference disabled rather than switching to Local 36ms
+     → expect(element).toBeDisabled()
+
+Received element is not disabled:
+  <button
+  data-testid="run-on"
+/>
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/ssh/components.test.tsx > keeps removed host reference disabled rather than switching to Local
+Error: expect(element).toBeDisabled()
+
+Received element is not disabled:
+  <button
+  data-testid="run-on"
+/>
+ ❯ src/features/ferryx/ssh/components.test.tsx:7:40
+      5| it("keeps removed host reference disabled rather than switching to Loc…
+      6|   render(<RunOn value={{ kind: "ssh", hostId: "removed" }} hosts={[]} …
+      7|   expect(screen.getByTestId("run-on")).toBeDisabled();
+       |                                        ^
+      8|   expect(screen.getByTestId("run-on")).toHaveAttribute("data-host-id",…
+      9| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 2 passed (3)
+   Start at  19:38:26
+   Duration  5.43s (transform 270ms, setup 985ms, collect 160ms, tests 40ms, environment 2.34s, prepare 175ms)
+
+error: script "test" exited with code 1

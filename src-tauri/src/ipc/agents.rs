@@ -524,7 +524,7 @@ pub fn detect_agents(names: &[String]) -> Vec<AgentDetection> {
         .collect()
 }
 
-fn search_paths() -> Vec<PathBuf> {
+pub(crate) fn search_paths() -> Vec<PathBuf> {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS
         .get_or_init(|| {
@@ -567,7 +567,7 @@ fn login_shell_path() -> Option<OsString> {
     Some(OsString::from(value))
 }
 
-fn resolve_binary(name: &str, search_paths: &[PathBuf]) -> Option<PathBuf> {
+pub(crate) fn resolve_binary(name: &str, search_paths: &[PathBuf]) -> Option<PathBuf> {
     if name.contains('/') || name.contains('\\') {
         return None;
     }

@@ -151,6 +151,13 @@ impl PtyManager {
             cmd.env(key, value);
         }
 
+        // GUI-launched daemons inherit minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) on macOS.
+        // Direct child spawns (such as agent resumes) fail to find binaries in Homebrew, bun,
+        // cargo, nvm unless PATH is augmented with the user's login shell search paths.
+        if let Ok(augmented) = std::env::join_paths(crate::ipc::agents::search_paths()) {
+            cmd.env("PATH", augmented);
+        }
+
         // TERM=xterm-256color only claims 256 indexed colors. Truecolor-capable agent TUIs read
         // COLORTERM instead, and degrade to a reduced palette when it is missing.
         cmd.env("COLORTERM", "truecolor");

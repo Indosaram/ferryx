@@ -14,18 +14,19 @@ This guide describes how to prepare, build, and submit Ferryx as an MSIX package
 
 ## 2. App Identity Configuration
 
-In Microsoft Partner Center under **Product management** -> **Product Identity**, retrieve your store credentials:
+In Microsoft Partner Center under **Product management** -> **Product Identity**, the store credentials for Ferryx are:
 
-- **Package/Identity/Name**: e.g., `YourPublisher.Ferryx`
-- **Package/Identity/Publisher**: e.g., `CN=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`
-- **Package/Properties/PublisherDisplayName**: e.g., `Ferryx Team`
+- **Package/Identity/Name**: `ProjectMaho.Ferryx`
+- **Package Family Name (PFN)**: `ProjectMaho.Ferryx_s4dtschhe0d3e`
+- **Package/Identity/Publisher**: `CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36`
+- **Package/Properties/PublisherDisplayName**: `Project Maho`
 
-Update `src-tauri/windows/msix/AppxManifest.xml` or pass them as parameters when running the build script:
+Configured in `src-tauri/windows/msix/AppxManifest.xml` and `scripts/build-msix.ps1`:
 
 ```xml
 <Identity
-  Name="<Your-Store-Package-Name>"
-  Publisher="CN=<Your-Store-Publisher-ID>"
+  Name="ProjectMaho.Ferryx"
+  Publisher="CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36"
   Version="0.1.0.0"
   ProcessorArchitecture="x64" />
 ```

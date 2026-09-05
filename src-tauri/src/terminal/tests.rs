@@ -59,6 +59,30 @@ async fn test_spawn_write_echo_and_read() {
 }
 
 #[tokio::test]
+async fn test_spawn_startup_command_omo() {
+    let startup = crate::daemon::protocol::TerminalStartup::AgentResume {
+        agent_type: "omo".to_string(),
+        provider_session: crate::daemon::protocol::AgentProviderSession {
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: "fake-test-session".to_string(),
+            transcript_path: None,
+        },
+    };
+    let cmd = crate::terminal::shell::resolve_startup_command(None, Some(&startup))
+        .expect("resolve startup command");
+    let manager = PtyManager::new();
+    let res = manager.spawn(cmd, 80, 24);
+    assert!(
+        res.is_ok(),
+        "spawning omo should succeed without 'not found in PATH' error: {:?}",
+        res.err()
+    );
+    if let Ok((session_id, _)) = res {
+        let _ = manager.close_session(&session_id).await;
+    }
+}
+
+#[tokio::test]
 async fn test_resize() {
     let manager = PtyManager::new();
     let cmd = CommandBuilder::new("/bin/sh");

@@ -1,0 +1,50 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/design/session.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/features/ferryx/design/session.test.ts (2 tests | 2 failed) 14ms
+   × freezes explicit target and exact bytes; remote failure preserves immutable draft; sends once 12ms
+     → expected undefined to deeply equal Uint8Array[ 137, 80, 78, 71 ]
+   × subscribes before arm and discards capture callback after invalidation 1ms
+     → expected undefined to be defined
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/design/session.test.ts > freezes explicit target and exact bytes; remote failure preserves immutable draft; sends once
+AssertionError: expected undefined to deeply equal Uint8Array[ 137, 80, 78, 71 ]
+
+- Expected: 
+Uint8Array [
+  137,
+  80,
+  78,
+  71,
+]
+
++ Received: 
+undefined
+
+ ❯ src/features/ferryx/design/session.test.ts:15:18
+     13|   session.capture = capture;
+     14|   const chosen = { ...target }; await session.confirm(chosen, "note", …
+     15|   expect(staged).toEqual(capture.png); expect(session.draft?.target.ho…
+       |                  ^
+     16|   expect(Object.isFrozen(session.draft)).toBe(true);
+     17|   await expect(session.send()).rejects.toThrow("REMOTE_UNAVAILABLE"); …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/features/ferryx/design/session.test.ts > subscribes before arm and discards capture callback after invalidation
+AssertionError: expected undefined to be defined
+ ❯ src/features/ferryx/design/session.test.ts:26:62
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  19:24:19
+   Duration  2.92s (transform 62ms, setup 568ms, collect 22ms, tests 14ms, environment 1.44s, prepare 548ms)
+
+error: script "test" exited with code 1

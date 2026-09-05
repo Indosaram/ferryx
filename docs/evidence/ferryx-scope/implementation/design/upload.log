@@ -1,0 +1,2 @@
+{"status":"passed","boundary":"actual HTTP byte transfer and receiver-owned private file","bytes":8,"remoteSsh":false,"productionStaging":false}
+{"cleanup":"loopback server stopped and private receiver directory removed"}

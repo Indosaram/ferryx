@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/ssh
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/features/ferryx/ssh/model.test.ts (2 tests | 2 failed) 5ms
+   × SSH target configuration > rejects invalid ports and option injection 3ms
+     → expected null not to be null
+   × SSH target configuration > never falls back to local when a referenced host is removed 2ms
+     → expected [Function] to throw an error
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/ssh/model.test.ts > SSH target configuration > rejects invalid ports and option injection
+AssertionError: expected null not to be null
+ ❯ src/features/ferryx/ssh/model.test.ts:6:54
+      4| describe("SSH target configuration", () => {
+      5|   it("rejects invalid ports and option injection", () => {
+      6|     expect(validateHost({ ...host, port: 1.5 })).not.toBeNull();
+       |                                                      ^
+      7|     expect(validateHost({ ...host, hostname: "-oProxyCommand=evil" }))…
+      8|     expect(validateHost(host)).toBeNull();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/features/ferryx/ssh/model.test.ts > SSH target configuration > never falls back to local when a referenced host is removed
+AssertionError: expected [Function] to throw an error
+ ❯ src/features/ferryx/ssh/model.test.ts:11:71
+      9|   });
+     10|   it("never falls back to local when a referenced host is removed", ()…
+     11|     expect(() => resolveRunTarget({ kind: "ssh", hostId: "qa" }, [])).…
+       |                                                                       ^
+     12|     expect(resolveRunTarget({ kind: "ssh", hostId: "qa" }, [host])).to…
+     13|     expect(resolveRunTarget(undefined, [])).toEqual({ kind: "local" });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  19:35:03
+   Duration  1.49s (transform 45ms, setup 231ms, collect 10ms, tests 5ms, environment 484ms, prepare 56ms)
+
+error: script "test" exited with code 1

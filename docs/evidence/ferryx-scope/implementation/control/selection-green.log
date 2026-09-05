@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/control
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/features/ferryx/control/selection.test.tsx (1 test) 89ms
+ ✓ src/features/ferryx/control/control.test.tsx (2 tests) 34ms
+
+ Test Files  2 passed (2)
+      Tests  3 passed (3)
+   Start at  19:39:54
+   Duration  1.96s (transform 76ms, setup 246ms, collect 484ms, tests 123ms, environment 461ms, prepare 65ms)
+

@@ -1,0 +1,39 @@
+    Blocking waiting for file lock on build directory
+   Compiling ferryx v2026.902.2 (/Users/indo/code/project/orca-lite/src-tauri)
+error[E0432]: unresolved import `objc2_user_notifications::UNNotificationSound`
+ --> src/notification/macos_submission.rs:7:85
+  |
+7 | use objc2_user_notifications::{UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound, UNUserNotificationCenter};
+  |                                                                                     ^^^^^^^^^^^^^^^^^^^
+  |                                                                                     |
+  |                                                                                     no `UNNotificationSound` in the root
+  |                                                                                     help: a similar name exists in the module: `UNNotificationContent`
+
+error[E0599]: no method named `setSound` found for struct `Retained<UNMutableNotificationContent>` in the current scope
+  --> src/notification/macos_submission.rs:19:45
+   |
+19 |         NotificationSound::System => native.setSound(Some(&UNNotificationSound::defaultSound())),
+   |                                             ^^^^^^^^ method not found in `Retained<UNMutableNotificationContent>`
+
+error[E0599]: no method named `setSound` found for struct `Retained<UNMutableNotificationContent>` in the current scope
+  --> src/notification/macos_submission.rs:20:45
+   |
+20 |         NotificationSound::Silent => native.setSound(None),
+   |                                             ^^^^^^^^ method not found in `Retained<UNMutableNotificationContent>`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+warning: `ferryx` (lib) generated 1 warning
+error: could not compile `ferryx` (lib) due to 3 previous errors; 1 warning emitted
+
+EXIT:101

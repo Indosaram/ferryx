@@ -6,10 +6,10 @@
     The application semantic version (e.g. 0.1.0 or v0.1.0).
 
 .PARAMETER Publisher
-    The Publisher identity DN (e.g. CN=Ferryx, O=Ferryx, C=US or Microsoft Partner Center Publisher ID).
+    The Publisher identity DN (e.g. CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36 or Microsoft Partner Center Publisher ID).
 
 .PARAMETER PackageName
-    The MSIX package name (defaults to Ferryx).
+    The MSIX package name (defaults to ProjectMaho.Ferryx).
 
 .PARAMETER OutputDir
     The output directory where generated .msix and certificates are saved (defaults to dist/msix).
@@ -19,8 +19,8 @@
 #>
 param (
     [string]$Version = "0.1.0",
-    [string]$Publisher = "CN=Ferryx, O=Ferryx, C=US",
-    [string]$PackageName = "Ferryx",
+    [string]$Publisher = "CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36",
+    [string]$PackageName = "ProjectMaho.Ferryx",
     [string]$OutputDir = "dist/msix",
     [switch]$SkipSigning = $false
 )
@@ -93,12 +93,15 @@ if (-not $makeAppx) {
 Write-Host "[2/6] Found Windows SDK tools: $makeAppx"
 
 # Prepare staging / layout directory
-$layoutDir = "target/msix-layout"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$layoutDir = Join-Path $repoRoot "target\msix-layout"
 if (Test-Path $layoutDir) {
     Remove-Item -Recurse -Force $layoutDir
 }
 New-Item -ItemType Directory -Force -Path "$layoutDir\Assets" | Out-Null
-New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+
+$resolvedOutputDir = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDir))
+New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 
 # Locate Ferryx binary
 $binaryCandidates = @(
@@ -165,7 +168,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 Write-Host "[5/6] Generated AppxManifest.xml with version $msixVersion"
 
 # Pack MSIX
-$msixOutputFile = "$OutputDir\Ferryx_${cleanVersion}_x64.msix"
+$msixOutputFile = Join-Path $resolvedOutputDir "Ferryx_${cleanVersion}_x64.msix"
 Write-Host "[6/6] Packing MSIX package to: $msixOutputFile"
 & $makeAppx pack /d $layoutDir /p $msixOutputFile /nv /o
 
@@ -186,7 +189,7 @@ if (-not $SkipSigning -and $signTool) {
             -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}Subject Type=End Entity")
 
         $pfxPassword = ConvertTo-SecureString -String "FerryxMsixSignPass2026!" -Force -AsPlainText
-        $pfxPath = "$OutputDir\Ferryx_DevCert.pfx"
+        $pfxPath = Join-Path $resolvedOutputDir "Ferryx_DevCert.pfx"
         Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pfxPassword | Out-Null
 
         Write-Host "==> Signing package with SignTool..."

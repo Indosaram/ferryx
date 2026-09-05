@@ -1,0 +1,52 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/control
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/features/ferryx/control/control.test.tsx (2 tests) 35ms
+ ❯ src/features/ferryx/control/selection.test.tsx (1 test | 1 failed) 45ms
+   × selects exact host workspace and session locally 44ms
+     → Unable to find an accessible element with the role "button" and name "b / w / b"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section />[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/control/selection.test.tsx > selects exact host workspace and session locally
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "b / w / b"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section />[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/features/ferryx/control/selection.test.tsx:10:26
+      8|   let selected: unknown;
+      9|   render(<HostSessionSelection agents={agents} selected={null} onSelec…
+     10|   fireEvent.click(screen.getByRole("button",{name:"b / w / b"}));
+       |                          ^
+     11|   expect(selected).toEqual(agents[1].target);
+     12|   expect(screen.getByTestId("host-select")).toBeTruthy();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 2 passed (3)
+   Start at  19:39:14
+   Duration  3.11s (transform 118ms, setup 653ms, collect 565ms, tests 80ms, environment 1.16s, prepare 349ms)
+
+error: script "test" exited with code 1

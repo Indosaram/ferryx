@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/features/ferryx/design/session.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/features/ferryx/design/session.test.ts (3 tests | 1 failed) 29ms
+   ✓ freezes explicit target and exact bytes; remote failure preserves immutable draft; sends once 5ms
+   ✓ subscribes before arm and discards capture callback after invalidation 0ms
+   × cancel preserves a confirmed draft but prevents sending that cancelled selection 22ms
+     → promise resolved "{ …(3) }" instead of rejecting
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/features/ferryx/design/session.test.ts > cancel preserves a confirmed draft but prevents sending that cancelled selection
+AssertionError: promise resolved "{ …(3) }" instead of rejecting
+
+- Expected
++ Received
+
+- Error {
+-   "message": "rejected promise",
++ {
++   "requestId": "cancelled-request",
++   "stage": "accepted",
++   "target": {
++     "backendSessionId": "s",
++     "epoch": "1",
++     "hostId": "remote",
++     "ownerId": "owner",
++   },
+  }
+
+ ❯ src/features/ferryx/design/session.test.ts:34:54
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed (3)
+   Start at  19:53:17
+   Duration  1.30s (transform 117ms, setup 383ms, collect 67ms, tests 29ms, environment 578ms, prepare 67ms)
+
+error: script "test" exited with code 1
