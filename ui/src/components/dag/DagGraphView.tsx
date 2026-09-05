@@ -66,7 +66,25 @@ export function DagGraphView({
   }
 
   const nodes = activeRun.nodes;
-  const waves = [...activeRun.waves].sort((a, b) => a.index - b.index);
+  const rawWaves = [...activeRun.waves].sort((a, b) => a.index - b.index);
+
+  // Unassigned nodes fallback (Bug 6): collect any nodes not partitioned into waves
+  const assignedNodeIds = new Set<string>();
+  rawWaves.forEach((wave) => {
+    wave.nodeIds.forEach((id) => assignedNodeIds.add(id));
+  });
+  const unassignedNodeIds = nodes
+    .filter((n) => !assignedNodeIds.has(n.id))
+    .map((n) => n.id);
+
+  const waves = [...rawWaves];
+  if (unassignedNodeIds.length > 0) {
+    waves.push({
+      index: rawWaves.length > 0 ? Math.max(...rawWaves.map((w) => w.index)) + 1 : 0,
+      nodeIds: unassignedNodeIds,
+    });
+  }
+
   const counts = activeRun.counts || deriveDagRunCounts(nodes);
   const activeWaveIdx = deriveActiveWaveIndex(activeRun);
   const totalWaves = waves.length;
@@ -153,7 +171,7 @@ export function DagGraphView({
                   width: CARD_WIDTH,
                 }}
               >
-                wave {wave.index + 1}
+                wave {colIndex + 1}
               </div>
               {wave.nodeIds.map((nodeId, rowIndex) => {
                 const node = nodeMap.get(nodeId);

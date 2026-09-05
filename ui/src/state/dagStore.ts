@@ -37,6 +37,13 @@ export function selectActiveRunIds(
   return activeIds;
 }
 
+function runTimestamp(run: DagRunSnapshot): number {
+  const parsed = run.updatedAt ?? run.completedAt ?? run.startedAt;
+  if (!parsed) return 0;
+  const time = Date.parse(parsed);
+  return Number.isFinite(time) ? time : 0;
+}
+
 export function selectRunSummaries(
   state: DagStoreState,
   projectPath: string,
@@ -45,9 +52,7 @@ export function selectRunSummaries(
   if (!projectRuns) return [];
   const runs = Object.values(projectRuns);
   return runs.slice().sort((a, b) => {
-    const bUpdated = b.updatedAt ?? "";
-    const aUpdated = a.updatedAt ?? "";
-    return bUpdated.localeCompare(aUpdated);
+    return runTimestamp(b) - runTimestamp(a);
   });
 }
 

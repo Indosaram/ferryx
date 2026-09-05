@@ -1,12 +1,10 @@
 use crate::dag::journal::{
-    list_run_summaries, parse_run_checkpoint, DagJournalError,
-    DagRunSnapshot as JournalDagRunSnapshot, DagRunSummary,
+    list_run_summaries, parse_run_checkpoint, DagRunSnapshot, DagRunSummary,
 };
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use crate::ipc::run_blocking;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashSet;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
@@ -24,44 +22,6 @@ fn resolve_dag_runs_dir(project_path: &Path) -> PathBuf {
     } else {
         nested.join("runs")
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DagRunSnapshot {
-    #[serde(flatten)]
-    snapshot: JournalDagRunSnapshot,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
-}
-
-impl Deref for DagRunSnapshot {
-    type Target = JournalDagRunSnapshot;
-
-    fn deref(&self) -> &Self::Target {
-        &self.snapshot
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DagCheckpointSessionIds {
-    #[serde(default)]
-    root_session_id: Option<String>,
-    #[serde(default)]
-    parent_session_id: Option<String>,
-}
-
-fn parse_ipc_run_checkpoint(json: &str) -> Result<DagRunSnapshot, DagJournalError> {
-    let session_ids: DagCheckpointSessionIds = serde_json::from_str(json)?;
-    let snapshot = parse_run_checkpoint(json)?;
-    Ok(DagRunSnapshot {
-        snapshot,
-        root_session_id: session_ids.root_session_id,
-        parent_session_id: session_ids.parent_session_id,
-    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,7 +62,7 @@ fn load_current_snapshots(project_path: &str) -> Vec<DagRunSnapshot> {
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(snapshot) = parse_ipc_run_checkpoint(&content) {
+                if let Ok(snapshot) = parse_run_checkpoint(&content) {
                     snapshots.push(snapshot);
                 }
             }
@@ -128,18 +88,10 @@ pub async fn dag_watch_project<R: tauri::Runtime>(
         watched.insert(canonical.clone())
     };
     if is_new_root {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, JournalDagRunSnapshot)>(100);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, DagRunSnapshot)>(100);
         crate::dag::watcher::spawn_dag_watcher(PathBuf::from(&canonical), tx);
         tauri::async_runtime::spawn(async move {
-            while let Some((tagged, journal_snapshot)) = rx.recv().await {
-                let snapshot = load_current_snapshots(&tagged)
-                    .into_iter()
-                    .find(|snapshot| snapshot.run_id == journal_snapshot.run_id)
-                    .unwrap_or(DagRunSnapshot {
-                        snapshot: journal_snapshot,
-                        root_session_id: None,
-                        parent_session_id: None,
-                    });
+            while let Some((tagged, snapshot)) = rx.recv().await {
                 let payload = DagRunUpdatedPayload {
                     project_path: tagged,
                     snapshot,
@@ -205,7 +157,7 @@ pub async fn dag_get_run(
                 let content = std::fs::read_to_string(candidate).map_err(|e| {
                     IpcError::new(IpcErrorCode::IoError, format!("failed to read file: {e}"))
                 })?;
-                let snapshot = parse_ipc_run_checkpoint(&content).map_err(|e| {
+                let snapshot = parse_run_checkpoint(&content).map_err(|e| {
                     IpcError::new(
                         IpcErrorCode::ParseError,
                         format!("failed to parse checkpoint: {e}"),
@@ -220,7 +172,7 @@ pub async fn dag_get_run(
                 let entry_path = entry.path();
                 if entry_path.is_file() && entry_path.extension().is_some_and(|ext| ext == "json") {
                     if let Ok(content) = std::fs::read_to_string(&entry_path) {
-                        if let Ok(snapshot) = parse_ipc_run_checkpoint(&content) {
+                        if let Ok(snapshot) = parse_run_checkpoint(&content) {
                             if snapshot.run_id == run_id || snapshot.run_id == clean_id {
                                 return Ok(Some(snapshot));
                             }
@@ -270,7 +222,7 @@ mod tests {
         }"#;
 
         let with_ids =
-            parse_ipc_run_checkpoint(with_session_ids).expect("parse checkpoint with ids");
+            parse_run_checkpoint(with_session_ids).expect("parse checkpoint with ids");
         assert_eq!(
             with_ids.root_session_id.as_deref(),
             Some("01a055f9-a8de-7619-a1f5-81ca62e3d3b1")
@@ -290,7 +242,7 @@ mod tests {
         );
 
         let without_ids =
-            parse_ipc_run_checkpoint(without_session_ids).expect("parse checkpoint without ids");
+            parse_run_checkpoint(without_session_ids).expect("parse checkpoint without ids");
         assert_eq!(without_ids.root_session_id, None);
         assert_eq!(without_ids.parent_session_id, None);
         let serialized =

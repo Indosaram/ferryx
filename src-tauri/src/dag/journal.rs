@@ -142,6 +142,10 @@ pub struct DagRunSnapshot {
     pub critical_path: Vec<String>,
     pub bottlenecks: Vec<DagBottleneck>,
     pub counts: DagRunCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +212,10 @@ struct RawCheckpoint {
     run_key: String,
     name: String,
     status: DagRunStatus,
+    #[serde(default)]
+    root_session_id: Option<String>,
+    #[serde(default)]
+    parent_session_id: Option<String>,
     #[serde(default)]
     started_at: Option<String>,
     #[serde(default)]
@@ -284,6 +292,8 @@ pub fn parse_run_checkpoint(json: &str) -> Result<DagRunSnapshot, DagJournalErro
         waves: raw.waves,
         critical_path: raw.critical_path,
         bottlenecks: raw.bottlenecks,
+        root_session_id: raw.root_session_id,
+        parent_session_id: raw.parent_session_id,
     })
 }
 

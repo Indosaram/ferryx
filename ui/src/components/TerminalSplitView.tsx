@@ -809,6 +809,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         tab={tab}
         content={content}
         session={session}
+        sessions={props.sessions}
         activity={props.activityBySessionId?.[sessionId]}
         isOnlyLeaf={tabLayout.root.type === "leaf"}
         isActive={props.groupFocused && tabLayout.activeLeafId === node.leafId}
@@ -859,6 +860,7 @@ type PaneLeafViewProps = {
   tab: WorkspaceTab;
   content: PaneContent;
   session: TerminalSession;
+  sessions: Readonly<Record<string, TerminalSession>>;
   activity?: TerminalActivity;
   isOnlyLeaf: boolean;
   isActive: boolean;
@@ -880,6 +882,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   tab,
   content,
   session,
+  sessions,
   activity,
   isOnlyLeaf,
   isActive,
@@ -1097,6 +1100,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
               return (
                 <TerminalPane
                   session={session}
+                  sessions={sessions}
                   active={isActive}
                   activity={activity}
                   needsAttention={needsAttention}

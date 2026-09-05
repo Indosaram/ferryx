@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import type { DagRunSnapshot } from "../../lib/dagTypes";
 import type { TerminalSession } from "../../lib/types";
@@ -17,10 +17,9 @@ export type DagPaneBadgeProps = {
 };
 
 function cleanPath(p: string): string {
-  const norm = p.replace(/\\/g, "/").trim();
-  if (norm.length > 1 && norm.endsWith("/")) {
-    return norm.replace(/\/+$/, "");
-  }
+  let norm = p.replace(/\\/g, "/").trim();
+  if (norm.startsWith("/private/")) norm = norm.slice("/private".length);
+  if (norm.length > 1 && norm.endsWith("/")) norm = norm.replace(/\/+$/, "");
   return norm;
 }
 
@@ -57,9 +56,9 @@ function resolveProjectRuns(
 
 function runUpdatedAt(run: DagRunSnapshot): number {
   const parsed = run.updatedAt ?? run.completedAt ?? run.startedAt;
-  if (parsed === null) return Number.NaN;
+  if (!parsed) return 0;
   const time = Date.parse(parsed);
-  return Number.isFinite(time) ? time : Number.NaN;
+  return Number.isFinite(time) ? time : 0;
 }
 
 function GraphGlyph(): JSX.Element {
@@ -109,8 +108,11 @@ export function DagPaneBadge({
   );
 
   useEffect(() => {
-    dagRunOwnership.retain(runningRuns.map((candidate) => candidate.runId));
-  }, [runningRuns]);
+    dagRunOwnership.retain(
+      runningRuns.map((candidate) => candidate.runId),
+      runs.map((candidate) => candidate.runId),
+    );
+  }, [runningRuns, runs]);
 
   useEffect(() => {
     if (!agentWorking || paneId === undefined || paneId === "") return;
@@ -139,8 +141,6 @@ export function DagPaneBadge({
   }, [runningRuns, sessions, paneId]);
 
   const run = useMemo(() => {
-    const owned = runningRuns.find((candidate) => ownersByRunId[candidate.runId] === paneId);
-    if (owned) return owned;
     const exact = runningRuns.find(
       (candidate) =>
         typeof candidate.rootSessionId === "string" &&
@@ -148,6 +148,8 @@ export function DagPaneBadge({
         candidate.rootSessionId === providerSessionId,
     );
     if (exact) return exact;
+    const owned = runningRuns.find((candidate) => ownersByRunId[candidate.runId] === paneId);
+    if (owned) return owned;
     if (!agentPresent) return null;
     return runningRuns.find(
       (candidate) =>
@@ -157,14 +159,49 @@ export function DagPaneBadge({
   }, [runningRuns, ownersByRunId, paneId, providerSessionId, agentPresent, exactlyMatchedByAnotherPane]);
 
   const visible = run !== null;
+  const modalRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!open || !visible) return;
+
+    previousActiveElementRef.current = document.activeElement as HTMLElement | null;
+    const focusTimer = setTimeout(() => {
+      closeButtonRef.current?.focus();
+    }, 0);
+
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        return;
+      }
+      if (event.key === "Tab" && modalRef.current) {
+        const focusable = modalRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusable.length > 0) {
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+      }
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      clearTimeout(focusTimer);
+      document.removeEventListener("keydown", onKeyDown, true);
+      previousActiveElementRef.current?.focus();
+    };
   }, [open, visible]);
 
   if (run === null) return null;
@@ -192,15 +229,21 @@ export function DagPaneBadge({
                 data-testid="dag-pane-modal-backdrop"
                 className="fixed inset-0 z-[100] bg-black/60"
                 onClick={() => setOpen(false)}
+                onKeyDown={(e) => e.stopPropagation()}
                 aria-hidden="true"
               />
-              <div className="pointer-events-none fixed inset-0 z-[101] flex items-center justify-center p-6">
+              <div
+                className="pointer-events-none fixed inset-0 z-[101] flex items-center justify-center p-6"
+                onKeyDown={(e) => e.stopPropagation()}
+              >
                 <div
+                  ref={modalRef}
                   data-testid="dag-pane-modal"
                   role="dialog"
                   aria-modal="true"
                   aria-label="DAG runs"
-                  className="pointer-events-auto flex h-[min(820px,86vh)] w-[min(1280px,92vw)] flex-col overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-2xl"
+                  tabIndex={-1}
+                  className="pointer-events-auto flex h-[min(820px,86vh)] w-[min(1280px,92vw)] flex-col overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-2xl outline-none"
                 >
                   <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
                     <span className="flex min-w-0 items-center gap-2 text-xs text-foreground">
@@ -212,6 +255,7 @@ export function DagPaneBadge({
                       </span>
                     </span>
                     <button
+                      ref={closeButtonRef}
                       type="button"
                       data-testid="dag-pane-modal-close"
                       aria-label="Close DAG runs"

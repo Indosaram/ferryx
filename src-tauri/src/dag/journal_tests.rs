@@ -27,6 +27,15 @@ fn test_parse_run_checkpoint_f107_real_fixture() {
         }
     }
 
+    assert_eq!(
+        snapshot.root_session_id.as_deref(),
+        Some("01a04819-fbfa-7fd7-b6be-3fe9bfed7bf1")
+    );
+    assert_eq!(
+        snapshot.parent_session_id.as_deref(),
+        Some("01a04819-fbfa-7fd7-b6be-3fe9bfed7bf1")
+    );
+
     assert_eq!(snapshot.counts.completed, 1);
     assert_eq!(snapshot.counts.total, 6);
     assert_eq!(snapshot.counts.cancelled, 5);

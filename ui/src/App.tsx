@@ -682,7 +682,9 @@ function WorkspaceApp({
         .then(({ projectPath, runs }) => {
           for (const snapshot of runs) dagStore.applySnapshot(projectPath, snapshot);
         })
-        .catch(() => undefined);
+        .catch(() => {
+          dagWatchedPathsRef.current.delete(path);
+        });
     }
   }, [inactiveProjectWorktrees, activeWorktreePathsKey, projectRootsKey]);
 

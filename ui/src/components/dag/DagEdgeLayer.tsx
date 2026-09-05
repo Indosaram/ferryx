@@ -17,6 +17,9 @@ export function DagEdgeLayer({
   width,
   height,
 }: DagEdgeLayerProps): JSX.Element {
+  const arrowMarkerId = React.useId();
+  const arrowCriticalMarkerId = React.useId();
+
   const criticalEdgesSet = React.useMemo(() => {
     const set = new Set<string>();
     for (let i = 0; i < criticalPath.length - 1; i++) {
@@ -35,7 +38,7 @@ export function DagEdgeLayer({
     >
       <defs>
         <marker
-          id="dag-arrow"
+          id={arrowMarkerId}
           viewBox="0 0 6 6"
           refX="5"
           refY="3"
@@ -46,7 +49,7 @@ export function DagEdgeLayer({
           <path d="M 0 0 L 6 3 L 0 6 z" fill="rgb(var(--foreground-rgb) / 0.45)" />
         </marker>
         <marker
-          id="dag-arrow-critical"
+          id={arrowCriticalMarkerId}
           viewBox="0 0 6 6"
           refX="5"
           refY="3"
@@ -83,7 +86,7 @@ export function DagEdgeLayer({
                 : "rgb(var(--foreground-rgb) / 0.35)"
             }
             strokeWidth={isCritical ? 2 : 1.5}
-            markerEnd={isCritical ? "url(#dag-arrow-critical)" : "url(#dag-arrow)"}
+            markerEnd={isCritical ? `url(#${arrowCriticalMarkerId})` : `url(#${arrowMarkerId})`}
             data-testid={`dag-edge-${edge.from}-${edge.to}`}
             data-critical={isCritical ? "true" : "false"}
           />

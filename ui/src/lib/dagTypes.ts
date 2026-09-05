@@ -9,11 +9,13 @@ export type DagNodeState =
   | "failed"
   | "skipped"
   | "cancelled"
-  | "paused";
+  | "paused"
+  | "unknown";
 
 export type DagNodeRoute =
   | { readonly kind: "category"; readonly category: string }
-  | { readonly kind: "agent"; readonly agent: string; readonly model?: string };
+  | { readonly kind: "agent"; readonly agent: string; readonly model?: string }
+  | { readonly kind: "unknown" };
 
 export type DagNodeError = {
   readonly code: string;
@@ -68,7 +70,7 @@ export type DagRunSnapshot = {
 
 const VALID_RUN_STATUSES = new Set<string>(["running", "completed", "failed", "cancelled", "paused"]);
 const VALID_NODE_STATES = new Set<string>([
-  "pending", "scheduled", "blocked", "running", "completed", "failed", "skipped", "cancelled", "paused",
+  "pending", "scheduled", "blocked", "running", "completed", "failed", "skipped", "cancelled", "paused", "unknown",
 ]);
 
 function assertNever(x: never): never {
@@ -92,7 +94,8 @@ export function deriveDagRunCounts(nodes: readonly DagNodeSnapshot[]): DagRunCou
       case "pending":
       case "scheduled":
       case "blocked":
-      case "paused": break;
+      case "paused":
+      case "unknown": break;
       default: return assertNever(node.state);
     }
   }
@@ -108,7 +111,7 @@ function parseStrOrNull(val: unknown): string | null | undefined {
   return typeof val === "string" ? val : undefined;
 }
 
-function parseRoute(val: unknown): DagNodeRoute | null {
+export function parseRoute(val: unknown): DagNodeRoute | null {
   if (!isRecord(val)) return null;
   if (val["kind"] === "category" && typeof val["category"] === "string") {
     return { kind: "category", category: val["category"] };
@@ -117,6 +120,9 @@ function parseRoute(val: unknown): DagNodeRoute | null {
     const route: { kind: "agent"; agent: string; model?: string } = { kind: "agent", agent: val["agent"] };
     if (typeof val["model"] === "string") route.model = val["model"];
     return route;
+  }
+  if (val["kind"] === "unknown" || (typeof val["kind"] === "string" && val["kind"] !== "category" && val["kind"] !== "agent")) {
+    return { kind: "unknown" };
   }
   return null;
 }

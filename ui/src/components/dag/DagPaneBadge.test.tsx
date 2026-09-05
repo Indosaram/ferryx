@@ -450,5 +450,120 @@ describe("DagPaneBadge", () => {
     expect(screen.getByTestId("dag-pane-modal-title")).toHaveTextContent("Run Second");
   });
 
+  it("matches runs across macOS /private prefix differences", () => {
+    const run1: DagRunSnapshot = {
+      ...baseSnapshot,
+      runId: "run-private-pane",
+      status: "running",
+    };
+    dagStore.applySnapshot("/repo/my-project", run1);
 
+    const { unmount: unmount1 } = render(
+      <DagPaneBadge
+        projectPath="/private/repo/my-project"
+        agentWorking
+        agentPresent
+        paneId="pane-a"
+      />,
+    );
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+    unmount1();
+
+    dagStore.reset();
+    const run2: DagRunSnapshot = {
+      ...baseSnapshot,
+      runId: "run-private-registered",
+      status: "running",
+    };
+    dagStore.applySnapshot("/private/repo/my-project", run2);
+
+    const { unmount: unmount2 } = render(
+      <DagPaneBadge
+        projectPath="/repo/my-project"
+        agentWorking
+        agentPresent
+        paneId="pane-b"
+      />,
+    );
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+    unmount2();
+  });
+
+  it("exact session match takes priority over an existing claim from another pane", () => {
+    const rootSessionId = "01a055f9-a8de-7619-a1f5-81ca62e3d3b1";
+    dagStore.applySnapshot("/repo/my-project", {
+      ...baseSnapshot,
+      runId: "run-claimed-by-other",
+      name: "Claimed By Other",
+      rootSessionId,
+      status: "running",
+    });
+    dagRunOwnership.claim("run-claimed-by-other", "pane-other");
+
+    const sessionA = createSession("pane-a", rootSessionId);
+    const sessionOther = createSession("pane-other");
+
+    render(
+      <DagPaneBadge
+        projectPath="/repo/my-project"
+        paneId="pane-a"
+        providerSessionId={rootSessionId}
+        sessions={[sessionA, sessionOther]}
+        agentPresent={false}
+        agentWorking={false}
+      />,
+    );
+
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
+    expect(screen.getByTestId("dag-pane-run-run-claimed-by-other")).toBeInTheDocument();
+  });
+
+  it("retains ownership scoped to current project runs without evicting other projects", () => {
+    dagStore.applySnapshot("/repo/other-project", {
+      ...baseSnapshot,
+      runId: "run-other",
+      status: "running",
+    });
+    dagRunOwnership.claim("run-other", "pane-other");
+
+    dagStore.applySnapshot("/repo/my-project", {
+      ...baseSnapshot,
+      runId: "run-my",
+      status: "running",
+    });
+
+    render(
+      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+    );
+
+    expect(dagRunOwnership.ownerOf("run-other")).toBe("pane-other");
+  });
+
+  it("traps focus and closes on Escape keydown with event captured", () => {
+    const runningRun: DagRunSnapshot = {
+      ...baseSnapshot,
+      runId: "run-trap-1",
+      name: "Trap Pipeline",
+      status: "running",
+    };
+    dagStore.applySnapshot("/repo/my-project", runningRun);
+
+    render(
+      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+    );
+
+    const button = screen.getByTestId("dag-pane-badge-button");
+    fireEvent.click(button);
+
+    const modal = screen.getByTestId("dag-pane-modal");
+    expect(modal).toBeInTheDocument();
+
+    const closeBtn = screen.getByTestId("dag-pane-modal-close");
+    expect(closeBtn).toBeInTheDocument();
+
+    // Fire Escape keydown
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("dag-pane-modal")).not.toBeInTheDocument();
+  });
 });

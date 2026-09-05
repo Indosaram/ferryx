@@ -32,7 +32,11 @@ async fn scan_and_emit(
     let runs_dir = resolve_dag_runs_dir(root);
     let target_dir = if runs_dir.is_dir() {
         &runs_dir
-    } else if root.is_dir() {
+    } else if root.is_dir()
+        && (root.join("runs").is_dir()
+            || root.ends_with(".omo/senpi-task/dag")
+            || root.ends_with("dag"))
+    {
         root
     } else {
         return true;
@@ -46,21 +50,31 @@ async fn scan_and_emit(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(snapshot) = parse_run_checkpoint(&content) {
-                    let is_updated = match cache.get(&snapshot.run_id) {
-                        Some(prev) => prev != &snapshot,
-                        None => true,
-                    };
-                    if is_updated {
-                        cache.insert(snapshot.run_id.clone(), snapshot.clone());
-                        if sink
-                            .send((project_path.to_string(), snapshot))
-                            .await
-                            .is_err()
-                        {
-                            return false;
-                        }
+            let mut snapshot_opt = None;
+            for attempt in 0..3 {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(snapshot) = parse_run_checkpoint(&content) {
+                        snapshot_opt = Some(snapshot);
+                        break;
+                    }
+                }
+                if attempt < 2 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
+            }
+            if let Some(snapshot) = snapshot_opt {
+                let is_updated = match cache.get(&snapshot.run_id) {
+                    Some(prev) => prev != &snapshot,
+                    None => true,
+                };
+                if is_updated {
+                    cache.insert(snapshot.run_id.clone(), snapshot.clone());
+                    if sink
+                        .send((project_path.to_string(), snapshot))
+                        .await
+                        .is_err()
+                    {
+                        return false;
                     }
                 }
             }
@@ -88,8 +102,20 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
     let tx_clone = notify_tx.clone();
     let watcher_res = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
-            if res.is_ok() {
-                let _ = tx_clone.try_send(());
+            if let Ok(event) = res {
+                let is_noisy = event.paths.iter().any(|p| {
+                    p.components().any(|c| {
+                        let s = c.as_os_str();
+                        s == "node_modules"
+                            || s == "target"
+                            || s == ".git"
+                            || s == "dist"
+                            || s == ".cache"
+                    })
+                });
+                if !is_noisy {
+                    let _ = tx_clone.try_send(());
+                }
             }
         },
         Config::default(),

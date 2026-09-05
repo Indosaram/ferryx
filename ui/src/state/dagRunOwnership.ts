@@ -41,11 +41,15 @@ export const dagRunOwnership = {
   },
 
   /** Keeps only the runs still running, so finished runs stop reserving their pane. */
-  retain(activeRunIds: Iterable<string>): void {
+  retain(activeRunIds: Iterable<string>, allKnownRunIdsInScope?: Iterable<string>): void {
     const keep = new Set(activeRunIds);
+    const scope = allKnownRunIdsInScope ? new Set(allKnownRunIdsInScope) : null;
     let changed = false;
     for (const runId of [...owners.keys()]) {
-      if (!keep.has(runId)) {
+      const shouldDelete = scope
+        ? scope.has(runId) && !keep.has(runId)
+        : !keep.has(runId);
+      if (shouldDelete) {
         owners.delete(runId);
         changed = true;
       }

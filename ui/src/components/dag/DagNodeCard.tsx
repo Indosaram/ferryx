@@ -61,6 +61,11 @@ const STATE_APPEARANCE: Record<DagNodeState, StateAppearance> = {
     card: "border-border bg-muted/30",
     accent: "text-muted-foreground",
   },
+  unknown: {
+    label: "unknown",
+    card: "border-border bg-muted/30",
+    accent: "text-muted-foreground",
+  },
 };
 
 export function DagNodeCard({
@@ -73,7 +78,9 @@ export function DagNodeCard({
   const glyph = getNodeStateGlyph(node.state);
   const routeText = formatRouteText(node.route);
   const displayLabel = node.label || node.id;
-  const criticalPathClass = isCriticalPath ? "ring-1 ring-primary/50" : "";
+  const criticalPathClass = isCriticalPath
+    ? "outline outline-1 -outline-offset-1 outline-primary/70"
+    : "";
 
   return (
     <div
@@ -82,7 +89,7 @@ export function DagNodeCard({
       data-node-state={node.state}
       data-critical-path={isCriticalPath ? "true" : "false"}
       style={style}
-      className={`group relative flex flex-col justify-between rounded-lg border p-2.5 text-xs select-none ${appearance.card} ${criticalPathClass}`}
+      className={`group relative flex flex-col justify-between overflow-hidden rounded-lg border p-2 text-xs select-none ${appearance.card} ${criticalPathClass}`}
     >
       <div className="flex items-center justify-between gap-1.5 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
@@ -103,7 +110,7 @@ export function DagNodeCard({
         )}
       </div>
 
-      <div className="mt-2 flex items-center justify-between gap-1 text-[11px]">
+      <div className="mt-1 flex items-center justify-between gap-1 text-[11px]">
         <span className={`shrink-0 font-medium ${appearance.accent}`} data-testid="dag-node-state-label">
           {appearance.label}
         </span>

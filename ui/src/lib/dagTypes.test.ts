@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import sampleJson from "../state/__fixtures__/dagRunSample.json";
-import { parseDagRunSnapshot } from "./dagTypes";
+import { deriveDagRunCounts, parseDagRunSnapshot, parseRoute } from "./dagTypes";
+import type { DagNodeSnapshot } from "./dagTypes";
 
 describe("DagRunSnapshot validator", () => {
   it("parses the real fixture snapshot and derives accurate counts and literals", () => {
@@ -105,5 +106,85 @@ describe("DagRunSnapshot validator", () => {
 
     // Then: returns null
     expect(resultMissingRoute).toBeNull();
+  });
+
+  it("handles 'unknown' node state in parseDagRunSnapshot and deriveDagRunCounts without throwing", () => {
+    // Given: fixture snapshot with a node having state "unknown"
+    const snapshotWithUnknownNode = {
+      ...sampleJson,
+      nodes: [
+        {
+          ...(sampleJson.nodes[0] as Record<string, unknown>),
+          state: "unknown",
+        },
+        ...sampleJson.nodes.slice(1),
+      ],
+    };
+
+    // When: parsing the snapshot
+    const snapshot = parseDagRunSnapshot(snapshotWithUnknownNode);
+
+    // Then: parses successfully without throwing and preserves "unknown" state
+    expect(snapshot).not.toBeNull();
+    if (!snapshot) return;
+    expect(snapshot.nodes[0]?.state).toBe("unknown");
+
+    // Then: total includes the unknown node, but specific status counts ignore it
+    expect(snapshot.counts.total).toBe(6);
+    expect(snapshot.counts.completed).toBe(1);
+    expect(snapshot.counts.cancelled).toBe(4);
+
+    // When: calling deriveDagRunCounts directly with unknown state nodes
+    const dummyNode: DagNodeSnapshot = {
+      id: "node-unknown",
+      label: "Unknown Node",
+      state: "unknown",
+      dependsOn: [],
+      attempt: 1,
+      route: { kind: "unknown" },
+      startedAt: null,
+      completedAt: null,
+      error: null,
+      taskId: null,
+    };
+    const counts = deriveDagRunCounts([dummyNode]);
+
+    // Then: counts total is 1 and all status counts are 0 without throwing
+    expect(counts).toEqual({
+      total: 1,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      skipped: 0,
+      running: 0,
+    });
+  });
+
+  it("parses unknown route kind as { kind: 'unknown' } without throwing or returning null", () => {
+    // When & Then: parseRoute parses "unknown" kind as { kind: "unknown" }
+    expect(parseRoute({ kind: "unknown" })).toEqual({ kind: "unknown" });
+
+    // When & Then: parseRoute parses any other unknown kind as { kind: "unknown" }
+    expect(parseRoute({ kind: "custom", customField: 123 })).toEqual({ kind: "unknown" });
+    expect(parseRoute({ kind: "service", endpoint: "http://localhost" })).toEqual({ kind: "unknown" });
+
+    // Given: fixture with unknown route kinds on a node
+    const snapshotWithUnknownRoute = {
+      ...sampleJson,
+      nodes: [
+        {
+          ...(sampleJson.nodes[0] as Record<string, unknown>),
+          route: { kind: "external_service", serviceId: "svc-9" },
+        },
+        ...sampleJson.nodes.slice(1),
+      ],
+    };
+
+    // When: parsing the snapshot
+    const snapshot = parseDagRunSnapshot(snapshotWithUnknownRoute);
+
+    // Then: node route is parsed gracefully as { kind: "unknown" }
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.nodes[0]?.route).toEqual({ kind: "unknown" });
   });
 });

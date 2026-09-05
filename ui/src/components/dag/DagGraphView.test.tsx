@@ -244,4 +244,44 @@ describe("Dag pane tree integration", () => {
 
     expect(screen.getByTestId("dag-graph-view")).toBeInTheDocument();
   });
+
+  it("renders unmapped nodes in a fallback wave column so all nodes remain visible", () => {
+    const snapshotWithUnmappedNode: DagRunSnapshot = {
+      ...sampleSnapshot,
+      nodes: [
+        ...sampleSnapshot.nodes,
+        {
+          id: "extra-node",
+          label: "Extra unmapped task",
+          state: "pending",
+          dependsOn: [],
+          attempt: 0,
+          route: { kind: "agent", agent: "test" },
+          startedAt: null,
+          completedAt: null,
+          error: null,
+          taskId: null,
+        },
+      ],
+    };
+
+    render(<DagGraphView snapshot={snapshotWithUnmappedNode} />);
+    // Initial 4 waves + 1 fallback wave = 5 waves
+    const waveColumns = screen.getAllByTestId("dag-wave-column");
+    expect(waveColumns).toHaveLength(5);
+    expect(screen.getByTestId("dag-node-extra-node")).toBeInTheDocument();
+    expect(screen.getByText("Extra unmapped task")).toBeInTheDocument();
+  });
+
+  it("handles runs where waves array is empty by grouping nodes into a fallback wave column", () => {
+    const snapshotEmptyWaves: DagRunSnapshot = {
+      ...sampleSnapshot,
+      waves: [],
+    };
+
+    render(<DagGraphView snapshot={snapshotEmptyWaves} />);
+    const waveColumns = screen.getAllByTestId("dag-wave-column");
+    expect(waveColumns).toHaveLength(1);
+    expect(screen.getByTestId("dag-node-extract")).toBeInTheDocument();
+  });
 });
