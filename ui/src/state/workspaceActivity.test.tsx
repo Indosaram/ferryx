@@ -523,4 +523,29 @@ describe("workspace activity tracking", () => {
 
     clearWorkspaceSnapshot();
   });
+
+  it("counts unseen pane attention as badge even when the tab itself is visible", () => {
+    clearWorkspaceSnapshot();
+    const state: WorkspaceState = {
+      workspaceId: "ws-1",
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {},
+      layout: { tabs: [], activeTabId: "", layoutsByTabId: {} },
+      // Tab is visible: no unread tab flags — the pane attention frame is the only signal.
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {
+        "s-done-unseen": { state: "done", title: "a", isAgent: true, seen: false },
+        "s-done-seen": { state: "done", title: "b", isAgent: true, seen: true },
+        "s-waiting-unseen": { state: "waiting", title: "c", isAgent: true, seen: false },
+        "s-working": { state: "working", title: "d", isAgent: true },
+      },
+    } as unknown as WorkspaceState;
+
+    // Two unseen attention sessions (done + waiting) drive the badge.
+    expect(selectGlobalUnreadBadgeCount(state, "ws-1")).toBe(2);
+
+    clearWorkspaceSnapshot();
+  });
 });

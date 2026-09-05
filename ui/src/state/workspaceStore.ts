@@ -1321,18 +1321,33 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
 }
 
 /**
- * Global Dock badge count: unread tabs of the live workspace plus every parked
- * workspace snapshot, so an agent finishing in another project still lights the badge.
+ * Global Dock badge count, aligned with the pane-attention signal:
+ * each workspace contributes the larger of (unseen attention sessions — the
+ * same `done`/`waiting && !seen` state that lights pane highlight frames) and
+ * (bell-only unread tabs), summed across the live workspace and every parked
+ * workspace snapshot, so an agent finishing anywhere still lights the badge.
  */
 export function selectGlobalUnreadBadgeCount(
   currentState: WorkspaceState,
   currentWorkspaceId?: string,
 ): number {
-  let count = Object.values(currentState.unreadTabIds ?? {}).filter(Boolean).length;
+  const countAttention = (state: WorkspaceState): number =>
+    Object.values(state.activityBySessionId ?? {}).filter(
+      (activity) =>
+        activity &&
+        !activity.seen &&
+        (activity.state === "done" || activity.state === "waiting"),
+    ).length;
+  const countUnreadTabs = (state: WorkspaceState): number =>
+    Object.values(state.unreadTabIds ?? {}).filter(Boolean).length;
+  const badgeFor = (state: WorkspaceState): number =>
+    Math.max(countAttention(state), countUnreadTabs(state));
+
+  let count = badgeFor(currentState);
   const targetWsId = currentState.workspaceId ?? currentWorkspaceId;
   for (const [workspaceId, snapshot] of listWorkspaceSnapshots()) {
     if (workspaceId === targetWsId) continue;
-    count += Object.values(snapshot.unreadTabIds ?? {}).filter(Boolean).length;
+    count += badgeFor(snapshot);
   }
   return count;
 }
