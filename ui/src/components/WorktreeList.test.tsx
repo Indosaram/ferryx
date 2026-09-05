@@ -147,7 +147,7 @@ describe("WorktreeList actions", () => {
     expect(onDelete).toHaveBeenCalledWith(worktree);
   });
 
-  it("badges the repository root as primary and blocks deleting it", () => {
+  it("badges the repository root as primary and omits delete action for it", () => {
     render(
       <WorktreeList
         worktrees={[rootWorktree, worktree]}
@@ -162,9 +162,28 @@ describe("WorktreeList actions", () => {
     // Only the root worktree carries the primary badge.
     expect(screen.getAllByText("primary")).toHaveLength(1);
 
-    const [rootDelete, featureDelete] = screen.getAllByRole("button", { name: "Delete worktree" });
-    expect(rootDelete).toBeDisabled();
-    expect(featureDelete).toBeEnabled();
+    // Primary worktree does not render a delete button; only non-primary worktrees expose delete.
+    const deleteButtons = screen.getAllByRole("button", { name: "Delete worktree" });
+    expect(deleteButtons).toHaveLength(1);
+    expect(deleteButtons[0]).toBeEnabled();
+  });
+
+  it("triggers worktree creation from the worktree row action when provided", () => {
+    const onCreateWorktree = vi.fn();
+    render(
+      <WorktreeList
+        worktrees={[rootWorktree]}
+        activePath={rootWorktree.path}
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onCreateWorktree={onCreateWorktree}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree" }));
+    expect(onCreateWorktree).toHaveBeenCalledWith(rootWorktree);
   });
 
   it("renders nothing when a project has no worktrees", () => {

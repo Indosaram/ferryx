@@ -17,8 +17,7 @@ import {
 } from "@dnd-kit/sortable";
 import {
   ChevronRight,
-  FolderGit2,
-  FolderPlus,
+  Folder,
   PanelLeftClose,
   Plus,
   Settings2,
@@ -367,7 +366,7 @@ export function Sidebar({
                   <SortableProjectSection key={project.workspaceId} workspaceId={project.workspaceId} header={header}>
                     {expanded ? (
                       <div
-                        className="pl-3 pr-0.5 pt-0.5"
+                        className="pl-5 pr-0.5 pt-0.5"
                         onPointerDown={(event) => event.stopPropagation()}
                       >
                         <SortableContext
@@ -382,6 +381,9 @@ export function Sidebar({
                             unreadWorktreePaths={unreadWorktreePaths}
                             activityByWorktreePath={activityByWorktreePath}
                             onSelect={onSelectWorktree}
+                            onCreateWorktree={
+                              project.gitRoot !== null ? () => onCreateWorktree(project) : undefined
+                            }
                             onDelete={onDeleteWorktree}
                             sortableWorkspaceId={project.workspaceId}
                             label={`${project.workspaceId} worktrees`}
@@ -565,7 +567,7 @@ function ProjectHeader({
           aria-label={project.workspaceId}
           className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
         >
-          <FolderGit2 className="size-3.5 shrink-0" />
+          <Folder className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{project.workspaceId}</span>
           {activity.runningCount > 0 ? (
             <span
@@ -591,11 +593,11 @@ function ProjectHeader({
             label={`Add worktree to ${project.workspaceId}`}
             size="sm"
             disabled={inert}
-            className="size-5 opacity-55 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
             onClick={onCreateWorktree}
             onPointerDown={(event) => event.stopPropagation()}
           >
-            <FolderPlus className="size-3" />
+            <Plus className="size-3.5" />
           </IconButton>
         ) : null}
         {onRemoveProject ? (

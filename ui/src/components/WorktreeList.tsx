@@ -1,5 +1,5 @@
 import { useSortable } from "@dnd-kit/sortable";
-import { LockKeyhole, Trash2 } from "lucide-react";
+import { LockKeyhole, Plus, Trash2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
 
@@ -21,6 +21,7 @@ type WorktreeListProps = {
   readonly unreadWorktreePaths?: Record<string, boolean>;
   readonly activityByWorktreePath?: Record<string, ActivitySummary | undefined>;
   readonly onSelect: (worktree: Worktree) => void;
+  readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
   readonly sortableWorkspaceId?: string;
   readonly label?: string;
@@ -34,6 +35,7 @@ export type WorktreeRowProps = {
   readonly unread: boolean;
   readonly activitySummary: ActivitySummary | undefined;
   readonly onSelect: (worktree: Worktree) => void;
+  readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
 };
 
@@ -57,6 +59,7 @@ export const WorktreeRow = memo(function WorktreeRow({
   unread,
   activitySummary,
   onSelect,
+  onCreateWorktree,
   onDelete,
 }: WorktreeRowProps) {
   const menuUnlistenRef = useRef<(() => void) | null>(null);
@@ -183,17 +186,30 @@ export const WorktreeRow = memo(function WorktreeRow({
           </span>
         </button>
 
-        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-55 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
+        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
           {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
-          <IconButton
-            label="Delete worktree"
-            size="sm"
-            disabled={!canDelete}
-            onClick={() => onDelete(worktree)}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <Trash2 className="size-3" />
-          </IconButton>
+          {onCreateWorktree ? (
+            <IconButton
+              label="Add worktree"
+              size="sm"
+              className="size-5"
+              onClick={() => onCreateWorktree(worktree)}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <Plus className="size-3" />
+            </IconButton>
+          ) : null}
+          {canDelete ? (
+            <IconButton
+              label="Delete worktree"
+              size="sm"
+              className="size-5 hover:text-destructive"
+              onClick={() => onDelete(worktree)}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <Trash2 className="size-3" />
+            </IconButton>
+          ) : null}
         </div>
       </div>
 
@@ -239,6 +255,7 @@ export function WorktreeList({
   unreadWorktreePaths,
   activityByWorktreePath,
   onSelect,
+  onCreateWorktree,
   onDelete,
   sortableWorkspaceId,
   label = "Worktrees",
@@ -270,6 +287,7 @@ export function WorktreeList({
           unread: hasUnread,
           activitySummary: summary,
           onSelect,
+          onCreateWorktree,
           onDelete,
         };
 
