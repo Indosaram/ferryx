@@ -4,6 +4,7 @@ type NativeTerminalLifecycleOperation<T> = () => Promise<T>;
 
 const lifecycleTails = new Map<string, Promise<void>>();
 const attachedSessionIds = new Set<string>();
+const attachments = new Map<string, Promise<void>>();
 const sessionGenerations = new Map<string, number>();
 
 type PendingDetachment = {
@@ -52,6 +53,8 @@ function executeDetachment(pending: PendingDetachment): void {
       });
       return;
     }
+    attachedSessionIds.delete(pending.sessionId);
+    attachments.delete(pending.sessionId);
     await pending.operation();
   };
 
@@ -181,10 +184,10 @@ function startLifecycleOperation<T>(
  * pre-existing React/IPC boundary. Only operations that overlap an in-flight lifecycle
  * mutation are deferred.
  */
-export function attachNativeTerminalLifecycle<T>(
+export function attachNativeTerminalLifecycle(
   sessionId: string,
-  operation: NativeTerminalLifecycleOperation<T>,
-): Promise<T> {
+  operation: NativeTerminalLifecycleOperation<void>,
+): Promise<void> {
   switchDebug("terminal.lifecycle.attach.requested", {
     backendSessionId: sessionId,
     pendingDetachmentCount: pendingDetachments.size,
@@ -218,7 +221,7 @@ export function attachNativeTerminalLifecycle<T>(
       backendSessionId: sessionId,
       generation,
     });
-    return Promise.resolve(undefined as T);
+    return attachments.get(sessionId) ?? Promise.resolve();
   }
 
   const generation = bumpSessionGeneration(sessionId);
@@ -227,9 +230,12 @@ export function attachNativeTerminalLifecycle<T>(
     backendSessionId: sessionId,
     generation,
   });
-  return enqueueNativeTerminalLifecycle(sessionId, operation).catch((error: unknown) => {
-    attachedSessionIds.delete(sessionId);
-    releasePresentationWaiters(sessionId);
+  const attachment = enqueueNativeTerminalLifecycle(sessionId, operation).catch((error: unknown) => {
+    if (attachments.get(sessionId) === attachment) {
+      attachedSessionIds.delete(sessionId);
+      attachments.delete(sessionId);
+      releasePresentationWaiters(sessionId);
+    }
     switchDebug("terminal.lifecycle.attach.error", {
       backendSessionId: sessionId,
       generation,
@@ -237,16 +243,18 @@ export function attachNativeTerminalLifecycle<T>(
     });
     throw error;
   });
+  attachments.set(sessionId, attachment);
+  return attachment;
 }
 
 /**
  * Re-attaches a session by forcing a fresh attachment even if TS state
  * previously considered it attached.
  */
-export function reattachNativeTerminalLifecycle<T>(
+export function reattachNativeTerminalLifecycle(
   sessionId: string,
-  operation: NativeTerminalLifecycleOperation<T>,
-): Promise<T> {
+  operation: NativeTerminalLifecycleOperation<void>,
+): Promise<void> {
   attachedSessionIds.delete(sessionId);
   return attachNativeTerminalLifecycle(sessionId, operation);
 }
@@ -324,6 +332,7 @@ function enqueueNativeTerminalLifecycle<T>(
 export function resetNativeTerminalLifecycleForTest(): void {
   lifecycleTails.clear();
   attachedSessionIds.clear();
+  attachments.clear();
   sessionGenerations.clear();
   pendingDetachments.clear();
   detachmentsWaitingForPresentation.clear();
