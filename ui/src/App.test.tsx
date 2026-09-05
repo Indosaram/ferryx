@@ -42,6 +42,7 @@ const { resolve } = await import("node:path");
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
+import type { Worktree } from "./lib/types";
 
 const { saveBrowserSettings } = await import("./lib/browserSettings");
 const { saveAgentSettings } = await import("./lib/agentsSettings");
@@ -146,6 +147,7 @@ vi.mock("./lib/tauri", () => ({
   previewWorktreeDelete: vi.fn(),
   deleteWorktree: vi.fn(),
   deleteWorktreeDestructive: vi.fn(),
+  unregisterProject: vi.fn().mockResolvedValue(undefined),
   getInitialProject: native.getInitialProject,
   listProjectBranches: native.listProjectBranches,
   listWorktrees: native.listWorktrees,
@@ -156,12 +158,14 @@ vi.mock("./lib/tauri", () => ({
   clearSession: native.clearSession,
   listTerminalSessions: native.listTerminalSessions,
   spawnTerminal: native.spawnTerminal,
+  spawnTerminalsBatch: vi.fn().mockResolvedValue([]),
   spawnTerminalDetailed: native.spawnTerminalDetailed,
   closeTerminal: vi.fn().mockResolvedValue(undefined),
   attachTerminal: vi.fn().mockResolvedValue(undefined),
   getTerminalCwd: vi.fn(),
   resizeTerminal: vi.fn(),
   waitForTerminalExit: vi.fn(),
+  discoverAgentProviderSession: vi.fn().mockResolvedValue(null),
   detectAgents: native.detectAgents,
   writeTerminal: native.writeTerminal,
   isTauriRuntime: native.isTauriRuntime,
@@ -173,6 +177,10 @@ vi.mock("./lib/tauri", () => ({
   publishFocusedTerminal: native.publishFocusedTerminal,
   setBadgeCount: native.setBadgeCount,
   onRemoteSelectionRequested: native.onRemoteSelectionRequested,
+  onNativeTerminalAgentState: vi.fn().mockResolvedValue(() => {}),
+  onNativeTerminalBell: vi.fn().mockResolvedValue(() => {}),
+  onNativeTerminalFocus: vi.fn().mockResolvedValue(() => {}),
+  onNativeTerminalTitle: vi.fn().mockResolvedValue(() => {}),
   onWorktreeChanged: vi.fn().mockResolvedValue(() => {}),
   bootTrace: vi.fn().mockResolvedValue(undefined),
   toIpcError: (error: unknown) => error,
@@ -204,23 +212,29 @@ vi.mock("./components/Sidebar", () => ({
     open = true,
     onAddProject,
     onCreateWorktree,
+    onRemoveProject,
     onSelectProject,
     onSelectWorktree,
+    onDeleteWorktree,
     onToggle,
     onOpenSettings,
     projects = [],
     worktrees = [],
+    inactiveProjectWorktrees: _inactiveProjectWorktrees,
     activeProjectId,
   }: {
     open?: boolean;
     onAddProject?: () => void;
     onCreateWorktree: (project?: { workspaceId: string }) => void;
+    onRemoveProject?: (project: { workspaceId: string }) => void;
     onSelectProject?: (project: { workspaceId: string }) => void;
     onSelectWorktree?: (worktree: { path: string }) => void;
+    onDeleteWorktree?: (worktree: { path: string }) => void;
     onToggle?: () => void;
     onOpenSettings?: () => void;
     projects?: Array<{ workspaceId: string; gitRoot?: string | null }>;
     worktrees?: Array<{ path: string }>;
+    inactiveProjectWorktrees?: Record<string, Array<{ path: string }>>;
     activeProjectId?: string;
   }) => (
     <div data-testid="mock-sidebar" data-open={open}>
@@ -248,11 +262,19 @@ vi.mock("./components/Sidebar", () => ({
                   Add worktree to {project.workspaceId}
                 </button>
               ) : null}
+              <button type="button" onClick={() => onRemoveProject?.(project)}>
+                Remove project {project.workspaceId}
+              </button>
               {project.workspaceId === activeProjectId
                 ? worktrees.map((worktree) => (
-                    <button key={worktree.path} type="button" onClick={() => onSelectWorktree?.(worktree)}>
-                      Worktree {worktree.path}
-                    </button>
+                    <div key={worktree.path}>
+                      <button key={worktree.path} type="button" onClick={() => onSelectWorktree?.(worktree)}>
+                        Worktree {worktree.path}
+                      </button>
+                      <button type="button" onClick={() => onDeleteWorktree?.(worktree)}>
+                        Delete worktree {worktree.path}
+                      </button>
+                    </div>
                   ))
                 : null}
             </div>
@@ -275,9 +297,7 @@ vi.mock("./components/SettingsDialog", () => ({
       </div>
     ) : null,
 }));
-vi.mock("./components/TerminalSplitView", async () => {
-  const { useState } = await import("react");
-  const { NewTabPopover } = await import("./components/NewTabPopover");
+vi.mock("./components/TerminalSplitView", () => {
   return {
     TerminalSplitView: ({
       searchLeafId,
@@ -292,24 +312,15 @@ vi.mock("./components/TerminalSplitView", async () => {
       onAddBrowserTab?: (url?: string) => void;
       defaultAgentId?: string | null;
     }) => {
-      const [open, setOpen] = useState(false);
       return (
-        <div data-testid="terminal-split-view" data-search-leaf-id={searchLeafId ?? ""}>
-          <button type="button" onClick={() => setOpen(true)}>
-            New tab
+        <div
+          data-testid="terminal-split-view"
+          data-search-leaf-id={searchLeafId ?? ""}
+          data-default-agent-id={defaultAgentId ?? ""}
+        >
+          <button type="button" onClick={() => onAddBrowserTab?.()}>
+            New browser tab
           </button>
-          <NewTabPopover
-            open={open}
-            onClose={() => setOpen(false)}
-            onNewTerminal={() => setOpen(false)}
-            onNewBrowser={(url) => {
-              setOpen(false);
-              onAddBrowserTab?.(url);
-            }}
-            agents={agents}
-            onLaunchAgent={onLaunchAgent}
-            defaultAgentId={defaultAgentId}
-          />
           {agents?.map((agent) => (
             <button key={agent.name} type="button" onClick={() => onLaunchAgent?.(agent)}>
               Launch {agent.name}
@@ -320,7 +331,20 @@ vi.mock("./components/TerminalSplitView", async () => {
     },
   };
 });
-vi.mock("./components/WorktreeDeleteDialog", () => ({ WorktreeDeleteDialog: () => null }));
+vi.mock("./components/WorktreeDeleteDialog", () => ({
+  WorktreeDeleteDialog: ({ workspaceId, worktree, onClose, onDeleted }: any) => (
+    <div data-testid="worktree-delete-dialog" data-workspace-id={workspaceId} data-worktree-path={worktree.path}>
+      <button type="button" onClick={onClose}>
+        Cancel delete
+      </button>
+      <button type="button" onClick={onDeleted}>
+        Confirm delete
+      </button>
+    </div>
+  ),
+}));
+
+const defaultStoreState = JSON.parse(JSON.stringify(workspace.storeState));
 
 const { App } = await import("./App");
 const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
@@ -332,6 +356,7 @@ afterEach(() => {
 
 describe("App project workspace flow", () => {
   beforeEach(() => {
+    workspace.storeState = JSON.parse(JSON.stringify(defaultStoreState));
     resetWorkspaceRestore();
     storeSpy = vi.spyOn(workspaceStoreModule, "useWorkspaceStore").mockImplementation((() => ({
       state: workspace.storeState,
@@ -601,6 +626,17 @@ describe("App project workspace flow", () => {
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite");
   });
 
+  it("falls back to stored projects and initializes bootstrap when getInitialProject rejects", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "my-project", repoRoot: "/repo/my-project" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "my-project");
+    native.getInitialProject.mockRejectedValue(new Error("Repository root invalid or not found at '/'"));
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project my-project")).toBeInTheDocument();
+  });
+
   it("checks for a signed update when the native app starts", async () => {
     native.isTauriRuntime.mockReturnValue(true);
 
@@ -773,6 +809,97 @@ describe("App project workspace flow", () => {
     expect(await screen.findByText("Active project orca-lite")).toBeInTheDocument();
     expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("orca-lite");
+  });
+
+  it("removes a project via RemoveProjectDialog and switches active project when removing the active one", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    const projects = [
+      { workspaceId: "project-1", repoRoot: "/repos/project-1" },
+      { workspaceId: "project-2", repoRoot: "/repos/project-2" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "project-1");
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project project-1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove project project-1" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove project project-1" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Remove Project" });
+    expect(dialog).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Project" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Remove Project" })).not.toBeInTheDocument();
+    });
+
+    expect(await screen.findByText("Active project project-2")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Project project-1" })).not.toBeInTheDocument();
+  });
+
+  it("shows a genuine empty state and does not re-register the default project after removing the last project", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "only-project", repoRoot: "/repos/only" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "only-project");
+    native.registerProject.mockClear();
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project only-project")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove project only-project" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Project" }));
+
+    // Genuine empty state: no-projects prompt instead of a resurrected default workspace.
+    expect(await screen.findByTestId("no-projects-view")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Project" })).toBeInTheDocument();
+
+    // The empty catalog is persisted verbatim and the default (".") is never registered.
+    await waitFor(() => {
+      expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe("[]");
+    });
+    // Exactly one registration (the boot project); no default re-registration after removal.
+    expect(native.registerProject).toHaveBeenCalledTimes(1);
+    expect(native.registerProject).toHaveBeenCalledWith({ workspaceId: "only-project", repoPath: "/repos/only" });
+  });
+
+  it("scopes WorktreeDeleteDialog workspaceId to the owning project of the deleted worktree", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    const projects = [
+      { workspaceId: "project-1", repoRoot: "/repos/project-1" },
+      { workspaceId: "project-2", repoRoot: "/repos/project-2" },
+    ];
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "project-1");
+
+    const worktreeProj2: Worktree = {
+      path: "/repos/project-2/.orca-worktrees/project-2/feature-x",
+      head: "def456",
+      branch: "refs/heads/orca/project-2/feature-x",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    workspace.storeState = {
+      ...workspace.storeState,
+      worktrees: [worktreeProj2],
+    };
+
+    render(<App />);
+
+    expect(await screen.findByText("Active project project-1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Delete worktree ${worktreeProj2.path}` })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: `Delete worktree ${worktreeProj2.path}` }));
+
+    const deleteDialog = await screen.findByTestId("worktree-delete-dialog");
+    expect(deleteDialog).toHaveAttribute("data-workspace-id", "project-2");
+    expect(deleteDialog).toHaveAttribute("data-worktree-path", worktreeProj2.path);
   });
 
   it("migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10)", async () => {
@@ -2025,20 +2152,17 @@ describe("App project workspace flow", () => {
     await waitFor(() => expect(native.detectAgents).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByRole("button", { name: "Launch aider" })).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    const buttons = within(screen.getByText("AGENTS").parentElement as HTMLElement).getAllByRole("button");
-    expect(buttons[0]).toHaveTextContent("Aider");
-    expect(within(buttons[0]).getByText("Default")).toBeVisible();
-    expect(buttons[1]).toHaveTextContent("Claude");
-    expect(within(buttons[1]).queryByText("Default")).not.toBeInTheDocument();
+    const splitView = await screen.findByTestId("terminal-split-view");
+    expect(splitView).toHaveAttribute("data-default-agent-id", "aider");
+    expect(screen.getByRole("button", { name: "Launch aider" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument();
   });
 
   it("opens a browser tab at the configured homepage from the new-tab menu", async () => {
     saveBrowserSettings({ homePage: "https://example.com/start" });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New tab" }));
-    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "New browser tab" }));
 
     await waitFor(() => {
       expect(workspace.createBrowserTab).toHaveBeenCalledWith("https://example.com/start");
@@ -2048,8 +2172,7 @@ describe("App project workspace flow", () => {
   it("opens a blank browser tab from the new-tab menu when no homepage is set", async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New tab" }));
-    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "New browser tab" }));
 
     await waitFor(() => {
       expect(workspace.createBrowserTab).toHaveBeenCalledWith("about:blank");

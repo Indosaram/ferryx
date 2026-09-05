@@ -18,6 +18,29 @@ const browserMocks = vi.hoisted(() => ({
   onBrowserDownloadRequested: vi.fn(async () => () => undefined),
 }));
 
+const nativeMenu = vi.hoisted(() => ({
+  lastCall: null as null | { items: Array<Record<string, unknown>>; onAction: (id: string) => void },
+}));
+
+vi.mock("../lib/nativeMenu", () => ({
+  openNativePopupMenu: vi.fn(
+    async (
+      _command: string,
+      items: Array<Record<string, unknown>>,
+      _position: { x: number; y: number },
+      onAction: (id: string) => void,
+    ) => {
+      nativeMenu.lastCall = { items, onAction };
+      return () => undefined;
+    },
+  ),
+}));
+
+function clickNativeMenuItem(id: string) {
+  if (!nativeMenu.lastCall) throw new Error("native menu was not opened");
+  nativeMenu.lastCall.onAction(id);
+}
+
 vi.mock("../lib/browserTauri", () => browserMocks);
 
 vi.mock("@tauri-apps/api/window", () => ({
@@ -53,6 +76,7 @@ function Harness() {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  nativeMenu.lastCall = null;
 });
 
 describe("New Browser Tab click creates visible browser content", () => {
@@ -82,7 +106,7 @@ describe("New Browser Tab click creates visible browser content", () => {
     render(<Harness />);
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
+    clickNativeMenuItem("new-browser");
 
     await waitFor(() => {
       expect(browserMocks.createBrowser).toHaveBeenCalledWith(
@@ -98,7 +122,7 @@ describe("New Browser Tab click creates visible browser content", () => {
     render(<Harness />);
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
+    clickNativeMenuItem("new-browser");
 
     await waitFor(() => {
       expect(browserMocks.createBrowser).toHaveBeenCalledWith(expect.objectContaining({ url: "about:blank" }));

@@ -1,11 +1,14 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { RegisteredProject, Worktree } from "../lib/types";
+import type { RegisteredProject, Worktree, WorktreeChangedPayload } from "../lib/types";
 import {
   useInactiveProjectWorktrees,
   type InactiveProjectWorktreeServices,
 } from "./inactiveProjectWorktrees";
+
+type WorktreeChangedHandler = (payload: WorktreeChangedPayload) => void;
+let worktreeChangedHandlerRef: WorktreeChangedHandler | null = null;
 
 const gitProject: RegisteredProject = {
   workspaceId: "orca-lite",
@@ -148,5 +151,62 @@ describe("useInactiveProjectWorktrees", () => {
 
     resolveGitProjectListing([mainWorktree]);
     await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]));
+  });
+
+  it("re-lists an inactive project when the backend reports one of its worktrees deleted", async () => {
+    let worktreeChangedHandler: WorktreeChangedHandler | null = null;
+    const services = createServices({
+      onWorktreeChanged: vi.fn(async (handler: WorktreeChangedHandler) => {
+        worktreeChangedHandler = handler;
+        return () => undefined;
+      }),
+      listWorktrees: vi.fn(async (workspaceId: string) => {
+        if (workspaceId === gitProject.workspaceId) {
+          return [mainWorktree];
+        }
+        return [];
+      }),
+    });
+
+    const { result } = renderHook(() =>
+      useInactiveProjectWorktrees([gitProject, plainProject], plainProject.workspaceId, [], services),
+    );
+
+    await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]));
+
+    expect(worktreeChangedHandler).not.toBeNull();
+    services.listWorktrees = vi.fn(async () => []);
+    worktreeChangedHandler!({
+      workspaceId: gitProject.workspaceId,
+      kind: "deleted",
+      worktree: { wsId: gitProject.workspaceId, slug: "main" },
+    });
+
+    await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([]));
+  });
+
+  it("ignores worktree change events for projects it does not track", async () => {
+    const onWorktreeChanged = vi.fn(async (handler: WorktreeChangedHandler) => {
+      worktreeChangedHandlerRef = handler;
+      return () => undefined;
+    });
+    const services = createServices({ onWorktreeChanged });
+    const { result } = renderHook(() =>
+      useInactiveProjectWorktrees([gitProject, plainProject], gitProject.workspaceId, [], services),
+    );
+
+    // Wait for the initial inactive listing to settle (plain project gets its folder root).
+    await waitFor(() => expect(result.current[plainProject.workspaceId]).toHaveLength(1));
+    const callsBefore = (services.listWorktrees as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    worktreeChangedHandlerRef?.({
+      workspaceId: "untracked-ws",
+      kind: "deleted",
+      worktree: { wsId: "untracked-ws", slug: "main" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const callsAfter = (services.listWorktrees as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(callsAfter).toBe(callsBefore);
   });
 });

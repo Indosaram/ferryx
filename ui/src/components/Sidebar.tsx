@@ -22,8 +22,10 @@ import {
   PanelLeftClose,
   Plus,
   Settings2,
+  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
@@ -35,13 +37,14 @@ import {
   SIDEBAR_WIDTH_STORAGE_KEY,
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../lib/storageKeys";
-import type { RegisteredProject } from "../lib/tauri";
+import { revealPath, type RegisteredProject } from "../lib/tauri";
 import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
+import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
-import { WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
+import { fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
 
 export {
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
@@ -82,6 +85,7 @@ type SidebarProps = {
   onSelectProject?: (project: RegisteredProject) => void;
   onReorderProjects?: (orderedWorkspaceIds: string[]) => void;
   onAddProject?: () => void;
+  onRemoveProject?: (project: RegisteredProject) => void;
   onSelectWorktree: (worktree: Worktree) => void;
   onCreateWorktree: (project?: RegisteredProject) => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
@@ -106,6 +110,7 @@ export function Sidebar({
   onSelectProject = () => undefined,
   onReorderProjects = () => undefined,
   onAddProject = () => undefined,
+  onRemoveProject,
   onSelectWorktree,
   onCreateWorktree,
   onDeleteWorktree = () => undefined,
@@ -354,6 +359,7 @@ export function Sidebar({
                       toggleProject(project.workspaceId);
                     }}
                     onCreateWorktree={() => onCreateWorktree(project)}
+                    onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
                   />
                 );
 
@@ -464,6 +470,7 @@ type ProjectHeaderProps = {
   onToggle?: () => void;
   onSelect?: () => void;
   onCreateWorktree?: () => void;
+  onRemoveProject?: () => void;
   inert?: boolean;
 };
 
@@ -476,66 +483,136 @@ function ProjectHeader({
   onToggle,
   onSelect,
   onCreateWorktree,
+  onRemoveProject,
   inert = false,
 }: ProjectHeaderProps) {
+  const menuUnlistenRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      menuUnlistenRef.current?.();
+      menuUnlistenRef.current = null;
+    };
+  }, []);
+
+  const handleContextMenu = (event: React.MouseEvent) => {
+    if (inert) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const items: NativeMenuEntry[] = [
+      { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
+      { kind: "item", id: "reveal", label: fileManagerActionLabel(), icon: "reveal" },
+      { kind: "item", id: "copy-path", label: "Copy Project Path" },
+      { kind: "separator" },
+      { kind: "item", id: "remove", label: "Remove Project", enabled: Boolean(onRemoveProject), icon: "trash" },
+    ];
+    menuUnlistenRef.current?.();
+    void openNativePopupMenu(
+      "cmd_native_sidebar_context_menu",
+      items,
+      { x: event.clientX, y: event.clientY },
+      (id) => {
+        menuUnlistenRef.current?.();
+        menuUnlistenRef.current = null;
+        if (id === "add-worktree") onCreateWorktree?.();
+        else if (id === "reveal") {
+          revealPath(project.repoRoot).catch((err: unknown) => {
+            toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        } else if (id === "copy-path") {
+          if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+            navigator.clipboard
+              .writeText(project.repoRoot)
+              .then(() => toast.success("Path copied to clipboard"))
+              .catch(() => toast.error("Failed to copy to clipboard"));
+          } else {
+            toast.error("Clipboard API unavailable");
+          }
+        } else if (id === "remove") onRemoveProject?.();
+      },
+    )
+      .then((unlisten) => {
+        menuUnlistenRef.current = unlisten;
+      })
+      .catch(() => undefined);
+  };
+
   return (
-    <div className="group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground">
-      <button
-        type="button"
-        disabled={inert}
-        onClick={onToggle}
-        onPointerDown={(event) => event.stopPropagation()}
-        aria-expanded={expanded}
-        aria-label={`${expanded ? "Collapse" : "Expand"} ${project.workspaceId}`}
-        className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+    <>
+      <div
+        onContextMenu={handleContextMenu}
+        className="group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground"
       >
-        <ChevronRight
-          aria-hidden="true"
-          className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")}
-        />
-      </button>
-      <button
-        type="button"
-        disabled={inert}
-        onClick={onSelect}
-        aria-current={active ? "true" : undefined}
-        aria-label={project.workspaceId}
-        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
-      >
-        <FolderGit2 className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{project.workspaceId}</span>
-        {activity.runningCount > 0 ? (
-          <span
-            data-testid="project-running-badge"
-            className="shrink-0 rounded-full bg-status-working/12 px-1.5 py-px text-[9px] font-medium leading-none text-status-working"
-          >
-            {activity.runningCount} running
-          </span>
-        ) : null}
-        {attentionState ? (
-          <span
-            data-testid="project-attention-indicator"
-            data-attention-state={attentionState}
-            title={attentionState === "waiting" ? "Agent needs attention" : "Unread activity"}
-            className="inline-flex size-3 shrink-0 items-center justify-center"
-          >
-            <StatusDot state={attentionState} />
-          </span>
-        ) : null}
-      </button>
-      {project.gitRoot !== null ? (
-        <IconButton
-          label={`Add worktree to ${project.workspaceId}`}
-          size="sm"
+        <button
+          type="button"
           disabled={inert}
-          className="size-5 opacity-55 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
-          onClick={onCreateWorktree}
+          onClick={onToggle}
           onPointerDown={(event) => event.stopPropagation()}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${project.workspaceId}`}
+          className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
         >
-          <FolderPlus className="size-3" />
-        </IconButton>
-      ) : null}
-    </div>
+          <ChevronRight
+            aria-hidden="true"
+            className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")}
+          />
+        </button>
+        <button
+          type="button"
+          disabled={inert}
+          onClick={onSelect}
+          aria-current={active ? "true" : undefined}
+          aria-label={project.workspaceId}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+        >
+          <FolderGit2 className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{project.workspaceId}</span>
+          {activity.runningCount > 0 ? (
+            <span
+              data-testid="project-running-badge"
+              className="shrink-0 rounded-full bg-status-working/12 px-1.5 py-px text-[9px] font-medium leading-none text-status-working"
+            >
+              {activity.runningCount} running
+            </span>
+          ) : null}
+          {attentionState ? (
+            <span
+              data-testid="project-attention-indicator"
+              data-attention-state={attentionState}
+              title={attentionState === "waiting" ? "Agent needs attention" : "Unread activity"}
+              className="inline-flex size-3 shrink-0 items-center justify-center"
+            >
+              <StatusDot state={attentionState} />
+            </span>
+          ) : null}
+        </button>
+        {project.gitRoot !== null ? (
+          <IconButton
+            label={`Add worktree to ${project.workspaceId}`}
+            size="sm"
+            disabled={inert}
+            className="size-5 opacity-55 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
+            onClick={onCreateWorktree}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <FolderPlus className="size-3" />
+          </IconButton>
+        ) : null}
+        {onRemoveProject ? (
+          <IconButton
+            label={`Remove project ${project.workspaceId}`}
+            size="sm"
+            disabled={inert}
+            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive"
+            onClick={onRemoveProject}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <Trash2 className="size-3" />
+          </IconButton>
+        ) : null}
+      </div>
+
+    </>
   );
 }
 

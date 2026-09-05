@@ -16,6 +16,7 @@ export interface NotificationCoordinatorOptions {
   getSettings?: () => NotificationSettings;
   onMarkTabUnread?: (tabId: string) => void;
   onMarkWorktreeUnread?: (path: string) => void;
+  onError?: (error: unknown, source: 'sound' | 'dispatch') => void;
 }
 
 export interface TerminalBellEventParams {
@@ -92,10 +93,14 @@ export class NotificationCoordinator {
       }
 
       if (settings.enabled && settings.terminalBell) {
-        void playNotificationSound({
-          soundId: settings.customSoundId ?? 'system',
-          customSoundPath: settings.customSoundPath,
-          volume: settings.customSoundVolume,
+        Promise.resolve(
+          playNotificationSound({
+            soundId: settings.customSoundId ?? 'system',
+            customSoundPath: settings.customSoundPath,
+            volume: settings.customSoundVolume,
+          })
+        ).catch((err) => {
+          this.options.onError?.(err, 'sound');
         });
 
         const dispatchArgs: DispatchNotificationArgs = {
@@ -103,7 +108,9 @@ export class NotificationCoordinator {
           worktreeLabel: params.worktreeLabel || params.worktreeId,
           terminalTitle: params.terminalTitle,
         };
-        void dispatchNotification(dispatchArgs);
+        Promise.resolve(dispatchNotification(dispatchArgs)).catch((err) => {
+          this.options.onError?.(err, 'dispatch');
+        });
       }
     }
   }
@@ -143,10 +150,14 @@ export class NotificationCoordinator {
       }
 
       if (settings.enabled && settings.agentTaskComplete) {
-        void playNotificationSound({
-          soundId: settings.customSoundId ?? 'system',
-          customSoundPath: settings.customSoundPath,
-          volume: settings.customSoundVolume,
+        Promise.resolve(
+          playNotificationSound({
+            soundId: settings.customSoundId ?? 'system',
+            customSoundPath: settings.customSoundPath,
+            volume: settings.customSoundVolume,
+          })
+        ).catch((err) => {
+          this.options.onError?.(err, 'sound');
         });
 
         const dispatchArgs: DispatchNotificationArgs = {
@@ -155,7 +166,9 @@ export class NotificationCoordinator {
           terminalTitle: params.terminalTitle,
           agentLabel: params.agentLabel,
         };
-        void dispatchNotification(dispatchArgs);
+        Promise.resolve(dispatchNotification(dispatchArgs)).catch((err) => {
+          this.options.onError?.(err, 'dispatch');
+        });
       }
     }
   }

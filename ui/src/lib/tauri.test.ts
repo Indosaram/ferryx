@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/api/event", () => events);
 
 import {
   attachTerminal,
+  dispatchNotification,
   probeNotificationDelivery,
   createWorktree,
   deleteWorktree,
@@ -113,6 +114,7 @@ describe("Tauri IPC wrapper contract", () => {
         clientRequestId: "spawn-logical-action-1",
         shell: null,
         startup: null,
+        inheritFromSessionId: null,
       },
     });
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
@@ -137,6 +139,7 @@ describe("Tauri IPC wrapper contract", () => {
         clientRequestId: null,
         shell: "pwsh",
         startup: null,
+        inheritFromSessionId: null,
       },
     });
   });
@@ -186,6 +189,7 @@ describe("Tauri IPC wrapper contract", () => {
           agentType: "claude",
           providerSession: { key: "session_id", id: "provider-1" },
         },
+        inheritFromSessionId: null,
       },
     });
   });
@@ -579,5 +583,20 @@ describe("probeNotificationDelivery", () => {
       "cmd_notification_probe_delivery",
       { sendTest: true },
     );
+  });
+});
+
+describe("dispatchNotification", () => {
+  it("binds payload under 'request' parameter expected by Rust cmd_notification_dispatch", async () => {
+    core.invoke.mockResolvedValue({ submitted: true });
+    const payload = {
+      source: "agent-task-complete" as const,
+      terminalTitle: "Done",
+      agentLabel: "Claude",
+    };
+    await dispatchNotification(payload);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_notification_dispatch", {
+      request: payload,
+    });
   });
 });

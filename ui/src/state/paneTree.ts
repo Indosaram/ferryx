@@ -17,6 +17,17 @@ export type PaneNode = PaneLeafNode | PaneSplitNode;
 export const MIN_PANE_RATIO = 0.1;
 export const MAX_PANE_RATIO = 0.9;
 
+export {
+  applySeamRatio,
+  computeLeafRects,
+  computeSplitsGeometry,
+  findAlignedSplitRatio,
+  findCollinearSeam,
+  resolveSeam,
+  setCollinearRatioAtPath,
+  type ResolvedSeam,
+} from "./paneGeometry";
+
 /** Clamps a ratio into the usable range, falling back to an even split for non-finite input. */
 export function clampRatio(ratio: number): number {
   if (!Number.isFinite(ratio)) return 0.5;

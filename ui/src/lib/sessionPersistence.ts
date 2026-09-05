@@ -661,6 +661,7 @@ export function deserializeWorkspaceState(
           isAgent: Boolean(activity.isAgent),
           ...(activity.agentType ? { agentType: migrateLegacyAgentType(activity.agentType) ?? activity.agentType } : {}),
           ...(activity.source ? { source: activity.source } : {}),
+          ...(activity.agentSource ? { agentSource: activity.agentSource } : {}),
         };
       }
     }

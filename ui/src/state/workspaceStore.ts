@@ -12,6 +12,7 @@ import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelF
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
 import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import { worktreeIdentity } from "../lib/types";
@@ -32,14 +33,12 @@ import type {
   WorktreeIdentity,
 } from "../lib/types";
 import { createLayoutState, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
-import { collectLeafIds, type PaneDirection } from "./paneTree";
+import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
 
-type WorkspaceTerminalActivity = TerminalActivity & {
-  agentSource?: "screen" | "title";
-};
+type WorkspaceTerminalActivity = TerminalActivity;
 
 export type WorkspaceState = {
   workspaceId?: string;
@@ -62,7 +61,19 @@ export type WorkspaceServices = {
     cwd?: string | null;
     clientRequestId?: string | null;
     shell?: string | null;
+    inheritFromSessionId?: string | null;
   }) => Promise<string>;
+  /** Optional detailed spawn carrying the daemon-resolved cwd; enables the single-hop split path. */
+  spawnTerminalDetailed?: (request: {
+    workspaceId: string;
+    worktree: WorktreeIdentity | null;
+    cwd?: string | null;
+    clientRequestId?: string | null;
+    shell?: string | null;
+    inheritFromSessionId?: string | null;
+  }) => Promise<{ sessionId: string; session?: { cwd?: string | null } | null }>;
+  /** Optional batch spawn for restore/recovery; falls back to per-session spawns when absent. */
+  spawnTerminalsBatch?: (spawns: Array<Parameters<WorkspaceServices["spawnTerminal"]>[0]>) => Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
   closeTerminal: (sessionId: string) => Promise<void>;
   waitForTerminalExit: (sessionId: string, timeoutMs: number) => Promise<void>;
@@ -84,6 +95,7 @@ export {
 
 import { getHmrWorkspaceState, setHmrWorkspaceState } from "./hmrWorkspaceState";
 import { getWorkspaceSnapshot, listWorkspaceSnapshots, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import { getWorkspaceRestoreStatus } from "./workspaceRestore";
 
 export type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
@@ -140,7 +152,14 @@ export type WorkspaceAction =
       leafId: string;
     }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
-  | { type: "SET_PANE_RATIO"; tabId: string; path: string; ratio: number }
+  | {
+      type: "SET_PANE_RATIO";
+      tabId: string;
+      path: string;
+      ratio: number;
+      isolated?: boolean;
+      seam?: ResolvedSeam | null;
+    }
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
@@ -175,9 +194,25 @@ type UseWorkspaceStoreOptions = {
   services?: WorkspaceServices;
 };
 
+// Optional tauri IPC additions (M8/M9) resolved lazily so test doubles that mock
+// "../lib/tauri" without them keep working; production always has both.
+function optionalTauriFn(name: "spawnTerminalDetailed" | "spawnTerminalsBatch"): unknown {
+  try {
+    return (tauriIpc as Record<string, unknown>)[name];
+  } catch {
+    return undefined;
+  }
+}
+
 const defaultServices: WorkspaceServices = {
   ensureTerminalEvents,
   spawnTerminal,
+  get spawnTerminalDetailed() {
+    return optionalTauriFn("spawnTerminalDetailed") as WorkspaceServices["spawnTerminalDetailed"];
+  },
+  get spawnTerminalsBatch() {
+    return optionalTauriFn("spawnTerminalsBatch") as WorkspaceServices["spawnTerminalsBatch"];
+  },
   getTerminalCwd,
   closeTerminal,
   waitForTerminalExit,
@@ -510,6 +545,46 @@ export function useWorkspaceStore({
         spawningSessionIdsRef.current.add(sessionId);
       }
 
+      // Batch spawn (M8): one IPC round trip instead of N per-session invokes when the
+      // transport supports it. Per-session fallback keeps mock services working.
+      if (services.spawnTerminalsBatch && targets.length > 1) {
+        await services.ensureTerminalEvents();
+        const requests = targets.map((sessionId) => {
+          const session = stateRef.current.sessions[sessionId];
+          return {
+            workspaceId,
+            worktree: session?.worktree ?? null,
+            cwd: session?.cwd ?? session?.worktreePath ?? null,
+          };
+        });
+        let entries: Array<{ index: number; sessionId: string | null; error: string | null }> = [];
+        try {
+          entries = await services.spawnTerminalsBatch(requests);
+        } catch {
+          // Transport-level batch failure: fall through to per-session spawns.
+        }
+        if (entries.length > 0) {
+          for (const entry of entries) {
+            const sessionId = targets[entry.index];
+            spawningSessionIdsRef.current.delete(sessionId);
+            const session = stateRef.current.sessions[sessionId];
+            if (!entry.sessionId || !session) continue;
+            // Recovery spawns can outlive a project switch; rebinding now would
+            // point another project's session at this PTY.
+            if (mountedWorkspaceIdRef.current !== workspaceId) {
+              await closeBackendSession({ ...session, backendSessionId: entry.sessionId }, services);
+              continue;
+            }
+            dispatch({
+              type: "REBIND_SESSION_BACKEND",
+              sessionId,
+              backendSessionId: entry.sessionId,
+            });
+          }
+          return;
+        }
+      }
+
       await Promise.all(
         targets.map(async (sessionId) => {
           try {
@@ -546,6 +621,9 @@ export function useWorkspaceStore({
   const ensureTabForWorktree = useCallback(
     async (worktree: Worktree, options?: { allowCreate?: boolean }) => {
       const allowCreate = options?.allowCreate ?? true;
+      const restoreStatus = getWorkspaceRestoreStatus(workspaceId);
+      const isRestoring = restoreStatus === "loading";
+      const effectiveAllowCreate = allowCreate && !isRestoring;
       const snapshot = stateRef.current;
       switchDebug("worktree.ensure.start", {
         workspaceId,
@@ -582,7 +660,7 @@ export function useWorkspaceStore({
           dispatch({ type: "ACTIVATE_TAB", tabId: activeTab.id });
           return activeTab.id;
         }
-        if (!allowCreate) {
+        if (!effectiveAllowCreate) {
           switchDebug("worktree.ensure.empty-no-create", {
             workspaceId,
             worktreePath: worktree.path,
@@ -625,6 +703,14 @@ export function useWorkspaceStore({
         dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
         dispatch({ type: "ACTIVATE_TAB", tabId: existingInCurrent.id });
         return existingInCurrent.id;
+      }
+
+      if (!effectiveAllowCreate) {
+        switchDebug("worktree.ensure.empty-no-create", {
+          workspaceId,
+          worktreePath: worktree.path,
+        });
+        return null;
       }
 
       switchDebug("worktree.ensure.create-new", {
@@ -681,22 +767,37 @@ export function useWorkspaceStore({
       }
 
       let backendSessionId: string | null = null;
+      let inheritedCwd = sourceSession.cwd;
       try {
         await services.ensureTerminalEvents();
-        let inheritedCwd = sourceSession.cwd;
-        if (sourceSession.backendSessionId) {
-          try {
-            inheritedCwd = (await services.getTerminalCwd(sourceSession.backendSessionId)) ?? sourceSession.cwd;
-          } catch {
-            inheritedCwd = sourceSession.cwd;
+        if (services.spawnTerminalDetailed) {
+          // CWD inheritance (M9): one IPC round trip — the daemon resolves the source
+          // pane's live working directory server-side and returns it in the response.
+          const result = await spawnDetailedForLogicalAction(services, {
+            workspaceId,
+            worktree: sourceSession.worktree,
+            cwd: null,
+            inheritFromSessionId: sourceSession.backendSessionId,
+          });
+          backendSessionId = result.sessionId;
+          inheritedCwd = result.session?.cwd ?? inheritedCwd;
+        } else {
+          // Mock/test services without detailed spawn: resolve live cwd explicitly.
+          let liveCwd = sourceSession.cwd;
+          if (sourceSession.backendSessionId) {
+            try {
+              liveCwd = (await services.getTerminalCwd(sourceSession.backendSessionId)) ?? sourceSession.cwd;
+            } catch {
+              liveCwd = sourceSession.cwd;
+            }
           }
+          inheritedCwd = liveCwd;
+          backendSessionId = await spawnTerminalForLogicalAction(services, {
+            workspaceId,
+            worktree: sourceSession.worktree,
+            cwd: liveCwd,
+          });
         }
-
-        backendSessionId = await spawnTerminalForLogicalAction(services, {
-          workspaceId,
-          worktree: sourceSession.worktree,
-          cwd: inheritedCwd,
-        });
 
         if (stateRef.current.sessions[localSessionId]) {
           dispatch({
@@ -885,7 +986,20 @@ export function useWorkspaceStore({
   );
   const focusPane = useCallback((tabId: string, leafId: string) => dispatch({ type: "FOCUS_PANE", tabId, leafId }), [dispatch]);
   const setPaneRatio = useCallback(
-    (tabId: string, path: string, ratio: number) => dispatch({ type: "SET_PANE_RATIO", tabId, path, ratio }),
+    (
+      tabId: string,
+      path: string,
+      ratio: number,
+      options?: { isolated?: boolean; seam?: ResolvedSeam | null },
+    ) =>
+      dispatch({
+        type: "SET_PANE_RATIO",
+        tabId,
+        path,
+        ratio,
+        isolated: options?.isolated,
+        seam: options?.seam,
+      }),
     [dispatch],
   );
   const setTabGroupRatio = useCallback(
@@ -1019,8 +1133,14 @@ export function useWorkspaceStore({
     [createBrowserTab],
   );
 
-  const agents = useMemo(() => selectAgents(renderedState), [renderedState]);
-  const tabActivity = useMemo(() => selectTabActivitySummaries(renderedState), [renderedState]);
+  const agents = useMemo(
+    () => selectAgents(renderedState),
+    [renderedState.layout, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId],
+  );
+  const tabActivity = useMemo(
+    () => selectTabActivitySummaries(renderedState),
+    [renderedState.layout, renderedState.activityBySessionId, renderedState.unreadTabIds],
+  );
   // Rows for other projects come from their snapshots and are overlaid by the live workspace, so a
   // worktree the user switched away from keeps reporting its agent instead of going blank.
   const worktreeActivity = useMemo(
@@ -1030,11 +1150,17 @@ export function useWorkspaceStore({
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
     // signal for the snapshot cache, which useMemo cannot observe directly.
-    [renderedState, workspaceId, parkedActivityVersion],
+    [renderedState.layout, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadWorktreePaths, workspaceId, parkedActivityVersion],
   );
   const activityNotificationTargets = useMemo(
     () => selectActivityNotificationTargets(renderedState),
-    [renderedState],
+    [renderedState.layout, renderedState.activityBySessionId, renderedState.sessions],
+  );
+  const unreadBadgeCount = useMemo(
+    () => selectGlobalUnreadBadgeCount(renderedState, workspaceId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
+    // signal for the snapshot cache, which useMemo cannot observe directly.
+    [renderedState, workspaceId, parkedActivityVersion],
   );
 
   return {
@@ -1043,6 +1169,7 @@ export function useWorkspaceStore({
     agents,
     tabActivity,
     worktreeActivity,
+    unreadBadgeCount,
     activityNotificationTargets,
     openTab,
     createBrowserTab,
@@ -1191,6 +1318,23 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
   }
 
   return merged;
+}
+
+/**
+ * Global Dock badge count: unread tabs of the live workspace plus every parked
+ * workspace snapshot, so an agent finishing in another project still lights the badge.
+ */
+export function selectGlobalUnreadBadgeCount(
+  currentState: WorkspaceState,
+  currentWorkspaceId?: string,
+): number {
+  let count = Object.values(currentState.unreadTabIds ?? {}).filter(Boolean).length;
+  const targetWsId = currentState.workspaceId ?? currentWorkspaceId;
+  for (const [workspaceId, snapshot] of listWorkspaceSnapshots()) {
+    if (workspaceId === targetWsId) continue;
+    count += Object.values(snapshot.unreadTabIds ?? {}).filter(Boolean).length;
+  }
+  return count;
 }
 
 export type ActivityNotificationTarget = {
@@ -1648,7 +1792,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return layout === state.layout ? state : { ...state, layout };
     }
     case "SET_PANE_RATIO": {
-      const layout = layoutReducer(state.layout, { type: "SET_PANE_RATIO", tabId: action.tabId, path: action.path, ratio: action.ratio });
+      const layout = layoutReducer(state.layout, {
+        type: "SET_PANE_RATIO",
+        tabId: action.tabId,
+        path: action.path,
+        ratio: action.ratio,
+        isolated: action.isolated,
+        seam: action.seam,
+      });
       return layout === state.layout ? state : { ...state, layout };
     }
     case "SET_TAB_GROUP_RATIO": {
@@ -1909,9 +2060,18 @@ function acknowledgeTabCompletions(state: WorkspaceState, tabId: string): Worksp
   let changed = false;
   const next = { ...activityBySessionId };
 
+  // In a split tab only the focused leaf's session is actually read by the user;
+  // background panes keep their unseen completion so their attention frame survives.
+  const tabLayout = state.layout.layoutsByTabId?.[tabId];
+  const activeLeafId = tabLayout?.activeLeafId;
+  const activeSessionId = activeLeafId ? tabLayout.sessionIdsByLeafId[activeLeafId] : null;
+
   for (const sessionId of getTabSessionIds(state, tabId)) {
     const activity = activityBySessionId[sessionId];
     if (!activity || activity.state !== "done" || activity.seen) continue;
+    if (tabLayout && tabLayout.root.type === "split" && activeSessionId && sessionId !== activeSessionId) {
+      continue;
+    }
     next[sessionId] = { ...activity, seen: true };
     changed = true;
   }
@@ -1929,6 +2089,21 @@ function isTabVisible(state: WorkspaceState, tabId: string): boolean {
   return false;
 }
 
+/**
+ * Whether the user is genuinely looking at THIS session right now: its tab is
+ * visible and, in a split tab, its leaf is the active one. A background split
+ * pane must never be treated as observed just because its tab is frontmost.
+ */
+function isSessionActivelyObserved(state: WorkspaceState, tabId: string, sessionId: string): boolean {
+  if (!isTabVisible(state, tabId)) return false;
+  const tabLayout = state.layout.layoutsByTabId?.[tabId];
+  if (tabLayout && tabLayout.root.type === "split") {
+    const leafId = Object.entries(tabLayout.sessionIdsByLeafId).find(([_, sId]) => sId === sessionId)?.[0];
+    return Boolean(leafId && leafId === tabLayout.activeLeafId);
+  }
+  return true;
+}
+
 function applySessionActivity(
   state: WorkspaceState,
   tabId: string,
@@ -1943,6 +2118,7 @@ function applySessionActivity(
     previous.isAgent === activity.isAgent &&
     previous.agentType === activity.agentType &&
     previous.source === activity.source &&
+    previous.agentSource === activity.agentSource &&
     previous.seen === activity.seen
   ) {
     return state;
@@ -1952,15 +2128,20 @@ function applySessionActivity(
   // acknowledged. This is what keeps an agent that boots with a spinner and settles at its prompt
   // from leaving a permanent dot on the tab in front of the user.
   const acknowledged =
-    activity.state === "done" && (activity.seen === true || isTabVisible(state, tabId));
-  const stored: TerminalActivity = acknowledged ? { ...activity, seen: true } : activity;
+    activity.state === "done" && (activity.seen === true || isSessionActivelyObserved(state, tabId, sessionId));
+  const stored: TerminalActivity = {
+    ...activity,
+    ...(activity.state === "done" ? { seen: acknowledged } : {}),
+  };
 
   let nextState: WorkspaceState = {
     ...state,
     activityBySessionId: { ...(state.activityBySessionId ?? {}), [sessionId]: stored },
   };
 
-  if (activity.state === "done" && previous?.state !== "done" && !isTabVisible(state, tabId)) {
+  const isAttentionState = activity.state === "done" || activity.state === "waiting";
+  const wasAttentionState = previous?.state === "done" || previous?.state === "waiting";
+  if (isAttentionState && !wasAttentionState && !isTabVisible(state, tabId)) {
     const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,
@@ -2065,7 +2246,7 @@ function clearWorktreeUnreadWhenRead(
 
 async function spawnTerminalForLogicalAction(
   services: WorkspaceServices,
-  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null },
+  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null; inheritFromSessionId?: string | null },
 ): Promise<string> {
   const clientRequestId = createClientRequestId();
   const stableRequest = { ...request, clientRequestId };
@@ -2074,6 +2255,21 @@ async function spawnTerminalForLogicalAction(
   } catch (error) {
     if (!isAmbiguousRendererTransportError(error)) throw error;
     return services.spawnTerminal(stableRequest);
+  }
+}
+
+async function spawnDetailedForLogicalAction(
+  services: WorkspaceServices,
+  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null; inheritFromSessionId?: string | null },
+): Promise<Awaited<ReturnType<NonNullable<WorkspaceServices["spawnTerminalDetailed"]>>>> {
+  const clientRequestId = createClientRequestId();
+  const stableRequest = { ...request, clientRequestId };
+  const spawnDetailed = services.spawnTerminalDetailed!;
+  try {
+    return await spawnDetailed(stableRequest);
+  } catch (error) {
+    if (!isAmbiguousRendererTransportError(error)) throw error;
+    return spawnDetailed(stableRequest);
   }
 }
 

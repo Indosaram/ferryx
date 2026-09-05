@@ -1,10 +1,13 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { LockKeyhole, Trash2 } from "lucide-react";
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
+import { toast } from "sonner";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
 import { workspaceName } from "../lib/branchFilter";
 import { cn } from "../lib/cn";
+import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
+import { revealPath } from "../lib/tauri";
 import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { IconButton } from "./ui/IconButton";
@@ -34,6 +37,13 @@ export type WorktreeRowProps = {
   readonly onDelete: (worktree: Worktree) => void;
 };
 
+export function fileManagerActionLabel() {
+  const platform = typeof navigator === "undefined" ? "" : navigator.platform || navigator.userAgent;
+  if (/Mac/i.test(platform)) return "Reveal in Finder";
+  if (/Win/i.test(platform)) return "Show in File Explorer";
+  return "Open in File Manager";
+}
+
 /** The repository root worktree is the one that is not an `orca/<ws>/<slug>` worktree branch. */
 function isPrimaryWorktree(worktree: Worktree) {
   return worktreeIdentity(worktree) === null;
@@ -49,6 +59,15 @@ export const WorktreeRow = memo(function WorktreeRow({
   onSelect,
   onDelete,
 }: WorktreeRowProps) {
+  const menuUnlistenRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      menuUnlistenRef.current?.();
+      menuUnlistenRef.current = null;
+    };
+  }, []);
+
   const primary = isPrimaryWorktree(worktree);
   const canDelete = !primary;
   const displayName = workspaceName(worktree);
@@ -61,65 +80,124 @@ export const WorktreeRow = memo(function WorktreeRow({
   const indicator: StatusDotState | null =
     aggregateIndicator ?? (activitySummary === undefined && agent ? agent.state : null);
 
-  return (
-    <div
-      className={cn(
-        "group/worktree-row relative my-0.5 w-full rounded-md border transition-colors",
-        active
-          ? "border-[#6c6c6c] bg-[#3f3f3f]"
-          : "border-transparent bg-transparent hover:bg-white/[0.04]",
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => onSelect(worktree)}
-        aria-current={active ? "true" : undefined}
-        className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-      >
-        <span className="flex min-w-0 flex-col">
-          <span className="flex min-w-0 items-center gap-1.5">
-            <span
-              data-testid="worktree-status-dot"
-              data-activity-state={indicator ?? "idle"}
-              className="inline-flex size-2 shrink-0 items-center justify-center"
-            >
-              {indicator ? <StatusDot state={indicator} /> : <span className="size-2 shrink-0 rounded-full bg-status-idle" />}
-            </span>
-            <span
-              className={cn(
-                "truncate text-[12px] font-semibold leading-tight",
-                active ? "text-[#fafafa]" : "text-worktree-sidebar-foreground",
-              )}
-            >
-              {displayName}
-            </span>
-            {primary ? (
-              <span className="shrink-0 rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]">
-                primary
-              </span>
-            ) : null}
-            {status?.isDirty ? (
-              <span className="shrink-0 text-[10px] text-status-warning">
-                Dirty · {status.files.length} {status.files.length === 1 ? "file" : "files"}
-              </span>
-            ) : null}
-          </span>
-        </span>
-      </button>
+  const handleContextMenu = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const items: NativeMenuEntry[] = [
+      { kind: "item", id: "reveal", label: fileManagerActionLabel(), icon: "reveal" },
+      { kind: "item", id: "copy-path", label: "Copy Worktree Path" },
+    ];
+    if (worktree.branch) {
+      items.push({ kind: "item", id: "copy-branch", label: "Copy Branch Name" });
+    }
+    items.push({ kind: "separator" });
+    items.push({ kind: "item", id: "delete", label: "Delete Worktree", enabled: canDelete, icon: "trash" });
+    menuUnlistenRef.current?.();
+    void openNativePopupMenu(
+      "cmd_native_sidebar_context_menu",
+      items,
+      { x: event.clientX, y: event.clientY },
+      (id) => {
+        menuUnlistenRef.current?.();
+        menuUnlistenRef.current = null;
+        if (id === "reveal") handleReveal();
+        else if (id === "copy-path") copyPath();
+        else if (id === "copy-branch") {
+          const branchName = (worktree.branch ?? "").replace(/^refs\/heads\//, "");
+          if (branchName) {
+            void navigator.clipboard.writeText(branchName).then(() => {
+              toast.success("Copied branch name to clipboard");
+            });
+          }
+        } else if (id === "delete") onDelete(worktree);
+      },
+    )
+      .then((unlisten) => {
+        menuUnlistenRef.current = unlisten;
+      })
+      .catch(() => undefined);
+  };
 
-      <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-55 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
-        {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
-        <IconButton
-          label="Delete worktree"
-          size="sm"
-          disabled={!canDelete}
-          onClick={() => onDelete(worktree)}
-          onPointerDown={(event) => event.stopPropagation()}
+  const copyPath = () => {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      navigator.clipboard
+        .writeText(worktree.path)
+        .then(() => toast.success("Path copied to clipboard"))
+        .catch(() => toast.error("Failed to copy to clipboard"));
+    } else {
+      toast.error("Clipboard API unavailable");
+    }
+  };
+
+  const handleReveal = () => {
+    revealPath(worktree.path).catch((err: unknown) => {
+      toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
+  return (
+    <>
+      <div
+        onContextMenu={handleContextMenu}
+        className={cn(
+          "group/worktree-row relative my-0.5 w-full rounded-md border transition-colors",
+          active
+            ? "border-[#6c6c6c] bg-[#3f3f3f]"
+            : "border-transparent bg-transparent hover:bg-white/[0.04]",
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => onSelect(worktree)}
+          aria-current={active ? "true" : undefined}
+          className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <Trash2 className="size-3" />
-        </IconButton>
+          <span className="flex min-w-0 flex-col">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span
+                data-testid="worktree-status-dot"
+                data-activity-state={indicator ?? "idle"}
+                className="inline-flex size-2 shrink-0 items-center justify-center"
+              >
+                {indicator ? <StatusDot state={indicator} /> : <span className="size-2 shrink-0 rounded-full bg-status-idle" />}
+              </span>
+              <span
+                className={cn(
+                  "truncate text-[12px] font-semibold leading-tight",
+                  active ? "text-[#fafafa]" : "text-worktree-sidebar-foreground",
+                )}
+              >
+                {displayName}
+              </span>
+              {primary ? (
+                <span className="shrink-0 rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]">
+                  primary
+                </span>
+              ) : null}
+              {status?.isDirty ? (
+                <span className="shrink-0 text-[10px] text-status-warning">
+                  Dirty · {status.files.length} {status.files.length === 1 ? "file" : "files"}
+                </span>
+              ) : null}
+            </span>
+          </span>
+        </button>
+
+        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-55 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
+          {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
+          <IconButton
+            label="Delete worktree"
+            size="sm"
+            disabled={!canDelete}
+            onClick={() => onDelete(worktree)}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <Trash2 className="size-3" />
+          </IconButton>
+        </div>
       </div>
-    </div>
+
+    </>
   );
 });
 

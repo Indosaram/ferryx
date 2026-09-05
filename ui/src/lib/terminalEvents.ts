@@ -118,15 +118,22 @@ class TerminalEventBus {
 
   ensureStarted(): Promise<void> {
     if (this.startPromise) return this.startPromise;
-    this.startPromise = Promise.all([
+    const startupTasks: Array<Promise<unknown>> = [
       onTerminalOutput((payload) => this.handleControlOutput(payload)),
       onTerminalLifecycle((payload) => this.handleLifecycle(payload)),
-      this.ensureBinaryOutputChannel(),
-    ]).then(() => undefined);
+    ];
+    // Only register the raw-byte PTY channel eagerly if something already consumes output.
+    // Otherwise it is registered lazily from subscribeOutput/subscribeTitle so unconsumed
+    // native sessions never stream, decode, or backlog bytes.
+    if (this.outputListeners.size > 0 || this.titleListeners.size > 0) {
+      startupTasks.push(this.ensureBinaryOutputChannel());
+    }
+    this.startPromise = Promise.all(startupTasks).then(() => undefined);
     return this.startPromise;
   }
 
   subscribeOutput(sessionId: string, listener: OutputListener, replay = true) {
+    void this.ensureBinaryOutputChannel();
     const listeners = this.outputListeners.get(sessionId) ?? new Set<OutputListener>();
     listeners.add(listener);
     this.outputListeners.set(sessionId, listeners);
@@ -166,6 +173,7 @@ class TerminalEventBus {
   }
 
   subscribeTitle(listener: TitleListener) {
+    void this.ensureBinaryOutputChannel();
     this.titleListeners.add(listener);
     return () => {
       this.titleListeners.delete(listener);
@@ -259,8 +267,11 @@ class TerminalEventBus {
   }
 
   private handleBinaryOutput(payload: DecodedTerminalOutputFrame, receivedAtMs?: number) {
-    const decodedText = this.decoderRegistry.decode(payload.sessionId, payload.data);
-    if (decodedText) this.trackTitles(payload.sessionId, decodedText);
+    // Skip UTF-8 decode + OSC title scanning entirely when nothing listens for titles.
+    if (this.titleListeners.size > 0) {
+      const decodedText = this.decoderRegistry.decode(payload.sessionId, payload.data);
+      if (decodedText) this.trackTitles(payload.sessionId, decodedText);
+    }
     if (payload.data.byteLength > 0) {
       this.publishOutput(
         payload.sessionId,
@@ -299,7 +310,9 @@ class TerminalEventBus {
     daemonEpoch?: string | null,
     receivedAtMs?: number,
   ) {
-    if (data.byteLength > 0) {
+    // Only retain a replay backlog while an output listener is attached to this session.
+    // Unconsumed native sessions must not accumulate bytes.
+    if (data.byteLength > 0 && (this.outputListeners.get(sessionId)?.size ?? 0) > 0) {
       let entry = this.backlog.get(sessionId);
       if (!entry) {
         entry = { chunks: [], totalBytes: 0 };

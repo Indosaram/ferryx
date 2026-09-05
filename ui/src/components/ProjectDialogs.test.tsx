@@ -16,7 +16,7 @@ const dialog = vi.hoisted(() => ({
 vi.mock("../lib/tauri", () => native);
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 
-import { AddProjectDialog, AddWorktreeDialog, deriveWorkspaceId } from "./ProjectDialogs";
+import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, deriveWorkspaceId } from "./ProjectDialogs";
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -302,5 +302,35 @@ describe("AddWorktreeDialog flow", () => {
     await waitFor(() => expect(screen.getByText(/not a Git repository/i)).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Create Worktree" })).toBeNull();
     expect(screen.getByRole("button", { name: "Close Add Worktree" })).toBeInTheDocument();
+  });
+});
+
+describe("RemoveProjectDialog flow", () => {
+  it("renders project id, path notice, and invokes onConfirm when Remove Project is clicked", () => {
+    const onClose = vi.fn();
+    const onConfirm = vi.fn();
+    const project = { workspaceId: "proj-remove", repoRoot: "/repos/proj-remove", gitRoot: "/repos/proj-remove" };
+
+    render(<RemoveProjectDialog project={project} onClose={onClose} onConfirm={onConfirm} />);
+
+    expect(screen.getByRole("dialog", { name: "Remove Project" })).toBeInTheDocument();
+    expect(screen.getByText("proj-remove")).toBeInTheDocument();
+    expect(screen.getByText("/repos/proj-remove")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Project" }));
+    expect(onConfirm).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("invokes onClose when Cancel is clicked", () => {
+    const onClose = vi.fn();
+    const onConfirm = vi.fn();
+    const project = { workspaceId: "proj-remove", repoRoot: "/repos/proj-remove", gitRoot: null };
+
+    render(<RemoveProjectDialog project={project} onClose={onClose} onConfirm={onConfirm} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

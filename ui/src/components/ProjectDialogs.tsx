@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderGit2, FolderPlus, GitBranch, LoaderCircle, X } from "lucide-react";
+import { FolderGit2, FolderPlus, GitBranch, LoaderCircle, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import {
@@ -439,6 +439,70 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
           ) : null}
         </div>
       </form>
+    </div>
+  );
+}
+
+type RemoveProjectDialogProps = {
+  project: RegisteredProject;
+  onClose: () => void;
+  onConfirm: () => void;
+};
+
+export function RemoveProjectDialog({ project, onClose, onConfirm }: RemoveProjectDialogProps) {
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"
+      role="presentation"
+      onMouseDown={onClose}
+    >
+      <div
+        role="dialog"
+        aria-label="Remove Project"
+        className="w-full max-w-[400px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex h-9 items-center border-b border-border px-3">
+          <Trash2 className="mr-2 size-3.5 text-destructive" />
+          <h2 className="text-[13px] font-medium">Remove Project</h2>
+          <button
+            type="button"
+            aria-label="Close Remove Project"
+            className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            onClick={onClose}
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+        <div className="selectable space-y-2 p-3 text-xs">
+          <p className="text-foreground">
+            Are you sure you want to remove <span className="font-semibold">{project.workspaceId}</span> from Ferryx?
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            This only removes the project from your sidebar. Your repository files at{" "}
+            <span className="break-all font-mono text-muted-foreground">{project.repoRoot}</span> will not be deleted.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
+          <button
+            type="button"
+            className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="h-7 rounded-md bg-destructive px-3 text-xs font-medium text-destructive-foreground hover:bg-destructive/90"
+            onClick={() => {
+              onConfirm();
+              onClose();
+            }}
+          >
+            Remove Project
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

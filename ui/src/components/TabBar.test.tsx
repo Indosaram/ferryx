@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActivitySummary } from "../lib/activity";
@@ -17,9 +17,58 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => nativeWindow,
 }));
 
+const nativeMenu = vi.hoisted(() => ({
+  lastCall: null as null | {
+    command: string;
+    items: Array<Record<string, unknown>>;
+    position: { x: number; y: number };
+    onAction: (id: string) => void;
+  },
+}));
+
+vi.mock("../lib/nativeMenu", () => ({
+  openNativePopupMenu: vi.fn(
+    async (
+      command: string,
+      items: Array<Record<string, unknown>>,
+      position: { x: number; y: number },
+      onAction: (id: string) => void,
+    ) => {
+      nativeMenu.lastCall = { command, items, position, onAction };
+      return () => undefined;
+    },
+  ),
+}));
+
+function menuItems() {
+  if (!nativeMenu.lastCall) throw new Error("native menu was not opened");
+  return nativeMenu.lastCall.items;
+}
+
+function menuItem(idOrLabel: string) {
+  const items = menuItems();
+  const found = items.find(
+    (item) =>
+      (item as { id?: string }).id === idOrLabel ||
+      ((item as { label?: string }).label ?? "").includes(idOrLabel),
+  );
+  if (!found) {
+    throw new Error(`menu item not found: ${idOrLabel}; got ${JSON.stringify(items)}`);
+  }
+  return found as { id: string; label: string; enabled?: boolean };
+}
+
+function clickMenuItem(idOrLabel: string) {
+  if (!nativeMenu.lastCall) throw new Error("native menu was not opened");
+  act(() => {
+    nativeMenu.lastCall?.onAction(menuItem(idOrLabel).id);
+  });
+}
+
 afterEach(() => {
   cleanup();
   nativeWindow.startDragging.mockClear();
+  nativeMenu.lastCall = null;
   localStorage.clear();
 });
 
@@ -68,7 +117,7 @@ describe("TabBar", () => {
     expect(onClose).toHaveBeenCalledWith("tab-a");
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(screen.getByRole("button", { name: /New Terminal/i }));
+    clickMenuItem("new-terminal");
     expect(onAdd).toHaveBeenCalledOnce();
   });
 
@@ -145,15 +194,15 @@ describe("TabBar", () => {
     );
 
     fireEvent.contextMenu(getTab("main"), { clientX: 100, clientY: 100 });
-    expect(screen.getByRole("menuitem", { name: "Move Tab to Split Left" })).toBeEnabled();
-    expect(screen.getByRole("menuitem", { name: /Split terminal right/i })).toBeEnabled();
+    expect(menuItem("move:left").enabled).not.toBe(false);
+    expect(menuItem("split-right").enabled).not.toBe(false);
 
-    fireEvent.click(screen.getByRole("menuitem", { name: "Move Tab to Split Left" }));
+    clickMenuItem("move:left");
     expect(onMoveTabToSplit).toHaveBeenCalledWith("tab-a", "left");
     expect(onSplitRight).not.toHaveBeenCalled();
 
     fireEvent.contextMenu(getTab("main"));
-    fireEvent.click(screen.getByRole("menuitem", { name: /Split terminal right/i }));
+    clickMenuItem("split-right");
     expect(onSplitRight).toHaveBeenCalledWith("tab-a");
   });
 
@@ -172,7 +221,7 @@ describe("TabBar", () => {
     );
 
     fireEvent.contextMenu(getTab("main"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Pin tab" }));
+    clickMenuItem("pin");
     expect(onTogglePin).toHaveBeenCalledWith("tab-a", true);
 
     rerender(
@@ -189,8 +238,9 @@ describe("TabBar", () => {
     expect(screen.queryByRole("button", { name: "Close main" })).not.toBeInTheDocument();
 
     fireEvent.contextMenu(getTab("main"));
-    expect(screen.getByRole("menuitem", { name: "Close tab" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Unpin tab" }));
+    expect(menuItem("close").enabled).toBe(false);
+    expect(menuItem("pin").label).toBe("Unpin tab");
+    clickMenuItem("pin");
     expect(onTogglePin).toHaveBeenLastCalledWith("tab-a", false);
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -209,14 +259,14 @@ describe("TabBar", () => {
     );
 
     fireEvent.contextMenu(getTab("main"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Rename tab" }));
+    clickMenuItem("rename");
     let input = screen.getByDisplayValue("main");
     fireEvent.change(input, { target: { value: "  discarded  " } });
     fireEvent.keyDown(input, { key: "Escape" });
     expect(onRenameTab).not.toHaveBeenCalled();
 
     fireEvent.contextMenu(getTab("main"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Rename tab" }));
+    clickMenuItem("rename");
     input = screen.getByDisplayValue("main");
     fireEvent.change(input, { target: { value: "  custom title  " } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -258,12 +308,8 @@ describe("TabBar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    const browserAction = screen.getByRole("button", { name: /New Browser Tab/i });
-    fireEvent.pointerDown(browserAction, { button: 0 });
-    expect(nativeWindow.startDragging).not.toHaveBeenCalled();
-
-    fireEvent.click(browserAction);
-    expect(onAddBrowser).toHaveBeenCalledWith("about:blank", undefined);
+    clickMenuItem("new-browser");
+    expect(onAddBrowser).toHaveBeenCalledWith("about:blank");
 
     fireEvent.pointerDown(screen.getByRole("button", { name: "Action" }), { button: 0 });
     expect(nativeWindow.startDragging).not.toHaveBeenCalled();
@@ -284,8 +330,8 @@ describe("TabBar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(screen.getByRole("button", { name: /New Browser Tab/i }));
-    expect(onAddBrowser).toHaveBeenCalledWith("https://example.com/start", undefined);
+    clickMenuItem("new-browser");
+    expect(onAddBrowser).toHaveBeenCalledWith("https://example.com/start");
   });
 
   it("disables terminal split for browser tabs while preserving whole-tab split", () => {
@@ -304,9 +350,9 @@ describe("TabBar", () => {
     );
 
     fireEvent.contextMenu(getTab("Browser"));
-    expect(screen.getByRole("menuitem", { name: /Split terminal right/i })).toBeDisabled();
-    expect(screen.getByRole("menuitem", { name: "Move Tab to Split Right" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Move Tab to Split Right" }));
+    expect(menuItem("split-right").enabled).toBe(false);
+    expect(menuItem("move:right").enabled).not.toBe(false);
+    clickMenuItem("move:right");
     expect(onMoveTabToSplit).toHaveBeenCalledWith("browser", "right");
     expect(onSplitRight).not.toHaveBeenCalled();
   });
@@ -349,18 +395,21 @@ describe("TabBar", () => {
     const tablist = screen.getByRole("tablist");
     const newTabButton = screen.getByRole("button", { name: "New tab" });
 
-    // The add trigger / menu wrapper must NOT be a descendant of the overflow-x-auto [role=tablist] container
+    // The add trigger must NOT be a descendant of the overflow-x-auto [role=tablist] container
     expect(tablist.contains(newTabButton)).toBe(false);
 
-    // Open popover and verify popover dialog is also outside the tablist
+    // The menu is a native OS popup (no DOM dialog); opening it must not mount any in-app overlay
     fireEvent.click(newTabButton);
-    const popover = screen.getByRole("dialog", { name: "New tab menu" });
-    expect(tablist.contains(popover)).toBe(false);
+    expect(nativeMenu.lastCall?.command).toBe("cmd_native_new_tab_menu");
+    expect(screen.queryByRole("dialog", { name: "New tab menu" })).not.toBeInTheDocument();
   });
 
-  it("forwards launchable agents and triggers onLaunchAgent when clicked in new tab popover", () => {
+  it("forwards launchable agents with brand icons and triggers onLaunchAgent from the new tab menu", () => {
     const onLaunchAgent = vi.fn();
-    const agents = [{ name: "claude", command: "claude", args: "" }];
+    const agents = [
+      { name: "claude", command: "claude", args: "" },
+      { name: "aider", command: "aider", args: "" },
+    ];
     render(
       <TabBar
         tabs={[terminalTab("tab-a", "main")]}
@@ -374,8 +423,12 @@ describe("TabBar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    expect(screen.getByText("Claude")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Claude"));
+    expect(nativeMenu.lastCall?.command).toBe("cmd_native_new_tab_menu");
+    expect(menuItems()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "agent:claude", label: "Claude", icon: "agent:claude" }),
+      expect.objectContaining({ id: "agent:aider", label: "Aider", icon: "agent:aider" }),
+    ]));
+    clickMenuItem("agent:claude");
     expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
   });
 
@@ -399,10 +452,12 @@ describe("TabBar", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    const buttons = within(screen.getByText("AGENTS").parentElement as HTMLElement).getAllByRole("button");
-    expect(buttons[0]).toHaveTextContent("Aider");
-    expect(within(buttons[0]).getByText("Default")).toBeVisible();
-    fireEvent.click(screen.getByText("Claude"));
+    const agentIds = menuItems()
+      .map((item) => (item as { id?: string }).id ?? "")
+      .filter((id) => id.startsWith("agent:"));
+    expect(agentIds[0]).toBe("agent:aider");
+    expect(menuItem("agent:aider").label).toContain("Default");
+    clickMenuItem("agent:claude");
     expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
   });
 

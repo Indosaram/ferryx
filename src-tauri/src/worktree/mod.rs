@@ -167,7 +167,7 @@ prunable reason gitdir gone
     }
 
     #[test]
-    fn dirty_worktree_is_never_deleted_even_with_force_remove() {
+    fn dirty_worktree_survives_force_remove_but_yields_to_explicit_destructive_delete() {
         let (_temp, manager) = setup_test_repo();
         let path = path_for(&manager, "dirty");
         manager
@@ -185,6 +185,14 @@ prunable reason gitdir gone
             Err(WorktreeError::DirtyWorktree { .. })
         ));
         assert!(scratch.exists());
+
+        // Destructive deletion explicitly removes dirty worktrees and deletes the branch.
+        manager
+            .delete_worktree_and_branch_destructive(&path, true)
+            .expect("destructive deletion removes dirty worktree");
+        assert!(!path.exists());
+        let branches = git::run_git(manager.repo_root(), &["branch", "--list"]).unwrap();
+        assert!(!branches.contains("orca/ws-dirty/task-dirty"));
     }
 
     #[test]
@@ -339,5 +347,18 @@ prunable reason gitdir gone
             .expect("resolve worktree");
         assert_eq!(resolved_wt.path, created.path);
         assert_eq!(resolved_mgr.repo_root(), manager.repo_root());
+    }
+
+    #[test]
+    fn worktree_manager_rejects_filesystem_root() {
+        #[cfg(unix)]
+        let root = std::path::Path::new("/");
+        #[cfg(windows)]
+        let root = std::path::Path::new("C:\\");
+
+        assert!(matches!(
+            WorktreeManager::try_new(root),
+            Err(WorktreeError::InvalidRepoRoot { .. })
+        ));
     }
 }

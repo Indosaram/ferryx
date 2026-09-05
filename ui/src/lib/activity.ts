@@ -8,6 +8,8 @@ export type TerminalActivity = {
   isAgent: boolean;
   agentType?: string;
   source?: "screen" | "title";
+  /** How the agent identity was established: screen detection vs title parsing. */
+  agentSource?: "screen" | "title";
   /**
    * The user has already seen this completion, so it must not light an attention dot.
    *

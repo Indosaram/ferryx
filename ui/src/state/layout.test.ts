@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { TerminalTab } from "../lib/types";
 import { createLayoutState, layoutReducer } from "./layout";
+import { resolveSeam } from "./paneTree";
 
 function tab(id: string, sessionId: string): TerminalTab {
   return { id, label: id, sessionId };
@@ -207,5 +208,130 @@ describe("layoutReducer with per-tab split trees", () => {
 
     state = layoutReducer(state, { type: "SET_PANE_RATIO", tabId: "tab-1", path: "", ratio: 0.7 });
     expect(state.layoutsByTabId["tab-1"].root).toMatchObject({ type: "split", ratio: 0.7 });
+  });
+
+  it("synchronizes collinear split ratios in a 2x2 pane grid", () => {
+    let state = createLayoutState([tab("tab-1", "session-1")], "tab-1");
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-init",
+      direction: "horizontal",
+      newLeafId: "leaf-right",
+      sessionId: "session-right",
+    });
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-init",
+      direction: "vertical",
+      newLeafId: "leaf-left-bottom",
+      sessionId: "session-left-bottom",
+    });
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-right",
+      direction: "vertical",
+      newLeafId: "leaf-right-bottom",
+      sessionId: "session-right-bottom",
+    });
+
+    state = layoutReducer(state, {
+      type: "SET_PANE_RATIO",
+      tabId: "tab-1",
+      path: "first",
+      ratio: 0.65,
+    });
+
+    const root = state.layoutsByTabId["tab-1"].root;
+    if (root.type !== "split") throw new Error("expected split root");
+    if (root.first.type !== "split" || root.second.type !== "split") {
+      throw new Error("expected child splits");
+    }
+    expect(root.first.ratio).toBe(0.65);
+    expect(root.second.ratio).toBe(0.65);
+  });
+
+  it("inherits aligned split ratio when splitting sibling pane", () => {
+    let state = createLayoutState([tab("tab-1", "session-1")], "tab-1");
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-init",
+      direction: "horizontal",
+      newLeafId: "leaf-right",
+      sessionId: "session-right",
+    });
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-init",
+      direction: "vertical",
+      newLeafId: "leaf-left-bottom",
+      sessionId: "session-left-bottom",
+      ratio: 0.7,
+    });
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-right",
+      direction: "vertical",
+      newLeafId: "leaf-right-bottom",
+      sessionId: "session-right-bottom",
+    });
+
+    const root = state.layoutsByTabId["tab-1"].root;
+    if (root.type !== "split") throw new Error("expected split root");
+    if (root.second.type !== "split") throw new Error("expected second split");
+    expect(root.second.ratio).toBe(0.7);
+  });
+
+  it("applies updates via pre-resolved frozen seam without mid-drag capture", () => {
+    let state = createLayoutState([tab("tab-1", "session-1")], "tab-1");
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-init",
+      direction: "horizontal",
+      newLeafId: "leaf-right",
+      sessionId: "session-right",
+    });
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-init",
+      direction: "vertical",
+      newLeafId: "leaf-left-bottom",
+      sessionId: "session-left-bottom",
+      ratio: 0.3,
+    });
+    state = layoutReducer(state, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      targetLeafId: "leaf-right",
+      direction: "vertical",
+      newLeafId: "leaf-right-bottom",
+      sessionId: "session-right-bottom",
+      ratio: 0.6,
+    });
+
+    const frozenSeam = resolveSeam(state.layoutsByTabId["tab-1"].root, "first");
+    expect(frozenSeam?.members.map((m) => m.path)).toEqual(["first"]);
+
+    state = layoutReducer(state, {
+      type: "SET_PANE_RATIO",
+      tabId: "tab-1",
+      path: "first",
+      ratio: 0.61,
+      seam: frozenSeam,
+    });
+
+    const root = state.layoutsByTabId["tab-1"].root;
+    if (root.type !== "split" || root.first.type !== "split" || root.second.type !== "split") {
+      throw new Error("expected split tree");
+    }
+    expect(root.first.ratio).toBe(0.61);
+    expect(root.second.ratio).toBe(0.6);
   });
 });

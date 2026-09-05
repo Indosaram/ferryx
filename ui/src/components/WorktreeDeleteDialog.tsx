@@ -90,7 +90,7 @@ export function WorktreeDeleteDialog({
     } catch (cause) {
       const ipcError = toIpcError(cause);
       setError(ipcError);
-      setDestructiveRequired(ipcError.code === "UNMERGED_BRANCH");
+      setDestructiveRequired(ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE");
     } finally {
       setBusy(false);
     }
@@ -155,9 +155,13 @@ export function WorktreeDeleteDialog({
               <div className="flex items-start gap-2 text-destructive">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                 <div>
-                  <div className="font-semibold">Unmerged branch</div>
+                  <div className="font-semibold">
+                    {error?.code === "DIRTY_WORKTREE" ? "Uncommitted changes" : "Unmerged branch"}
+                  </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-destructive/85">
-                    Safe deletion refused to discard unmerged commits. Destructive deletion is a separate explicit action.
+                    {error?.code === "DIRTY_WORKTREE"
+                      ? "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently."
+                      : "Safe deletion refused to discard unmerged commits. Destructive deletion is a separate explicit action."}
                   </p>
                 </div>
               </div>
@@ -167,7 +171,9 @@ export function WorktreeDeleteDialog({
                 onClick={() => void handleDestructiveDelete()}
                 className="w-full rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
               >
-                Delete unmerged branch permanently
+                {error?.code === "DIRTY_WORKTREE"
+                  ? "Delete worktree and discard changes permanently"
+                  : "Delete unmerged branch permanently"}
               </button>
             </div>
           ) : null}

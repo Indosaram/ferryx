@@ -31,7 +31,13 @@ import type {
   WorkspaceTab,
 } from "../lib/types";
 import { defaultContentForTab, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
-import { isRedundantSplit as isRedundantPaneSplit, type PaneDirection, type PaneNode } from "../state/paneTree";
+import {
+  isRedundantSplit as isRedundantPaneSplit,
+  resolveSeam,
+  type PaneDirection,
+  type PaneNode,
+  type ResolvedSeam,
+} from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
 import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
@@ -155,7 +161,7 @@ type TerminalSplitViewProps = {
   onReloadBrowserTab?: (tabId: string) => void;
   onSplitPane?: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane?: (tabId: string, leafId: string) => void;
-  onSetRatio?: (tabId: string, path: string, ratio: number) => void;
+  onSetRatio?: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   onSetGroupRatio?: (path: string, ratio: number) => void;
   onSwapPanes?: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane?: (tabId: string, leafId: string) => void;
@@ -585,7 +591,7 @@ type TabGroupViewProps = {
     targetPane?: { tabId: string; leafId: string },
   ) => void;
   onClosePane: (tabId: string, leafId: string) => void;
-  onSetRatio: (tabId: string, path: string, ratio: number) => void;
+  onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
   unreadTabIds?: Record<string, boolean>;
@@ -782,7 +788,7 @@ type PaneRendererProps = {
   onReloadBrowserTab: (tabId: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
-  onSetRatio: (tabId: string, path: string, ratio: number) => void;
+  onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
 };
@@ -836,7 +842,10 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         direction={node.direction}
         ratio={ratio}
         ariaLabel="Resize terminal panes"
-        onRatioChange={(newRatio) => props.onSetRatio(tab.id, path, newRatio)}
+        onDragStart={() => resolveSeam(tabLayout.root, path)}
+        onRatioChange={(newRatio, options) => {
+          props.onSetRatio(tab.id, path, newRatio, options);
+        }}
       />
       <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden" style={{ flexBasis: `${(1 - ratio) * 100}%`, flexGrow: 1, flexShrink: 1 }}>
         <PaneRenderer {...props} node={node.second} path={path ? `${path}.second` : "second"} />
@@ -1151,11 +1160,18 @@ const PaneLeafView = React.memo(function PaneLeafView({
 type PaneResizeDividerProps = {
   direction: PaneDirection;
   ratio: number;
-  onRatioChange: (ratio: number) => void;
+  onDragStart?: () => ResolvedSeam | null;
+  onRatioChange: (ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   ariaLabel?: string;
 };
 
-function PaneResizeDivider({ direction, ratio, onRatioChange, ariaLabel = "Resize terminal panes" }: PaneResizeDividerProps) {
+function PaneResizeDivider({
+  direction,
+  ratio,
+  onDragStart,
+  onRatioChange,
+  ariaLabel = "Resize terminal panes",
+}: PaneResizeDividerProps) {
   const dividerRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const isHorizontal = direction === "horizontal";
@@ -1178,19 +1194,49 @@ function PaneResizeDivider({ direction, ratio, onRatioChange, ariaLabel = "Resiz
       cleanupRef.current = null;
     }
     document.body.style.cursor = isHorizontal ? "col-resize" : "row-resize";
-    const parentRect = parent.getBoundingClientRect();
 
-    const handlePointerMove = (pointerEvent: PointerEvent) => {
-      const totalSize = isHorizontal ? parentRect.width : parentRect.height;
-      if (totalSize <= 0) return;
-      if (totalSize <= MIN_PANE_SIZE_PX * 2) {
-        onRatioChange(0.5);
+    const seam = onDragStart?.() ?? null;
+    const isolatedRef = { current: Boolean(event.altKey) };
+    const seamRef = { current: seam };
+    const pendingRatioRef = { current: null as number | null };
+    let frameId: number | null = null;
+
+    const flushRatio = (r: number) => {
+      onRatioChange(r, { isolated: isolatedRef.current, seam: seamRef.current });
+    };
+
+    const scheduleRatio = (r: number) => {
+      pendingRatioRef.current = r;
+      if (typeof requestAnimationFrame !== "function") {
+        flushRatio(r);
         return;
       }
-      const position = isHorizontal ? pointerEvent.clientX - parentRect.left : pointerEvent.clientY - parentRect.top;
+      if (frameId === null) {
+        frameId = requestAnimationFrame(() => {
+          frameId = null;
+          if (pendingRatioRef.current !== null) {
+            flushRatio(pendingRatioRef.current);
+            pendingRatioRef.current = null;
+          }
+        });
+      }
+    };
+
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      isolatedRef.current = pointerEvent.altKey;
+      const parentNow = dividerRef.current?.parentElement;
+      if (!parentNow) return;
+      const rect = parentNow.getBoundingClientRect();
+      const totalSize = isHorizontal ? rect.width : rect.height;
+      if (totalSize <= 0) return;
+      if (totalSize <= MIN_PANE_SIZE_PX * 2) {
+        scheduleRatio(0.5);
+        return;
+      }
+      const position = isHorizontal ? pointerEvent.clientX - rect.left : pointerEvent.clientY - rect.top;
       const minimumRatio = MIN_PANE_SIZE_PX / totalSize;
       const clampedRatio = Math.max(minimumRatio, Math.min(1 - minimumRatio, position / totalSize));
-      onRatioChange(Number(clampedRatio.toFixed(4)));
+      scheduleRatio(Number(clampedRatio.toFixed(4)));
     };
 
     const cleanup = () => {
@@ -1199,6 +1245,14 @@ function PaneResizeDivider({ direction, ratio, onRatioChange, ariaLabel = "Resiz
       window.removeEventListener("pointerup", cleanup);
       window.removeEventListener("pointercancel", cleanup);
       cleanupRef.current = null;
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+        frameId = null;
+      }
+      if (pendingRatioRef.current !== null) {
+        flushRatio(pendingRatioRef.current);
+        pendingRatioRef.current = null;
+      }
     };
 
     cleanupRef.current = cleanup;

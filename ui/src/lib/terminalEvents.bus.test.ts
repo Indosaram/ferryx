@@ -82,6 +82,8 @@ describe("terminalEventBus backlog buffer", () => {
     const chunkCount = 25;
     const chunkText = "x".repeat(100);
 
+    // An output listener must be attached for the session to retain a replay backlog.
+    const unsubscribe = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
     for (let index = 0; index < chunkCount; index += 1) {
       callbacks.output?.({
         sessionId,
@@ -95,6 +97,7 @@ describe("terminalEventBus backlog buffer", () => {
     expect(metrics.chunks).toBeGreaterThan(1);
     expect(metrics.chunks).toBe(chunkCount);
 
+    unsubscribe();
     terminalEventBus.clearSession(sessionId);
   });
 
@@ -103,6 +106,8 @@ describe("terminalEventBus backlog buffer", () => {
     const sessionId = "backend-segmented-replay";
     const retainedChunks = ["first", "second-longer", "third"];
 
+    // A live output listener retains the backlog; a later replay subscriber then receives it.
+    const unsubscribeSink = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
     for (const text of retainedChunks) {
       callbacks.output?.({
         sessionId,
@@ -128,6 +133,7 @@ describe("terminalEventBus backlog buffer", () => {
     expect(replayedChunks.some((chunk) => chunk.byteLength === retainedChunks.join("").length)).toBe(false);
 
     unsubscribe();
+    unsubscribeSink();
     terminalEventBus.clearSession(sessionId);
   });
 
@@ -138,6 +144,8 @@ describe("terminalEventBus backlog buffer", () => {
     const chunkCount = 60;
     const tailMarker = "TAIL_SENTINEL_2026";
 
+    // A live output listener retains the bounded backlog for the later replay subscriber.
+    const unsubscribeSink = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
     for (let index = 0; index < chunkCount; index += 1) {
       const isLast = index === chunkCount - 1;
       const text = isLast
@@ -163,18 +171,21 @@ describe("terminalEventBus backlog buffer", () => {
     expect(metrics.chunks).toBeGreaterThan(1);
 
     unsubscribe();
+    unsubscribeSink();
     terminalEventBus.clearSession(sessionId);
   });
 
   it("clears session backlog and listeners on clearSession", async () => {
     await terminalEventBus.ensureStarted();
     const sessionId = "backend-clear";
+    const unsubscribe = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
     callbacks.output?.({
       sessionId,
       data: encodeOutput("some initial output"),
     });
 
     expect(getBacklogMetricsForTest(sessionId).chunks).toBe(1);
+    unsubscribe();
     terminalEventBus.clearSession(sessionId);
 
     expect(getBacklogMetricsForTest(sessionId)).toEqual({
@@ -191,6 +202,10 @@ describe("terminalEventBus backlog buffer", () => {
     const unsubscribeTitle = terminalEventBus.subscribeTitle((id, title) => {
       titles.push([id, title]);
     });
+
+    // Title updates fire from the title listener alone, but retaining an output backlog for a
+    // later replay subscriber requires a live output listener to be attached.
+    const unsubscribeSink = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
 
     const maxBacklog = 512 * 1024;
     const initialPrefix = "START_OF_STREAM_THAT_SHOULD_BE_DROPPED\n";
@@ -254,6 +269,7 @@ describe("terminalEventBus backlog buffer", () => {
 
     unsubscribeTitle();
     unsubscribeOutput();
+    unsubscribeSink();
     terminalEventBus.clearSession(sessionId);
   });
 

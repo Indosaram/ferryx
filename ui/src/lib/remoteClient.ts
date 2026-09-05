@@ -26,8 +26,9 @@ export class RemoteClient {
   private ws: WebSocket | null = null;
   private eventListeners: Map<string, Set<(payload: any) => void>> = new Map();
   private reconnectTimer: any = null;
+  private reconnectAttempts = 0;
 
-  constructor(baseUrl: string = window.location.origin) {
+  constructor(baseUrl: string = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "http://localhost:5173") {
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
@@ -125,7 +126,16 @@ export class RemoteClient {
       this.ws.onclose = () => {
         this.ws = null;
         clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = setTimeout(() => this.connectEvents(), 3000);
+        // Exponential backoff with jitter (audit L4): a daemon outage must not produce a
+        // thundering herd of fixed-interval reconnects from every remote client.
+        const attempt = Math.min(this.reconnectAttempts, 5);
+        const backoffMs = Math.min(3000 * 2 ** attempt, 30_000);
+        const jitterMs = Math.floor(Math.random() * 1000);
+        this.reconnectAttempts += 1;
+        this.reconnectTimer = setTimeout(() => this.connectEvents(), backoffMs + jitterMs);
+      };
+      this.ws.onopen = () => {
+        this.reconnectAttempts = 0;
       };
     } catch {
       // ignore

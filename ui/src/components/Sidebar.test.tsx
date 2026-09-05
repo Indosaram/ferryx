@@ -6,6 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Worktree } from "../lib/types";
 import { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, SIDEBAR_WIDTH_STORAGE_KEY, Sidebar } from "./Sidebar";
 
+const nativeMenu = vi.hoisted(() => ({
+  openNativePopupMenu: vi.fn(),
+}));
+
+vi.mock("../lib/nativeMenu", () => ({
+  openNativePopupMenu: nativeMenu.openNativePopupMenu,
+}));
+
+function lastSidebarMenuCall(): { items: Array<{ kind: string; id?: string; label?: string; enabled?: boolean }>; onAction: (id: string) => void } {
+  const calls = nativeMenu.openNativePopupMenu.mock.calls;
+  const last = calls[calls.length - 1];
+  return { items: last[1], onAction: last[3] };
+}
+
 const worktree: Worktree = {
   path: "/repo/main",
   head: "abc123",
@@ -573,5 +587,40 @@ describe("Sidebar navigation", () => {
 
     expect(screen.getByRole("button", { name: "Add worktree to git-proj" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add worktree to plain-proj" })).not.toBeInTheDocument();
+  });
+
+  it("triggers onRemoveProject from project native context menu Remove Project action", () => {
+    const onRemoveProject = vi.fn();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    const testProjects = [
+      { workspaceId: "proj-1", repoRoot: "/repos/proj-1", gitRoot: "/repos/proj-1" },
+    ];
+    renderSidebar({ projects: testProjects, onRemoveProject });
+
+    const projectButton = screen.getByRole("button", { name: "proj-1" });
+    fireEvent.contextMenu(projectButton, { clientX: 50, clientY: 50 });
+
+    expect(nativeMenu.openNativePopupMenu).toHaveBeenCalledTimes(1);
+    const { items, onAction } = lastSidebarMenuCall();
+    const removeItem = items.find((item) => item.id === "remove");
+    expect(removeItem?.label).toBe("Remove Project");
+    expect(removeItem?.enabled).toBe(true);
+
+    onAction("remove");
+    expect(onRemoveProject).toHaveBeenCalledWith(testProjects[0]);
+  });
+
+  it("triggers onRemoveProject from project row trash icon button", () => {
+    const onRemoveProject = vi.fn();
+    const testProjects = [
+      { workspaceId: "proj-1", repoRoot: "/repos/proj-1", gitRoot: "/repos/proj-1" },
+    ];
+    renderSidebar({ projects: testProjects, onRemoveProject });
+
+    const trashBtn = screen.getByRole("button", { name: "Remove project proj-1" });
+    expect(trashBtn).toBeInTheDocument();
+
+    fireEvent.click(trashBtn);
+    expect(onRemoveProject).toHaveBeenCalledWith(testProjects[0]);
   });
 });

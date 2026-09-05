@@ -12,17 +12,21 @@ import {
   type WorkspaceTab,
 } from "../lib/types";
 import {
+  applySeamRatio,
   clampRatio,
   collectLeafIds,
   createLeafNode,
   equalizeRatios,
+  findAlignedSplitRatio,
   findFirstLeafId,
   findSiblingLeafId,
   type PaneDirection,
   removeLeaf,
+  setCollinearRatioAtPath,
   setRatioAtPath,
   splitLeaf,
   swapLeaves,
+  type ResolvedSeam,
 } from "./paneTree";
 
 export type LayoutAction =
@@ -68,7 +72,14 @@ export type LayoutAction =
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "CLOSE_PANE"; tabId: string; leafId: string; replacementSessionId?: string }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
-  | { type: "SET_PANE_RATIO"; tabId: string; path: string; ratio: number }
+  | {
+      type: "SET_PANE_RATIO";
+      tabId: string;
+      path: string;
+      ratio: number;
+      isolated?: boolean;
+      seam?: ResolvedSeam | null;
+    }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "TOGGLE_PANE_EXPANDED"; tabId: string; leafId: string }
   | { type: "EQUALIZE_PANES"; tabId: string };
@@ -246,7 +257,16 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       if (!targetLeafId || !existingLeafIds.includes(targetLeafId)) return state;
       const newLeafId = action.newLeafId ?? createLayoutId("leaf");
       if (existingLeafIds.includes(newLeafId)) return state;
-      const newRoot = splitLeaf(tabLayout.root, targetLeafId, newLeafId, action.direction, action.position, action.ratio);
+      const effectiveRatio =
+        action.ratio ?? findAlignedSplitRatio(tabLayout.root, targetLeafId, action.direction);
+      const newRoot = splitLeaf(
+        tabLayout.root,
+        targetLeafId,
+        newLeafId,
+        action.direction,
+        action.position,
+        effectiveRatio,
+      );
       const newContent = action.content ?? createTerminalPaneContent(action.sessionId ?? "");
       const newSessionId = newContent.kind === "terminal" ? newContent.sessionId : "";
       return normalizeLayoutInternal(
@@ -517,7 +537,11 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
     case "SET_PANE_RATIO": {
       const tabLayout = state.layoutsByTabId[action.tabId];
       if (!tabLayout) return state;
-      const root = setRatioAtPath(tabLayout.root, action.path, action.ratio);
+      const root = action.isolated
+        ? setRatioAtPath(tabLayout.root, action.path, action.ratio)
+        : action.seam
+          ? applySeamRatio(tabLayout.root, action.seam, action.ratio)
+          : setCollinearRatioAtPath(tabLayout.root, action.path, action.ratio);
       if (root === tabLayout.root) return state;
       return normalizeLayoutInternal(
         {

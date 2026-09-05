@@ -331,4 +331,24 @@ describe("reset", () => {
 
     expect(dispatchMock).not.toHaveBeenCalled();
   });
+
+  it("reports dispatch or sound failures through onError callback", async () => {
+    const errorSpy = vi.fn();
+    dispatchMock.mockRejectedValueOnce(new Error("IPC failed"));
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onError: errorSpy,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.any(Error), "dispatch");
+  });
 });

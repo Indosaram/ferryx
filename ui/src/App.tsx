@@ -6,7 +6,7 @@ import { withTimeout } from "./lib/withTimeout";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
-import { AddProjectDialog, AddWorktreeDialog } from "./components/ProjectDialogs";
+import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
@@ -52,6 +52,7 @@ import {
   onRemoteSelectionRequested,
   publishFocusedTerminal,
   registerProject,
+  unregisterProject,
   saveSession,
   setBadgeCount,
   spawnTerminal,
@@ -88,8 +89,10 @@ import { checkForUpdate, registerWindowCloseGuard } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
+import { clearHmrWorkspaceState } from "./state/hmrWorkspaceState";
+import { clearWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { selectGlobalUnreadBadgeCount, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
@@ -230,8 +233,22 @@ export function App() {
         );
         if (!cancelled) setBootstrap(prepared);
       })
-      .catch((error) => {
-        void bootTrace("initial.error", { message: String(error).slice(0, 200) });
+      .catch(async (error) => {
+        const errorMsg = (error as { message?: string } | null)?.message ?? String(error);
+        void bootTrace("initial.error", { message: String(errorMsg).slice(0, 200), details: error });
+        if (!cancelled) {
+          const storedBootstrap = loadProjectBootstrap();
+          const savedSession = await loadSession().catch(() => null);
+          const recovered = recoverProjectBootstrap(savedSession);
+          const prepared = mergeRecoveredProjectBootstrap(storedBootstrap, recovered, DEFAULT_PROJECT);
+          await preloadWorkspaceSnapshots(
+            prepared.projects.map((project) => project.workspaceId),
+            async () => savedSession,
+          ).catch((preloadError) => {
+            console.warn("Workspace session preload fallback skipped:", preloadError);
+          });
+          if (!cancelled) setBootstrap(prepared);
+        }
       });
     return () => {
       cancelled = true;
@@ -473,6 +490,7 @@ function WorkspaceApp({
     agents,
     tabActivity,
     worktreeActivity,
+    unreadBadgeCount: unreadBadgeCountFromStore,
     activityNotificationTargets,    markTabUnread,
     markWorktreeUnread,
     subscribeTerminalBell,
@@ -514,12 +532,15 @@ function WorkspaceApp({
   const markWorktreeUnreadRef = useRef(markWorktreeUnread);
   markWorktreeUnreadRef.current = markWorktreeUnread;
 
+  const reportRuntimeErrorRef = useRef<(err: unknown) => void>(() => {});
+
   const coordinatorRef = useRef<NotificationCoordinator | null>(null);
   if (!coordinatorRef.current) {
     coordinatorRef.current = new NotificationCoordinator({
       onMarkTabUnread: (tabId) => markTabUnreadRef.current?.(tabId),
       onMarkWorktreeUnread: (path) => markWorktreeUnreadRef.current?.(path),
       isWindowFocused: () => getNativeWindowFocused() ?? isWindowForegroundFocused(),
+      onError: (err) => reportRuntimeErrorRef.current(err),
     });
   }
 
@@ -627,6 +648,7 @@ function WorkspaceApp({
     plainRootWorktree,
     registeredWorkspaceId: registeredProjectId,
   });
+  reportRuntimeErrorRef.current = reportRuntimeError;
 
   const inactiveProjectWorktrees = useInactiveProjectWorktrees(
     projects,
@@ -710,6 +732,17 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     setRegisteredProjectId(null);
+    const isPlaceholder =
+      projects.length === 1 &&
+      projects[0].workspaceId === DEFAULT_WORKSPACE_ID &&
+      projects[0].repoRoot === ".";
+    // With no user projects left there is nothing to register: the fallback
+    // DEFAULT_PROJECT (".") must never be silently (re-)registered behind the
+    // user's back after they removed every project.
+    if (projects.length === 0 || isPlaceholder) {
+      switchDebug("project.register.skipped", { reason: "no-projects" });
+      return;
+    }
     switchDebug("project.register.start", {
       workspaceId: activeProject.workspaceId,
       repoRoot: activeProject.repoRoot,
@@ -800,7 +833,7 @@ function WorkspaceApp({
         workspaceId: activeProject.workspaceId,
       });
     };
-  }, [activeProject.repoRoot, activeProject.workspaceId, registrationAttempt, refreshWorktrees, reportRuntimeError]);
+  }, [activeProject.repoRoot, activeProject.workspaceId, projects.length, registrationAttempt, refreshWorktrees, reportRuntimeError]);
 
   // A failed registration leaves the runtime gated, so retry when the window
   // regains focus rather than staying empty until the app restarts.
@@ -850,15 +883,20 @@ function WorkspaceApp({
   }, [activeProject.workspaceId, ensureSessionBackends, pendingBackendRecovery, registeredProjectId, reportRuntimeError]);
 
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const cachedLoadedSessionRef = useRef<PersistedWorkspaceSession | null>(null);
   const persistSessionStrict = useCallback((workspaceId: string, repoRoot: string, currentState: WorkspaceState) => {
     return enqueueStrictPersistence(saveChainRef, async () => {
-        const existing = await loadSession().catch(() => null);
+        let existing = cachedLoadedSessionRef.current;
+        if (!existing) {
+          existing = await loadSession().catch(() => null);
+        }
         const session = serializeWorkspaceState(
           workspaceId,
           repoRoot,
           currentState,
           existing,
         );
+        cachedLoadedSessionRef.current = session;
         await saveSession(session);
     });
   }, []);
@@ -935,6 +973,11 @@ function WorkspaceApp({
     return unregister;
   }, [persistSession]);
 
+  const persistedSessionsKey = useMemo(
+    () => Object.entries(state.sessions).map(([id, s]) => `${id}:${s.backendSessionId ?? ""}:${s.lifecycle}`).join(","),
+    [state.sessions],
+  );
+
   useEffect(() => {
     const hasTabs =
       state.layout.tabs.length > 0 ||
@@ -960,16 +1003,17 @@ function WorkspaceApp({
     activeProject.repoRoot,
     activeProject.workspaceId,
     persistSession,
+    persistedSessionsKey,
     state.layout,
     state.worktreeLayouts,
     state.worktrees,
     state.activeWorktreePath,
-    state.sessions,
     state.workspaceId,
   ]);
 
   const [isAddProjectOpen, setIsAddProjectOpen] = useState(false);
   const [createTargetProject, setCreateTargetProject] = useState<RegisteredProject | null>(null);
+  const [pendingProjectRemove, setPendingProjectRemove] = useState<RegisteredProject | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -995,8 +1039,8 @@ function WorkspaceApp({
   }, [focusedTerminalPayload, reportRuntimeError]);
 
   const unreadBadgeCount = useMemo(
-    () => Object.values(state.unreadTabIds ?? {}).filter(Boolean).length,
-    [state.unreadTabIds],
+    () => unreadBadgeCountFromStore ?? selectGlobalUnreadBadgeCount(state, activeProject.workspaceId),
+    [unreadBadgeCountFromStore, state, activeProject.workspaceId],
   );
 
   useEffect(() => {
@@ -1069,15 +1113,38 @@ function WorkspaceApp({
   }, []);
 
   const handleRegisteredProject = useCallback((project: RegisteredProject) => {
-    setProjects((current) => {
-      const next = [...current.filter((candidate) => candidate.workspaceId !== project.workspaceId), project];
-      persistProjects(next);
-      return next;
-    });
+    const current = projectsRef.current;
+    const next = [...current.filter((candidate) => candidate.workspaceId !== project.workspaceId), project];
+    persistProjects(next);
+    setProjects(next);
     setActiveProjectId(project.workspaceId);
     persistActiveProjectId(project.workspaceId);
     setWorktreeStatuses({});
   }, []);
+
+  const handleConfirmRemoveProject = useCallback(async () => {
+    if (!pendingProjectRemove) return;
+    const target = pendingProjectRemove;
+    setPendingProjectRemove(null);
+    const current = projectsRef.current;
+    const next = current.filter((candidate) => candidate.workspaceId !== target.workspaceId);
+    persistProjects(next);
+    setProjects(next);
+    if (target.workspaceId === activeProjectId) {
+      const nextActive = next[0] ?? DEFAULT_PROJECT;
+      setActiveProjectId(nextActive.workspaceId);
+      persistActiveProjectId(nextActive.workspaceId);
+      setWorktreeStatuses({});
+    }
+    clearWorkspaceSnapshot(target.workspaceId);
+    clearHmrWorkspaceState(target.workspaceId);
+    try {
+      await unregisterProject({ workspaceId: target.workspaceId });
+      toast.success(`Removed project ${target.workspaceId}`);
+    } catch (err) {
+      reportRuntimeError(err);
+    }
+  }, [activeProjectId, pendingProjectRemove, reportRuntimeError]);
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
@@ -1669,6 +1736,7 @@ function WorkspaceApp({
           onSelectProject={handleSelectProject}
           onReorderProjects={handleReorderProjects}
           onAddProject={handleOpenAddProject}
+          onRemoveProject={setPendingProjectRemove}
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
@@ -1689,7 +1757,24 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
-        {activeWorktree && state.layout.tabs.length === 0 ? (
+        {projects.length === 0 ? (
+          <div
+            data-testid="no-projects-view"
+            className="flex h-full flex-1 flex-col items-center justify-center gap-4 bg-background"
+          >
+            <div className="flex flex-col items-center gap-1 text-center">
+              <p className="text-sm font-medium text-muted-foreground">No projects</p>
+              <p className="text-xs text-muted-foreground/70">Add a project to open a terminal workspace.</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleOpenAddProject}
+              className="flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-xs font-medium hover:bg-accent/80"
+            >
+              <span>Add Project</span>
+            </button>
+          </div>
+        ) : activeWorktree && state.layout.tabs.length === 0 ? (
           <EmptyWorkspaceView
             onNewTerminal={handleAddTerminalTab}
             onNewBrowserTab={handleAddBrowserTab}
@@ -1806,7 +1891,10 @@ function WorkspaceApp({
       ) : null}
       {deleteTarget ? (
         <WorktreeDeleteDialog
-          workspaceId={activeProject.workspaceId}
+          workspaceId={
+            resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) ??
+            activeProject.workspaceId
+          }
           worktree={deleteTarget}
           onClose={handleCloseDeleteTarget}
           onDeleted={() => {
@@ -1815,8 +1903,29 @@ function WorkspaceApp({
               delete next[deleteTarget.path];
               return next;
             });
+            if (activeWorktree?.path === deleteTarget.path) {
+              const remaining = state.worktrees.filter((w) => w.path !== deleteTarget.path);
+              const ownerId = resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId);
+              const ownerProject = projects.find((p) => p.workspaceId === ownerId);
+              const fallback =
+                (ownerProject ? remaining.find((w) => w.path === ownerProject.repoRoot) : undefined) ??
+                (ownerProject
+                  ? remaining.find((w) => resolveWorktreeOwnerId(w, projects, activeProject.workspaceId) === ownerId)
+                  : undefined) ??
+                remaining[0];
+              if (fallback) {
+                handleSelectWorktree(fallback);
+              }
+            }
             void refreshWorktrees();
           }}
+        />
+      ) : null}
+      {pendingProjectRemove ? (
+        <RemoveProjectDialog
+          project={pendingProjectRemove}
+          onClose={() => setPendingProjectRemove(null)}
+          onConfirm={handleConfirmRemoveProject}
         />
       ) : null}
       {pendingTabClose ? (
@@ -1893,9 +2002,18 @@ function loadProjects(): RegisteredProject[] {
     if (!raw) return [DEFAULT_PROJECT];
     const parsed = JSON.parse(raw) as RegisteredProject[];
     if (!Array.isArray(parsed)) return [DEFAULT_PROJECT];
+    // An explicitly stored empty array means the user removed every project on
+    // purpose; boot into the genuine empty state instead of resurrecting the
+    // default startup project.
+    if (parsed.length === 0) return [];
     const valid = parsed
       .filter(
-        (project) => project && typeof project.workspaceId === "string" && typeof project.repoRoot === "string",
+        (project) =>
+          project &&
+          typeof project.workspaceId === "string" &&
+          typeof project.repoRoot === "string" &&
+          project.repoRoot !== "/" &&
+          project.repoRoot !== "\\",
       )
       .map((project) => ({
         workspaceId: project.workspaceId,

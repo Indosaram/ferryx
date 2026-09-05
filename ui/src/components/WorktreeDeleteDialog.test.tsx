@@ -130,6 +130,22 @@ describe("WorktreeDeleteDialog", () => {
     await waitFor(() => expect(services.deleteDestructive).toHaveBeenCalledWith(worktree));
   });
 
+  it("offers destructive deletion for the DIRTY_WORKTREE error code", async () => {
+    const services = createServices({
+      deleteSafe: vi.fn(async () => {
+        throw { code: "DIRTY_WORKTREE", message: "uncommitted changes", details: {} };
+      }),
+    });
+    render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+
+    await screen.findByText("orca/ws-main/feature");
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
+    expect(await screen.findByRole("button", { name: "Delete worktree and discard changes permanently" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and discard changes permanently" }));
+    await waitFor(() => expect(services.deleteDestructive).toHaveBeenCalledWith(worktree));
+  });
+
   it("does not infer destructive deletion from an error message", async () => {
     const services = createServices({
       deleteSafe: vi.fn(async () => {

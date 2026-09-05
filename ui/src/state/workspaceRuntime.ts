@@ -248,7 +248,8 @@ export function useWorkspaceRuntime({
         unlistenWorktreeChanged();
         return;
       }
-      await refreshWorktreesRef.current();
+      const initialAllowCreate = registeredWorkspaceId === undefined;
+      await refreshWorktreesRef.current(initialAllowCreate ? undefined : { allowCreate: false });
       switchDebug("workspace.runtime.initialize.complete", { workspaceId });
     };
 

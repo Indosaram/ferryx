@@ -115,13 +115,25 @@ impl WorktreeManager {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test_root(root: PathBuf) -> Self {
+        Self {
+            repo_root: root,
+            git_backed: false,
+            writer_leases: WriterLeaseRegistry::default(),
+            delete_lock: Arc::new(Mutex::new(())),
+            dirty_snapshots: Arc::new(Mutex::new(HashMap::new())),
+            revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
     pub fn try_new(repo_root: impl Into<PathBuf>) -> Result<Self, WorktreeError> {
         let requested = repo_root.into();
         let canonical =
             fs::canonicalize(&requested).map_err(|_| WorktreeError::InvalidRepoRoot {
                 path: requested.clone(),
             })?;
-        if !canonical.is_dir() {
+        if !canonical.is_dir() || canonical.parent().is_none() {
             return Err(WorktreeError::InvalidRepoRoot { path: canonical });
         }
 
@@ -522,7 +534,7 @@ impl WorktreeManager {
         let canonical = self.canonical_worktree_path(worktree_path)?;
         self.ensure_no_writer(&canonical)?;
         let dirty_state = self.check_dirty(&canonical)?;
-        if dirty_state.is_dirty {
+        if !force && dirty_state.is_dirty {
             let count = dirty_state.files.len();
             let files = dirty_state
                 .files
@@ -544,6 +556,22 @@ impl WorktreeManager {
 
     pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
+        let canonical = self.canonical_worktree_path(worktree_path)?;
+        self.ensure_no_writer(&canonical)?;
+        let dirty_state = self.check_dirty(&canonical)?;
+        if dirty_state.is_dirty {
+            let count = dirty_state.files.len();
+            let files = dirty_state
+                .files
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
+            return Err(WorktreeError::DirtyWorktree {
+                path: canonical,
+                count,
+                files,
+            });
+        }
         self.remove_worktree_locked(worktree_path, force)
             .map(|_| ())
     }
@@ -640,7 +668,7 @@ impl WorktreeManager {
             None
         };
 
-        let pruned = self.remove_worktree_locked(worktree_path, false)?;
+        let pruned = self.remove_worktree_locked(worktree_path, destructive)?;
         if let Some(branch) = branch {
             git_branch_delete(&self.repo_root, &branch, destructive)?;
         }

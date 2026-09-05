@@ -110,6 +110,8 @@ export type SpawnTerminalRequest = {
   cwd?: string | null;
   clientRequestId?: string | null;
   shell?: string | null;
+  /** Inherit the live CWD of this backend session when `cwd` is not pinned. */
+  inheritFromSessionId?: string | null;
   startup?: {
     kind: "agentResume";
     agentType: string;
@@ -137,6 +139,15 @@ export function isTauriRuntime() {
 
 export async function registerProject(request: { workspaceId: string; repoPath: string }) {
   return invokeCommand<RegisteredProject>("cmd_project_register", { request });
+}
+
+export async function unregisterProject(request: { workspaceId: string }) {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_project_unregister", { request });
+}
+
+export async function revealPath(path: string) {
+  return invokeCommand<void>("cmd_path_reveal", { path });
 }
 
 export async function getInitialProject() {
@@ -292,6 +303,37 @@ export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Prom
       clientRequestId: request.clientRequestId ?? null,
       shell: request.shell ?? null,
       startup: request.startup ?? null,
+      inheritFromSessionId: request.inheritFromSessionId ?? null,
+    },
+  });
+}
+
+export type SpawnTerminalBatchEntry = {
+  index: number;
+  sessionId: string | null;
+  error: string | null;
+};
+
+export async function spawnTerminalsBatch(
+  spawns: SpawnTerminalRequest[],
+): Promise<SpawnTerminalBatchEntry[]> {
+  if (!isTauri()) {
+    throw {
+      code: "INTERNAL_ERROR",
+      message: "Terminal spawning is available only in the Ferryx desktop runtime",
+      details: { runtime: "web" },
+    } satisfies StructuredIpcError;
+  }
+  return invokeCommand<SpawnTerminalBatchEntry[]>("cmd_terminal_spawn_batch", {
+    request: {
+      spawns: spawns.map((request) => ({
+        ...request,
+        cwd: request.cwd ?? null,
+        clientRequestId: request.clientRequestId ?? null,
+        shell: request.shell ?? null,
+        startup: request.startup ?? null,
+        inheritFromSessionId: request.inheritFromSessionId ?? null,
+      })),
     },
   });
 }
@@ -614,7 +656,7 @@ export async function revokeRemoteDevice(deviceId: string): Promise<boolean> {
 
 
 export async function dispatchNotification(req: import('./types').DispatchNotificationArgs): Promise<import('./types').DispatchNotificationResult> {
-  return invokeCommand<import('./types').DispatchNotificationResult>('cmd_notification_dispatch', { req });
+  return invokeCommand<import('./types').DispatchNotificationResult>('cmd_notification_dispatch', { request: req });
 }
 
 export async function getNotificationPermissionStatus(): Promise<import('./types').NotificationPermissionStatus> {

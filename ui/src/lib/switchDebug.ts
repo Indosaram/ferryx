@@ -62,7 +62,7 @@ const debugEnabled = resolveSwitchDebugEnabled({
   VITE_SWITCH_DEBUG: import.meta.env.VITE_SWITCH_DEBUG as string | undefined,
 });
 const runId = globalThis.crypto.randomUUID();
-const isTauri = "__TAURI_INTERNALS__" in window;
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 let sinkTail = Promise.resolve();
 
 const logger = createSwitchDebugLogger({

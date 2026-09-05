@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Worktree } from "../lib/types";
 import {
   selectActivityNotificationTargets,
+  selectGlobalUnreadBadgeCount,
   selectTabActivitySummaries,
   selectWorktreeActivitySummaries,
   useWorkspaceStore,
@@ -11,6 +12,7 @@ import {
   type WorkspaceServices,
   type WorkspaceState,
 } from "./workspaceStore";
+import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 
 const worktree: Worktree = {
   path: "/repo/main",
@@ -367,5 +369,158 @@ describe("workspace activity tracking", () => {
     expect(result.current.tabActivity).toBe(initialTabActivity);
     expect(result.current.worktreeActivity).toBe(initialWorktreeActivity);
     expect(result.current.activityNotificationTargets).toBe(initialTargets);
+  });
+
+  it("retains unseen activity on a completion in an unfocused split pane of an active tab so the pane gets attention highlight", () => {
+    const initialState: WorkspaceState = {
+      workspaceId: "default",
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {
+        "session-active": {
+          id: "session-active",
+          cwd: worktree.path,
+          workspaceId: "default",
+          backendSessionId: "backend-active",
+          lifecycle: "running",
+        },
+        "session-background": {
+          id: "session-background",
+          cwd: worktree.path,
+          workspaceId: "default",
+          backendSessionId: "backend-background",
+          lifecycle: "running",
+        },
+      },
+      layout: {
+        tabs: [{ id: "tab-1", label: "main", sessionId: "session-active" }],
+        activeTabId: "tab-1",
+        layoutsByTabId: {
+          "tab-1": {
+            root: {
+              type: "split",
+              id: "split-root",
+              direction: "horizontal",
+              ratio: 0.5,
+              first: { type: "leaf", id: "leaf-active", leafId: "leaf-active" },
+              second: { type: "leaf", id: "leaf-bg", leafId: "leaf-bg" },
+            },
+            activeLeafId: "leaf-active",
+            sessionIdsByLeafId: {
+              "leaf-active": "session-active",
+              "leaf-bg": "session-background",
+            },
+          },
+        },
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {
+        "session-background": {
+          state: "working",
+          title: "agent",
+          isAgent: true,
+          agentType: "claude",
+          seen: false,
+        },
+      },
+    } as unknown as WorkspaceState;
+
+    const nextState = workspaceReducer(initialState, {
+      type: "SESSION_SCREEN_ACTIVITY",
+      sessionId: "session-background",
+      tabId: "tab-1",
+      state: "idle",
+      ruleId: "idle-rule",
+    });
+
+    const bgActivity = nextState.activityBySessionId?.["session-background"];
+    expect(bgActivity?.state).toBe("done");
+    expect(bgActivity?.seen).toBe(false);
+  });
+
+  it("marks background tab and worktree unread when an agent enters waiting state", () => {
+    const initialState: WorkspaceState = {
+      workspaceId: "default",
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {
+        "session-active": {
+          id: "session-active",
+          cwd: worktree.path,
+          workspaceId: "default",
+          backendSessionId: "backend-active",
+          lifecycle: "running",
+        },
+        "session-bg-tab": {
+          id: "session-bg-tab",
+          cwd: worktree.path,
+          workspaceId: "default",
+          backendSessionId: "backend-bg-tab",
+          lifecycle: "running",
+        },
+      },
+      layout: {
+        tabs: [
+          { id: "tab-1", label: "main", sessionId: "session-active" },
+          { id: "tab-2", label: "bg-tab", sessionId: "session-bg-tab" },
+        ],
+        activeTabId: "tab-1",
+        layoutsByTabId: {},
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {
+        "session-bg-tab": {
+          state: "working",
+          title: "agent",
+          isAgent: true,
+          agentType: "claude",
+        },
+      },
+    } as unknown as WorkspaceState;
+
+    const nextState = workspaceReducer(initialState, {
+      type: "SESSION_SCREEN_ACTIVITY",
+      sessionId: "session-bg-tab",
+      tabId: "tab-2",
+      state: "blocked",
+      ruleId: "blocked-rule",
+    });
+
+    const bgActivity = nextState.activityBySessionId?.["session-bg-tab"];
+    expect(bgActivity?.state).toBe("waiting");
+    expect(nextState.unreadTabIds["tab-2"]).toBe(true);
+    expect(nextState.unreadWorktreePaths[worktree.path]).toBe(true);
+  });
+
+  it("aggregates unread tab count across current and parked workspace snapshots for badge", () => {
+    clearWorkspaceSnapshot();
+    const currentState: WorkspaceState = {
+      workspaceId: "ws-1",
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {},
+      layout: { tabs: [], activeTabId: "", layoutsByTabId: {} },
+      unreadTabIds: { "tab-1": true, "tab-2": true },
+      unreadWorktreePaths: {},
+    } as unknown as WorkspaceState;
+
+    const parkedState: WorkspaceState = {
+      workspaceId: "ws-2",
+      worktrees: [featureWorktree],
+      activeWorktreePath: featureWorktree.path,
+      sessions: {},
+      layout: { tabs: [], activeTabId: "", layoutsByTabId: {} },
+      unreadTabIds: { "tab-parked-1": true },
+      unreadWorktreePaths: {},
+    } as unknown as WorkspaceState;
+
+    setWorkspaceSnapshot("ws-2", parkedState);
+
+    const totalBadgeCount = selectGlobalUnreadBadgeCount(currentState, "ws-1");
+    expect(totalBadgeCount).toBe(3);
+
+    clearWorkspaceSnapshot();
   });
 });

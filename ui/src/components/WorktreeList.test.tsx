@@ -6,6 +6,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActiveAgent, Worktree } from "../lib/types";
 import { WorktreeList } from "./WorktreeList";
 
+const nativeMenu = vi.hoisted(() => ({
+  openNativePopupMenu: vi.fn(),
+}));
+
+vi.mock("../lib/nativeMenu", () => ({
+  openNativePopupMenu: nativeMenu.openNativePopupMenu,
+}));
+
+function lastMenuCall(): { items: Array<{ kind: string; id?: string; label?: string; enabled?: boolean }>; onAction: (id: string) => void } {
+  const calls = nativeMenu.openNativePopupMenu.mock.calls;
+  const last = calls[calls.length - 1];
+  return { items: last[1], onAction: last[3] };
+}
+
 const worktree: Worktree = {
   path: "/repo/feature",
   head: "abc123",
@@ -317,5 +331,55 @@ describe("WorktreeList actions", () => {
 
     const activeLabel = screen.getByText("feature");
     expect(activeLabel.className).toContain("text-[#fafafa]");
+  });
+
+  it("opens native context menu on right click and triggers deletion from context menu", () => {
+    const onDelete = vi.fn();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    render(
+      <WorktreeList
+        worktrees={[worktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    const row = screen.getByText("feature").closest(".group\\/worktree-row")!;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 100 });
+
+    expect(nativeMenu.openNativePopupMenu).toHaveBeenCalledTimes(1);
+    const { items, onAction } = lastMenuCall();
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.label).toBe("Delete Worktree");
+    expect(deleteItem?.enabled).toBe(true);
+
+    onAction("delete");
+    expect(onDelete).toHaveBeenCalledWith(worktree);
+  });
+
+  it("disables Delete Worktree in native context menu for primary worktrees", () => {
+    const onDelete = vi.fn();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    render(
+      <WorktreeList
+        worktrees={[rootWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    const row = screen.getByText("main").closest(".group\\/worktree-row")!;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 100 });
+
+    const { items } = lastMenuCall();
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.label).toBe("Delete Worktree");
+    expect(deleteItem?.enabled).toBe(false);
   });
 });

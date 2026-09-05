@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
@@ -7,6 +7,37 @@ import { resolve } from "node:path";
 import { resetNotificationSettings, saveNotificationSettings } from "../lib/notificationSettings";
 import * as TerminalSplitViewModule from "./TerminalSplitView";
 import { TerminalSplitView } from "./TerminalSplitView";
+
+const nativeMenu = vi.hoisted(() => ({
+  lastCall: null as null | {
+    command: string;
+    items: Array<Record<string, unknown>>;
+    onAction: (id: string) => void;
+  },
+}));
+
+vi.mock("../lib/nativeMenu", () => ({
+  openNativePopupMenu: vi.fn(
+    async (
+      command: string,
+      items: Array<Record<string, unknown>>,
+      _position: { x: number; y: number },
+      onAction: (id: string) => void,
+    ) => {
+      nativeMenu.lastCall = { command, items, onAction };
+      return () => undefined;
+    },
+  ),
+}));
+
+function clickNativeMenuItem(idPrefix: string) {
+  if (!nativeMenu.lastCall) throw new Error("native menu was not opened");
+  const found = nativeMenu.lastCall.items.find(
+    (item) => ((item as { id?: string }).id ?? "").startsWith(idPrefix),
+  ) as { id: string } | undefined;
+  if (!found) throw new Error(`menu item not found: ${idPrefix}`);
+  nativeMenu.lastCall.onAction(found.id);
+}
 
 vi.mock("./TerminalPane", () => ({
   TerminalPane: ({
@@ -37,6 +68,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   resetNotificationSettings();
+  nativeMenu.lastCall = null;
 });
 
 function tab(id: string, sessionId: string): TerminalTab {
@@ -141,7 +173,7 @@ describe("TerminalSplitView group and pane rendering", () => {
     render(<TerminalSplitView layout={layout} sessions={{}} onAddTab={onAddTab} />);
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(screen.getByRole("button", { name: /New Terminal/i }));
+    clickNativeMenuItem("new-terminal");
     expect(onAddTab).toHaveBeenCalledOnce();
   });
 
@@ -290,7 +322,7 @@ describe("TerminalSplitView group and pane rendering", () => {
     render(<TerminalSplitView layout={layout} sessions={splitSessions()} onSplitPane={onSplitPane} />);
 
     fireEvent.contextMenu(screen.getByText("tab-2"));
-    fireEvent.click(screen.getByRole("menuitem", { name: /Split terminal right/i }));
+    clickNativeMenuItem("split-right");
     expect(onSplitPane).toHaveBeenCalledWith("tab-2", "leaf-b-bottom", "horizontal");
   });
 
@@ -345,7 +377,46 @@ describe("TerminalSplitView group and pane rendering", () => {
     fireEvent.pointerDown(divider, { clientX: 90, clientY: 20 });
     fireEvent.pointerMove(window, { clientX: 110, clientY: 20 });
     fireEvent.pointerUp(window);
-    expect(onSetRatio).toHaveBeenCalledWith("tab-1", "", 0.5);
+    expect(onSetRatio).toHaveBeenCalledWith(
+      "tab-1",
+      "",
+      0.5,
+      expect.objectContaining({ isolated: false }),
+    );
+  });
+
+  it("passes a frozen seam from pointerdown and keeps isolated true when Alt is held during divider drag", () => {
+    const onSetRatio = vi.fn();
+    const layout = splitLayout();
+
+    render(<TerminalSplitView layout={layout} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+    const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
+    const parent = divider.parentElement as HTMLElement;
+    vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      right: 500,
+      width: 500,
+      top: 0,
+      bottom: 500,
+      height: 500,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+    fireEvent.pointerMove(window, { clientX: 350, clientY: 100, altKey: true });
+    fireEvent.pointerUp(window);
+
+    expect(onSetRatio).toHaveBeenCalledTimes(1);
+    const options = onSetRatio.mock.calls[0][3];
+    expect(options).toMatchObject({ isolated: true });
+    expect(options.seam).toMatchObject({
+      direction: "horizontal",
+      targetPath: "",
+      target: { origin: 0, span: 1 },
+    });
+    expect(options.seam.members).toEqual([{ origin: 0, path: "", span: 1 }]);
   });
 
   it("passes searchOpen true only to the pane matching searchLeafId", () => {
@@ -469,10 +540,11 @@ describe("TerminalSplitView group and pane rendering", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    const buttons = within(screen.getByText("AGENTS").parentElement as HTMLElement).getAllByRole("button");
-    expect(buttons[0]).toHaveTextContent("Aider");
-    expect(within(buttons[0]).getByText("Default")).toBeVisible();
-    fireEvent.click(screen.getByText("Claude"));
+    const items = nativeMenu.lastCall?.items ?? [];
+    const agentItems = items.filter((item) => ((item as { id?: string }).id ?? "").startsWith("agent:"));
+    expect((agentItems[0] as { label?: string }).label).toContain("Aider");
+    expect((agentItems[0] as { label?: string }).label).toContain("Default");
+    clickNativeMenuItem("agent:claude");
     expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
   });
 
