@@ -91,6 +91,7 @@ fn test_pointer_drag_selection_renders_visible_selection_artifact_png() {
         position: MousePosition { x, y },
         modifiers: Default::default(),
         size: Some(size),
+        timestamp_ns: None,
     };
 
     // Primary pointer drag across row 0 (from col 0 center x=5 to col 24 end x=250)

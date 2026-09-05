@@ -478,7 +478,7 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
                             if let Some(session_id) =
                                 surface_host.session_at_logical_point(logical_x, logical_y)
                             {
-                                let _ = window.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);
+                                let _ = app_handle.emit(NATIVE_TERMINAL_FOCUS_EVENT, &session_id);
                             }
                         }
                     }
@@ -489,7 +489,10 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     });
 
     let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::LeftMouseUp,
+            &block,
+        )
     };
     if let Some(monitor) = monitor {
         std::mem::forget(monitor);
@@ -715,6 +718,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle().clone(),
                 Arc::clone(&browser_cli_manager),
             )?;
+            ipc::native_menu::register_menu_event_forwarder(app.handle());
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
             Ok(())
         })
@@ -739,6 +743,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,
+        cmd_terminal_spawn_batch,
         cmd_terminal_attach,
         cmd_terminal_get_cwd,
         cmd_terminal_write,
@@ -776,6 +781,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_project_initial,
         cmd_boot_trace,
         cmd_project_register,
+        cmd_project_unregister,
+        cmd_path_reveal,
         ipc::ssh::cmd_ssh_list_hosts,
         ipc::ssh::cmd_ssh_import_config,
         ipc::ssh::cmd_ssh_update_host,
@@ -785,6 +792,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_create_remote_worktree,
         ipc::ssh::cmd_ssh_delete_remote_worktree,
         cmd_project_branches,
+        ipc::native_menu::cmd_native_terminal_context_menu,
+        ipc::native_menu::cmd_native_tab_context_menu,
+        ipc::native_menu::cmd_native_new_tab_menu,
+        ipc::native_menu::cmd_native_sidebar_context_menu,
         cmd_worktree_list,
         cmd_worktree_create,
         cmd_worktree_delete,

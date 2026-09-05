@@ -473,6 +473,21 @@ async fn project_registration_enforces_one_workspace_id_per_canonical_root() {
     .expect("a distinct root registers under its own id");
     assert_eq!(other.workspace_id, "project-b");
     assert_eq!(registry_state.list().len(), 2);
+
+    // If another repository also requests "project-a", it disambiguates instead of crashing
+    let third_repo = setup_git_project();
+    let third = cmd_project_register(
+        app.state::<Arc<DaemonClient>>(),
+        registry_state.clone(),
+        RegisterProjectRequest {
+            workspace_id: "project-a".into(),
+            repo_path: third_repo.path().to_path_buf(),
+        },
+    )
+    .await
+    .expect("colliding id disambiguates to a unique slug");
+    assert_eq!(third.workspace_id, "project-a-2");
+    assert_eq!(registry_state.list().len(), 3);
 }
 
 #[test]

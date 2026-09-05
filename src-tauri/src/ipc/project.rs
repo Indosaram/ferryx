@@ -55,7 +55,14 @@ pub fn initial_project(registry: &WorkspaceRegistry) -> Result<RegisteredProject
             reason: format!("the startup working directory is unavailable: {error}"),
         })
     })?;
-    register_canonical_project(registry, &cwd, None)
+    let canonical = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    if canonical.parent().is_none() {
+        return Err(IpcError::from(WorktreeError::InvalidPath {
+            path: canonical,
+            reason: "filesystem root cannot be registered as a startup workspace".to_string(),
+        }));
+    }
+    register_canonical_project(registry, &canonical, None)
 }
 
 /// Registers a repository root under exactly one workspace ID.
@@ -229,6 +236,85 @@ pub async fn cmd_project_branches(
             .collect::<Vec<_>>();
         branches.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(branches)
+    })
+    .await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterProjectRequest {
+    pub workspace_id: String,
+}
+
+#[tauri::command]
+pub async fn cmd_project_unregister(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    workspace_registry: State<'_, WorkspaceRegistry>,
+    request: UnregisterProjectRequest,
+) -> Result<(), IpcError> {
+    // Revoke the daemon binding first: it backs the remote gateway, so a
+    // failure must propagate instead of silently leaving a removed project
+    // reachable by paired remote devices. Local registry cleanup runs only
+    // after the revocation succeeds, keeping both sides consistent.
+    daemon_client
+        .unregister_workspace(&request.workspace_id)
+        .await?;
+    workspace_registry.unregister(&request.workspace_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_path_reveal(path: String) -> Result<(), IpcError> {
+    run_blocking(move || {
+        let p = std::path::Path::new(&path);
+        if !p.exists() {
+            return Err(IpcError::new(
+                crate::ipc::error::IpcErrorCode::InvalidPath,
+                format!("Path does not exist: {path}"),
+            ));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg("-R")
+                .arg(&path)
+                .spawn()
+                .map_err(|err| {
+                    IpcError::internal(format!("Failed to reveal path '{path}': {err}"))
+                })?;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Pass one unquoted argument and let Rust's arg escaping own the
+            // quoting; manually embedding "" shifts the argument boundary
+            // CreateProcess reconstructs and lets paths with quotes inject
+            // extra explorer arguments.
+            std::process::Command::new("explorer")
+                .arg(format!("/select,{path}"))
+                .spawn()
+                .map_err(|err| {
+                    IpcError::internal(format!("Failed to reveal path '{path}': {err}"))
+                })?;
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let target = if p.is_dir() {
+                p
+            } else {
+                p.parent().unwrap_or(p)
+            };
+            std::process::Command::new("xdg-open")
+                .arg(target)
+                .spawn()
+                .map_err(|err| {
+                    IpcError::internal(format!("Failed to reveal path '{path}': {err}"))
+                })?;
+        }
+
+        Ok(())
     })
     .await
 }
