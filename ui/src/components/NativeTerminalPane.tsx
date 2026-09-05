@@ -1700,10 +1700,22 @@ export function NativeTerminalPane({
       observer.observe(element);
     }
 
+    // ResizeObserver does not fire when only the monitor pixel density changes.
+    let resolutionQuery: MediaQueryList | null = null;
+    const updateDeviceScale = () => {
+      resolutionQuery?.removeEventListener("change", updateDeviceScale);
+      resolutionQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      resolutionQuery.addEventListener("change", updateDeviceScale);
+      if (isAttached) reportBounds();
+    };
+    updateDeviceScale();
+    window.addEventListener("resize", updateDeviceScale);
     void attemptAttach(0);
 
     return () => {
       retryAttachRef.current = null;
+      resolutionQuery?.removeEventListener("change", updateDeviceScale);
+      window.removeEventListener("resize", updateDeviceScale);
       if (retryTimer) {
         clearTimeout(retryTimer);
       }

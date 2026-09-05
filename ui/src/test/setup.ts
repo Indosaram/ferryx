@@ -70,4 +70,18 @@ const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache
 setupBeforeEach(() => {
   clearHmrWorkspaceState();
   clearWorkspaceSnapshot();
+  // jsdom has no media-query engine; tests that change density provide their own signals.
+  if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: (media: string): MediaQueryList => Object.assign(new EventTarget(), {
+        media,
+        matches: false,
+        onchange: null,
+        addListener() {},
+        removeListener() {},
+      }),
+    });
+  }
 });

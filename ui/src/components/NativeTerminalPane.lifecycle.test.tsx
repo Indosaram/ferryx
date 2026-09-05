@@ -21,7 +21,7 @@ if (typeof window === "undefined") {
 }
 
 const { StrictMode } = await import("react");
-const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("../test/setup");
 
@@ -364,6 +364,35 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
         "false",
       );
     });
+  });
+
+  it("updates device scale without reattaching when monitor density changes at fixed logical bounds", async () => {
+    const queries: EventTarget[] = [];
+    vi.stubGlobal("matchMedia", vi.fn(() => {
+      const query = new EventTarget();
+      queries.push(query);
+      return query;
+    }));
+    vi.stubGlobal("devicePixelRatio", 1);
+    const view = render(<NativeTerminalPane session={session("backend-scale")} />);
+    await act(async () => {});
+    tauriInvoke.mockClear();
+    vi.stubGlobal("devicePixelRatio", 2);
+    await act(async () => { queries[queries.length - 1]?.dispatchEvent(new Event("change")); });
+    expect(tauriInvoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.objectContaining({ scaleFactor: 2 }));
+    expect(lifecycleCalls()).toEqual([]);
+    tauriInvoke.mockClear();
+    vi.stubGlobal("devicePixelRatio", 1);
+    await act(async () => { queries[queries.length - 1]?.dispatchEvent(new Event("change")); });
+    expect(tauriInvoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.objectContaining({ scaleFactor: 1 }));
+    expect(lifecycleCalls()).toEqual([]);
+    const activeQuery = queries[queries.length - 1];
+    const remove = vi.spyOn(activeQuery, "removeEventListener");
+    await act(async () => { view.unmount(); });
+    expect(remove).toHaveBeenCalledWith("change", expect.any(Function));
+    tauriInvoke.mockClear();
+    await act(async () => { activeQuery.dispatchEvent(new Event("change")); });
+    expect(tauriInvoke).not.toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.anything());
   });
 
   it("handles React StrictMode remount cleanly preserving attach sequence", async () => {
