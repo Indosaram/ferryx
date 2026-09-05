@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "status": "self-test-passed",
+  "invocation": [
+    "/Users/indo/.bun/bin/bun",
+    "/Users/indo/code/project/orca-lite/scripts/qa/ferryx-scope-qa.mjs",
+    "--self-test",
+    "--evidence-dir",
+    "docs/evidence/ferryx-scope/harness-lead"
+  ],
+  "versions": {
+    "bun": "1.4.0",
+    "os": "darwin",
+    "release": "25.6.0",
+    "arch": "arm64"
+  },
+  "commands": [
+    {
+      "argv": [
+        "curl",
+        "--disable",
+        "--noproxy",
+        "*",
+        "--fail-with-body",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "5",
+        "--dump-header",
+        "-",
+        "http://127.0.0.1:56299"
+      ],
+      "exitCode": 0,
+      "stdout": "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nDate: Sat, 05 Sep 2026 10:39:19 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 1215\r\n\r\n<!doctype html><meta charset=\"utf-8\"><title>Ferryx isolated pixel fixture</title>\n<style>body{margin:0;padding:16px;min-height:1800px} [data-testid=design-element]{width:120px;height:64px;background:rgb(25,120,210)}</style>\n<button data-testid=\"design-element\" onclick=\"document.querySelector('[data-testid=design-click-count]').textContent=++window.clicks\">FERRYX_BLUE</button>\n<output data-testid=\"design-click-count\">0</output>\n<canvas data-testid=\"design-canvas\" width=\"120\" height=\"64\"></canvas>\n<canvas data-testid=\"design-webgl\" width=\"120\" height=\"64\"></canvas>\n<img data-testid=\"design-image\" width=\"120\" height=\"64\" alt=\"Green marker\" src=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='64'%3E%3Cpath fill='%2300aa55' d='M0 0h120v64H0z'/%3E%3C/svg%3E\">\n<iframe data-testid=\"design-iframe\" src=\"http://127.0.0.1:56298\"></iframe>\n<script>window.clicks=0;const c=document.querySelector('[data-testid=design-canvas]').getContext('2d');c.fillStyle='#ef6633';c.fillRect(0,0,120,64);const g=document.querySelector('[data-testid=design-webgl]').getContext('webgl');if(g){g.clearColor(.5,0,.75,1);g.clear(g.COLOR_BUFFER_BIT)}document.documentElement.dataset.ready='true';</script>",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "/Users/indo/.bun/bin/bun",
+        "/Users/indo/code/project/orca-lite/ui/node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "/Users/indo/code/project/orca-lite/scripts/qa/ferryx-scope-vitest.config.mjs",
+        "scripts/qa/ferryx-scope-boundary.test.mjs"
+      ],
+      "stdout": "\n RUN  v3.2.7 /Users/indo/code/project/orca-lite\n\n ✓ scripts/qa/ferryx-scope-boundary.test.mjs (3 tests) 143ms\n\n Test Files  1 passed (1)\n      Tests  3 passed (3)\n   Start at  19:39:19\n   Duration  336ms (transform 24ms, setup 0ms, collect 37ms, tests 143ms, environment 1ms, prepare 50ms)\n\n",
+      "stderr": "",
+      "exitCode": 0
+    }
+  ],
+  "http": [
+    {
+      "url": "http://127.0.0.1:56299",
+      "headers": "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nDate: Sat, 05 Sep 2026 10:39:19 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 1215",
+      "body": "<!doctype html><meta charset=\"utf-8\"><title>Ferryx isolated pixel fixture</title>\n<style>body{margin:0;padding:16px;min-height:1800px} [data-testid=design-element]{width:120px;height:64px;background:rgb(25,120,210)}</style>\n<button data-testid=\"design-element\" onclick=\"document.querySelector('[data-testid=design-click-count]').textContent=++window.clicks\">FERRYX_BLUE</button>\n<output data-testid=\"design-click-count\">0</output>\n<canvas data-testid=\"design-canvas\" width=\"120\" height=\"64\"></canvas>\n<canvas data-testid=\"design-webgl\" width=\"120\" height=\"64\"></canvas>\n<img data-testid=\"design-image\" width=\"120\" height=\"64\" alt=\"Green marker\" src=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='64'%3E%3Cpath fill='%2300aa55' d='M0 0h120v64H0z'/%3E%3C/svg%3E\">\n<iframe data-testid=\"design-iframe\" src=\"http://127.0.0.1:56298\"></iframe>\n<script>window.clicks=0;const c=document.querySelector('[data-testid=design-canvas]').getContext('2d');c.fillStyle='#ef6633';c.fillRect(0,0,120,64);const g=document.querySelector('[data-testid=design-webgl]').getContext('webgl');if(g){g.clearColor(.5,0,.75,1);g.clear(g.COLOR_BUFFER_BIT)}document.documentElement.dataset.ready='true';</script>",
+      "bodySha256": "b04603a77c8d3189b1cf6b7dbc43b9d967763529cfad9a800919e8c62e548693",
+      "surface": "fixture-only"
+    }
+  ],
+  "actions": [
+    {
+      "action": "fixture.listen",
+      "host": "127.0.0.1",
+      "port": 0,
+      "actualUrl": "http://127.0.0.1:56299",
+      "frameUrl": "http://127.0.0.1:56298"
+    }
+  ],
+  "screenshots": [],
+  "cleanup": [
+    {
+      "event": "cleanup",
+      "loopbackServersClosed": 2,
+      "processesSignalled": []
+    },
+    {
+      "event": "cleanup",
+      "id": "8518c80a-6319-4ef5-b252-289a8e5a1757",
+      "root": "/private/tmp/ferryx-qa.hY53nO",
+      "removed": true,
+      "processesSignalled": [],
+      "leadSshTouched": false
+    }
+  ],
+  "scenario": "foundation",
+  "fixture": {
+    "root": "/private/tmp/ferryx-qa.hY53nO",
+    "id": "8518c80a-6319-4ef5-b252-289a8e5a1757",
+    "repositories": "seeded-not-committed"
+  },
+  "browser": {
+    "default": "Bun.WebView",
+    "available": true,
+    "executed": false,
+    "reason": "Private browser data-path isolation and product routes are not integrated",
+    "pushRequired": "Playwright with real Chrome and physical phone",
+    "desktopRequired": "computer-use bound to QA PID/window"
+  },
+  "productVerified": false
+}
