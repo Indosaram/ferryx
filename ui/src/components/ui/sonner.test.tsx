@@ -52,4 +52,11 @@ describe("sonner Toaster and useToastTheme", () => {
     const { container } = render(<Toaster />);
     expect(container).toBeDefined();
   });
+
+  it("has sonner styles imported in index.css", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const indexCss = fs.readFileSync(path.resolve(__dirname, "../../index.css"), "utf8");
+    expect(indexCss).toContain("sonner/dist/styles.css");
+  });
 });

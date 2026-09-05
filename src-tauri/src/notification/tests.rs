@@ -218,6 +218,25 @@ fn dispatch_request_deserializes_from_camel_case_payload() {
 }
 
 #[test]
+fn dispatch_request_deserializes_from_kebab_case_payload() {
+    let parsed_agent: DispatchNotificationRequest = serde_json::from_value(json!({
+        "source": "agent-task-complete",
+        "agentLabel": "claude",
+    }))
+    .expect("parse kebab-case agent-task-complete");
+    assert_eq!(parsed_agent.source, NotificationSource::AgentTaskComplete);
+    assert_eq!(parsed_agent.agent_label.as_deref(), Some("claude"));
+
+    let parsed_bell: DispatchNotificationRequest = serde_json::from_value(json!({
+        "source": "terminal-bell",
+        "worktreeLabel": "main",
+    }))
+    .expect("parse kebab-case terminal-bell");
+    assert_eq!(parsed_bell.source, NotificationSource::TerminalBell);
+    assert_eq!(parsed_bell.worktree_label.as_deref(), Some("main"));
+}
+
+#[test]
 fn dispatch_request_tolerates_a_minimal_payload() {
     let parsed: DispatchNotificationRequest =
         serde_json::from_value(json!({ "source": "test" })).expect("parse minimal request");

@@ -438,7 +438,13 @@ export type WorktreeChangedPayload = {
   kind: "created" | "deleted" | "destructivelyDeleted" | "dirtyChanged" | "pruned";
 };
 
-export type NotificationSource = "agent-task-complete" | "terminal-bell" | "system";
+export type NotificationSource =
+  | "agent-task-complete"
+  | "terminal-bell"
+  | "system"
+  | "agentTaskComplete"
+  | "terminalBell"
+  | "test";
 export type NotificationAuthorization = "not-determined" | "denied" | "authorized" | "provisional" | "unknown";
 export type NotificationPlatform = "macos" | "windows" | "linux" | "unknown";
 
