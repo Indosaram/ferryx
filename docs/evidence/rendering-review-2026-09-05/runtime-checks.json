@@ -1,0 +1,44 @@
+{
+  "surface": "isolated headless system WebKit; native IPC mocked",
+  "settingsStartup": {
+    "requests": 1,
+    "background": "#123456"
+  },
+  "settingsRace": {
+    "background": "#bbbbbb",
+    "consumers": [
+      "#bbbbbb",
+      "#bbbbbb"
+    ],
+    "requests": 2
+  },
+  "worktreeActivity": {
+    "before": { "main": 1, "feature": 0 },
+    "after": { "main": 0, "feature": 1 }
+  },
+  "deviceScale": {
+    "bounds": [
+      {
+        "sessionId": "qa-native",
+        "bounds": {
+          "x": 0,
+          "y": 12,
+          "width": 800,
+          "height": 500
+        },
+        "scaleFactor": 2
+      },
+      {
+        "sessionId": "qa-native",
+        "bounds": {
+          "x": 0,
+          "y": 12,
+          "width": 800,
+          "height": 500
+        },
+        "scaleFactor": 1
+      }
+    ],
+    "lifecycle": []
+  }
+}
