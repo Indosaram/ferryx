@@ -881,8 +881,16 @@ export function NativeTerminalPane({
       sessionId: targetSessionId,
     })
       .then((text) => {
-        if (text && typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-          void navigator.clipboard.writeText(text).catch(() => undefined);
+        if (!text) return;
+        if (isMacShortcutPlatform()) {
+          // On macOS, native cmd_native_terminal_copy_selection writes non-empty selection
+          // directly to NSPasteboard on the main thread, bypassing WebKit user-activation restrictions.
+          return;
+        }
+        if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+          void navigator.clipboard.writeText(text).catch((error: unknown) => {
+            console.error("Native terminal browser clipboard write failed", error);
+          });
         }
       })
       .catch((error: unknown) => {

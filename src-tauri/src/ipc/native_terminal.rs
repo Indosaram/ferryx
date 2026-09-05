@@ -249,6 +249,22 @@ fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     (content, types)
 }
 
+#[cfg(target_os = "macos")]
+fn write_to_pasteboard(pasteboard: &objc2_app_kit::NSPasteboard, text: &str) -> bool {
+    use objc2::runtime::ProtocolObject;
+    use objc2_foundation::{NSArray, NSString};
+
+    if text.is_empty() {
+        return false;
+    }
+
+    let ns_text = NSString::from_str(text);
+    let obj = ProtocolObject::from_ref(&*ns_text);
+    let objects = NSArray::from_slice(&[obj]);
+    let _ = pasteboard.clearContents();
+    pasteboard.writeObjects(&objects)
+}
+
 #[cfg(target_os = "windows")]
 fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     use windows_sys::Win32::Foundation::HWND;
@@ -991,12 +1007,47 @@ pub async fn cmd_native_terminal_select<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_copy_selection<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
 ) -> Result<String, IpcError> {
-    copy_attached_native_selection(state.inner(), &session_id)
-        .map_err(|err| IpcError::internal(err.to_string()))
+    let text = copy_attached_native_selection(state.inner(), &session_id)
+        .map_err(|err| IpcError::internal(err.to_string()))?;
+
+    #[cfg(target_os = "macos")]
+    if !text.is_empty() {
+        let (sender, receiver) = oneshot::channel();
+        let text_clone = text.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
+            let success = write_to_pasteboard(&pasteboard, &text_clone);
+            let _ = sender.send(success);
+        }) {
+            return Err(IpcError::internal(format!(
+                "Could not dispatch native clipboard write: {error}"
+            )));
+        }
+
+        match receiver.await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(IpcError::internal(
+                    "Failed to write selection to macOS pasteboard",
+                ));
+            }
+            Err(_) => {
+                return Err(IpcError::internal(
+                    "Main thread stopped before native clipboard write completed",
+                ));
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
+
+    Ok(text)
 }
 
 #[tauri::command]
@@ -1677,6 +1728,104 @@ mod tests {
         assert_eq!(
             classify_windows_clipboard(Some("".to_string()), &[], &[]),
             NativeTerminalClipboardContent::Empty
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_terminal_drag_selection_written_to_unique_pasteboard() {
+        use crate::native_terminal::{
+            MouseAction, MouseButton, MouseEvent, MouseRendererSize, NativeTerminal,
+        };
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+
+        // 1. Create a native terminal instance and feed it text
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"first cmd-c selection to pasteboard")
+            .expect("feed selectable text");
+
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+
+        let make_event = |action, x, y| -> MouseEvent {
+            serde_json::from_value(serde_json::json!({
+                "action": action,
+                "button": (action == MouseAction::Press).then_some(MouseButton::Left),
+                "position": { "x": x, "y": y },
+                "modifiers": {
+                    "shift": false, "ctrl": false, "alt": false,
+                    "superKey": false, "capsLock": false, "numLock": false,
+                },
+                "size": size,
+            }))
+            .expect("decode pointer event")
+        };
+
+        // 2. Perform mouse drag selection across the text
+        terminal
+            .handle_mouse_gesture(&make_event(MouseAction::Press, 5.0, 10.0))
+            .expect("start pointer drag selection");
+        terminal
+            .handle_mouse_gesture(&make_event(MouseAction::Motion, 360.0, 10.0))
+            .expect("extend pointer drag selection");
+        terminal
+            .handle_mouse_gesture(&make_event(MouseAction::Release, 360.0, 10.0))
+            .expect("finish pointer drag selection");
+
+        let selection = terminal
+            .selection_text()
+            .expect("extract selection text")
+            .expect("selection must be present");
+        assert_eq!(selection, "first cmd-c selection to pasteboard");
+
+        // 3. Create an isolated uniquely-named pasteboard (NEVER touches user's general pasteboard)
+        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+
+        // 4. Exercise writer logic directly against the isolated pasteboard
+        let written = write_to_pasteboard(&pasteboard, &selection);
+        assert!(
+            written,
+            "writing non-empty selection to pasteboard must succeed"
+        );
+
+        // 5. Read back from the unique pasteboard and verify round-trip fidelity
+        // SAFETY: NSPasteboardTypeString is AppKit's immutable, process-lifetime
+        // NSString constant. The private pasteboard remains retained during the read.
+        let read_back = unsafe {
+            pasteboard
+                .stringForType(NSPasteboardTypeString)
+                .map(|s| s.to_string())
+        };
+        assert_eq!(
+            read_back,
+            Some("first cmd-c selection to pasteboard".to_string())
+        );
+
+        // 6. Verify that an empty selection does NOT clear or overwrite existing pasteboard content
+        let not_written = write_to_pasteboard(&pasteboard, "");
+        assert!(!not_written, "empty text must not be written");
+
+        // SAFETY: The same immutable AppKit constant and retained private pasteboard
+        // are still valid; no general pasteboard is read or modified by this test.
+        let unchanged = unsafe {
+            pasteboard
+                .stringForType(NSPasteboardTypeString)
+                .map(|s| s.to_string())
+        };
+        pasteboard.clearContents();
+        assert_eq!(
+            unchanged,
+            Some("first cmd-c selection to pasteboard".to_string()),
+            "pasteboard content must remain untouched on empty selection"
         );
     }
 }

@@ -3276,40 +3276,83 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("copies native selection to navigator.clipboard on platform copy shortcut", async () => {
-    const session = createSession("term-session-1");
-    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { readText: vi.fn(), writeText: writeTextSpy },
-    });
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    const originalProcessPlatform = process.platform;
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "linux",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: "Linux x86_64",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (X11; Linux x86_64)",
+        configurable: true,
+      });
 
-    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_copy_selection") {
-        return "selected native text";
-      }
-      return undefined;
-    });
+      const session = createSession("term-session-1");
+      const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText: vi.fn(), writeText: writeTextSpy },
+      });
 
-    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
-    const textarea = getByTestId("native-terminal-focus-sink");
+      let resolveCopySelection: ((value: string) => void) | undefined;
+      const copyPromise = new Promise<string>((resolve) => {
+        resolveCopySelection = resolve;
+      });
 
-    const copyShortcut = new KeyboardEvent("keydown", {
-      key: "c",
-      metaKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    act(() => {
-      textarea.dispatchEvent(copyShortcut);
-    });
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_copy_selection") {
+          return copyPromise;
+        }
+        return undefined;
+      });
 
-    expect(copyShortcut.defaultPrevented).toBe(true);
-    await waitFor(() => {
+      const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
+      const textarea = getByTestId("native-terminal-focus-sink");
+
+      const copyShortcut = new KeyboardEvent("keydown", {
+        key: "C",
+        code: "KeyC",
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        textarea.dispatchEvent(copyShortcut);
+      });
+
+      expect(copyShortcut.defaultPrevented).toBe(true);
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
         sessionId: "term-session-1",
       });
+
+      await act(async () => {
+        resolveCopySelection!("selected native text");
+        await copyPromise;
+        await Promise.resolve();
+      });
+
       expect(writeTextSpy).toHaveBeenCalledWith("selected native text");
-    });
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: originalProcessPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
   });
 
   it("copies native selection on macOS Korean layout Cmd+C (ㅊ and Process)", async () => {
@@ -3320,9 +3363,14 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       value: { readText: vi.fn(), writeText: writeTextSpy },
     });
 
+    let resolveCopySelection: ((value: string) => void) | undefined;
+    const copyPromise = new Promise<string>((resolve) => {
+      resolveCopySelection = resolve;
+    });
+
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_copy_selection") {
-        return "selected korean copy text";
+        return copyPromise;
       }
       return undefined;
     });
@@ -3342,12 +3390,17 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(copyShortcut.defaultPrevented).toBe(true);
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-        sessionId: "term-session-korean-copy",
-      });
-      expect(writeTextSpy).toHaveBeenCalledWith("selected korean copy text");
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+      sessionId: "term-session-korean-copy",
     });
+
+    await act(async () => {
+      resolveCopySelection!("selected korean copy text");
+      await copyPromise;
+    });
+
+    // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
+    expect(writeTextSpy).not.toHaveBeenCalled();
   });
 
   it("copy-or-interrupt event with empty selection does not send input to PTY", async () => {
@@ -3358,9 +3411,14 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       value: { readText: vi.fn(), writeText: writeTextSpy },
     });
 
+    let resolveCopySelection: ((value: string | null) => void) | undefined;
+    const copyPromise = new Promise<string | null>((resolve) => {
+      resolveCopySelection = resolve;
+    });
+
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_copy_selection") {
-        return null;
+        return copyPromise;
       }
       return undefined;
     });
@@ -3374,16 +3432,20 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       }
     });
 
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-        sessionId: "term-session-copy-interrupt-empty",
-      });
-      const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
-        ([cmd]) => cmd === "cmd_native_terminal_send_input",
-      );
-      expect(sendInputCalls).toHaveLength(0);
-      expect(writeTextSpy).not.toHaveBeenCalled();
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+      sessionId: "term-session-copy-interrupt-empty",
     });
+
+    await act(async () => {
+      resolveCopySelection!(null);
+      await copyPromise;
+    });
+
+    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_send_input",
+    );
+    expect(sendInputCalls).toHaveLength(0);
+    expect(writeTextSpy).not.toHaveBeenCalled();
   });
 
   it("copy-or-interrupt event with selection copies", async () => {
@@ -3394,9 +3456,14 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       value: { readText: vi.fn(), writeText: writeTextSpy },
     });
 
+    let resolveCopySelection: ((value: string) => void) | undefined;
+    const copyPromise = new Promise<string>((resolve) => {
+      resolveCopySelection = resolve;
+    });
+
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_copy_selection") {
-        return "some selection";
+        return copyPromise;
       }
       return undefined;
     });
@@ -3410,12 +3477,17 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       }
     });
 
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-        sessionId: "term-session-copy-interrupt-with-text",
-      });
-      expect(writeTextSpy).toHaveBeenCalledWith("some selection");
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+      sessionId: "term-session-copy-interrupt-with-text",
     });
+
+    await act(async () => {
+      resolveCopySelection!("some selection");
+      await copyPromise;
+    });
+
+    // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
+    expect(writeTextSpy).not.toHaveBeenCalled();
 
     const sendInputCallsWithC = tauriCoreMocks.invoke.mock.calls.filter(
       ([cmd, args]) =>
@@ -3423,6 +3495,154 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         (args as { input?: { keyEvent?: { key?: string } } })?.input?.keyEvent?.key === "c",
     );
     expect(sendInputCallsWithC).toHaveLength(0);
+  });
+
+  it("delivers copy request on first native copy event without depending on browser clipboard user activation on macOS", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    try {
+      Object.defineProperty(navigator, "platform", {
+        value: "MacIntel",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        configurable: true,
+      });
+
+      const session = createSession("term-session-mac-copy-denied");
+      const writeTextSpy = vi.fn().mockRejectedValue(
+        new DOMException("Must be handling a user gesture to write to clipboard", "NotAllowedError"),
+      );
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText: vi.fn(), writeText: writeTextSpy },
+      });
+
+      let resolveCopy: ((value: string) => void) | undefined;
+      const copyPromise = new Promise<string>((resolve) => {
+        resolveCopy = resolve;
+      });
+
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_copy_selection") {
+          return copyPromise;
+        }
+        return undefined;
+      });
+
+      render(<NativeTerminalPane sessionId="term-session-mac-copy-denied" session={session} />);
+      tauriCoreMocks.invoke.mockClear();
+
+      act(() => {
+        for (const listener of nativeTerminalEventMocks.copyOrInterruptListeners) {
+          listener();
+        }
+      });
+
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-mac-copy-denied",
+      });
+
+      await act(async () => {
+        resolveCopy!("selected text on first copy");
+        await copyPromise;
+      });
+
+      // On macOS, native copy writes to NSPasteboard directly; browser writeText must NOT be called,
+      // making copying completely immune to WebKit browser clipboard user-activation restrictions.
+      expect(writeTextSpy).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
+  });
+
+  it("surfaces browser clipboard write rejection on non-macOS platforms", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    const originalProcessPlatform = process.platform;
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "linux",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: "Linux x86_64",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (X11; Linux x86_64)",
+        configurable: true,
+      });
+
+      const session = createSession("term-session-linux-copy-fail");
+      const writeError = new Error("Clipboard write permission denied");
+      const writeTextSpy = vi.fn().mockRejectedValue(writeError);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText: vi.fn(), writeText: writeTextSpy },
+      });
+
+      let resolveCopy: ((value: string) => void) | undefined;
+      const copyPromise = new Promise<string>((resolve) => {
+        resolveCopy = resolve;
+      });
+
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_copy_selection") {
+          return copyPromise;
+        }
+        return undefined;
+      });
+
+      render(<NativeTerminalPane sessionId="term-session-linux-copy-fail" session={session} />);
+      tauriCoreMocks.invoke.mockClear();
+
+      act(() => {
+        for (const listener of nativeTerminalEventMocks.copyOrInterruptListeners) {
+          listener();
+        }
+      });
+
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-linux-copy-fail",
+      });
+
+      await act(async () => {
+        resolveCopy!("linux selection text");
+        await copyPromise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(writeTextSpy).toHaveBeenCalledWith("linux selection text");
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "Native terminal browser clipboard write failed",
+        writeError,
+      );
+    } finally {
+      consoleErrorSpy.mockRestore();
+      Object.defineProperty(process, "platform", {
+        value: originalProcessPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
   });
 
   it("does not send standalone modifier and lock keys through IPC", () => {
@@ -5477,9 +5697,14 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       value: { readText: vi.fn(), writeText: writeTextSpy },
     });
 
+    let resolveCopySelection: ((value: string) => void) | undefined;
+    const copyPromise = new Promise<string>((resolve) => {
+      resolveCopySelection = resolve;
+    });
+
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_copy_selection") {
-        return "copied selection text";
+        return copyPromise;
       }
       return undefined;
     });
@@ -5505,63 +5730,109 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     });
 
     expect(copyShortcut.defaultPrevented).toBe(true);
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-        sessionId: "term-session-cmdc-selection-agent",
-      });
-      expect(writeTextSpy).toHaveBeenCalledWith("copied selection text");
-      const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
-        ([cmd]) => cmd === "cmd_native_terminal_send_input",
-      );
-      expect(sendInputCalls).toHaveLength(0);
-    });
-  });
-
-  it("copies selection to clipboard on Ctrl+Shift+C without sending input", async () => {
-    const session = createSession("term-session-ctrl-shift-c-copy");
-    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { readText: vi.fn(), writeText: writeTextSpy },
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+      sessionId: "term-session-cmdc-selection-agent",
     });
 
-    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
-      if (cmd === "cmd_native_terminal_copy_selection") {
-        return "copied text from ctrl shift c";
-      }
-      return undefined;
+    await act(async () => {
+      resolveCopySelection!("copied selection text");
+      await copyPromise;
     });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-ctrl-shift-c-copy" session={session} />,
-    );
-    const textarea = getByTestId("native-terminal-focus-sink");
-    tauriCoreMocks.invoke.mockClear();
-
-    const ctrlShiftC = new KeyboardEvent("keydown", {
-      key: "C",
-      code: "KeyC",
-      ctrlKey: true,
-      shiftKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    act(() => {
-      textarea.dispatchEvent(ctrlShiftC);
-    });
-
-    expect(ctrlShiftC.defaultPrevented).toBe(true);
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
-        sessionId: "term-session-ctrl-shift-c-copy",
-      });
-      expect(writeTextSpy).toHaveBeenCalledWith("copied text from ctrl shift c");
-    });
-
+    // On macOS, native copy writes to NSPasteboard directly; browser write is skipped
+    expect(writeTextSpy).not.toHaveBeenCalled();
     const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
       ([cmd]) => cmd === "cmd_native_terminal_send_input",
     );
     expect(sendInputCalls).toHaveLength(0);
+  });
+
+  it("copies selection to clipboard on Ctrl+Shift+C without sending input", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+    const originalProcessPlatform = process.platform;
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "linux",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: "Linux x86_64",
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (X11; Linux x86_64)",
+        configurable: true,
+      });
+
+      const session = createSession("term-session-ctrl-shift-c-copy");
+      const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText: vi.fn(), writeText: writeTextSpy },
+      });
+
+      let resolveCopySelection: ((value: string) => void) | undefined;
+      const copyPromise = new Promise<string>((resolve) => {
+        resolveCopySelection = resolve;
+      });
+
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_copy_selection") {
+          return copyPromise;
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-ctrl-shift-c-copy" session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      tauriCoreMocks.invoke.mockClear();
+
+      const ctrlShiftC = new KeyboardEvent("keydown", {
+        key: "C",
+        code: "KeyC",
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        textarea.dispatchEvent(ctrlShiftC);
+      });
+
+      expect(ctrlShiftC.defaultPrevented).toBe(true);
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_copy_selection", {
+        sessionId: "term-session-ctrl-shift-c-copy",
+      });
+
+      await act(async () => {
+        resolveCopySelection!("copied text from ctrl shift c");
+        await copyPromise;
+        await Promise.resolve();
+      });
+
+      expect(writeTextSpy).toHaveBeenCalledWith("copied text from ctrl shift c");
+
+      const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_native_terminal_send_input",
+      );
+      expect(sendInputCalls).toHaveLength(0);
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: originalProcessPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "platform", {
+        value: originalPlatform,
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        value: originalUserAgent,
+        configurable: true,
+      });
+    }
   });
 
   it("syncs attention frame state to backend when needsAttention changes or component unmounts", async () => {
