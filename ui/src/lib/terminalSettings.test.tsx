@@ -1,6 +1,15 @@
 import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 const native = vi.hoisted(() => ({
   getTerminalPreferences: vi.fn(),
@@ -18,6 +27,7 @@ import {
   TERMINAL_BACKGROUND_STORAGE_KEY,
   TERMINAL_SETTINGS_STORAGE_KEY,
   applyCachedTerminalBackground,
+  fetchCachedNativePreferences,
   loadTerminalSettings,
   resetTerminalPreferencesCache,
   resolveTerminalSettings,
@@ -187,6 +197,115 @@ describe("terminal settings", () => {
       expect(saved.shell).toBeNull();
     });
     expect(loadTerminalSettings().shell).toBeNull();
+  });
+
+  it("dedupes native preference fetches across concurrently mounted panes via the shared cache", async () => {
+    await act(async () => {
+      renderHook(() => useTerminalSettings());
+      renderHook(() => useTerminalSettings());
+    });
+    expect(native.getTerminalPreferences).toHaveBeenCalledTimes(1);
+  });
+
+  it("still forces a fresh native fetch when a refresh is explicitly requested", async () => {
+    const { result } = renderHook(() => useTerminalSettings());
+    const initial = native.getTerminalPreferences.mock.calls.length;
+    await act(async () => {
+      await result.current.refreshNativePreferences();
+    });
+    expect(native.getTerminalPreferences.mock.calls.length).toBe(initial + 1);
+  });
+
+  it("does not flash the fallback background onto the shared surface when a later pane mounts", async () => {
+    const distinct = {
+      ...ghosttyPreferences,
+      theme: { ...ghosttyPreferences.theme, background: "#123456" },
+    };
+    const pending = deferred<typeof distinct>();
+    native.getTerminalPreferences.mockReset();
+    native.getTerminalPreferences.mockReturnValue(pending.promise);
+
+    renderHook(() => useTerminalSettings());
+    await act(async () => {
+      pending.resolve(distinct);
+      await pending.promise;
+    });
+    expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#123456");
+
+    renderHook(() => useTerminalSettings());
+    expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#123456");
+    await act(async () => {});
+  });
+
+  it("keeps the forced-refresh result when an earlier stale fetch resolves afterward", async () => {
+    const older = { ...ghosttyPreferences, theme: { ...ghosttyPreferences.theme, background: "#aaaaaa" } };
+    const newer = { ...ghosttyPreferences, theme: { ...ghosttyPreferences.theme, background: "#bbbbbb" } };
+    const first = deferred<typeof older>();
+    const second = deferred<typeof newer>();
+    native.getTerminalPreferences.mockReset();
+    native.getTerminalPreferences
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const pane = renderHook(() => useTerminalSettings());
+    const sibling = renderHook(() => useTerminalSettings());
+    await act(async () => {
+      const forced = pane.result.current.refreshNativePreferences();
+      second.resolve(newer);
+      await forced;
+    });
+    await act(async () => {
+      first.resolve(older);
+      await first.promise;
+    });
+    expect(pane.result.current.nativePreferences.theme.background).toBe("#bbbbbb");
+    expect(sibling.result.current.nativePreferences.theme.background).toBe("#bbbbbb");
+    expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#bbbbbb");
+
+    const late = renderHook(() => useTerminalSettings());
+    expect(late.result.current.nativePreferences.theme.background).toBe("#bbbbbb");
+    await act(async () => {});
+  });
+
+  it("preserves the cached startup background until native preferences resolve", async () => {
+    const pending = deferred<typeof ghosttyPreferences>();
+    native.getTerminalPreferences.mockReturnValue(pending.promise);
+    syncTerminalBackground("#123456");
+
+    renderHook(() => useTerminalSettings());
+    expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#123456");
+    await act(async () => {
+      pending.resolve(ghosttyPreferences);
+    });
+    expect(document.documentElement.style.getPropertyValue("--terminal")).toBe(ghosttyPreferences.theme.background);
+  });
+
+  it("does not publish a fetch that resolves after the cache was reset", async () => {
+    const stale = { ...ghosttyPreferences, theme: { ...ghosttyPreferences.theme, background: "#cccccc" } };
+    const first = deferred<typeof stale>();
+    native.getTerminalPreferences.mockReset();
+    native.getTerminalPreferences
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValue(new Promise<typeof stale>(() => {}));
+
+    void fetchCachedNativePreferences(false);
+    resetTerminalPreferencesCache();
+    await act(async () => {
+      first.resolve(stale);
+      await first.promise;
+    });
+
+    const pane = renderHook(() => useTerminalSettings());
+    expect(pane.result.current.nativePreferences.theme.background).toBe("#282c34");
+  });
+
+  it("dispatches a single settings event per update under StrictMode", () => {
+    const events = vi.fn();
+    window.addEventListener("orca:terminal-settings", events);
+    const { result } = renderHook(() => useTerminalSettings(), { wrapper: StrictMode });
+    act(() => result.current.updateSettings({ fontSize: 18 }));
+    window.removeEventListener("orca:terminal-settings", events);
+    expect(events).toHaveBeenCalledTimes(1);
   });
 
   it("reports a font-size-only override as a local override", () => {

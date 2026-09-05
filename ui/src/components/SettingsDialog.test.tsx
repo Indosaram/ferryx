@@ -7,7 +7,7 @@ import {
 } from "../lib/appearanceSettings";
 import { SHORTCUTS, shortcutLabel } from "../lib/shortcuts";
 import { SIDEBAR_OPEN_STORAGE_KEY } from "../lib/storageKeys";
-import { TERMINAL_SETTINGS_STORAGE_KEY } from "../lib/terminalSettings";
+import { resetTerminalPreferencesCache, TERMINAL_SETTINGS_STORAGE_KEY } from "../lib/terminalSettings";
 import { SettingsDialog } from "./SettingsDialog";
 
 async function selectRadixOption(triggerLabel: string | RegExp, optionText: string | RegExp) {
@@ -83,6 +83,7 @@ vi.mock(import("../lib/tauri"), async (importOriginal) => {
 afterEach(cleanup);
 beforeEach(() => {
   localStorage.clear();
+  resetTerminalPreferencesCache();
   native.getTerminalPreferences.mockReset();
   native.getTerminalPreferences.mockResolvedValue({
     fontFamily: "Noto Sans KR",

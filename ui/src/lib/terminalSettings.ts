@@ -1,5 +1,5 @@
 import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getMigratedItem, TERMINAL_SETTINGS_STORAGE_KEY } from "./storageKeys";
 import {
@@ -176,10 +176,12 @@ export function resolveTerminalSettings(
 }
 
 let globalPreferencesPromise: Promise<TerminalPreferences> | null = null;
+let lastResolvedPreferences: TerminalPreferences | null = null;
 let pushedOverrides: string | null = null;
 
 export function resetTerminalPreferencesCache() {
   globalPreferencesPromise = null;
+  lastResolvedPreferences = null;
   pushedOverrides = null;
 }
 
@@ -211,22 +213,34 @@ export async function fetchCachedNativePreferences(force = false): Promise<Termi
     } catch {
       globalPreferencesPromise = Promise.resolve(FALLBACK_PREFERENCES);
     }
+    const tracked: Promise<TerminalPreferences> = globalPreferencesPromise.then((preferences) => {
+      if (globalPreferencesPromise !== tracked) return globalPreferencesPromise ?? FALLBACK_PREFERENCES;
+      lastResolvedPreferences = preferences;
+      return preferences;
+    });
+    globalPreferencesPromise = tracked;
   }
   return globalPreferencesPromise;
 }
 
 export function useTerminalSettings() {
   const [localSettings, setLocalSettings] = useState<TerminalSettings>(() => loadTerminalSettings());
-  const [nativePreferences, setNativePreferences] = useState<TerminalPreferences>(FALLBACK_PREFERENCES);
+  const [resolvedPreferences, setNativePreferences] = useState<TerminalPreferences | null>(
+    () => lastResolvedPreferences,
+  );
+  const nativePreferences = resolvedPreferences ?? FALLBACK_PREFERENCES;
+  const preferenceRequest = useRef(0);
 
   const refreshNativePreferences = useCallback(async (force = true): Promise<TerminalPreferences> => {
+    const request = ++preferenceRequest.current;
     const preferences = await fetchCachedNativePreferences(force);
-    setNativePreferences(preferences);
+    if (request === preferenceRequest.current) setNativePreferences(preferences);
     return preferences;
   }, []);
 
   useEffect(() => {
-    void refreshNativePreferences(true);
+    void refreshNativePreferences(false);
+    return () => { preferenceRequest.current += 1; };
   }, [refreshNativePreferences]);
 
   useEffect(() => {
@@ -259,8 +273,8 @@ export function useTerminalSettings() {
   }, [localSettings]);
 
   useEffect(() => {
-    syncTerminalBackground(settings.theme.background);
-  }, [settings.theme.background]);
+    if (resolvedPreferences) syncTerminalBackground(settings.theme.background);
+  }, [resolvedPreferences, settings.theme.background]);
 
   return { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences };
 }
