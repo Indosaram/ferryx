@@ -469,39 +469,46 @@ pub(crate) async fn get_active_running_sessions(
     cache: &WorkspaceSnapshotCache,
 ) -> Vec<RemoteTerminalSession> {
     let active = state.active_selection.read().clone();
-    let Some(active_sel) = active else {
-        return Vec::new();
-    };
-    let Some(session_id) = active_sel.session_id.as_deref() else {
-        return Vec::new();
-    };
-    let Ok(details) = state.session_backend.describe_session(session_id).await else {
-        return Vec::new();
-    };
-    if !details.running {
-        return Vec::new();
+    let mut sessions = Vec::new();
+    for session_id in state.session_backend.list_sessions().await {
+        let Ok(details) = state.session_backend.describe_session(&session_id).await else {
+            continue;
+        };
+        if !details.running {
+            continue;
+        }
+        let selected = active
+            .as_ref()
+            .filter(|selection| selection.session_id.as_deref() == Some(session_id.as_str()));
+        let (derived_ws, derived_label) =
+            cache.derive_session_metadata(details.worktree_path.as_deref());
+        let workspace_id = derived_ws
+            .or(details.workspace_id)
+            .or_else(|| selected.and_then(|selection| selection.workspace_id.clone()));
+        let Some(workspace_id) = workspace_id else {
+            continue;
+        };
+        if selected.is_none() && state.workspace_registry.manager(&workspace_id).is_err() {
+            continue;
+        }
+        let worktree_label = derived_label.or(details.worktree_label).or_else(|| {
+            selected.and_then(|selection| {
+                selection
+                    .worktree_slug
+                    .clone()
+                    .or_else(|| selection.worktree_label.clone())
+            })
+        });
+        sessions.push(RemoteTerminalSession {
+            session_id: details.session_id,
+            title: None,
+            workspace_id: Some(workspace_id),
+            worktree_label,
+            running: true,
+        });
     }
-    let (derived_ws, derived_label) =
-        cache.derive_session_metadata(details.worktree_path.as_deref());
-    let workspace_id = active_sel
-        .workspace_id
-        .clone()
-        .or(details.workspace_id)
-        .or(derived_ws);
-    let worktree_label = active_sel
-        .worktree_slug
-        .clone()
-        .or_else(|| active_sel.worktree_label.clone())
-        .or(details.worktree_label)
-        .or(derived_label);
-
-    vec![RemoteTerminalSession {
-        session_id: details.session_id,
-        title: None,
-        workspace_id,
-        worktree_label,
-        running: true,
-    }]
+    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    sessions
 }
 
 async fn list_sessions(

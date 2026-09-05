@@ -571,6 +571,107 @@ async fn ws_handshake_status(addr: std::net::SocketAddr, path: &str, token: Opti
 }
 
 #[tokio::test]
+async fn scoped_remote_inventory_lists_registered_projects_without_desktop() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let registry = crate::worktree::WorkspaceRegistry::new();
+    let mut roots = Vec::new();
+    for workspace_id in ["qa-one", "qa-two"] {
+        let root = dir.path().join(workspace_id);
+        std::fs::create_dir_all(&root).expect("fixture directory");
+        crate::worktree::run_git(&root, &["init"]).expect("git init");
+        crate::worktree::run_git(
+            &root,
+            &[
+                "-c",
+                "user.name=Ferryx QA",
+                "-c",
+                "user.email=qa@ferryx.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        )
+        .expect("fixture commit");
+        registry.register(workspace_id, &root).expect("register");
+        roots.push((workspace_id, root));
+    }
+
+    let pty = Arc::new(crate::terminal::PtyManager::new());
+    let hub = Arc::new(crate::terminal::TerminalOutputHub::default());
+    let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), hub));
+    let mut expected_ids = Vec::new();
+    let mut receivers = Vec::new();
+    for (workspace_id, root) in &roots {
+        let manager = registry.manager(workspace_id).expect("manager");
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.cwd(root);
+        let (id, receiver) = pty
+            .spawn_in_worktree(command, 80, 24, &manager, root)
+            .expect("isolated PTY");
+        expected_ids.push(id);
+        receivers.push(receiver);
+    }
+    let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+    assert!(state.active_selection().is_none());
+    let code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::View);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&code, "Inventory fixture")
+        .expect("pair");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("isolated listener");
+    let addr = listener.local_addr().expect("listener address");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, create_remote_router(state))
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .expect("server exit");
+    });
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        http_request(addr, "GET", "/api/v1/sessions", Some(&token), None),
+    )
+    .await;
+
+    // Teardown precedes assertions so a RED result leaves no PTY or listener.
+    let _ = shutdown_tx.send(());
+    server.await.expect("join server");
+    for id in &expected_ids {
+        pty.close_session(id).await.expect("close fixture PTY");
+    }
+    drop(receivers);
+
+    let (status, body) = response.expect("bounded HTTP response");
+    assert_eq!(status, 200);
+    let sessions: Vec<RemoteTerminalSession> = serde_json::from_str(&body).expect("session DTOs");
+    let mut actual_ids: Vec<_> = sessions
+        .iter()
+        .map(|session| session.session_id.clone())
+        .collect();
+    actual_ids.sort();
+    expected_ids.sort();
+    assert_eq!(
+        actual_ids, expected_ids,
+        "Authenticated remote inventory must list both registered projects without desktop selection"
+    );
+    let mut workspaces: Vec<_> = sessions
+        .iter()
+        .filter_map(|session| session.workspace_id.as_deref())
+        .collect();
+    workspaces.sort();
+    assert_eq!(workspaces, vec!["qa-one", "qa-two"]);
+    assert!(!body.contains(dir.path().to_str().expect("fixture path")));
+}
+
+#[tokio::test]
 async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let repo_root = dir.path().join("repo");
