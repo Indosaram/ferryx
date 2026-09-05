@@ -385,7 +385,7 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
       expect(nextState.unreadWorktreePaths[worktree.path]).toBe(true);
     });
 
-    it("leaves working, waiting, already-seen entries and unknown session ids untouched (referential equality)", () => {
+    it("leaves working, already-seen entries and unknown session ids untouched (referential equality); waiting is dismissible", () => {
       let state = stateWithSession("tab-b");
       // Unknown session id
       expect(
@@ -398,14 +398,23 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
         workspaceReducer(state, { type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: "session-a" }),
       ).toBe(state);
 
-      // Waiting (blocked) activity
+      // Waiting (blocked) activity IS dismissible: a spurious blocked detection must not
+      // leave an attention frame the user can never clear, so marking seen applies to waiting too.
       state = workspaceReducer(state, screenAction("blocked", "question_blocked", "omo"));
+      const waitingSeen = workspaceReducer(state, {
+        type: "MARK_SESSION_ACTIVITY_SEEN",
+        sessionId: "session-a",
+      });
+      expect(waitingSeen.activityBySessionId?.["session-a"]?.seen).toBe(true);
       expect(
-        workspaceReducer(state, { type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: "session-a" }),
-      ).toBe(state);
+        workspaceReducer(waitingSeen, {
+          type: "MARK_SESSION_ACTIVITY_SEEN",
+          sessionId: "session-a",
+        }),
+      ).toBe(waitingSeen);
 
       // Done but already seen
-      state = workspaceReducer(state, screenAction("idle", "prompt_idle", "omo"));
+      state = workspaceReducer(waitingSeen, screenAction("idle", "prompt_idle", "omo"));
       const seenState = workspaceReducer(state, {
         type: "MARK_SESSION_ACTIVITY_SEEN",
         sessionId: "session-a",

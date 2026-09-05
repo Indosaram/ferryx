@@ -524,6 +524,34 @@ describe("workspace activity tracking", () => {
     clearWorkspaceSnapshot();
   });
 
+  it("dismisses a waiting attention frame when the user clicks that pane", () => {
+    const state: WorkspaceState = {
+      workspaceId: "default",
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {},
+      layout: { tabs: [], activeTabId: "", layoutsByTabId: {} },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {
+        "session-waiting": {
+          state: "waiting",
+          title: "agent",
+          isAgent: true,
+          agentType: "claude",
+          seen: false,
+        },
+      },
+    } as unknown as WorkspaceState;
+
+    const next = workspaceReducer(state, {
+      type: "MARK_SESSION_ACTIVITY_SEEN",
+      sessionId: "session-waiting",
+    });
+
+    expect(next.activityBySessionId?.["session-waiting"]?.seen).toBe(true);
+  });
+
   it("counts unseen pane attention as badge even when the tab itself is visible", () => {
     clearWorkspaceSnapshot();
     const state: WorkspaceState = {

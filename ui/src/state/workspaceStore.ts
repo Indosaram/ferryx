@@ -1975,7 +1975,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case "MARK_SESSION_ACTIVITY_SEEN": {
       const activity = state.activityBySessionId?.[action.sessionId];
-      if (!activity || activity.state !== "done" || activity.seen) return state;
+      if (
+        !activity ||
+        (activity.state !== "done" && activity.state !== "waiting") ||
+        activity.seen
+      ) return state;
       return {
         ...state,
         activityBySessionId: {
@@ -2083,7 +2087,7 @@ function acknowledgeTabCompletions(state: WorkspaceState, tabId: string): Worksp
 
   for (const sessionId of getTabSessionIds(state, tabId)) {
     const activity = activityBySessionId[sessionId];
-    if (!activity || activity.state !== "done" || activity.seen) continue;
+    if (!activity || (activity.state !== "done" && activity.state !== "waiting") || activity.seen) continue;
     if (tabLayout && tabLayout.root.type === "split" && activeSessionId && sessionId !== activeSessionId) {
       continue;
     }
@@ -2143,10 +2147,11 @@ function applySessionActivity(
   // acknowledged. This is what keeps an agent that boots with a spinner and settles at its prompt
   // from leaving a permanent dot on the tab in front of the user.
   const acknowledged =
-    activity.state === "done" && (activity.seen === true || isSessionActivelyObserved(state, tabId, sessionId));
+    (activity.state === "done" || activity.state === "waiting") &&
+    (activity.seen === true || isSessionActivelyObserved(state, tabId, sessionId));
   const stored: TerminalActivity = {
     ...activity,
-    ...(activity.state === "done" ? { seen: acknowledged } : {}),
+    ...(activity.state === "done" || activity.state === "waiting" ? { seen: acknowledged } : {}),
   };
 
   let nextState: WorkspaceState = {
