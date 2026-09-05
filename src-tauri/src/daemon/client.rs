@@ -372,7 +372,7 @@ impl DaemonClient {
         let port: u16 = port_str
             .trim()
             .parse()
-            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         DaemonStream::connect(format!("127.0.0.1:{port}")).await
     }
 
