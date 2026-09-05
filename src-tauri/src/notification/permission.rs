@@ -23,6 +23,15 @@ pub fn platform_permission_provider() -> Box<dyn NotificationPermissionProvider>
     }
 }
 
+/// Invalidate any cached permission status so next query is fresh.
+#[cfg(target_os = "macos")]
+pub fn invalidate_permission_cache() {
+    macos::invalidate_status_cache();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn invalidate_permission_cache() {}
+
 /// Non-authoritative provider for platforms without a real permission query.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DesktopFallbackPermissionProvider;
@@ -72,8 +81,15 @@ pub mod macos {
     const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
     const STATUS_CACHE_TTL: Duration = Duration::from_secs(10);
     static SUBMISSION_COUNTER: AtomicU64 = AtomicU64::new(0);
-    static STATUS_CACHE: std::sync::Mutex<Option<(NotificationPermissionStatusDto, std::time::Instant)>> =
-        std::sync::Mutex::new(None);
+    static STATUS_CACHE: std::sync::Mutex<
+        Option<(NotificationPermissionStatusDto, std::time::Instant)>,
+    > = std::sync::Mutex::new(None);
+
+    pub fn invalidate_status_cache() {
+        if let Ok(mut guard) = STATUS_CACHE.lock() {
+            *guard = None;
+        }
+    }
 
     pub fn map_authorization_status(status: UNAuthorizationStatus) -> NotificationAuthorization {
         match status {

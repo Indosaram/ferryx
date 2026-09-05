@@ -23,12 +23,18 @@ pub use service::*;
 pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
     #[cfg(target_os = "macos")]
     {
-        // On macOS, running `open x-apple.systempreferences:...` or opening System Settings
-        // when the app is unbundled or unnotified causes unwanted disruptive UI popups.
-        // Explicitly report unsupported to avoid unexpected System Settings window launches.
+        if run_opener(
+            "open",
+            &["x-apple.systempreferences:com.apple.preference.notifications"],
+        ) {
+            return OpenSystemSettingsResult {
+                opened: true,
+                reason: None,
+            };
+        }
         OpenSystemSettingsResult {
             opened: false,
-            reason: Some("opening system settings is disabled in dev/standalone mode".into()),
+            reason: Some("could not open macOS notification settings".into()),
         }
     }
 

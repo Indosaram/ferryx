@@ -675,6 +675,50 @@ export async function openNotificationSystemSettings(): Promise<import('./types'
   return invokeCommand<import('./types').OpenSystemSettingsResult>('cmd_notification_open_system_settings');
 }
 
+export async function getSystemPermissionsStatus(): Promise<import('./types').SystemPermissionsStatus> {
+  if (!isTauri()) {
+    return {
+      platform: 'web',
+      fullDiskAccess: {
+        status: 'unsupported',
+        granted: false,
+        canRequest: false,
+        description: 'Permissions are managed by the host desktop application.',
+      },
+      accessibility: {
+        status: 'unsupported',
+        granted: false,
+        canRequest: false,
+        description: 'Permissions are managed by the host desktop application.',
+      },
+      notifications: {
+        status: 'unsupported',
+        granted: false,
+        canRequest: false,
+        description: 'Permissions are managed by the host desktop application.',
+      },
+      allGranted: true,
+    };
+  }
+  return invokeCommand<import('./types').SystemPermissionsStatus>('cmd_permissions_get_status');
+}
+
+export async function openPermissionsSystemSettings(
+  target: 'full_disk_access' | 'accessibility' | 'notifications' | string
+): Promise<import('./types').OpenPermissionsSettingsResult> {
+  if (!isTauri()) {
+    return { opened: false, target, reason: 'unsupported outside desktop environment' };
+  }
+  return invokeCommand<import('./types').OpenPermissionsSettingsResult>('cmd_permissions_open_settings', { target });
+}
+
+export async function requestAccessibilityPermission(): Promise<boolean> {
+  if (!isTauri()) {
+    return false;
+  }
+  return invokeCommand<boolean>('cmd_permissions_request_accessibility');
+}
+
 export async function playNotificationSound(args: {
   soundId: string;
   customSoundPath?: string | null;

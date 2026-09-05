@@ -6,6 +6,7 @@ pub mod ipc;
 #[cfg(feature = "native-terminal")]
 pub mod native_terminal;
 pub mod notification;
+pub mod permissions;
 pub mod remote;
 pub mod session;
 pub mod ssh;
@@ -810,6 +811,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_notification_play_sound,
         cmd_notification_pick_audio,
         cmd_notification_set_badge_count,
+        cmd_permissions_get_status,
+        cmd_permissions_open_settings,
+        cmd_permissions_request_accessibility,
         cmd_session_save,
         cmd_session_load,
         cmd_session_clear,

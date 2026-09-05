@@ -25,6 +25,8 @@ import type { TerminalActivityState } from "./lib/activity";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
+import { initPermissionsToast } from "./lib/permissionsToast";
+import type { SectionId } from "./components/settings/types";
 import {
   AGENTS_SETTINGS_CHANGED_EVENT,
   detectionTargets,
@@ -1022,6 +1024,7 @@ function WorkspaceApp({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
@@ -1541,11 +1544,36 @@ function WorkspaceApp({
   }, []);
   const handleOpenCommandPalette = useCallback(() => setIsCommandPaletteOpen(true), []);
   const handleCloseCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
-  const handleOpenSettings = useCallback(() => {
+  const handleOpenSettings = useCallback((section?: SectionId) => {
     preloadSettingsDialog();
+    const validSection =
+      typeof section === "string" &&
+      [
+        "general",
+        "appearance",
+        "terminal",
+        "shortcuts",
+        "agents",
+        "browser",
+        "notifications",
+        "remote",
+        "permissions",
+      ].includes(section)
+        ? (section as SectionId)
+        : undefined;
+    setSettingsInitialSection(validSection);
     setIsSettingsOpen(true);
   }, []);
-  const handleCloseSettings = useCallback(() => setIsSettingsOpen(false), []);
+  const handleCloseSettings = useCallback(() => {
+    setIsSettingsOpen(false);
+    setSettingsInitialSection(undefined);
+  }, []);
+
+  useEffect(() => {
+    return initPermissionsToast({
+      onOpenSettings: (section) => handleOpenSettings(section),
+    });
+  }, [handleOpenSettings]);
   const handleToggleSettings = useCallback(() => {
     preloadSettingsDialog();
     setIsSettingsOpen((current) => !current);
@@ -1745,7 +1773,7 @@ function WorkspaceApp({
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
-          onOpenSettings={handleOpenSettings}
+          onOpenSettings={() => handleOpenSettings()}
           onToggle={toggleSidebar}
         />
       ) : (
@@ -1804,7 +1832,7 @@ function WorkspaceApp({
             onToggleTabPin={setTabPinned}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
-            onOpenSettings={handleOpenSettings}
+            onOpenSettings={() => handleOpenSettings()}
             agents={launchableAgents}
             onLaunchAgent={handleLaunchAgent}
             defaultAgentId={agentSettings.defaultAgentId}
@@ -1868,7 +1896,7 @@ function WorkspaceApp({
             </div>
           }
         >
-          <SettingsDialog open onClose={handleCloseSettings} />
+          <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings} />
         </Suspense>
       ) : null}
       {isAddProjectOpen ? (

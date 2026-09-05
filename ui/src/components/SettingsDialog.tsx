@@ -8,6 +8,7 @@ import {
   Palette,
   Radio,
   Settings2,
+  Shield,
   TerminalSquare,
 } from "lucide-react";
 
@@ -18,6 +19,7 @@ import { AppearanceSection } from "./settings/AppearanceSection";
 import { BrowserSection } from "./settings/BrowserSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
+import { PermissionsSection } from "./settings/PermissionsSection";
 import { RemoteAccessSection } from "./settings/RemoteAccessSection";
 import { ShortcutsSection } from "./settings/ShortcutsSection";
 import { TerminalSection } from "./settings/TerminalSection";
@@ -26,6 +28,7 @@ import type { SectionId } from "./settings/types";
 export type SettingsDialogProps = {
   open: boolean;
   onClose: () => void;
+  initialSection?: SectionId;
 };
 
 export function SettingsDialog({
@@ -38,9 +41,28 @@ export function SettingsDialog({
 
 type SettingsDialogBodyProps = Omit<SettingsDialogProps, "open">;
 
-function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
+const VALID_SECTIONS: readonly SectionId[] = [
+  "general",
+  "appearance",
+  "terminal",
+  "shortcuts",
+  "agents",
+  "browser",
+  "notifications",
+  "remote",
+  "permissions",
+];
+
+function sanitizeSectionId(candidate: unknown): SectionId {
+  if (typeof candidate === "string" && VALID_SECTIONS.includes(candidate as SectionId)) {
+    return candidate as SectionId;
+  }
+  return "general";
+}
+
+function SettingsDialogBody({ onClose, initialSection }: SettingsDialogBodyProps) {
   const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
-  const [section, setSection] = useState<SectionId>("general");
+  const [section, setSection] = useState<SectionId>(sanitizeSectionId(initialSection));
   const isMac = isMacShortcutPlatform();
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -119,6 +141,7 @@ function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
             <NavButton active={section === "agents"} icon={<Bot />} label="Agents" onClick={() => setSection("agents")} />
             <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
             <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
+            <NavButton active={section === "permissions"} icon={<Shield />} label="Permissions" onClick={() => setSection("permissions")} />
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote Access" onClick={() => setSection("remote")} />
           </nav>
         </div>
@@ -151,6 +174,7 @@ function SettingsDialogBody({ onClose }: SettingsDialogBodyProps) {
           {section === "agents" ? <AgentsSection /> : null}
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}
+          {section === "permissions" ? <PermissionsSection /> : null}
           {section === "remote" ? <RemoteAccessSection /> : null}
         </div>
       </main>
