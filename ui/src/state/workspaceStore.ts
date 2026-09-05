@@ -51,6 +51,8 @@ export type WorkspaceState = {
   unreadWorktreePaths: Record<string, boolean>;
   /** Optional for backwards compatibility with persisted/test states created before activity tracking. */
   activityBySessionId?: Record<string, TerminalActivity>;
+  /** Sessions whose NEXT attention transition is app-initiated noise (e.g. auto-resume landing at a prompt). */
+  attentionSuppressions?: Record<string, boolean>;
 };
 
 export type WorkspaceServices = {
@@ -186,7 +188,8 @@ export type WorkspaceAction =
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
   | { type: "MARK_WORKTREE_UNREAD"; worktreePath: string }
   | { type: "CLEAR_WORKTREE_UNREAD"; worktreePath: string }
-  | { type: "MARK_SESSION_ACTIVITY_SEEN"; sessionId: string };
+  | { type: "MARK_SESSION_ACTIVITY_SEEN"; sessionId: string }
+  | { type: "SUPPRESS_NEXT_ATTENTION"; sessionId: string };
 
 type UseWorkspaceStoreOptions = {
   workspaceId?: string;
@@ -1825,6 +1828,15 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const layout = layoutReducer(state.layout, { type: "SWAP_PANES", tabId: action.tabId, sourceLeafId: action.sourceLeafId, targetLeafId: action.targetLeafId });
       return layout === state.layout ? state : { ...state, layout };
     }
+    case "SUPPRESS_NEXT_ATTENTION": {
+      return {
+        ...state,
+        attentionSuppressions: {
+          ...(state.attentionSuppressions ?? {}),
+          [action.sessionId]: true,
+        },
+      };
+    }
     case "SESSION_LIFECYCLE": {
       const matchedSessionIds: string[] = [];
       const sessions = Object.fromEntries(
@@ -2143,25 +2155,32 @@ function applySessionActivity(
     return state;
   }
 
-  // A completion the user is already looking at is not a request for attention, so it is born
-  // acknowledged. This is what keeps an agent that boots with a spinner and settles at its prompt
-  // from leaving a permanent dot on the tab in front of the user.
+  const isAttentionState = activity.state === "done" || activity.state === "waiting";
+  const wasAttentionState = previous?.state === "done" || previous?.state === "waiting";
+  // An app-initiated auto-resume fabricates a working->idle->done blip when the agent merely
+  // lands back at its prompt; that first attention is noise, not a request for the user.
+  const suppression = state.attentionSuppressions?.[sessionId] === true && isAttentionState;
   const acknowledged =
-    (activity.state === "done" || activity.state === "waiting") &&
-    (activity.seen === true || isSessionActivelyObserved(state, tabId, sessionId));
+    isAttentionState &&
+    (activity.seen === true || suppression || isSessionActivelyObserved(state, tabId, sessionId));
   const stored: TerminalActivity = {
     ...activity,
-    ...(activity.state === "done" || activity.state === "waiting" ? { seen: acknowledged } : {}),
+    ...(isAttentionState ? { seen: acknowledged } : {}),
   };
 
   let nextState: WorkspaceState = {
     ...state,
     activityBySessionId: { ...(state.activityBySessionId ?? {}), [sessionId]: stored },
+    ...(suppression
+      ? {
+          attentionSuppressions: Object.fromEntries(
+            Object.entries(state.attentionSuppressions ?? {}).filter(([id]) => id !== sessionId),
+          ),
+        }
+      : {}),
   };
 
-  const isAttentionState = activity.state === "done" || activity.state === "waiting";
-  const wasAttentionState = previous?.state === "done" || previous?.state === "waiting";
-  if (isAttentionState && !wasAttentionState && !isTabVisible(state, tabId)) {
+  if (isAttentionState && !wasAttentionState && !suppression && !isTabVisible(state, tabId)) {
     const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,

@@ -959,9 +959,14 @@ function WorkspaceApp({
       workspaceId: activeProject.workspaceId,
       state: pending.state,
       recoveredFromHmr,
-      reconnect: (sessionId) => handleReconnectAgentSession(sessionId, { silent: true }),
+      reconnect: (sessionId) => {
+        // The app, not the user, initiated this resume; the working→idle blip it
+        // produces when the agent lands back at its prompt is not user attention.
+        dispatchWorkspaceAction({ type: "SUPPRESS_NEXT_ATTENTION", sessionId });
+        return handleReconnectAgentSession(sessionId, { silent: true });
+      },
     });
-  }, [activeProject.workspaceId, handleReconnectAgentSession, pendingAgentAutoResume, recoveredFromHmr, registeredProjectId]);
+  }, [activeProject.workspaceId, dispatchWorkspaceAction, handleReconnectAgentSession, pendingAgentAutoResume, recoveredFromHmr, registeredProjectId]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {

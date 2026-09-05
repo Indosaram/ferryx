@@ -524,6 +524,55 @@ describe("workspace activity tracking", () => {
     clearWorkspaceSnapshot();
   });
 
+  it("suppresses the first attention after an app-initiated auto-resume so restarts do not frame every pane", () => {
+    clearWorkspaceSnapshot();
+    const state: WorkspaceState = {
+      workspaceId: "default",
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {},
+      layout: {
+        tabs: [
+          { id: "tab-1", label: "main", sessionId: "session-other" },
+          { id: "tab-2", label: "resumed", sessionId: "session-resumed" },
+        ],
+        activeTabId: "tab-1",
+        layoutsByTabId: {},
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      attentionSuppressions: { "session-resumed": true },
+      activityBySessionId: {
+        "session-resumed": {
+          state: "working",
+          title: "agent",
+          isAgent: true,
+          agentType: "claude",
+        },
+      },
+    } as unknown as WorkspaceState;
+
+    const next = workspaceReducer(state, {
+      type: "SESSION_SCREEN_ACTIVITY",
+      sessionId: "session-resumed",
+      tabId: "tab-2",
+      state: "idle",
+      ruleId: "prompt_idle",
+    });
+
+    expect(next.activityBySessionId?.["session-resumed"]).toMatchObject({
+      state: "done",
+      seen: true,
+    });
+    // Suppression is consumed by the first attention transition.
+    expect(next.attentionSuppressions?.["session-resumed"]).toBeUndefined();
+    // And no unread tab/worktree flags are raised for it either.
+    expect(next.unreadTabIds["tab-2"]).toBeUndefined();
+    expect(next.unreadWorktreePaths[worktree.path]).toBeUndefined();
+
+    clearWorkspaceSnapshot();
+  });
+
   it("dismisses a waiting attention frame when the user clicks that pane", () => {
     const state: WorkspaceState = {
       workspaceId: "default",
