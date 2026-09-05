@@ -631,7 +631,13 @@ pub fn encode_attached_native_paste(
     text: &str,
 ) -> Result<Vec<u8>, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| term.encode_paste(text))
+    state.with_session_terminal(session_id, |term| {
+        let bytes = term.encode_paste(text)?;
+        if !bytes.is_empty() {
+            let _ = term.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+        }
+        Ok(bytes)
+    })
 }
 
 /// Encode a mouse event for a native session only if currently attached.
@@ -770,6 +776,7 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
         Ok(bytes) => bytes,
         Err(err) => return Err(IpcError::internal(err.to_string())),
     };
+    state.emit_scrollbar_if_changed(Some(&app), &session_id);
     if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
         return Err(err);
     }
@@ -998,6 +1005,7 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
         Ok(bytes) => bytes,
         Err(err) => return Err(IpcError::internal(err.to_string())),
     };
+    state.emit_scrollbar_if_changed(Some(&app), &session_id);
     if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
         return Err(err);
     }
@@ -1092,12 +1100,13 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
     let tracking =
         mouse_tracking_enabled_for_attached_session(state.inner(), &session_id).unwrap_or(false);
 
+    let has_shift = event.modifiers.shift;
     let is_plain_left_selection = event.button == Some(crate::native_terminal::MouseButton::Left)
         || (event.button.is_none()
             && (event.action == MouseAction::Motion || event.action == MouseAction::Release));
 
-    let perform_selection = !tracking || is_plain_left_selection;
-    let perform_tracking = tracking && !is_plain_left_selection;
+    let perform_selection = !tracking || is_plain_left_selection || has_shift;
+    let perform_tracking = tracking && !has_shift && !is_plain_left_selection;
 
     if perform_tracking {
         let bytes = match encode_attached_native_mouse(state.inner(), &session_id, &event) {

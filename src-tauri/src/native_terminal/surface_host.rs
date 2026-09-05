@@ -808,6 +808,24 @@ impl NativeTerminalSurfaceHostState {
         }
     }
 
+    pub fn emit_scrollbar_if_changed<R: Runtime>(
+        &self,
+        app: Option<&tauri::AppHandle<R>>,
+        session_id: &str,
+    ) {
+        let event = {
+            let mut sessions = self.sessions.lock();
+            let session = match sessions.get_mut(session_id) {
+                Some(s) => s,
+                None => return,
+            };
+            take_native_terminal_scrollbar_event(session, session_id)
+        };
+        if let Some(event) = event {
+            emit_native_terminal_event(app, &self.event_sink, event);
+        }
+    }
+
     pub fn prepare_session_layout(
         &self,
         request: NativeTerminalBoundsRequest,
@@ -1562,7 +1580,16 @@ impl NativeTerminalSurfaceHostState {
                     .ok_or(NativeTerminalError::NoValue)?
             }
         };
-        input.encoded(&session.terminal)
+        let bytes = input.encoded(&session.terminal)?;
+        if !bytes.is_empty() {
+            let _ = session
+                .terminal
+                .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+            if let Ok(sb) = session.terminal.scrollbar() {
+                session.scrollbar_overlay.metrics = Some(sb);
+            }
+        }
+        Ok(bytes)
     }
 
     pub fn get_receipt<R: Runtime>(
@@ -1697,6 +1724,14 @@ impl NativeTerminalSurfaceHostState {
             let session = sessions
                 .get_mut(session_id)
                 .ok_or(NativeTerminalError::NoValue)?;
+            if preedit.as_ref().is_some_and(|p| !p.is_empty()) {
+                let _ = session
+                    .terminal
+                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                if let Ok(sb) = session.terminal.scrollbar() {
+                    session.scrollbar_overlay.metrics = Some(sb);
+                }
+            }
             if session.preedit != preedit {
                 session.preedit = preedit;
             }

@@ -1366,3 +1366,141 @@ async fn native_terminal_hit_test_maps_exact_split_coordinates_with_half_open_bo
         Some(session_right)
     );
 }
+
+#[tokio::test]
+async fn input_and_paste_while_scrolled_up_scrolls_viewport_to_bottom() {
+    use ferryx_lib::native_terminal::composition::{CellMetrics, LogicalBounds};
+    use ferryx_lib::native_terminal::surface_host::{
+        NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState,
+    };
+    use ferryx_lib::native_terminal::{
+        NativeTerminal, NativeTerminalError, NativeTerminalInput, ScrollViewport, TerminalEngine,
+    };
+
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "test-session-scroll-to-bottom";
+
+    let metrics = CellMetrics {
+        width_px: 10,
+        height_px: 20,
+    };
+    let bounds = LogicalBounds {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 480.0,
+        scale_factor: 1.0,
+    };
+    state
+        .prepare_session_layout(
+            NativeTerminalBoundsRequest {
+                session_id: session_id.to_string(),
+                bounds,
+            },
+            metrics,
+        )
+        .expect("prepare session layout");
+
+    // Initialize session with enough lines to have scrollback
+    state
+        .with_session_terminal(session_id, |term: &mut NativeTerminal| -> Result<(), NativeTerminalError> {
+            for i in 0..100 {
+                term.feed(format!("line {i}\r\n").as_bytes())?;
+            }
+            // Scroll to the top
+            term.scroll_viewport(ScrollViewport::Top)?;
+            let sb = term.scrollbar()?;
+            assert!(sb.offset < sb.total.saturating_sub(sb.len), "must be scrolled up");
+            Ok(())
+        })
+        .expect("setup session with scrollback");
+
+    // Key release (action: Release) produces empty bytes and should NOT scroll to bottom
+    let keyup_input: NativeTerminalInput = serde_json::from_str(
+        r#"{
+            "keyEvent": {
+                "key": "a",
+                "action": "Release",
+                "modifiers": {
+                    "shift": false,
+                    "ctrl": false,
+                    "alt": false,
+                    "superKey": false,
+                    "capsLock": false,
+                    "numLock": false
+                },
+                "utf8": null
+            }
+        }"#,
+    )
+    .expect("deserialize key release");
+    let keyup_encoded = state
+        .encode_input(session_id, &keyup_input)
+        .expect("encode key release");
+    assert!(keyup_encoded.is_empty());
+
+    state
+        .with_session_terminal(session_id, |term: &mut NativeTerminal| -> Result<(), NativeTerminalError> {
+            let sb = term.scrollbar()?;
+            assert!(
+                sb.offset < sb.total.saturating_sub(sb.len),
+                "key release must NOT scroll to bottom"
+            );
+            Ok(())
+        })
+        .expect("verify scrollbar still scrolled up");
+
+    // Sending non-empty text input should scroll to bottom
+    let encoded = state
+        .encode_input(
+            session_id,
+            &NativeTerminalInput::Text {
+                text: "ls\n".into(),
+            },
+        )
+        .expect("encode input");
+    assert_eq!(encoded, b"ls\n");
+
+    state
+        .with_session_terminal(session_id, |term: &mut NativeTerminal| -> Result<(), NativeTerminalError> {
+            let sb = term.scrollbar()?;
+            let max_offset = sb.total.saturating_sub(sb.len);
+            assert_eq!(
+                sb.offset, max_offset,
+                "viewport must be scrolled to bottom after text input"
+            );
+            Ok(())
+        })
+        .expect("verify scrollbar at bottom");
+
+    // Scroll back to top
+    state
+        .with_session_terminal(session_id, |term: &mut NativeTerminal| -> Result<(), NativeTerminalError> {
+            term.scroll_viewport(ScrollViewport::Top)?;
+            let sb = term.scrollbar()?;
+            assert!(sb.offset < sb.total.saturating_sub(sb.len), "must be scrolled up");
+            Ok(())
+        })
+        .expect("scroll up again");
+
+    // Paste text should also scroll to bottom
+    let paste_encoded = ferryx_lib::ipc::native_terminal::encode_attached_native_paste(
+        &state,
+        session_id,
+        "echo hello\n",
+    )
+    .expect("encode paste");
+    assert!(!paste_encoded.is_empty());
+
+    state
+        .with_session_terminal(session_id, |term: &mut NativeTerminal| -> Result<(), NativeTerminalError> {
+            let sb = term.scrollbar()?;
+            let max_offset = sb.total.saturating_sub(sb.len);
+            assert_eq!(
+                sb.offset, max_offset,
+                "viewport must be scrolled to bottom after paste"
+            );
+            Ok(())
+        })
+        .expect("verify scrollbar at bottom after paste");
+}
