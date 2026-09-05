@@ -245,6 +245,111 @@ describe("shortcut registry", () => {
   });
 });
 
+type ImeEventInit = KeyboardEventInit & { keyCode?: number };
+
+// A physical shortcut chord as it arrives from the OS: the `code` still reflects
+// the shortcut key even while the keystroke is owned by an IME.
+const IME_CHORDS: readonly { readonly name: string; readonly actionId: ShortcutActionId; readonly base: ImeEventInit }[] = [
+  { name: "Ctrl+K command palette", actionId: "commandPalette.open", base: { key: "k", code: "KeyK", ctrlKey: true } },
+  { name: "Ctrl+1 tab select", actionId: "tab.select1", base: { key: "1", code: "Digit1", ctrlKey: true } },
+];
+
+// Each entry isolates ONE IME-ownership signal so dropping any single guard
+// clause in matchesBinding fails at least one case:
+//  - isComposing: spec-compliant engines, key value stays the physical letter
+//  - keyCode 229: legacy WebKit, isComposing false, key value stays physical
+//  - key "Process": legacy composition marker without keyCode/isComposing
+//  - key "Dead": dead-key composition without keyCode/isComposing
+const IME_SIGNALS: readonly { readonly label: string; readonly overrides: ImeEventInit }[] = [
+  { label: "isComposing-only", overrides: { isComposing: true } },
+  { label: "keyCode 229-only", overrides: { isComposing: false, keyCode: 229 } },
+  { label: "key Process-only", overrides: { isComposing: false, key: "Process" } },
+  { label: "key Dead-only", overrides: { isComposing: false, key: "Dead" } },
+];
+
+const IME_CASES: readonly [string, ShortcutActionId, ImeEventInit][] = IME_CHORDS.flatMap((chord) =>
+  IME_SIGNALS.map(
+    (signal) =>
+      [`${chord.name} / ${signal.label}`, chord.actionId, { ...chord.base, ...signal.overrides }] as [
+        string,
+        ShortcutActionId,
+        ImeEventInit,
+      ],
+  ),
+);
+
+describe("IME-owned keydown handling", () => {
+  it.each(IME_CASES)("ignores IME-owned keydown and leaves default intact: %s", (_label, actionId, eventInit) => {
+    const handler = vi.fn();
+    const handlers = { [actionId]: handler } as Partial<Record<ShortcutActionId, () => void>>;
+    renderHook(() => useShortcuts(handlers, { isMac: false }));
+
+    const imeEvent = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...eventInit });
+    window.dispatchEvent(imeEvent);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(imeEvent.defaultPrevented).toBe(false);
+  });
+
+  it.each(IME_CHORDS.map((chord) => [chord.name, chord.actionId, chord.base] as [string, ShortcutActionId, ImeEventInit]))(
+    "still routes %s when not IME-composing",
+    (_label, actionId, base) => {
+      const handler = vi.fn();
+      const handlers = { [actionId]: handler } as Partial<Record<ShortcutActionId, () => void>>;
+      renderHook(() => useShortcuts(handlers, { isMac: false }));
+
+      const realEvent = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...base });
+      window.dispatchEvent(realEvent);
+
+      expect(handler).toHaveBeenCalledOnce();
+      expect(realEvent.defaultPrevented).toBe(true);
+    },
+  );
+});
+
+describe("AltGr-owned keydown handling", () => {
+  it("ignores an AltGr keydown that collides with the Ctrl+Alt unsplit chord and leaves default intact", () => {
+    const handler = vi.fn();
+    renderHook(() => useShortcuts({ "terminal.unsplit": handler }, { isMac: false }));
+
+    // On Windows/Linux, AltGr reports ctrlKey+altKey while producing a typed
+    // glyph; getModifierState("AltGraph") is the only signal distinguishing it
+    // from a real Ctrl+Alt chord. Window-capture would otherwise eat the glyph.
+    const altGrEvent = new KeyboardEvent("keydown", {
+      key: "\u0111",
+      code: "KeyD",
+      ctrlKey: true,
+      altKey: true,
+      modifierAltGraph: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(altGrEvent);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(altGrEvent.defaultPrevented).toBe(false);
+  });
+
+  it("still unsplits on a real Ctrl+Alt+D chord when AltGraph is not active", () => {
+    const handler = vi.fn();
+    renderHook(() => useShortcuts({ "terminal.unsplit": handler }, { isMac: false }));
+
+    const chordEvent = new KeyboardEvent("keydown", {
+      key: "d",
+      code: "KeyD",
+      ctrlKey: true,
+      altKey: true,
+      modifierAltGraph: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(chordEvent);
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(chordEvent.defaultPrevented).toBe(true);
+  });
+});
+
 function canonicalChordKey(binding: ShortcutBinding): string {
   const parts: string[] = [];
   if (binding.mod) parts.push("Mod");

@@ -758,4 +758,206 @@ describe("remote terminal grid contract", () => {
     fireEvent.wheel(surface(), { deltaY: 60 });
     expect(socket().send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"scroll"'));
   });
+
+  it("pastes literal text that collides with key-command names verbatim, not as key commands", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const target = surface();
+
+    const literals = ["up", "tab", "delete", "ctrl-c", "alt-x", "ctrl-d"];
+    for (const literal of literals) {
+      socket().send.mockClear();
+      fireEvent.paste(target, { clipboardData: { getData: () => literal } });
+      expect(socket().send).toHaveBeenCalledTimes(1);
+      expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode(literal));
+    }
+  });
+
+  it("pastes multiline text whose lines collide with key names as verbatim bracketed paste", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.paste(surface(), {
+      clipboardData: { getData: () => "up\r\ntab\rdelete" },
+    });
+
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(
+      new TextEncoder().encode("\x1b[200~up\ntab\ndelete\x1b[201~"),
+    );
+  });
+
+  it("pastes Object.prototype key names verbatim without leaking inherited members", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const target = surface();
+
+    for (const literal of ["toString", "constructor", "hasOwnProperty"]) {
+      socket().send.mockClear();
+      fireEvent.paste(target, { clipboardData: { getData: () => literal } });
+      expect(socket().send).toHaveBeenCalledTimes(1);
+      expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode(literal));
+    }
+  });
+
+  it("pastes non-ASCII unicode literals verbatim without control-byte mangling", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.paste(surface(), { clipboardData: { getData: () => "안녕 ㅊ" } });
+
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("안녕 ㅊ"));
+  });
+
+  it("maps Korean hardware Ctrl+C (key jamo, code KeyC) to a structured interrupt", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "ㅊ", code: "KeyC", ctrlKey: true });
+
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(
+      JSON.stringify({ type: "signal", signal: "interrupt" }),
+    );
+  });
+
+  it("maps Korean hardware Ctrl+D / Ctrl+L to physical ASCII control codes", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "ㅇ", code: "KeyD", ctrlKey: true });
+    expect(socket().send).toHaveBeenNthCalledWith(1, new Uint8Array([4]));
+
+    fireEvent.keyDown(surface(), { key: "ㅣ", code: "KeyL", ctrlKey: true });
+    expect(socket().send).toHaveBeenNthCalledWith(2, new Uint8Array([12]));
+  });
+
+  it("lets hardware Ctrl+V fall through to the browser paste event instead of sending a control byte", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    const event = fireEvent.keyDown(surface(), { key: "ㅍ", code: "KeyV", ctrlKey: true });
+
+    expect(socket().send).not.toHaveBeenCalled();
+    // Not prevented -> the browser's native paste event can still run.
+    expect(event).toBe(true);
+  });
+
+  it("preserves Ctrl+Shift+C for browser copy instead of sending an interrupt", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    const event = fireEvent.keyDown(surface(), {
+      key: "C",
+      code: "KeyC",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+
+    expect(socket().send).not.toHaveBeenCalled();
+    expect(event).toBe(true);
+  });
+
+  it("does not send CR for Enter while an IME composition is active", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+
+    fireEvent.compositionStart(sink);
+    // Platform where nativeEvent.isComposing is not reflected on the keydown:
+    // the ref must still guard Enter from emitting a premature carriage return.
+    fireEvent.keyDown(surface(), { key: "Enter" });
+
+    expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it("does not send CR for Enter reported with IME keyCode 229", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "Enter", keyCode: 229 });
+
+    expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it("encodes hardware Alt+letter as an ESC-prefixed meta chord instead of dropping it", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "x", code: "KeyX", altKey: true });
+
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("\u001bx"));
+  });
+
+  it("encodes Korean hardware Alt+letter via the physical code, not the remapped jamo", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "ㅌ", code: "KeyX", altKey: true });
+
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("\u001bx"));
+  });
+
+  it("preserves Shift case for Alt+letter meta chords (Alt+Shift+X -> ESC X)", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "X", code: "KeyX", altKey: true, shiftKey: true });
+
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("\u001bX"));
+  });
+
+  it("hands AltGraph printable keys to the input sink so the glyph is emitted once", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    // getModifierState('AltGraph') is the authoritative printable-glyph signal.
+    // jsdom ignores getModifierState passed via the init dict, so define it on a
+    // real event. ctrlKey is false here (a valid AltGr-only report).
+    const event = new KeyboardEvent("keydown", {
+      key: "@",
+      code: "Digit2",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, "getModifierState", {
+      value: (mod: string) => mod === "AltGraph",
+    });
+    fireEvent(surface(), event);
+
+    // No synthesized chord and no direct send: the focused sink's InputEvent owns
+    // the glyph, and the keystroke is not canceled.
+    expect(socket().send).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(screen.getByTestId("remote-terminal-input-sink"));
+  });
+
+  it("encodes Shift+Tab as a CSI back-tab sequence rather than a plain Tab", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    fireEvent.keyDown(surface(), { key: "Tab", shiftKey: true });
+
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("\u001b[Z"));
+  });
+
+  it("never wraps an unsupported Ctrl+digit chord into a junk control byte", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+
+    // Ctrl+9 has no ASCII control code; it must emit nothing, not a garbage byte.
+    fireEvent.keyDown(surface(), { key: "9", code: "Digit9", ctrlKey: true });
+    expect(socket().send).not.toHaveBeenCalled();
+
+    // Ctrl+3 maps to ESC (0x1b) in the standard control table.
+    fireEvent.keyDown(surface(), { key: "3", code: "Digit3", ctrlKey: true });
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new Uint8Array([27]));
+  });
 });

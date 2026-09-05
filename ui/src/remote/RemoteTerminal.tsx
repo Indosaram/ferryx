@@ -124,6 +124,51 @@ function modifiedDockNavigationSequence(key: string): string | undefined {
   return modifierCode ? `\u001b[1;${modifierCode}${final}` : undefined;
 }
 
+// Resolve a Ctrl/Alt chord character from the physical key code so IME layouts
+// (e.g. Korean) that remap event.key still yield the intended ASCII. Returns
+// null for keys with no safe ASCII representation so we never wrap arbitrary
+// unicode into a control byte.
+function physicalChordChar(key: string, code: string): string | null {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (key.length === 1 && key.charCodeAt(0) <= 0x7f) return key;
+  return null;
+}
+
+// Standard ASCII control-code table for Ctrl chords. Returns null for chords
+// with no defined control byte so unsupported combos emit nothing rather than junk.
+function controlByteForChar(ch: string): number | null {
+  if (ch.length !== 1) return null;
+  const lower = ch.toLowerCase();
+  if (lower >= "a" && lower <= "z") return lower.charCodeAt(0) - 96;
+  switch (ch) {
+    case " ":
+    case "@":
+    case "2":
+      return 0;
+    case "[":
+    case "3":
+      return 27;
+    case "\\":
+    case "4":
+      return 28;
+    case "]":
+    case "5":
+      return 29;
+    case "^":
+    case "6":
+      return 30;
+    case "_":
+    case "7":
+      return 31;
+    case "?":
+    case "8":
+      return 127;
+    default:
+      return null;
+  }
+}
+
 function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/api/v1/terminal/${sessionId}?token=${encodeURIComponent(token)}&render=grid&cols=${geometry.cols}&rows=${geometry.rows}`;
@@ -565,8 +610,9 @@ export function RemoteTerminal({
       socket.send(new TextEncoder().encode(`\u001b${key.slice(4)}`));
       return;
     }
-    if (key.startsWith("ctrl-") && key.length === 6) {
-      socket.send(new Uint8Array([key.slice(5).toUpperCase().charCodeAt(0) - 64]));
+    if (key.startsWith("ctrl-")) {
+      const byte = controlByteForChar(key.slice(5));
+      if (byte !== null) socket.send(new Uint8Array([byte]));
       return;
     }
     const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
@@ -607,12 +653,34 @@ export function RemoteTerminal({
           // IME-composed keystrokes (Korean jamo, CJK, etc.) must flow through the
           // input sink's composition events. Sending them here shattered Hangul into
           // isolated jamo writes, one per physical keypress.
-          if (event.nativeEvent.isComposing || event.key === "Process" || event.key === "Dead") {
+          if (
+            isComposingRef.current ||
+            event.nativeEvent.isComposing ||
+            event.keyCode === 229 ||
+            event.key === "Process" ||
+            event.key === "Dead"
+          ) {
             return;
           }
-          if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
+          // AltGraph produces a printable glyph via the OS layout. Hand the
+          // keystroke to the input sink (no preventDefault) so its InputEvent
+          // emits the glyph exactly once, matching native behavior, instead of
+          // synthesizing a meta chord or double-sending the character.
+          if (event.getModifierState("AltGraph")) {
+            inputSinkRef.current?.focus();
+            return;
+          }
+          const ctrlChordChar =
+            event.ctrlKey && !event.metaKey && !event.altKey
+              ? physicalChordChar(event.key, event.nativeEvent.code)
+              : null;
+          if (ctrlChordChar) {
+            // Leave clipboard chords to the browser: Ctrl+Shift+C copies,
+            // Ctrl+V (with or without Shift) lets the native paste event run.
+            if (ctrlChordChar === "c" && event.shiftKey) return;
+            if (ctrlChordChar === "v") return;
             event.preventDefault();
-            sendKey(`ctrl-${event.key.toLowerCase()}`);
+            sendKey(`ctrl-${ctrlChordChar}`);
           } else if (!event.metaKey) {
             const modifiedSequence = modifiedNavigationSequence(event.key, event.ctrlKey, event.altKey);
             if (modifiedSequence) {
@@ -621,10 +689,27 @@ export function RemoteTerminal({
             } else if (event.key === "Enter") {
               event.preventDefault();
               sendKey("\r");
+            } else if (event.key === "Tab" && event.shiftKey) {
+              event.preventDefault();
+              sendKey("\u001b[Z");
             } else if (BROWSER_KEY_NAMES[event.key]) {
               event.preventDefault();
               sendKey(event.key);
-            } else if (!event.altKey && event.key.length === 1) {
+            } else if (event.altKey && !event.ctrlKey) {
+              // Meta (Alt) chord -> ESC-prefixed byte via the physical code; skip
+              // keys with no ASCII form rather than emitting arbitrary bytes.
+              // Preserve Shift for letters (Alt+Shift+X -> ESC X); Ctrl chords
+              // stay normalized to lowercase.
+              const metaChar = physicalChordChar(event.key, event.nativeEvent.code);
+              if (metaChar) {
+                const cased =
+                  event.shiftKey && metaChar >= "a" && metaChar <= "z"
+                    ? metaChar.toUpperCase()
+                    : metaChar;
+                event.preventDefault();
+                sendKey(`alt-${cased}`);
+              }
+            } else if (event.key.length === 1 && !event.altKey && !event.ctrlKey) {
               if (event.key.charCodeAt(0) <= 0x7f) {
                 event.preventDefault();
                 sendKey(event.key);
@@ -645,10 +730,12 @@ export function RemoteTerminal({
             "";
           if (!text) return;
           const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+          // Paste is always verbatim UTF-8: routing through sendKey would let literal
+          // text like "up", "ctrl-c", or "toString" be interpreted as key commands.
           if (normalized.includes("\n")) {
-            sendKey(`\x1b[200~${normalized}\x1b[201~`);
+            sendText(`\x1b[200~${normalized}\x1b[201~`);
           } else {
-            sendKey(normalized);
+            sendText(normalized);
           }
         }}
         className="relative min-h-0 flex-1 overflow-hidden bg-terminal outline-none motion-reduce:transition-none"

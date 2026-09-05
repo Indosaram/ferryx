@@ -426,6 +426,21 @@ export function isMacShortcutPlatform() {
 }
 
 export function matchesBinding(event: KeyboardEvent, binding: ShortcutBinding, isMac: boolean): boolean {
+  // Keydowns owned by an active IME composition must never match an app chord:
+  // the physical `code` still reflects the shortcut key, but the keystroke belongs
+  // to text conversion. WebKit signals this with legacy keyCode 229 and/or a
+  // `Process`/`Dead` key value; `isComposing` covers spec-compliant engines.
+  if (event.isComposing || event.keyCode === 229 || event.key === "Process" || event.key === "Dead") {
+    return false;
+  }
+
+  // AltGr (Windows/Linux) reports ctrlKey+altKey while producing a typed glyph.
+  // getModifierState("AltGraph") owns the keystroke for text entry, so it must
+  // never match an app chord even though a real Ctrl+Alt chord has it inactive.
+  if (event.getModifierState("AltGraph")) {
+    return false;
+  }
+
   const expectedMeta = Boolean(binding.mod && isMac);
   const expectedControl = Boolean(binding.control || (binding.mod && !isMac));
   const expectedAlt = Boolean(binding.alt);

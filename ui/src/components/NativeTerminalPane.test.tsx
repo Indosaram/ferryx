@@ -3568,6 +3568,348 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  const textSendsOf = () =>
+    tauriCoreMocks.invoke.mock.calls
+      .filter(([cmd]) => cmd === "cmd_native_terminal_send_input")
+      .map(([, args]) => (args as { input?: { text?: unknown } })?.input?.text)
+      .filter((text): text is string => typeof text === "string");
+
+  const keyEventSendsOf = () =>
+    tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" &&
+        Boolean((args as { input?: { keyEvent?: unknown } })?.input?.keyEvent),
+    );
+
+  it("leaves IME-owned keydowns on the focused sink to the IME and commits the composition text once", () => {
+    const session = createSession("term-session-ime-keydown-sink");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-keydown-sink" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    // Composition is active: WebKit re-delivers the composition's own keydowns with
+    // isComposing === false while the IME still owns the event. None may reach the PTY or be
+    // preventDefault'd, whether they look printable or like a control key.
+    act(() => {
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionstart", { bubbles: true, data: "" }),
+      );
+    });
+
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    const printable = new KeyboardEvent("keydown", {
+      key: "k",
+      code: "KeyK",
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(enter);
+      textarea.dispatchEvent(printable);
+    });
+
+    expect(enter.defaultPrevented).toBe(false);
+    expect(printable.defaultPrevented).toBe(false);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.anything(),
+    );
+
+    // The committed composition text is delivered exactly once by compositionend.
+    act(() => {
+      textarea.value = "안";
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionend", { bubbles: true, data: "안" }),
+      );
+    });
+
+    expect(textSendsOf()).toEqual(["안"]);
+  });
+
+  it("leaves a legacy keyCode 229 keydown on the focused sink to the IME", () => {
+    const session = createSession("term-session-ime-legacy-sink");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-legacy-sink" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    // No composition tracked yet; legacy IME bridges signal the in-flight preedit with the
+    // historical keyCode === 229 and isComposing === false.
+    const legacyEnter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+    });
+    const legacyPrintable = new KeyboardEvent("keydown", {
+      key: "a",
+      code: "KeyA",
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(legacyEnter);
+      textarea.dispatchEvent(legacyPrintable);
+    });
+
+    expect(legacyEnter.defaultPrevented).toBe(false);
+    expect(legacyPrintable.defaultPrevented).toBe(false);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.anything(),
+    );
+  });
+
+  it("leaves IME-owned keydowns in the document fallback to the IME", () => {
+    const session = createSession("term-session-ime-fallback");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-fallback" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+    tauriCoreMocks.invoke.mockClear();
+
+    const legacyEnter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+    });
+    const composingPrintable = new KeyboardEvent("keydown", {
+      key: "a",
+      code: "KeyA",
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      document.dispatchEvent(legacyEnter);
+      document.dispatchEvent(composingPrintable);
+    });
+
+    expect(legacyEnter.defaultPrevented).toBe(false);
+    expect(composingPrintable.defaultPrevented).toBe(false);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.anything(),
+    );
+  });
+
+  it("focuses the owning sink on a composition-starting IME keydown in the document fallback", () => {
+    const session = createSession("term-session-ime-fallback-focus");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ime-fallback-focus" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+    tauriCoreMocks.invoke.mockClear();
+
+    // keyCode 229 marks the IME grabbing the first keystroke before compositionstart fires; the
+    // owning sink must receive focus so the composition lands there, without being forwarded.
+    const start = new KeyboardEvent("keydown", {
+      key: "a",
+      code: "KeyA",
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      document.dispatchEvent(start);
+    });
+
+    expect(start.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_native_terminal_send_input",
+      expect.anything(),
+    );
+
+    // The composition now runs on the focused sink and commits its syllable exactly once.
+    act(() => {
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionstart", { bubbles: true, data: "" }),
+      );
+      textarea.value = "가";
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionend", { bubbles: true, data: "가" }),
+      );
+    });
+
+    expect(textSendsOf()).toEqual(["가"]);
+  });
+
+  it("treats an AltGr text key with only the AltGraph modifier set as text input", () => {
+    const session = createSession("term-session-altgraph-only");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-altgraph-only" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    // AltGraph state is authoritative even when the platform reports altKey only (no ctrlKey).
+    const altGr = new KeyboardEvent("keydown", {
+      key: "@",
+      code: "KeyQ",
+      altKey: true,
+      modifierAltGraph: true,
+      bubbles: true,
+      cancelable: true,
+    } as KeyboardEventInit);
+
+    act(() => {
+      textarea.dispatchEvent(altGr);
+    });
+
+    expect(altGr.defaultPrevented).toBe(false);
+    expect(keyEventSendsOf()).toHaveLength(0);
+
+    act(() => {
+      textarea.value = "@";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(textSendsOf()).toEqual(["@"]);
+  });
+
+  it("treats an AltGr chord on the focused sink as text input, not a Ctrl+Alt shortcut", () => {
+    const session = createSession("term-session-altgraph-sink");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-altgraph-sink" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    // AltGr+Q => "@": ctrlKey and altKey are both set, but the real AltGraph modifier means this
+    // is text, not a Ctrl+Alt chord. It must not be preventDefault'd or encoded as a key event.
+    const altGr = new KeyboardEvent("keydown", {
+      key: "@",
+      code: "KeyQ",
+      ctrlKey: true,
+      altKey: true,
+      modifierAltGraph: true,
+      bubbles: true,
+      cancelable: true,
+    } as KeyboardEventInit);
+
+    act(() => {
+      textarea.dispatchEvent(altGr);
+    });
+
+    expect(altGr.defaultPrevented).toBe(false);
+    expect(keyEventSendsOf()).toHaveLength(0);
+
+    // The browser text-input path delivers "@" through the input event exactly once.
+    act(() => {
+      textarea.value = "@";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(textSendsOf()).toEqual(["@"]);
+  });
+
+  it("treats an AltGr chord in the document fallback as text input and focuses the sink", () => {
+    const session = createSession("term-session-altgraph-fallback");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-altgraph-fallback" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+    tauriCoreMocks.invoke.mockClear();
+
+    const altGr = new KeyboardEvent("keydown", {
+      key: "@",
+      code: "KeyQ",
+      ctrlKey: true,
+      altKey: true,
+      modifierAltGraph: true,
+      bubbles: true,
+      cancelable: true,
+    } as KeyboardEventInit);
+
+    act(() => {
+      document.dispatchEvent(altGr);
+    });
+
+    expect(altGr.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    expect(keyEventSendsOf()).toHaveLength(0);
+
+    act(() => {
+      textarea.value = "@";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(textSendsOf()).toEqual(["@"]);
+  });
+
+  it("still forwards a genuine Ctrl+Alt chord when AltGraph is not active", () => {
+    const session = createSession("term-session-plain-ctrlalt");
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-plain-ctrlalt" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const chord = new KeyboardEvent("keydown", {
+      key: "q",
+      code: "KeyQ",
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(chord);
+    });
+
+    expect(chord.defaultPrevented).toBe(true);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      sessionId: "term-session-plain-ctrlalt",
+      input: {
+        keyEvent: {
+          key: "q",
+          action: "Press",
+          modifiers: {
+            shift: false,
+            ctrl: true,
+            alt: true,
+            superKey: false,
+            capsLock: false,
+            numLock: false,
+          },
+          utf8: null,
+        },
+      },
+    });
+  });
+
   it("includes terminal-host class name on container to allow global shortcut handlers to target terminal", () => {
     const session = createSession("term-session-1");
     const { getByTestId, rerender } = render(

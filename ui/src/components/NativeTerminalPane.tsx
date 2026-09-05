@@ -158,13 +158,14 @@ const ignoredBrowserKeys = new Set([
 type ForwardableKeyEvent = {
   defaultPrevented: boolean;
   isComposing: boolean;
+  keyCode: number;
   key: string;
   code: string;
   ctrlKey: boolean;
   altKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
-  getModifierState: (key: "CapsLock" | "NumLock") => boolean;
+  getModifierState: (key: "CapsLock" | "NumLock" | "AltGraph") => boolean;
 };
 
 function toForwardableKeyEvent(
@@ -175,14 +176,39 @@ function toForwardableKeyEvent(
   return {
     defaultPrevented: event.defaultPrevented,
     isComposing,
+    keyCode: event.keyCode,
     key: event.key,
     code: event.code,
     ctrlKey: event.ctrlKey,
     altKey: event.altKey,
     metaKey: event.metaKey,
     shiftKey: event.shiftKey,
-    getModifierState: (key: "CapsLock" | "NumLock") => event.getModifierState(key),
+    getModifierState: (key: "CapsLock" | "NumLock" | "AltGraph") =>
+      event.getModifierState(key),
   };
+}
+
+/// The shared gate both keydown paths (focus sink and document-capture fallback) apply BEFORE
+/// their paste/copy/Ctrl-C branches, so "which keys the IME owns" has one definition.
+///
+/// A keydown belongs to an in-flight IME composition when any of these hold: the live composition
+/// tracked from compositionstart/end is active (`composing`), WebKit re-delivered the
+/// composition's own keydown with `isComposing === false` but still flagged it, or a legacy IME
+/// bridge marked it with the historical `keyCode === 229`. The committed text is delivered exactly
+/// once by onCompositionEnd, so forwarding any of these would double-send or corrupt the preedit.
+function isImeOwnedKeydown(event: ForwardableKeyEvent, composing: boolean): boolean {
+  return composing || event.isComposing || event.keyCode === 229;
+}
+
+/// True when a printable keydown carries the real AltGraph modifier (AltGr text keys, e.g.
+/// AltGr+Q = "@"). AltGraph state is authoritative on its own, so such keys follow the browser
+/// text-input path instead of being encoded as a Ctrl+Alt control chord.
+function isAltGraphTextInput(event: ForwardableKeyEvent): boolean {
+  return (
+    event.key.length === 1 &&
+    !event.metaKey &&
+    event.getModifierState("AltGraph")
+  );
 }
 
 type KeyMatchableEvent = {
@@ -1148,6 +1174,26 @@ export function NativeTerminalPane({
         targetSessionId,
       });
 
+      // Shared IME/AltGr gate. IME-owned keydowns are left to the IME (no send, no preventDefault,
+      // no focus steal); AltGr text claims focus only for the owning pane so the browser input
+      // event delivers the character.
+      const forwardable = toForwardableKeyEvent(event);
+      if (isImeOwnedKeydown(forwardable, isComposingRef.current)) {
+        // A composition-starting IME key (keyCode 229 before compositionstart) must land on the
+        // owning sink, as the old non-ASCII branch did; an already-active composition keeps its
+        // focus so a composing sibling is never stolen.
+        if (targetEl !== inputRef.current && canClaimInput && !isComposingRef.current) {
+          inputRef.current?.focus();
+        }
+        return;
+      }
+      if (isAltGraphTextInput(forwardable)) {
+        if (targetEl !== inputRef.current && canClaimInput) {
+          inputRef.current?.focus();
+        }
+        return;
+      }
+
       if (
         targetEl !== inputRef.current &&
         !event.defaultPrevented &&
@@ -1173,7 +1219,6 @@ export function NativeTerminalPane({
       // carried bare printable characters, so with the sink unfocused (activeElement === BODY,
       // which is the common case) Enter/Backspace/Ctrl+C were silently swallowed: sendInput was
       // never called, so not even input.dropped was traced.
-      const forwardable = toForwardableKeyEvent(event);
       if (
         targetEl !== inputRef.current &&
         isPasteShortcut(forwardable) &&
@@ -1917,6 +1962,16 @@ export function NativeTerminalPane({
               return;
             }
 
+            // Shared IME/AltGr gate: the sink is already focused, so hand IME-owned keydowns and
+            // AltGr text to the browser's composition / input path instead of forwarding them.
+            const forwardable = toForwardableKeyEvent(event);
+            if (isImeOwnedKeydown(forwardable, isComposingRef.current)) {
+              return;
+            }
+            if (isAltGraphTextInput(forwardable)) {
+              return;
+            }
+
             if (isPasteShortcut(event)) {
               event.preventDefault();
               performNativePasteFallback();
@@ -1970,7 +2025,6 @@ export function NativeTerminalPane({
               return;
             }
 
-            const forwardable = toForwardableKeyEvent(event);
             if (!shouldForwardKey(forwardable)) {
               return;
             }
