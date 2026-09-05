@@ -91,8 +91,18 @@ pub trait TerminalEngine {
     /// Return ordered full-screen selection bounds as (start_col, start_row, end_col, end_row).
     fn selection_range(&self) -> Result<Option<(u16, u16, u16, u16)>, NativeTerminalError>;
 
+    /// Whether bracketed paste mode (DEC mode 2004) is currently active.
+    fn bracketed_paste_enabled(&self) -> Result<bool, NativeTerminalError>;
+
     /// Encode clipboard text according to the terminal's current bracketed-paste mode.
     fn encode_paste(&self, text: &str) -> Result<Vec<u8>, NativeTerminalError>;
+
+    /// Encode clipboard text with an optional override for bracketed paste mode.
+    fn encode_paste_with_bracketed_override(
+        &self,
+        text: &str,
+        bracketed_override: Option<bool>,
+    ) -> Result<Vec<u8>, NativeTerminalError>;
 
     /// Conservatively check whether clipboard text can inject terminal commands.
     fn paste_is_safe(&self, text: &str) -> bool;

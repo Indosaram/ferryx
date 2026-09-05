@@ -206,10 +206,14 @@ function isShortcutKey(event: KeyMatchableEvent, code: string, key: string): boo
 
 function isPasteShortcut(event: KeyShortcutEvent): boolean {
   return (
-    (event.ctrlKey || event.metaKey) &&
-    !event.altKey &&
-    !event.shiftKey &&
-    isShortcutKey(event, "KeyV", "v")
+    ((event.ctrlKey || event.metaKey) &&
+      !event.altKey &&
+      isShortcutKey(event, "KeyV", "v")) ||
+    (event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      (event.code === "Insert" || event.key === "Insert"))
   );
 }
 

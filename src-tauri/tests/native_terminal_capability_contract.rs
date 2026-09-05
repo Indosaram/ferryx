@@ -92,6 +92,28 @@ fn paste_encoding_tracks_bracketed_paste_mode() {
         .expect("enable bracketed paste mode");
     let bracketed = term.encode_paste("hello").expect("encode bracketed paste");
     assert_eq!(bracketed, b"\x1b[200~hello\x1b[201~");
+
+    // Multiline paste in bracketed paste mode preserves newlines and normalizes CRLF
+    let multiline_bracketed = term
+        .encode_paste("line 1\r\nline 2\nline 3")
+        .expect("encode multiline bracketed paste");
+    assert_eq!(
+        multiline_bracketed,
+        b"\x1b[200~line 1\nline 2\nline 3\x1b[201~"
+    );
+
+    // Explicit override forces bracketed mode even on an unbracketed terminal
+    let plain_term = NativeTerminal::new(40, 6).expect("create plain terminal");
+    let overridden = plain_term
+        .encode_paste_with_bracketed_override("first\r\nsecond", Some(true))
+        .expect("encode with override");
+    assert_eq!(overridden, b"\x1b[200~first\nsecond\x1b[201~");
+
+    // Plain term with multiline text also automatically brackets to prevent Enter splitting
+    let multiline_plain = plain_term
+        .encode_paste("first\r\nsecond")
+        .expect("encode multiline on plain term");
+    assert_eq!(multiline_plain, b"\x1b[200~first\nsecond\x1b[201~");
 }
 
 #[test]

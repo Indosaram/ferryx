@@ -1695,6 +1695,32 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("sends multiline DOM text paste as a single payload to cmd_native_terminal_paste", () => {
+    const session = createSession("term-session-multiline");
+    const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-multiline" session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    tauriCoreMocks.invoke.mockClear();
+
+    const multilineText = "line 1\r\nline 2\nline 3";
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => multilineText },
+    });
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+      sessionId: "term-session-multiline",
+      text: multilineText,
+    });
+    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_paste",
+    );
+    expect(pasteCalls).toHaveLength(1);
+  });
+
   it.each([
     { key: "v", code: "KeyV", description: "Latin v" },
     { key: "ㅍ", code: "KeyV", description: "Korean character ㅍ" },
@@ -1876,6 +1902,85 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       ([cmd]) => cmd === "cmd_native_terminal_paste",
     );
     expect(pasteCalls).toHaveLength(1);
+  });
+
+  it("claims Ctrl+Shift+V on focused textarea and routes native text clipboard content", async () => {
+    const session = createSession("term-session-ctrl-shift-v");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "ctrl shift v text" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-ctrl-shift-v" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "V",
+      code: "KeyV",
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-ctrl-shift-v",
+        text: "ctrl shift v text",
+      });
+    });
+  });
+
+  it("claims Shift+Insert on focused textarea and routes native text clipboard content", async () => {
+    const session = createSession("term-session-shift-insert");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") {
+        return { kind: "text", text: "shift insert text" };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-shift-insert" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteShortcut = new KeyboardEvent("keydown", {
+      key: "Insert",
+      code: "Insert",
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteShortcut);
+    });
+
+    expect(pasteShortcut.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId: "term-session-shift-insert",
+        text: "shift insert text",
+      });
+    });
   });
 
   it("claims Ctrl+V on focused textarea and routes native image clipboard content through agent Ctrl+V shortcut without DOM paste", async () => {

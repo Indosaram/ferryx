@@ -261,6 +261,15 @@ fn paste_encoding_honors_bracketed_paste_mode_at_boundary() {
         .encode_paste("echo foo")
         .expect("encode bracketed paste");
     assert_eq!(bracketed, b"\x1b[200~echo foo\x1b[201~");
+
+    // Multiline paste normalizes CRLF and wraps in bracketed mode
+    let multiline = term
+        .encode_paste("first line\r\nsecond line\nthird line")
+        .expect("encode multiline paste");
+    assert_eq!(
+        multiline,
+        b"\x1b[200~first line\nsecond line\nthird line\x1b[201~"
+    );
 }
 
 #[test]

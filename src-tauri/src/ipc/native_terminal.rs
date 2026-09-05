@@ -631,8 +631,14 @@ pub fn encode_attached_native_paste(
     text: &str,
 ) -> Result<Vec<u8>, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| {
-        let bytes = term.encode_paste(text)?;
+    state.with_session_terminal_and_context(session_id, |term, bracketed_effective| {
+        let is_multiline = text.contains('\n') || text.contains('\r');
+        let override_val = if bracketed_effective || is_multiline {
+            Some(true)
+        } else {
+            None
+        };
+        let bytes = term.encode_paste_with_bracketed_override(text, override_val)?;
         if !bytes.is_empty() {
             let _ = term.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
         }

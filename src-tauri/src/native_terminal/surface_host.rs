@@ -294,6 +294,9 @@ pub struct NativeTerminalSession {
     /// Set once the agent reports its own state through the Ferryx extension, which permanently
     /// disables screen inference for this session.
     pub agent_reports_own_state: bool,
+    /// Whether bracketed paste mode (DEC mode 2004) has ever been enabled on this session,
+    /// preserved across terminal resets and history re-feeds.
+    pub bracketed_paste_seen: bool,
     /// Whether a frontend pane currently owns a compositor surface for this session.
     ///
     /// A session outlives its surface: [`NativeTerminalSurfaceHostState::detach_session`] keeps the
@@ -768,17 +771,27 @@ impl NativeTerminalSurfaceHostState {
         })
     }
 
-    pub fn with_session_terminal<T>(
+    pub fn with_session_terminal_and_context<T>(
         &self,
         session_id: &str,
-        f: impl FnOnce(&mut NativeTerminal) -> Result<T, NativeTerminalError>,
+        f: impl FnOnce(&mut NativeTerminal, bool) -> Result<T, NativeTerminalError>,
     ) -> Result<T, NativeTerminalError> {
         validate_session_id(session_id)?;
         let mut sessions = self.sessions.lock();
         let session = sessions
             .get_mut(session_id)
             .ok_or(NativeTerminalError::NoValue)?;
-        f(&mut session.terminal)
+        let is_agent = session.last_agent_activity.is_some() || session.agent_reports_own_state;
+        let bracketed_effective = session.bracketed_paste_seen || is_agent;
+        f(&mut session.terminal, bracketed_effective)
+    }
+
+    pub fn with_session_terminal<T>(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut NativeTerminal) -> Result<T, NativeTerminalError>,
+    ) -> Result<T, NativeTerminalError> {
+        self.with_session_terminal_and_context(session_id, |term, _| f(term))
     }
 
     pub fn reapply_theme_to_sessions(&self) {
@@ -869,6 +882,7 @@ impl NativeTerminalSurfaceHostState {
                         attention_frame: false,
                         agent_reports_own_state: false,
                         surface_attached: true,
+                        bracketed_paste_seen: false,
                     },
                 );
                 (
@@ -1112,12 +1126,18 @@ impl NativeTerminalSurfaceHostState {
                         }
                     }
                 }
+                let was_bracketed = session.bracketed_paste_seen
+                    || session.terminal.bracketed_paste_enabled().unwrap_or(false);
                 session.terminal.reset();
                 feed_attachment_history(
                     &mut session.terminal,
                     &attachment.history,
                     &attachment.history_segments,
                 )?;
+                if was_bracketed && !session.terminal.bracketed_paste_enabled().unwrap_or(false) {
+                    let _ = session.terminal.feed_str("\x1b[?2004h");
+                    session.bracketed_paste_seen = true;
+                }
                 if let Some(layout) = session.layout {
                     if session.terminal.dimensions()? != (layout.cols, layout.rows) {
                         let metrics = session
@@ -1158,6 +1178,7 @@ impl NativeTerminalSurfaceHostState {
                     &attachment.history_segments,
                 )?;
                 let _ = terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                let bracketed_paste_seen = terminal.bracketed_paste_enabled().unwrap_or(false);
                 // A fresh session created by an attach owns a surface by definition.
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
@@ -1183,6 +1204,7 @@ impl NativeTerminalSurfaceHostState {
                         attention_frame: false,
                         agent_reports_own_state: false,
                         surface_attached: true,
+                        bracketed_paste_seen,
                     },
                 );
                 (update_sender, render_coordinator)
@@ -1248,6 +1270,9 @@ impl NativeTerminalSurfaceHostState {
                                         "Failed to feed daemon output to native terminal"
                                     );
                                 }
+                                if let Ok(true) = sess.terminal.bracketed_paste_enabled() {
+                                    sess.bracketed_paste_seen = true;
+                                }
                                 sess.last_sequence = Some(sequence);
                                 (true, take_native_terminal_events(sess, &session_id_owned, false))
                             } else {
@@ -1286,6 +1311,8 @@ impl NativeTerminalSurfaceHostState {
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                                let was_bracketed = sess.bracketed_paste_seen
+                                    || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
                                 sess.terminal.reset();
                                 let parsed_segments: Vec<HistorySegment> = segments
                                     .into_iter()
@@ -1305,6 +1332,12 @@ impl NativeTerminalSurfaceHostState {
                                         error = %err,
                                         "Failed to feed recovery history to native terminal"
                                     );
+                                }
+                                if was_bracketed
+                                    && !sess.terminal.bracketed_paste_enabled().unwrap_or(false)
+                                {
+                                    let _ = sess.terminal.feed_str("\x1b[?2004h");
+                                    sess.bracketed_paste_seen = true;
                                 }
                                 // feed_attachment_history leaves the grid at the last
                                 // segment's dimensions; restore the pane's layout size so the
@@ -1343,7 +1376,13 @@ impl NativeTerminalSurfaceHostState {
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                                let was_bracketed = sess.bracketed_paste_seen
+                                    || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
                                 sess.terminal.reset();
+                                if was_bracketed {
+                                    let _ = sess.terminal.feed_str("\x1b[?2004h");
+                                    sess.bracketed_paste_seen = true;
+                                }
                                 let _ = sess
                                     .terminal
                                     .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
@@ -1594,6 +1633,7 @@ impl NativeTerminalSurfaceHostState {
                         attention_frame: false,
                         agent_reports_own_state: false,
                         surface_attached: true,
+                        bracketed_paste_seen: false,
                     },
                 );
                 sessions

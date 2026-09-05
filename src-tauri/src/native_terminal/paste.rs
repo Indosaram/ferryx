@@ -16,7 +16,7 @@ pub fn paste_is_safe(text: &str) -> bool {
     unsafe { ghostty_paste_is_safe(text.as_ptr(), text.len()) }
 }
 
-fn bracketed_paste_enabled(
+pub fn bracketed_paste_enabled(
     handle: NonNull<GhosttyTerminalImpl>,
 ) -> Result<bool, NativeTerminalError> {
     let mut config = GhosttyTerminalModeConfig {
@@ -40,8 +40,27 @@ pub fn encode_paste(
     handle: NonNull<GhosttyTerminalImpl>,
     text: &str,
 ) -> Result<Vec<u8>, NativeTerminalError> {
-    let bracketed = bracketed_paste_enabled(handle)?;
-    let mut input = text.as_bytes().to_vec();
+    encode_paste_with_override(handle, text, None)
+}
+
+pub fn encode_paste_with_override(
+    handle: NonNull<GhosttyTerminalImpl>,
+    text: &str,
+    bracketed_override: Option<bool>,
+) -> Result<Vec<u8>, NativeTerminalError> {
+    let normalized = if text.contains('\r') {
+        text.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        text.to_string()
+    };
+
+    let is_multiline = normalized.contains('\n');
+    let bracketed = match bracketed_override {
+        Some(val) => val,
+        None => bracketed_paste_enabled(handle)? || is_multiline,
+    };
+
+    let mut input = normalized.as_bytes().to_vec();
     let input_ptr = if input.is_empty() {
         std::ptr::null_mut()
     } else {

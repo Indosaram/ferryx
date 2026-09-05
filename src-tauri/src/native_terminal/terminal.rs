@@ -15,7 +15,9 @@ use super::key_encoder::{encode_key_event, encode_key_event_with_option_as_alt};
 use super::lifecycle::{create_native_terminal, teardown_native_terminal};
 use super::mouse::MouseEvent;
 use super::mouse_encoder::encode_mouse_event;
-use super::paste::{encode_paste, paste_is_safe};
+use super::paste::{
+    bracketed_paste_enabled, encode_paste, encode_paste_with_override, paste_is_safe,
+};
 use super::queries::{
     query_cols, query_cursor_position, query_cursor_state, query_default_background,
     query_default_cursor_color, query_default_foreground, query_mouse_tracking_enabled,
@@ -366,8 +368,20 @@ impl TerminalEngine for NativeTerminal {
         selection_range(self.handle)
     }
 
+    fn bracketed_paste_enabled(&self) -> Result<bool, NativeTerminalError> {
+        bracketed_paste_enabled(self.handle)
+    }
+
     fn encode_paste(&self, text: &str) -> Result<Vec<u8>, NativeTerminalError> {
         encode_paste(self.handle, text)
+    }
+
+    fn encode_paste_with_bracketed_override(
+        &self,
+        text: &str,
+        bracketed_override: Option<bool>,
+    ) -> Result<Vec<u8>, NativeTerminalError> {
+        encode_paste_with_override(self.handle, text, bracketed_override)
     }
 
     fn paste_is_safe(&self, text: &str) -> bool {

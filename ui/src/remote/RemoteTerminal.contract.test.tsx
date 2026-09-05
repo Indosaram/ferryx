@@ -519,6 +519,20 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).toHaveBeenNthCalledWith(7, new TextEncoder().encode("pasted text"));
   });
 
+  it("wraps multiline paste in bracketed paste mode markers to prevent prompt splitting", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const target = surface();
+
+    fireEvent.paste(target, {
+      clipboardData: { getData: () => "line 1\r\nline 2\nline 3" },
+    });
+
+    expect(socket().send).toHaveBeenCalledWith(
+      new TextEncoder().encode("\x1b[200~line 1\nline 2\nline 3\x1b[201~"),
+    );
+  });
+
   it("does not shatter IME jamo keydowns into individual PTY writes", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);

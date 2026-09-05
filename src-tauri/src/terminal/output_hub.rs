@@ -63,6 +63,36 @@ pub struct BoundedBuffer {
     chunks: VecDeque<OutputChunk>,
     current_size: usize,
     next_sequence: u64,
+    bracketed_paste_enabled: bool,
+}
+
+pub fn scan_dec_mode_2004(bytes: &[u8]) -> Option<bool> {
+    if !bytes.windows(4).any(|w| w == b"2004") {
+        return None;
+    }
+    let mut last_state = None;
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b'[' && bytes[i + 2] == b'?' {
+            let mut j = i + 3;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'h' || bytes[j] == b'l') {
+                let params = &bytes[i + 3..j];
+                let is_set = bytes[j] == b'h';
+                for part in params.split(|&b| b == b';') {
+                    if part == b"2004" {
+                        last_state = Some(is_set);
+                    }
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    last_state
 }
 
 impl BoundedBuffer {
@@ -72,6 +102,7 @@ impl BoundedBuffer {
             chunks: VecDeque::new(),
             current_size: 0,
             next_sequence: 1,
+            bracketed_paste_enabled: false,
         }
     }
 
@@ -105,6 +136,9 @@ impl BoundedBuffer {
         };
 
         self.current_size += chunk.bytes.len();
+        if let Some(enabled) = scan_dec_mode_2004(&chunk.bytes) {
+            self.bracketed_paste_enabled = enabled;
+        }
         self.chunks.push_back(chunk.clone());
 
         while self.current_size > self.capacity && !self.chunks.is_empty() {
@@ -132,8 +166,27 @@ impl BoundedBuffer {
         self.current_size
     }
 
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.bracketed_paste_enabled
+    }
+
+    fn buffer_contains_active_bracketed_paste(&self) -> bool {
+        let mut in_buffer = false;
+        for chunk in &self.chunks {
+            if let Some(enabled) = scan_dec_mode_2004(&chunk.bytes) {
+                in_buffer = enabled;
+            }
+        }
+        in_buffer
+    }
+
     pub fn snapshot(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.current_size);
+        let needs_prefix =
+            self.bracketed_paste_enabled && !self.buffer_contains_active_bracketed_paste();
+        let mut out = Vec::with_capacity(self.current_size + if needs_prefix { 8 } else { 0 });
+        if needs_prefix {
+            out.extend_from_slice(b"\x1b[?2004h");
+        }
         for chunk in &self.chunks {
             out.extend_from_slice(&chunk.bytes);
         }
@@ -170,9 +223,21 @@ impl BoundedBuffer {
         match after_sequence {
             None => {
                 let chunk_refs: Vec<&OutputChunk> = self.chunks.iter().collect();
-                let segments = segment_history(&chunk_refs, ledger, after_sequence);
+                let mut segments = segment_history(&chunk_refs, ledger, after_sequence);
+                let history = self.snapshot();
+                if self.bracketed_paste_enabled && !self.buffer_contains_active_bracketed_paste() {
+                    if let Some(first_seg) = segments.first_mut() {
+                        first_seg.bytes.splice(0..0, b"\x1b[?2004h".iter().copied());
+                    } else {
+                        segments.push(HistorySegment {
+                            cols: None,
+                            rows: None,
+                            bytes: b"\x1b[?2004h".to_vec(),
+                        });
+                    }
+                }
                 (
-                    self.snapshot(),
+                    history,
                     segments,
                     Some(first_seq),
                     Some(last_seq),
@@ -190,9 +255,21 @@ impl BoundedBuffer {
                         available_from_sequence: first_seq,
                     });
                     let chunk_refs: Vec<&OutputChunk> = self.chunks.iter().collect();
-                    let segments = segment_history(&chunk_refs, ledger, after_sequence);
+                    let mut segments = segment_history(&chunk_refs, ledger, after_sequence);
+                    let history = self.snapshot();
+                    if self.bracketed_paste_enabled && !self.buffer_contains_active_bracketed_paste() {
+                        if let Some(first_seg) = segments.first_mut() {
+                            first_seg.bytes.splice(0..0, b"\x1b[?2004h".iter().copied());
+                        } else {
+                            segments.push(HistorySegment {
+                                cols: None,
+                                rows: None,
+                                bytes: b"\x1b[?2004h".to_vec(),
+                            });
+                        }
+                    }
                     (
-                        self.snapshot(),
+                        history,
                         segments,
                         Some(first_seq),
                         Some(last_seq),
@@ -505,6 +582,18 @@ impl TerminalOutputHub {
         }?;
         let hub = session_hub.read();
         Some((hub.buffer.start_sequence(), hub.buffer.end_sequence()))
+    }
+
+    pub fn is_bracketed_paste_enabled(&self, session_id: &str) -> bool {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        };
+        let Some(session_hub) = session_hub else {
+            return false;
+        };
+        let enabled = session_hub.read().buffer.bracketed_paste_enabled();
+        enabled
     }
 }
 
@@ -873,5 +962,47 @@ mod tests {
                 bytes: Vec::new(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn test_output_hub_bracketed_paste_retention_on_eviction() {
+        // Create hub with small capacity (64 bytes)
+        let hub = TerminalOutputHub::new(64);
+        let session_id = "bracketed-eviction-session";
+        let _rx = hub.register_session(session_id);
+
+        // 1. Initial output enables bracketed paste
+        hub.publish(session_id, b"\x1b[?2004hprompt> ".to_vec())
+            .expect("enable 2004h");
+        assert!(hub.is_bracketed_paste_enabled(session_id));
+
+        // 2. Flood with output to evict the initial chunk with \x1b[?2004h
+        for i in 0..10 {
+            hub.publish(session_id, format!("flood line {}\r\n", i).into_bytes())
+                .expect("publish flood");
+        }
+
+        // Bracketed paste must still be tracked as enabled
+        assert!(hub.is_bracketed_paste_enabled(session_id));
+
+        // 3. Snapshot must retain \x1b[?2004h at the beginning even though the chunk was evicted
+        let attachment = hub
+            .subscribe_with_sequence(session_id, None)
+            .expect("attachment");
+        assert!(
+            attachment.snapshot.history.starts_with(b"\x1b[?2004h"),
+            "snapshot history must start with \\x1b[?2004h prefix"
+        );
+        assert!(
+            attachment.snapshot.history_segments[0]
+                .bytes
+                .starts_with(b"\x1b[?2004h"),
+            "first history segment must start with \\x1b[?2004h prefix"
+        );
+
+        // 4. Disabling bracketed paste with \x1b[?2004l must clear it
+        hub.publish(session_id, b"\x1b[?2004lexiting\r\n".to_vec())
+            .expect("disable 2004l");
+        assert!(!hub.is_bracketed_paste_enabled(session_id));
     }
 }

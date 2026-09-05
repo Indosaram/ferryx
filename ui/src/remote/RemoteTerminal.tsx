@@ -639,7 +639,17 @@ export function RemoteTerminal({
         }}
         onPaste={(event) => {
           event.preventDefault();
-          sendKey(event.clipboardData.getData("text"));
+          const text =
+            event.clipboardData?.getData("text/plain") ||
+            event.clipboardData?.getData("text") ||
+            "";
+          if (!text) return;
+          const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+          if (normalized.includes("\n")) {
+            sendKey(`\x1b[200~${normalized}\x1b[201~`);
+          } else {
+            sendKey(normalized);
+          }
         }}
         className="relative min-h-0 flex-1 overflow-hidden bg-terminal outline-none motion-reduce:transition-none"
         style={{
