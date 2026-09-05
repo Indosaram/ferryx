@@ -1,8 +1,0 @@
-✓ Ferryx agent-activity surface QA
-  http://127.0.0.1:5173/activity-qa.html
-✓ Done
-loaded http://127.0.0.1:5173/activity-qa.html
-=== agent-activity real-surface capture: GREEN ===
-✓ Done
-✓ Done
-✓ Done

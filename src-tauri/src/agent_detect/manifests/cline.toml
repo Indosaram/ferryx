@@ -1,4 +1,4 @@
-# Ported from herdr (/Users/indo/.local/bin/herdr) on 2026-08-28.
+# Ported from herdr on 2026-08-28.
 # Source manifest id "cline"; extracted byte-accurately from the embedded corpus.
 id = "cline"
 version = "2026.06.10.1"

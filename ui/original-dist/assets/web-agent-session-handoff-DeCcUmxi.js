@@ -1,2 +1,0 @@
-import { a as isWebAgentSessionHandoffPostCreateSnapshotConfirmed, i as confirmWebAgentSessionHandoffAfterCreate, n as clearWebAgentSessionHandoffsForEnvironment, o as recordWebAgentSessionHandoff, r as clearWebAgentSessionHandoffsForWorktree, s as resolveWebAgentSessionHandoff, t as clearWebAgentSessionHandoff } from "./web-agent-session-handoff-D4ZdXDx4.js";
-export { confirmWebAgentSessionHandoffAfterCreate };

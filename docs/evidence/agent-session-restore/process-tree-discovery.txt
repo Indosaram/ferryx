@@ -1,9 +1,0 @@
-CRITERION 3 - process-keyed discovery, REAL live macOS process table
-process rows sampled: 924
-pane0: shellRoot=49653 -> resolved agent pid 49657
-pane1: shellRoot=49654 -> resolved agent pid 49658
-two panes, SAME cwd (/private/tmp), SAME agent (claude) -> DISTINCT pids: True [49657, 49658]
-negative control (agent 'codex' absent) -> None
-direct-child-only lookup finds: NOTHING => BFS descendant walk REQUIRED
-verdict: PROVEN
-cleanup: killed [49653, 49654]; pkill -f /private/tmp/ulw-agent8; rm -rf /private/tmp/ulw-agent8

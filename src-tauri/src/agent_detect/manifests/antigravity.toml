@@ -1,4 +1,4 @@
-# Ported from herdr (/Users/indo/.local/bin/herdr) on 2026-08-28.
+# Ported from herdr on 2026-08-28.
 # Source manifest id "agy"; extracted byte-accurately from the embedded corpus.
 # id renamed agy -> antigravity: the UI resolves a pane's brand icon with
 # resolveAgentLogo(manifest_id), whose key is "antigravity". Keeping "agy" would

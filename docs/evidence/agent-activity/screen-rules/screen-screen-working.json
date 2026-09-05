@@ -1,3 +1,0 @@
-SCENARIO screen-working: "{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"working\",\"spinning\":true,\"agentIcon\":false}},\"worktrees\":[\"idle\",\"working\"]}"
-  screenshot=docs/evidence/agent-activity/screen-rules/screen-screen-working.png
-"{\"byTab\":{\"tab-fg\":{\"statusState\":null,\"spinning\":false,\"agentIcon\":false},\"tab-bg\":{\"statusState\":\"working\",\"spinning\":true,\"agentIcon\":false}},\"worktrees\":[\"idle\",\"working\"]}"

@@ -1,4 +1,4 @@
-# Ported from herdr (/Users/indo/.local/bin/herdr) on 2026-08-28.
+# Ported from herdr on 2026-08-28.
 # Source manifest id "grok"; extracted byte-accurately from the embedded corpus.
 # Dropped rules (region unsupported by the Ferryx engine): osc_progress_working (osc_progress), osc_progress_idle (osc_progress)
 id = "grok"
