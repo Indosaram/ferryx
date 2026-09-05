@@ -8,6 +8,7 @@ pub mod native_terminal;
 pub mod notification;
 pub mod permissions;
 pub mod remote;
+pub mod scoped_contracts;
 pub mod session;
 pub mod ssh;
 pub mod terminal;
