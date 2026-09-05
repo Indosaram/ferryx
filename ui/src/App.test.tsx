@@ -1664,7 +1664,9 @@ describe("App project workspace flow", () => {
   });
 
   it("requests fresh backends for restored tabs whose daemon sessions are gone", async () => {
-    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([]);
     native.spawnTerminal.mockResolvedValue("new-spawned-session-id");
 
@@ -1715,6 +1717,8 @@ describe("App project workspace flow", () => {
   });
 
   it("waits until project registration and authoritative worktree refresh complete before restoring workspace and recovering stale session backends", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     let resolveRegister!: (value: any) => void;
     const registerPromise = new Promise((resolve) => {
       resolveRegister = resolve;
@@ -1770,7 +1774,7 @@ describe("App project workspace flow", () => {
 
     // 2. Resolve project registration - worktree refresh begins, but restore must still wait
     await act(async () => {
-      resolveRegister({ workspaceId: "default", repoRoot: "." });
+      resolveRegister({ workspaceId: "default", repoRoot: "/repo/main" });
     });
     expect(workspace.refreshWorktrees).toHaveBeenCalled();
     expect(workspace.restoreWorkspace).not.toHaveBeenCalled();
@@ -1794,7 +1798,9 @@ describe("App project workspace flow", () => {
   });
 
   it("restores persisted terminal sessions only once when restored state changes effect dependencies", async () => {
-    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([]);
     native.spawnTerminal.mockResolvedValue("new-spawned-session-id");
     native.loadSession.mockResolvedValue({
@@ -1844,7 +1850,9 @@ describe("App project workspace flow", () => {
   });
 
   it("preserves live backend sessions when restoring during dev/HMR", async () => {
-    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([{ sessionId: "live-sess-1", worktreePath: "/repo/main" }]);
     native.spawnTerminal.mockClear();
 
@@ -1885,7 +1893,9 @@ describe("App project workspace flow", () => {
   });
 
   it("reconciles live and missing sessions across split panes without auto-respawning dead sessions", async () => {
-    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([{ sessionId: "live-sess-1", worktreePath: "/repo/main" }]);
     native.spawnTerminal.mockClear();
     native.spawnTerminal.mockResolvedValue("respawned-sess-2");
@@ -1962,7 +1972,9 @@ describe("App project workspace flow", () => {
   });
 
   it("reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited", async () => {
-    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([
       { sessionId: "live-backend-1", daemonEpoch: "epoch-10" },
       { sessionId: "live-backend-2", daemonEpoch: "epoch-10" },
@@ -2338,6 +2350,8 @@ describe("App project workspace flow", () => {
   });
 
   it("preserves layout ownership and marks dead sessions exited across active and parked layouts without auto-respawning", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([]);
     const spawnedSessions: Record<string, string> = {
@@ -2476,8 +2490,10 @@ describe("App project workspace flow", () => {
   });
 
   it("successfully completes session restore under React StrictMode double-mount without skipping", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     const { StrictMode } = await import("react");
-    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.listTerminalSessions.mockResolvedValue([]);
     native.spawnTerminal.mockClear();
 
@@ -2532,6 +2548,8 @@ describe("App project workspace flow", () => {
   });
 
   it("skips native disk session restore when store was hydrated from HMR handoff and no HMR state exists", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     native.loadSession.mockClear();
     workspace.restoreWorkspace.mockClear();
@@ -2564,6 +2582,8 @@ describe("App project workspace flow", () => {
   });
 
   it("reconciles stale sessions and triggers ensureSessionBackends on HMR handoff when daemon restarted", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     const { setHmrWorkspaceState, clearHmrWorkspaceState } = await import("./state/hmrWorkspaceState");
     const workspaceId = "default";
     const hmrState = {
@@ -3009,6 +3029,24 @@ describe("App project workspace flow", () => {
       } as any);
 
       expect(result).toBeNull();
+    });
+
+    it("does not republish unchanged terminal inventory on unrelated workspace renders", async () => {
+      let view: ReturnType<typeof render> | undefined;
+      await act(async () => { view = render(<App />); });
+      const count = native.publishFocusedTerminal.mock.calls.length;
+      expect(count).toBeGreaterThan(0);
+      const previous = workspace.storeState;
+      try {
+        workspace.storeState = { ...previous, unreadTabIds: { "tab-2": true } };
+        await act(async () => { view?.rerender(<App />); });
+        expect(native.publishFocusedTerminal).toHaveBeenCalledTimes(count);
+        workspace.storeState = { ...workspace.storeState, layout: { ...previous.layout, activeTabId: "tab-2" } };
+        await act(async () => { view?.rerender(<App />); });
+        expect(native.publishFocusedTerminal).toHaveBeenCalledTimes(count + 1);
+      } finally {
+        workspace.storeState = previous;
+      }
     });
 
     it("publishes focused terminal to native IPC on mount and layout changes", async () => {
@@ -3547,6 +3585,8 @@ describe("App project workspace flow", () => {
 
   describe("Automatic agent session resume on workspace restore", () => {
     it("auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
       native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
       native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
 
@@ -3651,6 +3691,8 @@ describe("App project workspace flow", () => {
     });
 
     it("does not crash and degrades silently when auto-resume spawn fails", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
       native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
       native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
 

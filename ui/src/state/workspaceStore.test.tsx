@@ -216,6 +216,26 @@ describe("useWorkspaceStore terminal ownership", () => {
     );
   });
 
+  it("updates worktree activity when a rebound session changes its worktree path", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }));
+    act(() => result.current.restoreWorkspace({
+      ...restoredSplitState(),
+      activityBySessionId: { "session-1": { state: "working", title: "Claude", isAgent: true, agentType: "claude" } },
+    }));
+    expect(result.current.worktreeActivity[worktree.path].workingCount).toBe(1);
+    expect(result.current.worktreeActivity[featureWorktree.path].workingCount).toBe(0);
+    act(() => result.current.dispatchWorkspaceAction({
+      type: "REBIND_SESSION_BACKEND",
+      sessionId: "session-1",
+      backendSessionId: "rebound",
+      cwd: featureWorktree.path,
+    }));
+    expect(result.current.state.sessions["session-1"].cwd).toBe(featureWorktree.path);
+    expect(result.current.worktreeActivity[worktree.path].workingCount).toBe(0);
+    expect(result.current.worktreeActivity[featureWorktree.path].workingCount).toBe(1);
+  });
+
   it("splits a pane by creating an independent backend PTY and local session", async () => {
     const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));

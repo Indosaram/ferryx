@@ -1138,7 +1138,7 @@ export function useWorkspaceStore({
 
   const agents = useMemo(
     () => selectAgents(renderedState),
-    [renderedState.layout, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId],
+    [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId],
   );
   const tabActivity = useMemo(
     () => selectTabActivitySummaries(renderedState),
@@ -1153,11 +1153,11 @@ export function useWorkspaceStore({
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
     // signal for the snapshot cache, which useMemo cannot observe directly.
-    [renderedState.layout, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadWorktreePaths, workspaceId, parkedActivityVersion],
+    [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadTabIds, renderedState.unreadWorktreePaths, renderedState.workspaceId, workspaceId, parkedActivityVersion],
   );
   const activityNotificationTargets = useMemo(
     () => selectActivityNotificationTargets(renderedState),
-    [renderedState.layout, renderedState.activityBySessionId, renderedState.sessions],
+    [renderedState.layout, renderedState.worktreeLayouts, renderedState.worktrees, renderedState.activityBySessionId, renderedState.sessions],
   );
   const unreadBadgeCount = useMemo(
     () => selectGlobalUnreadBadgeCount(renderedState, workspaceId),

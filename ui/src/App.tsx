@@ -1043,8 +1043,12 @@ function WorkspaceApp({
     () => deriveFocusedTerminal(activeProject.workspaceId, state),
     [activeProject.workspaceId, state],
   );
+  const publishedTerminalPayloadKey = useRef<string | null>(null);
 
   useEffect(() => {
+    const key = JSON.stringify(focusedTerminalPayload);
+    if (publishedTerminalPayloadKey.current === key) return;
+    publishedTerminalPayloadKey.current = key;
     void Promise.resolve(publishFocusedTerminal(focusedTerminalPayload)).catch(reportRuntimeError);
   }, [focusedTerminalPayload, reportRuntimeError]);
 
@@ -1775,7 +1779,7 @@ function WorkspaceApp({
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
-          onOpenSettings={() => handleOpenSettings()}
+          onOpenSettings={handleOpenSettings}
           onToggle={toggleSidebar}
         />
       ) : (
@@ -1834,7 +1838,7 @@ function WorkspaceApp({
             onToggleTabPin={setTabPinned}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
-            onOpenSettings={() => handleOpenSettings()}
+            onOpenSettings={handleOpenSettings}
             agents={launchableAgents}
             onLaunchAgent={handleLaunchAgent}
             defaultAgentId={agentSettings.defaultAgentId}
