@@ -351,4 +351,47 @@ describe("reset", () => {
 
     expect(errorSpy).toHaveBeenCalledWith(expect.any(Error), "dispatch");
   });
+
+  it("surfaces a rejected dispatch result (submitted:false) with its reason through onError", async () => {
+    const errorSpy = vi.fn();
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onError: errorSpy,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.any(Error), "dispatch");
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain("permission-required");
+  });
+
+  it("does not treat the default system sound's played:false as an error", async () => {
+    const errorSpy = vi.fn();
+    soundMock.mockResolvedValueOnce({ played: false });
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onError: errorSpy,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
 });

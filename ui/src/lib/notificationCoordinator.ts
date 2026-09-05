@@ -99,18 +99,40 @@ export class NotificationCoordinator {
             customSoundPath: settings.customSoundPath,
             volume: settings.customSoundVolume,
           })
-        ).catch((err) => {
-          this.options.onError?.(err, 'sound');
-        });
+        )
+          .then((result) => {
+            // A custom sound that did not play is a real failure; the default
+            // "system" sound intentionally reports played:false (it rides the OS banner).
+            if (result && settings.customSoundPath && !result.played) {
+              this.options.onError?.(
+                new Error(`notification sound not played (${result.reason ?? 'unknown'})`),
+                'sound',
+              );
+            }
+          })
+          .catch((err) => {
+            this.options.onError?.(err, 'sound');
+          });
 
         const dispatchArgs: DispatchNotificationArgs = {
           source: 'terminal-bell',
           worktreeLabel: params.worktreeLabel || params.worktreeId,
           terminalTitle: params.terminalTitle,
         };
-        Promise.resolve(dispatchNotification(dispatchArgs)).catch((err) => {
-          this.options.onError?.(err, 'dispatch');
-        });
+        Promise.resolve(dispatchNotification(dispatchArgs))
+          .then((result) => {
+            // The backend rejects with an Ok result (e.g. permission-required),
+            // not an IPC error — surface the reason or it disappears silently.
+            if (result && !result.submitted) {
+              this.options.onError?.(
+                new Error(`desktop notification not submitted (${result.reason ?? 'unknown'})`),
+                'dispatch',
+              );
+            }
+          })
+          .catch((err) => {
+            this.options.onError?.(err, 'dispatch');
+          });
       }
     }
   }
@@ -156,9 +178,18 @@ export class NotificationCoordinator {
             customSoundPath: settings.customSoundPath,
             volume: settings.customSoundVolume,
           })
-        ).catch((err) => {
-          this.options.onError?.(err, 'sound');
-        });
+        )
+          .then((result) => {
+            if (result && settings.customSoundPath && !result.played) {
+              this.options.onError?.(
+                new Error(`notification sound not played (${result.reason ?? 'unknown'})`),
+                'sound',
+              );
+            }
+          })
+          .catch((err) => {
+            this.options.onError?.(err, 'sound');
+          });
 
         const dispatchArgs: DispatchNotificationArgs = {
           source: 'agent-task-complete',
@@ -166,9 +197,18 @@ export class NotificationCoordinator {
           terminalTitle: params.terminalTitle,
           agentLabel: params.agentLabel,
         };
-        Promise.resolve(dispatchNotification(dispatchArgs)).catch((err) => {
-          this.options.onError?.(err, 'dispatch');
-        });
+        Promise.resolve(dispatchNotification(dispatchArgs))
+          .then((result) => {
+            if (result && !result.submitted) {
+              this.options.onError?.(
+                new Error(`desktop notification not submitted (${result.reason ?? 'unknown'})`),
+                'dispatch',
+              );
+            }
+          })
+          .catch((err) => {
+            this.options.onError?.(err, 'dispatch');
+          });
       }
     }
   }
