@@ -8,7 +8,8 @@ use super::key::{KeyAction, KeyCode, KeyEvent};
 use super::sys::ffi::{
     ghostty_key_encoder_encode, ghostty_key_encoder_new, ghostty_key_encoder_setopt,
     ghostty_key_encoder_setopt_from_terminal, ghostty_key_event_new, ghostty_key_event_set_action,
-    ghostty_key_event_set_key, ghostty_key_event_set_mods, ghostty_key_event_set_utf8,
+    ghostty_key_event_set_key, ghostty_key_event_set_mods, ghostty_key_event_set_unshifted_codepoint,
+    ghostty_key_event_set_utf8,
 };
 use super::sys::types::{
     GhosttyKeyEncoder, GhosttyKeyEvent, GhosttyTerminal, GHOSTTY_KEY_A, GHOSTTY_KEY_ARROW_DOWN,
@@ -144,14 +145,20 @@ pub fn encode_key_event_with_option_as_alt(
         ghostty_key_event_set_key(event_guard.0.as_ptr(), key_c);
         ghostty_key_event_set_mods(event_guard.0.as_ptr(), raw_mods);
 
+        if let KeyCode::Character(c) = event.key {
+            ghostty_key_event_set_unshifted_codepoint(event_guard.0.as_ptr(), c as u32);
+        }
+
         if let Some(ref text) = event.utf8 {
             validate_utf8_for_key_event(text)?;
             ghostty_key_event_set_utf8(event_guard.0.as_ptr(), text.as_ptr(), text.len());
         } else if let KeyCode::Character(c) = event.key {
-            let mut char_buf = [0u8; 4];
-            let encoded = c.encode_utf8(&mut char_buf);
-            validate_utf8_for_key_event(encoded)?;
-            ghostty_key_event_set_utf8(event_guard.0.as_ptr(), encoded.as_ptr(), encoded.len());
+            if !event.modifiers.ctrl && !event.modifiers.super_key {
+                let mut char_buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut char_buf);
+                validate_utf8_for_key_event(encoded)?;
+                ghostty_key_event_set_utf8(event_guard.0.as_ptr(), encoded.as_ptr(), encoded.len());
+            }
         }
     }
 

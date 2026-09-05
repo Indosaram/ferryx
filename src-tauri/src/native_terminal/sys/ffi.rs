@@ -147,6 +147,7 @@ extern "C" {
     pub fn ghostty_key_event_set_action(event: GhosttyKeyEvent, action: c_int);
     pub fn ghostty_key_event_set_key(event: GhosttyKeyEvent, key: c_int);
     pub fn ghostty_key_event_set_mods(event: GhosttyKeyEvent, mods: u16);
+    pub fn ghostty_key_event_set_unshifted_codepoint(event: GhosttyKeyEvent, codepoint: u32);
     pub fn ghostty_key_event_set_utf8(event: GhosttyKeyEvent, utf8: *const u8, len: usize);
 
     pub fn ghostty_key_encoder_new(

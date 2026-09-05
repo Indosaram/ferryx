@@ -55,6 +55,28 @@ fn test_key_encode_plain_and_mode_sensitive_arrow_keys() {
     let key_f12 = KeyEvent::new(KeyCode::F12, KeyAction::Press);
     let bytes_f12 = term.encode_key(&key_f12).expect("encode F12");
     assert_eq!(bytes_f12, b"\x1b[24~", "F12 must encode to \\x1b[24~");
+
+    // 8. Ctrl+L in legacy mode: \x0c
+    let key_ctrl_l = KeyEvent {
+        key: KeyCode::Character('l'),
+        action: KeyAction::Press,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            ..Default::default()
+        },
+        utf8: None,
+    };
+    let bytes_ctrl_l = term.encode_key(&key_ctrl_l).expect("encode Ctrl+L");
+    assert_eq!(bytes_ctrl_l, b"\x0c", "Ctrl+L must encode to \\x0c in legacy mode");
+
+    // 9. Ctrl+L with Kitty keyboard protocol: \x1b[108;5u
+    let mut term_kitty = NativeTerminal::new(80, 24).expect("create terminal");
+    term_kitty.feed_str("\x1b[>1u").expect("enable kitty keyboard protocol");
+    let bytes_ctrl_l_kitty = term_kitty.encode_key(&key_ctrl_l).expect("encode Ctrl+L in kitty mode");
+    assert_eq!(
+        bytes_ctrl_l_kitty, b"\x1b[108;5u",
+        "Ctrl+L must encode to \\x1b[108;5u in Kitty keyboard mode"
+    );
 }
 
 #[test]
