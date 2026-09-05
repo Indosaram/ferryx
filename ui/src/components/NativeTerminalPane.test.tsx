@@ -269,6 +269,55 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     }
   });
 
+  it("allows clicking the attach error banner to retry connection immediately", async () => {
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      let attempts = 0;
+      let shouldFail = true;
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_attach") {
+          attempts += 1;
+          if (shouldFail) {
+            throw new Error("mount attach failed");
+          }
+          return undefined;
+        }
+        return undefined;
+      });
+
+      const session = createSession("term-session-retry-click");
+      const { queryByRole } = render(
+        <NativeTerminalPane sessionId="term-session-retry-click" session={session} />,
+      );
+
+      // Advance through initial failure and retries to surface the error banner (750ms)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(750);
+      });
+
+      const alert = queryByRole("alert");
+      expect(alert).toBeInTheDocument();
+      expect(alert).toHaveTextContent("Failed to attach native terminal");
+
+      // Now backend is ready, clicking the banner retries immediately
+      shouldFail = false;
+      await act(async () => {
+        fireEvent.click(alert!);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+
+      expect(queryByRole("alert")).not.toBeInTheDocument();
+      expect(attempts).toBeGreaterThanOrEqual(4);
+    } finally {
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("displays an accessible error banner when bounds IPC fails and does not show detach errors on unmount", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const session = createSession("term-session-1");
@@ -358,6 +407,12 @@ describe("snapBoundsToDevicePixels", () => {
       width: 800,
       height: 600,
     });
+  });
+
+  it("clamps negative origin coordinates to 0 to prevent compositor layout errors", () => {
+    expect(
+      snapBoundsToDevicePixels({ x: -0.4, y: -0.2, width: 800, height: 600 }, 1),
+    ).toEqual({ x: 0, y: 0, width: 800, height: 600 });
   });
 
   it("snaps the fractional origin a later split pane inherits", () => {

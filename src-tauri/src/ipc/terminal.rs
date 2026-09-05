@@ -317,6 +317,11 @@ pub struct SpawnTerminalRequest {
     pub shell: Option<String>,
     #[serde(default)]
     pub startup: Option<TerminalStartup>,
+    /// Spawn inheriting the live working directory of an existing backend session so
+    /// split/restore paths do not need a separate getTerminalCwd round trip first.
+    /// Ignored when `cwd` is explicitly provided.
+    #[serde(default)]
+    pub inherit_from_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,7 +581,28 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let registry = (*registry).clone();
     let workspace_id = request.workspace_id.clone();
     let identity = request.worktree.clone();
-    let requested_cwd = request.cwd.clone();
+    // Inherit the live CWD of an existing backend session when the frontend did not
+    // pin one, removing the separate getTerminalCwd IPC hop on split/restore paths.
+    let requested_cwd = match (request.cwd.clone(), request.inherit_from_session_id.clone()) {
+        (Some(cwd), _) => Some(cwd),
+        (None, Some(inherit_session_id)) => {
+            if let Some(cached) = get_cached_cwd(&inherit_session_id) {
+                Some(cached)
+            } else {
+                match daemon_client.describe_session(&inherit_session_id).await {
+                    Ok(details) => details.cwd.map(PathBuf::from),
+                    Err(err) => {
+                        eprintln!(
+                            "[cmd_terminal_spawn] stage=inherit_cwd failed session={inherit_session_id} code={:?}",
+                            err.code
+                        );
+                        None
+                    }
+                }
+            }
+        }
+        (None, None) => None,
+    };
 
     let (worktree_manager, worktree_root) = match run_blocking(move || {
         registry
@@ -707,6 +733,49 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         daemon_epoch: spawn_result.epoch.to_string(),
         session: spawn_result.session,
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnTerminalBatchRequest {
+    pub spawns: Vec<SpawnTerminalRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnTerminalBatchEntry {
+    pub index: usize,
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Batch spawn for workspace restore/recovery: collapses N per-session spawn
+/// invocations into one IPC round trip. Each entry spawns independently and
+/// reports its own failure without aborting the rest of the batch.
+#[tauri::command]
+pub async fn cmd_terminal_spawn_batch<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: SpawnTerminalBatchRequest,
+) -> Result<Vec<SpawnTerminalBatchEntry>, IpcError> {
+    let mut entries = Vec::with_capacity(request.spawns.len());
+    for (index, spawn) in request.spawns.into_iter().enumerate() {
+        match cmd_terminal_spawn(app.clone(), daemon_client.clone(), registry.clone(), spawn).await {
+            Ok(response) => entries.push(SpawnTerminalBatchEntry {
+                index,
+                session_id: Some(response.session_id),
+                error: None,
+            }),
+            Err(err) => entries.push(SpawnTerminalBatchEntry {
+                index,
+                session_id: None,
+                error: Some(err.message),
+            }),
+        }
+    }
+    Ok(entries)
 }
 
 #[tauri::command]

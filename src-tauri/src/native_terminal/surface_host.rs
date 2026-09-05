@@ -32,6 +32,19 @@ pub const NATIVE_TERMINAL_AGENT_STATE_EVENT: &str = "native_terminal_agent_state
 /// authoritative: screen rules only infer, so once a session speaks for itself the inferred
 /// source must never overwrite it.
 pub const AGENT_EXTENSION_MANIFEST_ID: &str = "ferryx-extension";
+
+/// Rows of slack below which the viewport counts as bottom-locked: trackpad inertia
+/// routinely parks the viewport 1-2 rows short of `.active`, and a resize there must
+/// re-lock to the bottom rather than pin the near-bottom row.
+const BOTTOM_LOCK_TOLERANCE_ROWS: u64 = 2;
+/// Minimum spacing between agent screen detections while a pane is attached and streaming.
+const AGENT_DETECT_INTERVAL_ATTACHED: std::time::Duration = std::time::Duration::from_millis(50);
+/// Backgrounded panes only need state transitions (not frames), so detection can be coarser
+/// while still bounding CPU under a chatty background pane (perf audit finding NT-02).
+const AGENT_DETECT_INTERVAL_DETACHED: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long the pump waits for the next output chunk before treating a burst as drained and
+/// re-running any detection the throttle skipped (trailing-edge detect).
+const AGENT_DETECT_TRAILING_IDLE: std::time::Duration = std::time::Duration::from_millis(60);
 pub const NATIVE_TERMINAL_SCROLLBAR_EVENT: &str = "native_terminal_scrollbar";
 pub const NATIVE_TERMINAL_FOCUS_EVENT: &str = "native_terminal_focus";
 
@@ -271,6 +284,10 @@ pub struct NativeTerminalSession {
     pub update_sender: tokio::sync::watch::Sender<()>,
     pub render_coordinator: Arc<RenderScheduleCoordinator>,
     pub last_agent_activity: Option<crate::agent_detect::AgentActivity>,
+    pub last_agent_detect_at: Option<std::time::Instant>,
+    /// Set when the throttle skipped detection on an output chunk; the pump re-runs a forced
+    /// detection once the burst drains so the trailing frame still produces transitions.
+    pub agent_detect_pending: bool,
     pub last_scrollbar: Option<NativeTerminalScrollbarPayload>,
     pub scrollbar_overlay: ScrollbarOverlayState,
     pub attention_frame: bool,
@@ -388,6 +405,7 @@ impl Default for NativeTerminalSurfaceHostState {
 fn take_native_terminal_events(
     session: &mut NativeTerminalSession,
     session_id: &str,
+    force_detect: bool,
 ) -> Vec<NativeTerminalEvent> {
     let mut events = Vec::with_capacity(3);
     if session.terminal.take_title_changed() {
@@ -418,37 +436,57 @@ fn take_native_terminal_events(
         return events;
     }
 
-    if let Ok(snapshot) = session.terminal.render_snapshot() {
-        let rows = (0..snapshot.rows as usize)
-            .map(|r| snapshot.row_text(r))
-            .collect();
-        let title = session.terminal.title().unwrap_or_default();
-        let input = crate::agent_detect::ScreenInput { rows, title };
-        let engine = crate::agent_detect::default_engine();
-        if let Some(detection) = engine.detect(&input, session.last_agent_activity) {
-            if session.last_agent_activity != Some(detection.state) {
-                session.last_agent_activity = Some(detection.state);
-                let state_str = match detection.state {
-                    crate::agent_detect::AgentActivity::Working => "working",
-                    crate::agent_detect::AgentActivity::Blocked => "blocked",
-                    crate::agent_detect::AgentActivity::Idle => "idle",
-                };
-                tracing::info!(
-                    session_id,
-                    state = state_str,
-                    rule_id = %detection.rule_id,
-                    manifest_id = %detection.manifest_id,
-                    "agent screen detection state change"
-                );
-                events.push(NativeTerminalEvent::AgentState(
-                    NativeTerminalAgentStatePayload {
-                        session_id: session_id.to_string(),
-                        state: state_str.to_string(),
-                        rule_id: detection.rule_id,
-                        manifest_id: detection.manifest_id,
-                        provider_session: None,
-                    },
-                ));
+    // Agent screen detection: throttled on streaming output chunks to avoid expensive
+    // O(rows × cols) snapshot allocations and regex evaluation on every rapid burst chunk.
+    // Attached panes re-run a skipped detection once the burst drains (trailing-edge detect
+    // in the pump task, keyed on agent_detect_pending); backgrounded panes use a coarser
+    // interval because they only need state transitions, not frames.
+    let detect_interval = if session.surface_attached {
+        AGENT_DETECT_INTERVAL_ATTACHED
+    } else {
+        AGENT_DETECT_INTERVAL_DETACHED
+    };
+    let should_detect = force_detect
+        || match session.last_agent_detect_at {
+            None => true,
+            Some(last) => last.elapsed() >= detect_interval,
+        };
+    session.agent_detect_pending = !should_detect;
+
+    if should_detect {
+        session.last_agent_detect_at = Some(std::time::Instant::now());
+        if let Ok(snapshot) = session.terminal.render_snapshot() {
+            let rows = (0..snapshot.rows as usize)
+                .map(|r| snapshot.row_text(r))
+                .collect();
+            let title = session.terminal.title().unwrap_or_default();
+            let input = crate::agent_detect::ScreenInput { rows, title };
+            let engine = crate::agent_detect::default_engine();
+            if let Some(detection) = engine.detect(&input, session.last_agent_activity) {
+                if session.last_agent_activity != Some(detection.state) {
+                    session.last_agent_activity = Some(detection.state);
+                    let state_str = match detection.state {
+                        crate::agent_detect::AgentActivity::Working => "working",
+                        crate::agent_detect::AgentActivity::Blocked => "blocked",
+                        crate::agent_detect::AgentActivity::Idle => "idle",
+                    };
+                    tracing::info!(
+                        session_id,
+                        state = state_str,
+                        rule_id = %detection.rule_id,
+                        manifest_id = %detection.manifest_id,
+                        "agent screen detection state change"
+                    );
+                    events.push(NativeTerminalEvent::AgentState(
+                        NativeTerminalAgentStatePayload {
+                            session_id: session_id.to_string(),
+                            state: state_str.to_string(),
+                            rule_id: detection.rule_id,
+                            manifest_id: detection.manifest_id,
+                            provider_session: None,
+                        },
+                    ));
+                }
             }
         }
     }
@@ -806,6 +844,8 @@ impl NativeTerminalSurfaceHostState {
                         update_sender,
                         render_coordinator,
                         last_agent_activity: None,
+                        last_agent_detect_at: None,
+                        agent_detect_pending: false,
                         last_scrollbar: None,
                         scrollbar_overlay: ScrollbarOverlayState::default(),
                         attention_frame: false,
@@ -824,14 +864,22 @@ impl NativeTerminalSurfaceHostState {
 
         let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
             let prior_scrollbar = session.terminal.scrollbar().ok();
-            let prior_scroll_ratio = prior_scrollbar.and_then(|sb| {
+            let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
                 let max_offset = sb.total.saturating_sub(sb.len);
-                if max_offset > 0 && sb.offset < max_offset {
-                    Some(sb.offset as f64 / max_offset as f64)
-                } else {
-                    None
-                }
+                max_offset == 0 || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
             });
+            let prior_scroll_ratio = if is_at_bottom {
+                None
+            } else {
+                prior_scrollbar.and_then(|sb| {
+                    let max_offset = sb.total.saturating_sub(sb.len);
+                    if max_offset > 0 {
+                        Some(sb.offset as f64 / max_offset as f64)
+                    } else {
+                        None
+                    }
+                })
+            };
 
             session.terminal.resize(
                 layout.cols,
@@ -850,6 +898,10 @@ impl NativeTerminalSurfaceHostState {
                             .scroll_viewport(crate::native_terminal::ScrollViewport::Row(target_offset));
                     }
                 }
+            } else {
+                let _ = session
+                    .terminal
+                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
             }
             true
         } else {
@@ -923,14 +975,23 @@ impl NativeTerminalSurfaceHostState {
             .layout(metrics)?;
             let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
                 let prior_scrollbar = session.terminal.scrollbar().ok();
-                let prior_scroll_ratio = prior_scrollbar.and_then(|sb| {
+                let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
                     let max_offset = sb.total.saturating_sub(sb.len);
-                    if max_offset > 0 && sb.offset < max_offset {
-                        Some(sb.offset as f64 / max_offset as f64)
-                    } else {
-                        None
-                    }
+                    max_offset == 0
+                        || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
                 });
+                let prior_scroll_ratio = if is_at_bottom {
+                    None
+                } else {
+                    prior_scrollbar.and_then(|sb| {
+                        let max_offset = sb.total.saturating_sub(sb.len);
+                        if max_offset > 0 {
+                            Some(sb.offset as f64 / max_offset as f64)
+                        } else {
+                            None
+                        }
+                    })
+                };
 
                 session.terminal.resize(
                     layout.cols,
@@ -949,6 +1010,10 @@ impl NativeTerminalSurfaceHostState {
                                 .scroll_viewport(crate::native_terminal::ScrollViewport::Row(target_offset));
                         }
                     }
+                } else {
+                    let _ = session
+                        .terminal
+                        .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 }
                 true
             } else {
@@ -1027,6 +1092,9 @@ impl NativeTerminalSurfaceHostState {
                         )?;
                     }
                 }
+                let _ = session
+                    .terminal
+                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 session.last_sequence = attachment.end_sequence;
                 session.render_coordinator.consume_render();
                 (
@@ -1050,6 +1118,7 @@ impl NativeTerminalSurfaceHostState {
                     &attachment.history,
                     &attachment.history_segments,
                 )?;
+                let _ = terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 // A fresh session created by an attach owns a surface by definition.
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
@@ -1068,6 +1137,8 @@ impl NativeTerminalSurfaceHostState {
                         update_sender: update_sender.clone(),
                         render_coordinator: Arc::clone(&render_coordinator),
                         last_agent_activity: None,
+                        last_agent_detect_at: None,
+                        agent_detect_pending: false,
                         last_scrollbar: None,
                         scrollbar_overlay: ScrollbarOverlayState::default(),
                         attention_frame: false,
@@ -1080,7 +1151,7 @@ impl NativeTerminalSurfaceHostState {
             let session = sessions
                 .get_mut(session_id)
                 .ok_or(NativeTerminalError::NoValue)?;
-            let events = take_native_terminal_events(session, session_id);
+            let events = take_native_terminal_events(session, session_id, true);
             (update_sender, render_coordinator, events)
         };
 
@@ -1096,7 +1167,36 @@ impl NativeTerminalSurfaceHostState {
         let session_id_owned = session_id.to_string();
         let app_handle = app;
         let pump_task = tokio::spawn(async move {
-            while let Some(msg) = messages.recv().await {
+            loop {
+                let msg = match
+                    tokio::time::timeout(AGENT_DETECT_TRAILING_IDLE, messages.recv()).await
+                {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => break,
+                    Err(_) => {
+                        // Burst went quiet: re-run any detection the throttle skipped so the
+                        // final frame of a burst (often the agent's last word before it blocks
+                        // on input) still produces a state transition.
+                        let (detected, events) = {
+                            let mut sessions_guard = sessions.lock();
+                            match sessions_guard.get_mut(&session_id_owned) {
+                                Some(sess) if sess.agent_detect_pending => (
+                                    true,
+                                    take_native_terminal_events(sess, &session_id_owned, true),
+                                ),
+                                Some(_) => (false, Vec::new()),
+                                None => (false, Vec::new()),
+                            }
+                        };
+                        for event in events {
+                            emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
+                        }
+                        if detected {
+                            update_sender.send_replace(());
+                        }
+                        continue;
+                    }
+                };
                 match msg {
                     DaemonStreamMessage::Output { sequence, data, .. } => {
                         let (session_exists, events) = {
@@ -1110,7 +1210,7 @@ impl NativeTerminalSurfaceHostState {
                                     );
                                 }
                                 sess.last_sequence = Some(sequence);
-                                (true, take_native_terminal_events(sess, &session_id_owned))
+                                (true, take_native_terminal_events(sess, &session_id_owned, false))
                             } else {
                                 (false, Vec::new())
                             }
@@ -1167,7 +1267,28 @@ impl NativeTerminalSurfaceHostState {
                                         "Failed to feed recovery history to native terminal"
                                     );
                                 }
-                                (true, take_native_terminal_events(sess, &session_id_owned))
+                                // feed_attachment_history leaves the grid at the last
+                                // segment's dimensions; restore the pane's layout size so the
+                                // Bottom lock below applies to the on-screen grid.
+                                if let Some(layout) = sess.layout {
+                                    if let Ok(dims) = sess.terminal.dimensions() {
+                                        if dims != (layout.cols, layout.rows) {
+                                            let metrics = sess.cell_metrics.unwrap_or_else(
+                                                font_manager::derived_cell_metrics,
+                                            );
+                                            let _ = sess.terminal.resize(
+                                                layout.cols,
+                                                layout.rows,
+                                                metrics.width_px,
+                                                metrics.height_px,
+                                            );
+                                        }
+                                    }
+                                }
+                                let _ = sess
+                                    .terminal
+                                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                                (true, take_native_terminal_events(sess, &session_id_owned, true))
                             } else {
                                 (false, Vec::new())
                             }
@@ -1184,7 +1305,10 @@ impl NativeTerminalSurfaceHostState {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
                                 sess.terminal.reset();
-                                (true, take_native_terminal_events(sess, &session_id_owned))
+                                let _ = sess
+                                    .terminal
+                                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                                (true, take_native_terminal_events(sess, &session_id_owned, true))
                             } else {
                                 (false, Vec::new())
                             }
@@ -1274,6 +1398,9 @@ impl NativeTerminalSurfaceHostState {
                 session.layout = None;
                 session.logical_bounds = None;
                 session.surface_attached = false;
+                // Backgrounding is a state-resync point: let the first post-detach chunk
+                // detect immediately instead of waiting out the attached-pane interval.
+                session.last_agent_detect_at = None;
                 session.render_coordinator.consume_render();
             }
         }
@@ -1421,6 +1548,8 @@ impl NativeTerminalSurfaceHostState {
                         update_sender,
                         render_coordinator,
                         last_agent_activity: None,
+                        last_agent_detect_at: None,
+                        agent_detect_pending: false,
                         last_scrollbar: None,
                         scrollbar_overlay: ScrollbarOverlayState::default(),
                         attention_frame: false,
@@ -2594,6 +2723,234 @@ mod tests {
             "viewport scroll ratio should be preserved near 0.5, got {}",
             ratio
         );
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn resize_keeps_viewport_at_bottom_when_at_bottom() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-bottom-lock-session";
+        let cell_metrics = font_manager::derived_cell_metrics();
+
+        let request = |cols, rows| NativeTerminalBoundsRequest {
+            session_id: session_id.to_string(),
+            bounds: LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: cols as f64 * cell_metrics.width_px as f64,
+                height: rows as f64 * cell_metrics.height_px as f64,
+                scale_factor: 1.0,
+            },
+        };
+
+        state
+            .prepare_session_layout(request(80, 24), cell_metrics)
+            .expect("create initial grid");
+
+        // Feed enough lines to create a substantial scrollback buffer
+        let mut text = String::new();
+        for i in 0..100 {
+            text.push_str(&format!("Line number {}\r\n", i));
+        }
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: text.into_bytes(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon session");
+
+        // Resize columns and rows (e.g. 80x24 -> 120x30, simulating closing a pane or widening window)
+        state
+            .prepare_session_layout(request(120, 30), cell_metrics)
+            .expect("resize grid");
+
+        let assert_bottom_locked = |label: &str| {
+            let sb = {
+                let sessions = state.sessions.lock();
+                let session = sessions.get(session_id).unwrap();
+                session.terminal.scrollbar().unwrap()
+            };
+            let max_offset = sb.total.saturating_sub(sb.len);
+            assert!(max_offset > 0, "{label}: scrollback must exist");
+            assert_eq!(
+                sb.offset, max_offset,
+                "{label}: viewport must remain locked at bottom (offset == max_offset)"
+            );
+        };
+        assert_bottom_locked("combined cols+rows grow");
+
+        // Width-only grow (horizontal pane close in a split)
+        state
+            .prepare_session_layout(request(160, 30), cell_metrics)
+            .expect("width-only resize");
+        assert_bottom_locked("width-only grow");
+
+        // Height shrink pushes rows into scrollback (opposite max_offset direction)
+        state
+            .prepare_session_layout(request(160, 12), cell_metrics)
+            .expect("height shrink");
+        assert_bottom_locked("height shrink");
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn attached_throttled_burst_still_emits_trailing_state_transition() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "throttled-attached-session";
+        let observed_states = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed_states);
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::AgentState(payload) = event {
+                observed_for_sink.lock().push(payload.state);
+            }
+        }));
+
+        let (tx, messages) = tokio::sync::mpsc::channel(4);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"Working (esc to interrupt)\r\n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon history");
+        assert_eq!(observed_states.lock().clone(), vec!["working".to_string()]);
+
+        // Burst: two chunks inside the throttle window; the second carries the blocked frame.
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 2,
+            data: b"more output\r\n".to_vec().into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send burst chunk 1");
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 3,
+            data: b"\x1b[2J\x1b[HAction Required: allow command?\r\npress enter to confirm or esc to cancel\r\n"
+                .to_vec()
+                .into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send burst chunk 2");
+
+        // The throttle skips both chunks; the pump's trailing-edge detect must still emit
+        // the blocked transition once the burst drains.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while observed_states.lock().len() < 2 && std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            observed_states.lock().clone(),
+            vec!["working".to_string(), "blocked".to_string()],
+            "an attached pane's final burst frame must still produce a state transition"
+        );
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn lagged_recovery_restores_grid_to_pane_layout_dimensions() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "lagged-dims-restore-session";
+        let cell_metrics = font_manager::derived_cell_metrics();
+
+        // Create the pane layout first so the session exists with layout (120, 30).
+        state
+            .prepare_session_layout(
+                NativeTerminalBoundsRequest {
+                    session_id: session_id.to_string(),
+                    bounds: LogicalBounds {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 120.0 * cell_metrics.width_px as f64,
+                        height: 30.0 * cell_metrics.height_px as f64,
+                        scale_factor: 1.0,
+                    },
+                },
+                cell_metrics,
+            )
+            .expect("create pane layout");
+
+        let (tx, messages) = tokio::sync::mpsc::channel(4);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"seed\r\n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach daemon session");
+
+        // Lagged recovery whose last history segment was recorded at a much narrower size;
+        // feed_attachment_history resizes the grid through each segment and leaves it at the
+        // last one (40x10). The handler must restore the pane layout size (120x30) before
+        // locking the viewport to the bottom, otherwise the bottom lock applies to the
+        // wrong grid.
+        tx.send(DaemonStreamMessage::Lagged {
+            session_id: session_id.into(),
+            requested_after_sequence: 1,
+            available_from_sequence: 2,
+            start_sequence: Some(2),
+            end_sequence: Some(3),
+            history: std::borrow::Cow::Borrowed(b"replayed at narrow width\r\n"),
+            segments: vec![crate::daemon::protocol::HistorySegmentWire {
+                cols: Some(40),
+                rows: Some(10),
+                bytes: b"replayed at narrow width\r\n".to_vec(),
+            }],
+        })
+        .await
+        .expect("send lagged recovery");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let dims = {
+                let sessions = state.sessions.lock();
+                let session = sessions.get(session_id).unwrap();
+                session.terminal.dimensions().unwrap()
+            };
+            if dims == (120, 30) || std::time::Instant::now() >= deadline {
+                assert_eq!(
+                    dims, (120, 30),
+                    "lagged recovery must restore the pane layout grid dimensions"
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
 
         state.teardown();
     }

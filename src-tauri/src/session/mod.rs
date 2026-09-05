@@ -182,7 +182,7 @@ pub fn save_session_to_path(
         })?;
     }
 
-    let serialized = serde_json::to_string_pretty(session).map_err(|e| {
+    let serialized = serde_json::to_string(session).map_err(|e| {
         IpcError::new(
             IpcErrorCode::ParseError,
             format!("Failed to serialize session state: {}", e),

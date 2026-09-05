@@ -380,10 +380,10 @@ export function snapBoundsToDevicePixels(
   if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return bounds;
 
   const snapEdge = (value: number) => Math.round(value * scaleFactor) / scaleFactor;
-  const left = snapEdge(bounds.x);
-  const top = snapEdge(bounds.y);
-  const right = snapEdge(bounds.x + bounds.width);
-  const bottom = snapEdge(bounds.y + bounds.height);
+  const left = Math.max(0, snapEdge(bounds.x));
+  const top = Math.max(0, snapEdge(bounds.y));
+  const right = Math.max(left, snapEdge(bounds.x + bounds.width));
+  const bottom = Math.max(top, snapEdge(bounds.y + bounds.height));
 
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
@@ -487,6 +487,11 @@ export function NativeTerminalPane({
   const visible = contextVisible;
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const retryAttachRef = useRef<(() => void) | null>(null);
+
+  const retryAttach = useCallback(() => {
+    retryAttachRef.current?.();
+  }, []);
   const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
   const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
   const lastKillLineCtrlCRef = useRef(0);
@@ -1505,6 +1510,7 @@ export function NativeTerminalPane({
     let lastGeometry: GeometryState | null = null;
     let inFlight = false;
     let pendingGeometry: GeometryState | null = null;
+    let isAttached = false;
 
     const dispatchBounds = (nextGeometry: GeometryState) => {
       if (!isSubscribed) return;
@@ -1626,6 +1632,7 @@ export function NativeTerminalPane({
       try {
         await performAttach(targetSessionId, retryCount > 0);
         if (!isSubscribed) return;
+        isAttached = true;
         switchDebug("terminal.surface.attach.complete", {
           localSessionId: sessionId,
           backendSessionId: targetSessionId,
@@ -1640,15 +1647,9 @@ export function NativeTerminalPane({
         } else {
           restoreFocusIfLost();
         }
-
-        if (typeof ResizeObserver !== "undefined" && !observer) {
-          observer = new ResizeObserver(() => {
-            reportBounds();
-          });
-          observer.observe(element);
-        }
       } catch (error: unknown) {
         if (!isSubscribed) return;
+        isAttached = false;
         switchDebug("terminal.surface.attach.error", {
           localSessionId: sessionId,
           backendSessionId: targetSessionId,
@@ -1671,9 +1672,34 @@ export function NativeTerminalPane({
       }
     };
 
+    retryAttachRef.current = () => {
+      if (!isSubscribed) return;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      void attemptAttach(0);
+    };
+
+    if (typeof ResizeObserver !== "undefined" && !observer) {
+      observer = new ResizeObserver(() => {
+        if (isAttached) {
+          reportBounds();
+        } else {
+          if (retryTimer) {
+            clearTimeout(retryTimer);
+            retryTimer = null;
+          }
+          void attemptAttach(0);
+        }
+      });
+      observer.observe(element);
+    }
+
     void attemptAttach(0);
 
     return () => {
+      retryAttachRef.current = null;
       if (retryTimer) {
         clearTimeout(retryTimer);
       }
@@ -1773,6 +1799,9 @@ export function NativeTerminalPane({
       }}
       onPointerDown={(event) => {
         if (!visible) return;
+        if (error) {
+          retryAttach();
+        }
         triggerScrollbarReveal();
         const geoViewport = viewportRef.current;
         if (geoViewport) {
@@ -2067,12 +2096,18 @@ export function NativeTerminalPane({
         ) : null}
       </div>
       {error ? (
-        <div
+        <button
+          type="button"
           role="alert"
-          className="pointer-events-none absolute bottom-3 right-3 max-w-error rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive shadow-sm"
+          onClick={(event) => {
+            event.stopPropagation();
+            retryAttach();
+          }}
+          title="Click to retry connecting terminal"
+          className="pointer-events-auto cursor-pointer absolute bottom-3 right-3 max-w-error rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive shadow-sm hover:bg-destructive/20 transition-colors"
         >
           {error}
-        </div>
+        </button>
       ) : null}
     </div>
   );

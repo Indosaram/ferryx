@@ -120,6 +120,10 @@ pub enum DaemonRequest {
         repo_root: String,
     },
     #[serde(rename_all = "camelCase")]
+    UnregisterWorkspace {
+        workspace_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
     Spawn {
         client_request_id: String,
         workspace_id: String,
@@ -197,7 +201,11 @@ pub enum DaemonRequest {
     /// events. Without it the gateway (which lives in the daemon) has no way to
     /// reach the GUI, so remote-issued selections are silently dropped.
     SubscribeRemoteEvents,
-    UpgradeBinary,
+    #[serde(rename_all = "camelCase")]
+    UpgradeBinary {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_binary_path: Option<String>,
+    },
     PrepareHandover,
     #[serde(rename_all = "camelCase")]
     CommitHandover {
@@ -220,6 +228,8 @@ pub enum DaemonResponse {
         binary_path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binary_mtime_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_version: Option<String>,
     },
     Pong,
     #[serde(rename_all = "camelCase")]
@@ -228,6 +238,7 @@ pub enum DaemonResponse {
         received_version: u32,
     },
     RegisterWorkspaceOk,
+    UnregisterWorkspaceOk,
     #[serde(rename_all = "camelCase")]
     SpawnOk {
         session_id: String,
@@ -811,14 +822,16 @@ mod tests {
             epoch: 777777,
             binary_path: Some("/bin/ferryx".to_string()),
             binary_mtime_ms: Some(1700000000000),
+            daemon_version: Some("2026.902.2".to_string()),
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
         assert!(hs_json.contains(r#""version":3"#));
         assert!(hs_json.contains(r#""binaryPath":"/bin/ferryx""#));
         assert!(hs_json.contains(r#""binaryMtimeMs":1700000000000"#));
+        assert!(hs_json.contains(r#""daemonVersion":"2026.902.2""#));
 
-        // Back-compat: JSON without binary fields deserializes with None
+        // Back-compat: JSON without binary/version fields deserializes with None
         let legacy_hs_json = r#"{"type":"handshakeOk","version":3,"pid":9999,"epoch":777777}"#;
         let legacy_hs: DaemonResponse =
             serde_json::from_str(legacy_hs_json).expect("deserialize legacy handshake");
@@ -826,10 +839,12 @@ mod tests {
             DaemonResponse::HandshakeOk {
                 binary_path,
                 binary_mtime_ms,
+                daemon_version,
                 ..
             } => {
                 assert_eq!(binary_path, None);
                 assert_eq!(binary_mtime_ms, None);
+                assert_eq!(daemon_version, None);
             }
             _ => panic!("Expected HandshakeOk"),
         }
@@ -957,12 +972,38 @@ mod tests {
 
     #[test]
     fn test_upgrade_binary_protocol_serde_roundtrip() {
-        let req = DaemonRequest::UpgradeBinary;
+        let req = DaemonRequest::UpgradeBinary {
+            new_binary_path: None,
+        };
         let json = serde_json::to_string(&req).expect("serialize UpgradeBinary");
         assert_eq!(json, r#"{"type":"upgradeBinary"}"#);
         let deserialized: DaemonRequest =
             serde_json::from_str(&json).expect("deserialize UpgradeBinary");
-        assert!(matches!(deserialized, DaemonRequest::UpgradeBinary));
+        assert!(matches!(
+            deserialized,
+            DaemonRequest::UpgradeBinary {
+                new_binary_path: None
+            }
+        ));
+
+        let req_with_path = DaemonRequest::UpgradeBinary {
+            new_binary_path: Some("/Applications/Ferryx.app/Contents/MacOS/ferryx".to_string()),
+        };
+        let json_with_path =
+            serde_json::to_string(&req_with_path).expect("serialize UpgradeBinary with path");
+        assert!(json_with_path
+            .contains(r#""newBinaryPath":"/Applications/Ferryx.app/Contents/MacOS/ferryx""#));
+        let deserialized_with_path: DaemonRequest =
+            serde_json::from_str(&json_with_path).expect("deserialize UpgradeBinary with path");
+        match deserialized_with_path {
+            DaemonRequest::UpgradeBinary { new_binary_path } => {
+                assert_eq!(
+                    new_binary_path,
+                    Some("/Applications/Ferryx.app/Contents/MacOS/ferryx".to_string())
+                );
+            }
+            _ => panic!("Expected UpgradeBinary"),
+        }
 
         for (variant, expected_type) in [
             (DaemonResponse::UpgradeScheduled, "upgradeScheduled"),

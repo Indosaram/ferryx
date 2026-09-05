@@ -443,7 +443,7 @@ impl LegacyPeer {
                         } => {
                             let _ = tx.send(OutputChunk {
                                 sequence,
-                                bytes: data.into_owned(),
+                                bytes: data.into_owned().into(),
                                 metrics_read_unix_micros,
                             });
                         }

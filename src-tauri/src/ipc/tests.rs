@@ -120,6 +120,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
             client_request_id: None,
             shell: None,
             startup: None,
+            inherit_from_session_id: None,
         },
     )
     .await
@@ -203,6 +204,7 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
             client_request_id: None,
             shell: None,
             startup: None,
+            inherit_from_session_id: None,
         },
     )
     .await
@@ -382,6 +384,7 @@ async fn terminal_global_events_preserve_raw_bytes_and_lifecycle() {
             client_request_id: None,
             shell: None,
             startup: None,
+            inherit_from_session_id: None,
         },
     )
     .await
@@ -459,6 +462,7 @@ async fn terminal_cwd_cache_and_resolution_contract() {
             client_request_id: None,
             shell: None,
             startup: None,
+            inherit_from_session_id: None,
         },
     )
     .await
@@ -518,6 +522,7 @@ async fn terminal_output_batching_coalesces_rapid_bursts() {
             client_request_id: None,
             shell: None,
             startup: None,
+            inherit_from_session_id: None,
         },
     )
     .await
@@ -612,6 +617,62 @@ fn terminal_process_cwd_resolves_accurately() {
 }
 
 #[tokio::test]
+async fn cmd_project_unregister_removes_registry_entry() {
+    let (_dir, daemon_client, server_task) = setup_test_daemon().await;
+    let (_repo, registry) = setup_workspace();
+    assert!(registry.contains("workspace-test"));
+
+    let app = tauri::test::mock_builder()
+        .manage(daemon_client)
+        .manage(registry.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    cmd_project_unregister(
+        app.state::<Arc<DaemonClient>>(),
+        app.state::<WorkspaceRegistry>(),
+        UnregisterProjectRequest {
+            workspace_id: "workspace-test".into(),
+        },
+    )
+    .await
+    .expect("unregister succeeds");
+
+    assert!(!registry.contains("workspace-test"));
+
+    // Unregistering an unknown workspace is an acknowledged no-op, not an error:
+    // the frontend catalog is the source of truth and may already be gone.
+    cmd_project_unregister(
+        app.state::<Arc<DaemonClient>>(),
+        app.state::<WorkspaceRegistry>(),
+        UnregisterProjectRequest {
+            workspace_id: "never-registered".into(),
+        },
+    )
+    .await
+    .expect("unregister unknown id is a no-op");
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn cmd_path_reveal_rejects_nonexistent_path_with_invalid_path_code() {
+    let err = cmd_path_reveal("/definitely/not/a/real/path/orca-lite-probe".to_string())
+        .await
+        .expect_err("nonexistent path must be rejected before any spawn");
+    assert_eq!(err.code, IpcErrorCode::InvalidPath);
+}
+
+#[tokio::test]
+async fn cmd_project_unregister_serializes_camel_case_request() {
+    let request = UnregisterProjectRequest {
+        workspace_id: "ws".into(),
+    };
+    let value = serde_json::to_value(&request).expect("serialize");
+    assert_eq!(value, serde_json::json!({ "workspaceId": "ws" }));
+}
+
+#[tokio::test]
 async fn test_project_registration_then_daemon_spawn() {
     let repo = TempDir::new().expect("repo tempdir");
     run_git(repo.path(), &["init"]).expect("git init");
@@ -658,6 +719,7 @@ async fn test_project_registration_then_daemon_spawn() {
             client_request_id: None,
             shell: None,
             startup: None,
+            inherit_from_session_id: None,
         },
     )
     .await
@@ -699,6 +761,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         cols: Some(80),
         rows: Some(24),
         client_request_id: Some("req-invalid-id".into()),
+        inherit_from_session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -738,6 +801,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         cols: Some(80),
         rows: Some(24),
         client_request_id: Some("req-wrong-key".into()),
+        inherit_from_session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
@@ -808,6 +872,7 @@ async fn agent_resume_startup_cwd_jail_enforcement() {
         cols: Some(80),
         rows: Some(24),
         client_request_id: Some("req-outside-cwd".into()),
+        inherit_from_session_id: None,
         shell: None,
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),

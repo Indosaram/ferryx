@@ -416,6 +416,8 @@ fn install_pty_resize_dispatcher(
     });
 }
 
+/// Optional replay cursor (audit M6): when the caller knows the engine already holds
+/// state through this sequence, attach replays only the tail instead of the full ring.
 #[tauri::command]
 pub async fn cmd_native_terminal_attach<R: Runtime>(
     app: AppHandle<R>,
@@ -424,6 +426,7 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     session_id: String,
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
+    after_sequence: Option<String>,
 ) -> Result<(), IpcError> {
     install_pty_resize_dispatcher(state.inner(), Arc::clone(daemon_client.inner()));
     let logical_bounds = match (bounds, scale_factor) {
@@ -444,7 +447,8 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
         false => {}
     }
 
-    let attachment = match daemon_client.attach(&session_id, None).await {
+    let after_seq = after_sequence.and_then(|s| s.parse::<u64>().ok());
+    let attachment = match daemon_client.attach(&session_id, after_seq).await {
         Ok(attachment) => attachment,
         Err(err) => return Err(err),
     };
@@ -1088,7 +1092,14 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
     let tracking =
         mouse_tracking_enabled_for_attached_session(state.inner(), &session_id).unwrap_or(false);
 
-    if tracking {
+    let is_plain_left_selection = event.button == Some(crate::native_terminal::MouseButton::Left)
+        || (event.button.is_none()
+            && (event.action == MouseAction::Motion || event.action == MouseAction::Release));
+
+    let perform_selection = !tracking || is_plain_left_selection;
+    let perform_tracking = tracking && !is_plain_left_selection;
+
+    if perform_tracking {
         let bytes = match encode_attached_native_mouse(state.inner(), &session_id, &event) {
             Ok(bytes) => bytes,
             Err(err) => return Err(IpcError::internal(err.to_string())),
@@ -1098,7 +1109,9 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
                 return Err(err);
             }
         }
-    } else {
+    }
+
+    if perform_selection {
         if let Err(err) =
             select_attached_native_terminal_with_mouse(state.inner(), &session_id, &event)
         {
@@ -1368,6 +1381,7 @@ mod tests {
             position: MousePosition { x: 10.5, y: 20.25 },
             modifiers: Default::default(),
             size,
+            timestamp_ns: None,
         }
     }
 

@@ -3659,6 +3659,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                 pid: std::process::id(),
                 binary_path: None,
                 binary_mtime_ms: None,
+                daemon_version: None,
             })
             .unwrap()
                 + "\n";

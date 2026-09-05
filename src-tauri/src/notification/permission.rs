@@ -70,7 +70,10 @@ pub mod macos {
     use std::time::Duration;
 
     const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
+    const STATUS_CACHE_TTL: Duration = Duration::from_secs(10);
     static SUBMISSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static STATUS_CACHE: std::sync::Mutex<Option<(NotificationPermissionStatusDto, std::time::Instant)>> =
+        std::sync::Mutex::new(None);
 
     pub fn map_authorization_status(status: UNAuthorizationStatus) -> NotificationAuthorization {
         match status {
@@ -205,7 +208,19 @@ pub mod macos {
 
     impl NotificationPermissionProvider for MacosPermissionProvider {
         fn status(&self) -> NotificationPermissionStatusDto {
-            query_settings().unwrap_or_else(dev_fallback_status)
+            if let Ok(guard) = STATUS_CACHE.lock() {
+                if let Some((cached, instant)) = guard.as_ref() {
+                    if instant.elapsed() < STATUS_CACHE_TTL {
+                        return cached.clone();
+                    }
+                }
+            }
+
+            let fresh = query_settings().unwrap_or_else(dev_fallback_status);
+            if let Ok(mut guard) = STATUS_CACHE.lock() {
+                *guard = Some((fresh.clone(), std::time::Instant::now()));
+            }
+            fresh
         }
 
         fn request(&self) -> NotificationPermissionRequestDto {
@@ -250,6 +265,11 @@ pub mod macos {
             };
 
             let status = query_settings().unwrap_or_else(dev_fallback_status);
+
+            // Invalidate permission cache so next query reads authoritative OS status
+            if let Ok(mut guard) = STATUS_CACHE.lock() {
+                *guard = None;
+            }
 
             NotificationPermissionRequestDto {
                 granted,

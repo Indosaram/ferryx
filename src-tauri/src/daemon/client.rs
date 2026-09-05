@@ -14,7 +14,6 @@ use crate::terminal::TerminalSignal;
 use crate::worktree::WorktreeIdentity;
 use serde_json::json;
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -111,7 +110,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
-            | DaemonRequest::UpgradeBinary
+            | DaemonRequest::UpgradeBinary { .. }
     )
 }
 
@@ -120,6 +119,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Handshake { .. } => "handshake",
         DaemonRequest::Ping => "ping",
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
+        DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
         DaemonRequest::Spawn { .. } => "spawn",
         DaemonRequest::Write { .. } => "write",
         DaemonRequest::Resize { .. } => "resize",
@@ -140,7 +140,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
-        DaemonRequest::UpgradeBinary => "upgradeBinary",
+        DaemonRequest::UpgradeBinary { .. } => "upgradeBinary",
         DaemonRequest::PrepareHandover => "prepareHandover",
         DaemonRequest::CommitHandover { .. } => "commitHandover",
         DaemonRequest::AbortHandover => "abortHandover",
@@ -273,9 +273,18 @@ pub struct DaemonAttachment {
 }
 
 /// Pure function determining whether a daemon self-upgrade should be requested.
-/// Returns `true` if and only if both mtimes are known (`Some`) and the local GUI/on-disk
-/// binary mtime is strictly newer than the running daemon's binary mtime.
-pub fn should_request_upgrade(daemon_mtime: Option<u64>, own_mtime: Option<u64>) -> bool {
+/// Returns `true` if:
+/// 1. `daemon_version` is provided and differs from `own_version` (CalVer package date version)
+/// 2. Or, for legacy daemons without version metadata, fallback to `own_mtime > daemon_mtime`.
+pub fn should_request_upgrade(
+    daemon_version: Option<&str>,
+    own_version: &str,
+    daemon_mtime: Option<u64>,
+    own_mtime: Option<u64>,
+) -> bool {
+    if let Some(daemon_ver) = daemon_version {
+        return daemon_ver != own_version;
+    }
     match (daemon_mtime, own_mtime) {
         (Some(daemon), Some(own)) => own > daemon,
         _ => false,
@@ -286,6 +295,10 @@ pub fn should_request_upgrade(daemon_mtime: Option<u64>, own_mtime: Option<u64>)
 pub struct DaemonClient {
     socket_path: PathBuf,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
+    /// Dedicated control connection for interactive per-session requests (keystroke
+    /// writes, resizes). A slow Spawn holding the shared connection mutex must never
+    /// head-of-line block keystrokes queued behind it (audit H7).
+    interactive_connection: Arc<Mutex<Option<ActiveConnection>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
     upgrade_requested: Arc<AtomicBool>,
 }
@@ -301,6 +314,7 @@ impl DaemonClient {
         Self {
             socket_path: get_socket_path(),
             connection: Arc::new(Mutex::new(None)),
+            interactive_connection: Arc::new(Mutex::new(None)),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
         }
@@ -310,13 +324,17 @@ impl DaemonClient {
         Self {
             socket_path,
             connection: Arc::new(Mutex::new(None)),
+            interactive_connection: Arc::new(Mutex::new(None)),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn upgrade_binary(&self) -> Result<DaemonResponse, IpcError> {
-        self.send_request(DaemonRequest::UpgradeBinary).await
+        let own_binary_path = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_string());
+        self.send_request(DaemonRequest::UpgradeBinary {
+            new_binary_path: own_binary_path,
+        }).await
     }
 
     pub fn epoch(&self) -> Option<u64> {
@@ -358,10 +376,26 @@ impl DaemonClient {
         DaemonStream::connect(format!("127.0.0.1:{port}")).await
     }
 
-    fn maybe_trigger_upgrade_if_stale(&self, daemon_mtime_ms: Option<u64>) {
-        let Some(daemon_mtime) = daemon_mtime_ms else {
+    fn maybe_trigger_upgrade_if_stale(
+        &self,
+        daemon_version: Option<String>,
+        daemon_mtime_ms: Option<u64>,
+    ) {
+        let own_version = env!("CARGO_PKG_VERSION");
+        let own_exe = std::env::current_exe().ok();
+        let own_mtime = own_exe
+            .as_ref()
+            .and_then(|exe| crate::daemon::server::get_file_mtime_ms(exe));
+
+        if !should_request_upgrade(
+            daemon_version.as_deref(),
+            own_version,
+            daemon_mtime_ms,
+            own_mtime,
+        ) {
             return;
-        };
+        }
+
         if self
             .upgrade_requested
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -372,64 +406,62 @@ impl DaemonClient {
 
         let socket_path = self.socket_path.clone();
         let connection_slot = Arc::clone(&self.connection);
-        tokio::spawn(async move {
-            let own_mtime = tokio::task::spawn_blocking(|| {
-                let exe = std::env::current_exe().ok()?;
-                crate::daemon::server::get_file_mtime_ms(&exe)
-            })
-            .await
-            .unwrap_or(None);
+        let own_binary_path = own_exe.map(|p| p.to_string_lossy().to_string());
 
-            if should_request_upgrade(Some(daemon_mtime), own_mtime) {
-                tracing::info!(
-                    "Daemon binary is stale (running daemon mtime: {daemon_mtime}, on-disk GUI mtime: {own_mtime:?}). Sending UpgradeBinary request."
-                );
-                let temp_client = DaemonClient::new_with_socket(socket_path);
-                match temp_client.send_request(DaemonRequest::UpgradeBinary).await {
-                    Ok(DaemonResponse::UpgradeScheduled) => {
-                        tracing::info!("Daemon upgrade scheduled successfully. Invalidating cached connection.");
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                        *connection_slot.lock().await = None;
-                    }
-                    Ok(DaemonResponse::UpgradeNotNeeded) => {
-                        tracing::info!("Daemon reported upgrade not needed.");
-                    }
-                    Ok(DaemonResponse::UpgradeDeferred) => {
-                        tracing::info!(
-                            "Daemon reported upgrade deferred because active sessions are running."
-                        );
-                    }
-                    Ok(DaemonResponse::UpgradeUnsupported) => {
-                        tracing::info!("Daemon reported upgrade unsupported on this platform. Suppressing further upgrade requests.");
-                    }
-                    Ok(other) => {
-                        tracing::warn!("Unexpected response to daemon upgrade request: {other:?}");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to send daemon upgrade request: {e}");
-                    }
+        tokio::spawn(async move {
+            tracing::info!(
+                "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Sending UpgradeBinary request."
+            );
+            let temp_client = DaemonClient::new_with_socket(socket_path);
+            match temp_client
+                .send_request(DaemonRequest::UpgradeBinary {
+                    new_binary_path: own_binary_path,
+                })
+                .await
+            {
+                Ok(DaemonResponse::UpgradeScheduled) => {
+                    tracing::info!(
+                        "Daemon upgrade scheduled successfully. Invalidating cached connection."
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    *connection_slot.lock().await = None;
+                }
+                Ok(DaemonResponse::UpgradeNotNeeded) => {
+                    tracing::info!("Daemon reported upgrade not needed.");
+                }
+                Ok(DaemonResponse::UpgradeDeferred) => {
+                    tracing::info!(
+                        "Daemon reported upgrade deferred because active sessions are running."
+                    );
+                }
+                Ok(DaemonResponse::UpgradeUnsupported) => {
+                    tracing::info!(
+                        "Daemon reported upgrade unsupported on this platform. Suppressing further upgrade requests."
+                    );
+                }
+                Ok(other) => {
+                    tracing::warn!("Unexpected response to daemon upgrade request: {other:?}");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to send daemon upgrade request: {e}");
                 }
             }
         });
     }
 
     async fn connect_or_spawn(&self) -> Result<DaemonStream, IpcError> {
-        match fs::symlink_metadata(&self.socket_path) {
-            Ok(_) => {
-                Self::validate_existing_socket_path(&self.socket_path)?;
-                if let Ok(stream) = Self::connect_socket(&self.socket_path).await {
-                    return Ok(stream);
+        // Bounded retry loop for connection attempts (e.g. during rolling handover when old
+        // daemon unlinks the socket and new daemon binds it).
+        for attempt in 0..5 {
+            if fs::symlink_metadata(&self.socket_path).is_ok() {
+                if Self::validate_existing_socket_path(&self.socket_path).is_ok() {
+                    if let Ok(stream) = Self::connect_socket(&self.socket_path).await {
+                        return Ok(stream);
+                    }
                 }
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(IpcError::new(
-                    IpcErrorCode::IoError,
-                    format!(
-                        "Failed to inspect daemon socket {}: {error}",
-                        self.socket_path.display()
-                    ),
-                ));
+            if attempt < 4 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
 
@@ -533,6 +565,7 @@ impl DaemonClient {
                 version,
                 epoch,
                 binary_mtime_ms,
+                daemon_version,
                 ..
             } => {
                 if version != DAEMON_PROTOCOL_VERSION {
@@ -542,7 +575,7 @@ impl DaemonClient {
                     ));
                 }
                 *self.epoch.write() = Some(epoch);
-                self.maybe_trigger_upgrade_if_stale(binary_mtime_ms);
+                self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
                 Ok(ActiveConnection {
                     reader,
                     writer: write_half,
@@ -566,7 +599,22 @@ impl DaemonClient {
     }
 
     pub async fn send_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
-        let mut conn_guard = self.connection.lock().await;
+        self.send_on_connection(&self.connection, req).await
+    }
+
+    /// Interactive requests (keystroke writes, resizes) use a dedicated connection so
+    /// a long-running request on the shared connection (e.g. a Spawn holding it for
+    /// blocking canonicalize + PTY startup) cannot stall queued keystrokes.
+    async fn send_interactive_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
+        self.send_on_connection(&self.interactive_connection, req).await
+    }
+
+    async fn send_on_connection(
+        &self,
+        slot: &Arc<Mutex<Option<ActiveConnection>>>,
+        req: DaemonRequest,
+    ) -> Result<DaemonResponse, IpcError> {
+        let mut conn_guard = slot.lock().await;
         let retry_safe = request_is_retry_safe(&req);
 
         if let Some(conn) = conn_guard.as_mut() {
@@ -604,6 +652,29 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::RegisterWorkspaceOk => Ok(()),
+            DaemonResponse::Error { message } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    /// Revokes a workspace binding in the daemon (idempotent: an unknown
+    /// workspace unregisters as success). Also terminates every live PTY the
+    /// daemon owns for the workspace, so remote clients cannot keep using an
+    /// already-spawned session of a project the user removed.
+    pub async fn unregister_workspace(&self, workspace_id: &str) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::UnregisterWorkspace {
+                workspace_id: workspace_id.to_string(),
+            })
+            .await?;
+
+        match resp {
+            DaemonResponse::UnregisterWorkspaceOk => Ok(()),
             DaemonResponse::Error { message } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
@@ -815,9 +886,10 @@ impl DaemonClient {
                 DaemonResponse::HandshakeOk {
                     version,
                     binary_mtime_ms,
+                    daemon_version,
                     ..
                 } if version == DAEMON_PROTOCOL_VERSION => {
-                    self.maybe_trigger_upgrade_if_stale(binary_mtime_ms);
+                    self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
                 }
                 DaemonResponse::SubscribeRemoteEventsOk => {}
                 DaemonResponse::Error { message } => {
@@ -905,9 +977,10 @@ impl DaemonClient {
             DaemonResponse::HandshakeOk {
                 version,
                 binary_mtime_ms,
+                daemon_version,
                 ..
             } if version == DAEMON_PROTOCOL_VERSION => {
-                self.maybe_trigger_upgrade_if_stale(binary_mtime_ms);
+                self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
             }
             DaemonResponse::HandshakeOk { version, .. } => {
                 return Err(daemon_protocol_mismatch_error(
@@ -1043,7 +1116,7 @@ impl DaemonClient {
 
     pub async fn write_terminal(&self, session_id: &str, data: Vec<u8>) -> Result<(), IpcError> {
         let resp = self
-            .send_request(DaemonRequest::Write {
+            .send_interactive_request(DaemonRequest::Write {
                 session_id: session_id.to_string(),
                 data,
             })
@@ -1068,7 +1141,7 @@ impl DaemonClient {
         rows: u16,
     ) -> Result<(), IpcError> {
         let resp = self
-            .send_request(DaemonRequest::Resize {
+            .send_interactive_request(DaemonRequest::Resize {
                 session_id: session_id.to_string(),
                 cols,
                 rows,
@@ -1434,6 +1507,7 @@ mod tests {
                 epoch: 999,
                 binary_path: None,
                 binary_mtime_ms: None,
+                daemon_version: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -1510,6 +1584,7 @@ mod tests {
                 epoch: 999,
                 binary_path: None,
                 binary_mtime_ms: None,
+                daemon_version: None,
             };
             let mut hs_json = serde_json::to_string(&hs_resp).unwrap();
             hs_json.push('\n');
@@ -1844,6 +1919,7 @@ mod tests {
                 epoch: 321,
                 binary_path: None,
                 binary_mtime_ms: None,
+                daemon_version: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');
@@ -1955,6 +2031,7 @@ mod tests {
                 epoch: 654,
                 binary_path: None,
                 binary_mtime_ms: None,
+                daemon_version: None,
             };
             let mut handshake_json = serde_json::to_string(&handshake).unwrap();
             handshake_json.push('\n');
@@ -2105,18 +2182,19 @@ mod tests {
 
     #[test]
     fn test_should_request_upgrade_all_branches() {
-        // Own strictly newer than daemon -> true
-        assert!(should_request_upgrade(Some(1000), Some(2000)));
+        // Version mismatch -> true
+        assert!(should_request_upgrade(Some("2026.831.1"), "2026.902.2", None, None));
+        assert!(should_request_upgrade(Some("2026.902.1"), "2026.902.2", None, None));
 
-        // Daemon equal to own -> false
-        assert!(!should_request_upgrade(Some(2000), Some(2000)));
+        // Version identical -> false
+        assert!(!should_request_upgrade(Some("2026.902.2"), "2026.902.2", None, None));
 
-        // Daemon newer than own -> false
-        assert!(!should_request_upgrade(Some(3000), Some(2000)));
-
-        // Either or both None -> false
-        assert!(!should_request_upgrade(None, Some(2000)));
-        assert!(!should_request_upgrade(Some(1000), None));
-        assert!(!should_request_upgrade(None, None));
+        // Version None (legacy daemon) -> fallback to mtime
+        assert!(should_request_upgrade(None, "2026.902.2", Some(1000), Some(2000)));
+        assert!(!should_request_upgrade(None, "2026.902.2", Some(2000), Some(2000)));
+        assert!(!should_request_upgrade(None, "2026.902.2", Some(3000), Some(2000)));
+        assert!(!should_request_upgrade(None, "2026.902.2", None, Some(2000)));
+        assert!(!should_request_upgrade(None, "2026.902.2", Some(1000), None));
+        assert!(!should_request_upgrade(None, "2026.902.2", None, None));
     }
 }

@@ -217,28 +217,22 @@ pub fn clear_cloexec(fd: std::os::unix::io::RawFd) -> Result<(), std::io::Error>
 }
 
 #[cfg(unix)]
-pub fn perform_daemon_exec() -> Result<(), std::io::Error> {
+pub fn perform_daemon_exec_with_path(exe: &std::path::Path) -> Result<(), std::io::Error> {
     use std::os::unix::process::CommandExt;
 
-    let exe = std::env::current_exe()?;
     tracing::info!("Re-executing daemon with binary at: {}", exe.display());
 
-    // Lock file semantics:
-    // The daemon lock is held via `libc::flock` on an open file descriptor (`DaemonLockFile`).
-    // Rust standard library opens files with `FD_CLOEXEC` by default.
-    // When `Command::exec()` is called, the kernel atomically replaces the process image
-    // (preserving the PID). Descriptors marked `FD_CLOEXEC` are closed by the kernel upon `exec()`,
-    // releasing the old flock. The newly exec'd daemon then re-acquires the lock cleanly in `run_server()`.
-    //
-    // Socket semantics:
-    // The existing socket file at `/tmp/rorca-{uid}/daemon.sock` is safely unlinked by the new
-    // daemon's `remove_stale_socket_after_lock` after it acquires the lock. No drop guards delete
-    // the socket prematurely.
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--daemon");
     let err = cmd.exec();
     tracing::error!("Daemon exec failed: {err}");
     Err(err)
+}
+
+#[cfg(unix)]
+pub fn perform_daemon_exec() -> Result<(), std::io::Error> {
+    let exe = std::env::current_exe()?;
+    perform_daemon_exec_with_path(&exe)
 }
 
 fn get_persistent_lock_path() -> Option<PathBuf> {
@@ -1198,6 +1192,7 @@ impl DaemonServer {
                             epoch: self.epoch,
                             binary_path: self.binary_path.clone(),
                             binary_mtime_ms: self.binary_mtime_ms,
+                            daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                         }
                     }
                 }
@@ -1209,6 +1204,12 @@ impl DaemonServer {
                     Ok(()) => DaemonResponse::RegisterWorkspaceOk,
                     Err(e) => DaemonResponse::Error { message: e },
                 },
+                Ok(DaemonRequest::UnregisterWorkspace { workspace_id }) => {
+                    match self.handle_unregister_workspace(&workspace_id).await {
+                        Ok(()) => DaemonResponse::UnregisterWorkspaceOk,
+                        Err(e) => DaemonResponse::Error { message: e },
+                    }
+                }
                 Ok(DaemonRequest::Spawn {
                     client_request_id,
                     workspace_id,
@@ -1388,9 +1389,8 @@ impl DaemonServer {
                             Err(message) => DaemonResponse::Error { message },
                         }
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        // Idempotent close: closing an already closed or non-existent session is a success.
+                        DaemonResponse::CloseOk
                     }
                 }
                 Ok(DaemonRequest::ListSessions) => {
@@ -1586,8 +1586,8 @@ impl DaemonServer {
                         }
                     }
                 }
-                Ok(DaemonRequest::UpgradeBinary) => {
-                    self.handle_upgrade_binary().await
+                Ok(DaemonRequest::UpgradeBinary { new_binary_path }) => {
+                    self.handle_upgrade_binary(new_binary_path).await
                 }
                 Ok(DaemonRequest::PrepareHandover) => {
                     #[cfg(unix)]
@@ -1667,20 +1667,14 @@ impl DaemonServer {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
     pub fn spawn_legacy_handover_daemon(
         self: Arc<Self>,
         legacy_path: PathBuf,
         listener: UnixListener,
+        exe: PathBuf,
     ) {
         tokio::spawn(async move {
-            let exe = match std::env::current_exe() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!("Failed to get current_exe: {e}");
-                    return;
-                }
-            };
-
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--daemon").arg("--handover-from").arg(&legacy_path);
             if let Err(e) = cmd.spawn() {
@@ -1703,24 +1697,43 @@ impl DaemonServer {
     }
 
     #[cfg(unix)]
-    async fn handle_upgrade_binary(self: &Arc<Self>) -> DaemonResponse {
-        let booted_mtime = self.binary_mtime_ms;
-        let on_disk_mtime = tokio::task::spawn_blocking(|| {
-            let exe = std::env::current_exe().ok()?;
-            get_file_mtime_ms(&exe)
-        })
-        .await
-        .unwrap_or(None);
+    async fn handle_upgrade_binary(
+        self: &Arc<Self>,
+        new_binary_path: Option<String>,
+    ) -> DaemonResponse {
+        let target_exe = new_binary_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_else(|| PathBuf::from("ferryx"));
 
-        if !crate::daemon::client::should_request_upgrade(booted_mtime, on_disk_mtime) {
-            return DaemonResponse::UpgradeNotNeeded;
+        // If no explicit new binary path was provided by the GUI, check if upgrade is needed
+        if new_binary_path.is_none() {
+            let booted_mtime = self.binary_mtime_ms;
+            let target_mtime = tokio::task::spawn_blocking({
+                let exe = target_exe.clone();
+                move || get_file_mtime_ms(&exe)
+            })
+            .await
+            .unwrap_or(None);
+
+            if !crate::daemon::client::should_request_upgrade(
+                None,
+                env!("CARGO_PKG_VERSION"),
+                booted_mtime,
+                target_mtime,
+            ) {
+                return DaemonResponse::UpgradeNotNeeded;
+            }
         }
 
         let active_sessions = self.terminal_service.list_sessions();
         if active_sessions.is_empty() {
+            let exe = target_exe.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                if let Err(e) = perform_daemon_exec() {
+                if let Err(e) = perform_daemon_exec_with_path(&exe) {
                     tracing::error!("Failed to re-exec daemon during upgrade: {e}");
                 }
             });
@@ -1739,13 +1752,16 @@ impl DaemonServer {
             }
         };
 
-        Arc::clone(self).spawn_legacy_handover_daemon(legacy_path, listener);
+        Arc::clone(self).spawn_legacy_handover_daemon(legacy_path, listener, target_exe);
 
         DaemonResponse::UpgradeScheduled
     }
 
     #[cfg(not(unix))]
-    async fn handle_upgrade_binary(self: &Arc<Self>) -> DaemonResponse {
+    async fn handle_upgrade_binary(
+        self: &Arc<Self>,
+        _new_binary_path: Option<String>,
+    ) -> DaemonResponse {
         DaemonResponse::UpgradeUnsupported
     }
 
@@ -1760,9 +1776,9 @@ impl DaemonServer {
         }
         let canonical = fs::canonicalize(&path)
             .map_err(|e| format!("Invalid repo_root path '{}': {e}", path.display()))?;
-        if !canonical.is_dir() {
+        if !canonical.is_dir() || canonical.parent().is_none() {
             return Err(format!(
-                "Repo root '{}' is not a directory",
+                "Repo root '{}' is not a valid project directory",
                 canonical.display()
             ));
         }
@@ -1777,6 +1793,36 @@ impl DaemonServer {
         self.workspace_registry
             .register(workspace_id, &canonical)
             .map_err(|e| e.to_string())
+    }
+
+    /// Revokes a workspace binding and terminates every live session the
+    /// daemon owns for it, so remote clients cannot keep using already-spawned
+    /// PTYs of a workspace the user removed. Idempotent: unregistering an
+    /// unknown workspace (e.g. after a daemon restart) succeeds as a no-op.
+    pub async fn handle_unregister_workspace(&self, workspace_id: &str) -> Result<(), String> {
+        self.workspace_registry.unregister(workspace_id);
+
+        let owned_sessions: Vec<String> = self
+            .session_metadata
+            .read()
+            .iter()
+            .filter(|(_, meta)| meta.workspace_id == workspace_id)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in owned_sessions {
+            if self.session_router.is_local_session(&session_id) {
+                self.handle_close(&session_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id)
+            {
+                peer.close(&session_id)
+                    .await
+                    .map_err(|message| format!("failed to close peer session '{session_id}': {message}"))?;
+            }
+            self.release_session_ownership(&session_id);
+        }
+        Ok(())
     }
 
     pub async fn handle_remote_configure(
@@ -2210,34 +2256,48 @@ impl DaemonServer {
     {
         let mut writer = BufWriter::new(writer);
         let mut last_seen_sequence: Option<u64> = None;
+        // Reused serialization buffer: one allocation serves the whole stream instead of a
+        // fresh String per frame (audit H2: optimized payload encoding).
+        let mut frame_buf = Vec::with_capacity(8 * 1024);
+        // A signal drained from `rx` (lag or close) that must be processed by the main
+        // loop on the next iteration instead of inside the batch drain.
+        let mut pending: Option<
+            Result<crate::terminal::output_hub::OutputChunk, broadcast::error::RecvError>,
+        > = None;
 
         loop {
-            let received = match agent_state_rx.as_mut() {
-                Some(state_rx) => tokio::select! {
-                    output = rx.recv() => output,
-                    report = state_rx.recv() => {
-                        if let Ok((reported_session_id, state, agent, provider_session)) = report {
-                            if reported_session_id == session_id {
-                                let msg = DaemonStreamMessage::AgentState {
-                                    session_id: Cow::Borrowed(&session_id),
-                                    state: Cow::Borrowed(&state),
-                                    agent: agent.as_deref().map(Cow::Borrowed),
-                                    provider_session,
-                                };
-                                let mut json = serde_json::to_string(&msg).unwrap();
-                                json.push('\n');
-                                if writer.write_all(json.as_bytes()).await.is_err() {
-                                    break;
-                                }
-                                if writer.flush().await.is_err() {
-                                    break;
+            let received = match pending.take() {
+                Some(received) => received,
+                None => match agent_state_rx.as_mut() {
+                    Some(state_rx) => tokio::select! {
+                        output = rx.recv() => output,
+                        report = state_rx.recv() => {
+                            if let Ok((reported_session_id, state, agent, provider_session)) = report {
+                                if reported_session_id == session_id {
+                                    let msg = DaemonStreamMessage::AgentState {
+                                        session_id: Cow::Borrowed(&session_id),
+                                        state: Cow::Borrowed(&state),
+                                        agent: agent.as_deref().map(Cow::Borrowed),
+                                        provider_session,
+                                    };
+                                    frame_buf.clear();
+                                    if serde_json::to_writer(&mut frame_buf, &msg).is_err() {
+                                        break;
+                                    }
+                                    frame_buf.push(b'\n');
+                                    if writer.write_all(&frame_buf).await.is_err() {
+                                        break;
+                                    }
+                                    if writer.flush().await.is_err() {
+                                        break;
+                                    }
                                 }
                             }
+                            continue;
                         }
-                        continue;
-                    }
+                    },
+                    None => rx.recv().await,
                 },
-                None => rx.recv().await,
             };
 
             match received {
@@ -2246,15 +2306,67 @@ impl DaemonServer {
                         continue;
                     }
                     last_seen_sequence = Some(chunk.sequence);
-                    let msg = DaemonStreamMessage::Output {
-                        session_id: Cow::Borrowed(&session_id),
-                        sequence: chunk.sequence,
-                        data: Cow::Borrowed(&chunk.bytes),
-                        metrics_read_unix_micros: chunk.metrics_read_unix_micros,
-                    };
-                    let mut json = serde_json::to_string(&msg).unwrap();
-                    json.push('\n');
-                    if writer.write_all(json.as_bytes()).await.is_err() {
+                    {
+                        let msg = DaemonStreamMessage::Output {
+                            session_id: Cow::Borrowed(&session_id),
+                            sequence: chunk.sequence,
+                            data: Cow::Borrowed(&chunk.bytes),
+                            metrics_read_unix_micros: chunk.metrics_read_unix_micros,
+                        };
+                        frame_buf.clear();
+                        if serde_json::to_writer(&mut frame_buf, &msg).is_err() {
+                            break;
+                        }
+                        frame_buf.push(b'\n');
+                        if writer.write_all(&frame_buf).await.is_err() {
+                            break;
+                        }
+                    }
+
+                    // Drain-then-flush (audit M5): absorb any immediately-available output
+                    // chunks into the buffered writer before flushing, so a burst costs one
+                    // flush per batch instead of one per chunk. Flushing when the queue is
+                    // empty keeps interactive latency at a single batch interval.
+                    const BATCH_FLUSH_BUDGET_BYTES: usize = 64 * 1024;
+                    let mut batched_bytes = frame_buf.len();
+                    let mut write_failed = false;
+                    while batched_bytes < BATCH_FLUSH_BUDGET_BYTES {
+                        match rx.try_recv() {
+                            Ok(next) => {
+                                if last_seen_sequence.is_some_and(|last| next.sequence <= last) {
+                                    continue;
+                                }
+                                last_seen_sequence = Some(next.sequence);
+                                let msg = DaemonStreamMessage::Output {
+                                    session_id: Cow::Borrowed(&session_id),
+                                    sequence: next.sequence,
+                                    data: Cow::Borrowed(&next.bytes),
+                                    metrics_read_unix_micros: next.metrics_read_unix_micros,
+                                };
+                                frame_buf.clear();
+                                if serde_json::to_writer(&mut frame_buf, &msg).is_err() {
+                                    write_failed = true;
+                                    break;
+                                }
+                                frame_buf.push(b'\n');
+                                batched_bytes += frame_buf.len();
+                                if writer.write_all(&frame_buf).await.is_err() {
+                                    write_failed = true;
+                                    break;
+                                }
+                            }
+                            Err(broadcast::error::TryRecvError::Empty) => break,
+                            Err(broadcast::error::TryRecvError::Closed) => {
+                                pending = Some(Err(broadcast::error::RecvError::Closed));
+                                break;
+                            }
+                            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                pending = Some(Err(broadcast::error::RecvError::Lagged(n)));
+                                break;
+                            }
+                        }
+                    }
+                    if write_failed {
                         break;
                     }
                     if writer.flush().await.is_err() {
@@ -2296,9 +2408,12 @@ impl DaemonServer {
                             history: Cow::Borrowed(&att.snapshot.history),
                             segments,
                         };
-                        let mut json = serde_json::to_string(&msg).unwrap();
-                        json.push('\n');
-                        if writer.write_all(json.as_bytes()).await.is_err() {
+                        frame_buf.clear();
+                        if serde_json::to_writer(&mut frame_buf, &msg).is_err() {
+                            break;
+                        }
+                        frame_buf.push(b'\n');
+                        if writer.write_all(&frame_buf).await.is_err() {
                             break;
                         }
                         if writer.flush().await.is_err() {
@@ -2311,10 +2426,12 @@ impl DaemonServer {
                         session_id: Cow::Borrowed(&session_id),
                         exit_code: None,
                     };
-                    let mut json = serde_json::to_string(&msg).unwrap();
-                    json.push('\n');
-                    let _ = writer.write_all(json.as_bytes()).await;
-                    let _ = writer.flush().await;
+                    frame_buf.clear();
+                    if serde_json::to_writer(&mut frame_buf, &msg).is_ok() {
+                        frame_buf.push(b'\n');
+                        let _ = writer.write_all(&frame_buf).await;
+                        let _ = writer.flush().await;
+                    }
                     break;
                 }
             }
@@ -2358,7 +2475,7 @@ mod tests {
         // Send binary output chunk
         tx.send(OutputChunk {
             sequence: 1,
-            bytes: b"hello pty stream\n".to_vec(),
+            bytes: b"hello pty stream\n".to_vec().into(),
             metrics_read_unix_micros: None,
         })
         .unwrap();
@@ -2390,6 +2507,33 @@ mod tests {
         assert!(line.contains(r#""sessionId":"test-session-123""#));
 
         let _ = pump_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_server_unregister_workspace_is_idempotent_and_revokes_registration() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        let repo_path = repo.path().to_str().unwrap();
+
+        assert!(server
+            .handle_register_workspace("ws-revoke", repo_path)
+            .is_ok());
+        assert!(server.workspace_registry.contains("ws-revoke"));
+
+        // Revocation removes the binding so the remote gateway (which resolves
+        // against this registry) can no longer address the workspace.
+        server
+            .handle_unregister_workspace("ws-revoke")
+            .await
+            .expect("unregister of a registered workspace succeeds");
+        assert!(!server.workspace_registry.contains("ws-revoke"));
+
+        // Idempotent: unregistering an unknown workspace is a success no-op
+        // (e.g. after a daemon restart dropped its registry).
+        server
+            .handle_unregister_workspace("ws-revoke")
+            .await
+            .expect("unregister of an unknown workspace is a no-op success");
     }
 
     #[tokio::test]
@@ -3302,12 +3446,14 @@ mod tests {
                 epoch,
                 binary_path,
                 binary_mtime_ms,
+                daemon_version,
             } => {
                 assert_eq!(version, DAEMON_PROTOCOL_VERSION);
                 assert_eq!(pid, std::process::id());
                 assert_eq!(epoch, server.epoch());
                 assert!(binary_path.is_some());
                 assert!(binary_mtime_ms.is_some());
+                assert!(daemon_version.is_some());
             }
             other => panic!("Expected HandshakeOk, got {other:?}"),
         }
@@ -3626,7 +3772,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_upgrade_binary_idempotent_when_not_needed() {
         let server = Arc::new(DaemonServer::new());
-        let resp = server.handle_upgrade_binary().await;
+        let resp = server.handle_upgrade_binary(None).await;
         // The running test binary is at least as new as itself on disk, so upgrade is not needed
         #[cfg(unix)]
         assert!(matches!(resp, DaemonResponse::UpgradeNotNeeded));

@@ -27,7 +27,10 @@ pub struct HistorySegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputChunk {
     pub sequence: u64,
-    pub bytes: Vec<u8>,
+    /// Shared, immutable chunk payload. Storing the bytes behind an `Arc` lets the buffer,
+    /// the sequence broadcast, and the raw broadcast share a single allocation instead of
+    /// deep-copying a 64 KiB `Vec<u8>` for every subscriber on each publish.
+    pub bytes: Arc<[u8]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_read_unix_micros: Option<u64>,
 }
@@ -93,9 +96,11 @@ impl BoundedBuffer {
 
         let sequence = self.allocate_sequence();
 
+        // Convert the owned payload into a shared allocation exactly once. Every later clone
+        // (buffer retention, sequence broadcast, raw broadcast) is a cheap refcount bump.
         let chunk = OutputChunk {
             sequence,
-            bytes: chunk_bytes,
+            bytes: Arc::from(chunk_bytes),
             metrics_read_unix_micros,
         };
 
@@ -219,12 +224,16 @@ pub fn segment_history(
     ledger: &[ResizePoint],
     after_sequence: Option<u64>,
 ) -> Vec<HistorySegment> {
+    // Both `chunks` and `ledger` are sequence-ordered, so a single advancing cursor over the
+    // ledger yields the segmentation in O(chunks + ledger) with no per-chunk re-scan.
     if chunks.is_empty() {
-        let relevant_points: Vec<&ResizePoint> = match after_sequence {
-            Some(req_seq) => ledger.iter().filter(|p| p.sequence > req_seq).collect(),
-            None => ledger.iter().collect(),
+        // The trailing size is just the last ledger point, provided it sits past the cursor
+        // (the ledger suffix with `sequence > req` is the only part that matters).
+        let last_point = match after_sequence {
+            Some(req_seq) => ledger.last().filter(|p| p.sequence > req_seq),
+            None => ledger.last(),
         };
-        if let Some(last_point) = relevant_points.last() {
+        if let Some(last_point) = last_point {
             return vec![HistorySegment {
                 cols: Some(last_point.cols),
                 rows: Some(last_point.rows),
@@ -234,37 +243,47 @@ pub fn segment_history(
         return Vec::new();
     }
 
-    let first_chunk = chunks[0];
-    let start_point = ledger
-        .iter()
-        .filter(|p| p.sequence <= first_chunk.sequence)
-        .last();
+    let total_bytes: usize = chunks.iter().map(|c| c.bytes.len()).sum();
+    let mut remaining = total_bytes;
 
-    let mut current_size = (start_point.map(|p| p.cols), start_point.map(|p| p.rows));
-    let mut segments: Vec<HistorySegment> = Vec::new();
-    let mut current_bytes = first_chunk.bytes.clone();
-    let mut last_chunk_seq = first_chunk.sequence;
+    let first_chunk = chunks[0];
+
+    // Advance to the last ledger point at or before the first chunk to seed the current size.
+    let mut li = 0usize;
+    let mut current_size: (Option<u16>, Option<u16>) = (None, None);
+    while li < ledger.len() && ledger[li].sequence <= first_chunk.sequence {
+        current_size = (Some(ledger[li].cols), Some(ledger[li].rows));
+        li += 1;
+    }
+
+    let mut segments: Vec<HistorySegment> =
+        Vec::with_capacity(ledger.len().saturating_sub(li) + 1);
+    let mut current_bytes: Vec<u8> = Vec::with_capacity(total_bytes);
+    current_bytes.extend_from_slice(&first_chunk.bytes);
+    remaining -= first_chunk.bytes.len();
 
     for chunk in &chunks[1..] {
-        let intermediate_points: Vec<&ResizePoint> = ledger
-            .iter()
-            .filter(|p| p.sequence > last_chunk_seq && p.sequence <= chunk.sequence)
-            .collect();
+        // Consume every ledger point in (prev_chunk_seq, chunk.sequence]; only the newest one
+        // decides this chunk's size. `li` never rewinds, keeping the walk linear.
+        let mut newest_size: Option<(Option<u16>, Option<u16>)> = None;
+        while li < ledger.len() && ledger[li].sequence <= chunk.sequence {
+            newest_size = Some((Some(ledger[li].cols), Some(ledger[li].rows)));
+            li += 1;
+        }
 
-        if let Some(last_point) = intermediate_points.last() {
-            let new_size = (Some(last_point.cols), Some(last_point.rows));
+        if let Some(new_size) = newest_size {
             if new_size != current_size {
                 segments.push(HistorySegment {
                     cols: current_size.0,
                     rows: current_size.1,
                     bytes: current_bytes,
                 });
-                current_bytes = Vec::new();
+                current_bytes = Vec::with_capacity(remaining);
                 current_size = new_size;
             }
         }
         current_bytes.extend_from_slice(&chunk.bytes);
-        last_chunk_seq = chunk.sequence;
+        remaining -= chunk.bytes.len();
     }
 
     segments.push(HistorySegment {
@@ -273,14 +292,14 @@ pub fn segment_history(
         bytes: current_bytes,
     });
 
-    let final_chunk_seq = chunks.last().unwrap().sequence;
-    let trailing_points: Vec<&ResizePoint> = ledger
-        .iter()
-        .filter(|p| p.sequence > final_chunk_seq)
-        .collect();
-
-    if let Some(last_point) = trailing_points.last() {
-        let trailing_size = (Some(last_point.cols), Some(last_point.rows));
+    // Ledger points remaining past the final chunk form a trailing (empty) segment when they
+    // change the size. `li` already sits at the first such point.
+    let mut trailing_size: Option<(Option<u16>, Option<u16>)> = None;
+    while li < ledger.len() {
+        trailing_size = Some((Some(ledger[li].cols), Some(ledger[li].rows)));
+        li += 1;
+    }
+    if let Some(trailing_size) = trailing_size {
         if trailing_size != current_size {
             segments.push(HistorySegment {
                 cols: trailing_size.0,
@@ -374,10 +393,10 @@ impl TerminalOutputHub {
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
 
-        // Broadcast to sequence subscribers
+        // Broadcast to sequence subscribers (cheap Arc refcount bump on the payload).
         let _ = hub.sender.send(chunk.clone());
         // Broadcast to legacy raw receivers
-        let _ = hub.raw_sender.send(chunk.bytes.clone());
+        let _ = hub.raw_sender.send(chunk.bytes.to_vec());
 
         Some(chunk)
     }
@@ -422,7 +441,10 @@ impl TerminalOutputHub {
         Some(sequence)
     }
 
-    pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
+    pub fn subscribe(
+        &self,
+        session_id: &str,
+    ) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -504,7 +526,7 @@ mod tests {
 
         hub.publish(session_id, b"live chunk".to_vec());
         let received = rx.recv().await.expect("received live message");
-        assert_eq!(received, b"live chunk");
+        assert_eq!(&received[..], b"live chunk");
     }
 
     #[tokio::test]
@@ -689,7 +711,7 @@ mod tests {
             .await
             .expect("subscriber receives live chunk");
         assert_eq!(received.sequence, 3);
-        assert_eq!(received.bytes, b"live-3;");
+        assert_eq!(&received.bytes[..], b"live-3;");
     }
 
     #[tokio::test]
