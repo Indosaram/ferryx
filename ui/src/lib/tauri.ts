@@ -659,6 +659,25 @@ export async function dispatchNotification(req: import('./types').DispatchNotifi
   return invokeCommand<import('./types').DispatchNotificationResult>('cmd_notification_dispatch', { request: req });
 }
 
+/**
+ * Wake signal fired app-wide when the user clicks an OS notification. The payload is
+ * intentionally ignored: the drain queue is the source of truth. Outside Tauri this is a
+ * no-op so callers can register unconditionally.
+ */
+export async function onNotificationActivated(listener: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<unknown>('notification_activated', () => listener());
+}
+
+/**
+ * Atomically drain and return the queued notification navigation targets. Outside Tauri
+ * this resolves to an empty list per the drain contract.
+ */
+export async function takeNotificationActivations(): Promise<import('./types').NotificationTarget[]> {
+  if (!isTauri()) return [];
+  return invokeCommand<import('./types').NotificationTarget[]>('cmd_notification_take_activations');
+}
+
 export async function getNotificationPermissionStatus(): Promise<import('./types').NotificationPermissionStatus> {
   return invokeCommand<import('./types').NotificationPermissionStatus>('cmd_notification_get_permission_status');
 }

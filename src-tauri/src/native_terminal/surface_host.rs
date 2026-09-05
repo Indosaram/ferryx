@@ -133,6 +133,7 @@ fn panic_free_layout(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeTerminalSurfaceReceipt {
+    pub presented: bool,
     pub cols: u16,
     pub rows: u16,
     pub rebuilt_rows: u16,
@@ -152,6 +153,7 @@ impl NativeTerminalSurfaceReceipt {
         cell_metrics: CellMetrics,
     ) -> Self {
         Self {
+            presented: false,
             cols: layout.cols,
             rows: layout.rows,
             rebuilt_rows,
@@ -308,6 +310,7 @@ pub struct NativeTerminalSession {
 }
 
 pub struct NativeTerminalSurfaceHostState {
+    // Lock hosts before sessions and keep it through ownership checks and presentation.
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
     sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
@@ -329,9 +332,13 @@ fn dispatch_scheduled_render<R: Runtime>(
         if !coordinator.begin_render() {
             return;
         }
+        let mut hosts_guard = hosts.lock();
         let render_state = {
             let sessions_guard = sessions.lock();
             sessions_guard.get(&session_id).and_then(|session| {
+                if !session.surface_attached {
+                    return None;
+                }
                 let layout = session.layout?;
                 let logical_bounds = session.logical_bounds?;
                 match session_render_snapshot(session) {
@@ -348,12 +355,11 @@ fn dispatch_scheduled_render<R: Runtime>(
             })
         };
         if let Some((layout, logical_bounds, render_input)) = render_state {
-            let mut hosts_guard = hosts.lock();
             if let Some(host) = hosts_guard.get_mut(&session_id) {
                 host.layout = Some(layout);
                 host.logical_bounds = Some(logical_bounds);
                 host.target.update_viewport(Some(logical_bounds));
-                if let Err(err) = host.render_snapshot(
+                match host.render_snapshot(
                     &surface_window,
                     layout,
                     &render_input.snapshot,
@@ -361,17 +367,26 @@ fn dispatch_scheduled_render<R: Runtime>(
                     render_input.scrollbar_overlay.as_ref(),
                     render_input.attention_frame,
                 ) {
-                    tracing::warn!(
+                    Ok(receipt) => {
+                        if !receipt.presented {
+                            coordinator.schedule_render();
+                        }
+                    }
+                    Err(err) => tracing::warn!(
                         session_id = %session_id,
                         error = %err,
                         "Failed to render native terminal snapshot"
-                    );
+                    ),
                 }
             }
         }
+        drop(hosts_guard);
 
         if coordinator.finish_render() {
-            dispatch_scheduled_render(follow_up_window, hosts, sessions, session_id, coordinator);
+            // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries.
+            tauri::async_runtime::spawn(async move {
+                dispatch_scheduled_render(follow_up_window, hosts, sessions, session_id, coordinator);
+            });
         }
     }) {
         failure_coordinator.consume_render();
@@ -821,6 +836,15 @@ impl NativeTerminalSurfaceHostState {
         }
     }
 
+    fn lock_attached_hosts(
+        &self,
+        session_id: &str,
+    ) -> Result<parking_lot::MutexGuard<'_, HashMap<String, NativeTerminalSurfaceHost>>, NativeTerminalError> {
+        let hosts = self.hosts.lock();
+        self.ensure_surface_attached(session_id)?;
+        Ok(hosts)
+    }
+
     pub fn emit_scrollbar_if_changed<R: Runtime>(
         &self,
         app: Option<&tauri::AppHandle<R>>,
@@ -847,6 +871,9 @@ impl NativeTerminalSurfaceHostState {
         let layout = request.layout(cell_metrics)?;
         let mut sessions = self.sessions.lock();
         let (session, initialized) = match sessions.get_mut(&request.session_id) {
+            Some(session) if !session.surface_attached => {
+                return Err(NativeTerminalError::SessionDetached(request.session_id));
+            }
             Some(session) => (session, false),
             None => {
                 let mut terminal = NativeTerminal::new(layout.cols, layout.rows)?;
@@ -1023,7 +1050,7 @@ impl NativeTerminalSurfaceHostState {
                 }
             };
             if let Some(layout) = layout {
-                let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+                if session.terminal.dimensions()? != (layout.cols, layout.rows) {
                     let prior_scrollbar = session.terminal.scrollbar().ok();
                     let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
                         let max_offset = sb.total.saturating_sub(sb.len);
@@ -1065,14 +1092,11 @@ impl NativeTerminalSurfaceHostState {
                             .terminal
                             .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                     }
-                    true
-                } else {
-                    false
-                };
+                }
                 session.layout = Some(layout);
                 session.logical_bounds = Some(bounds);
                 session.cell_metrics = Some(metrics);
-                resized.then_some((layout.cols, layout.rows))
+                Some((layout.cols, layout.rows))
             } else {
                 None
             }
@@ -1228,6 +1252,21 @@ impl NativeTerminalSurfaceHostState {
         let session_id_owned = session_id.to_string();
         let app_handle = app;
         let pump_task = tokio::spawn(async move {
+            let schedule_render = || {
+                if render_coordinator.schedule_render() {
+                    if let Some(window) = app_handle.as_ref().and_then(|app| app.get_webview_window("main")) {
+                        dispatch_scheduled_render(
+                            window,
+                            Arc::clone(&hosts),
+                            Arc::clone(&sessions),
+                            session_id_owned.clone(),
+                            Arc::clone(&render_coordinator),
+                        );
+                    } else {
+                        render_coordinator.consume_render();
+                    }
+                }
+            };
             loop {
                 let msg = match
                     tokio::time::timeout(AGENT_DETECT_TRAILING_IDLE, messages.recv()).await
@@ -1287,22 +1326,8 @@ impl NativeTerminalSurfaceHostState {
                             update_sender.send_replace(());
                         }
 
-                        if session_exists && render_coordinator.schedule_render() {
-                            if let Some(app) = &app_handle {
-                                if let Some(window) = app.get_webview_window("main") {
-                                    dispatch_scheduled_render(
-                                        window,
-                                        Arc::clone(&hosts),
-                                        Arc::clone(&sessions),
-                                        session_id_owned.clone(),
-                                        Arc::clone(&render_coordinator),
-                                    );
-                                } else {
-                                    render_coordinator.consume_render();
-                                }
-                            } else {
-                                render_coordinator.consume_render();
-                            }
+                        if session_exists {
+                            schedule_render();
                         }
                     }
                     DaemonStreamMessage::Lagged {
@@ -1369,6 +1394,7 @@ impl NativeTerminalSurfaceHostState {
                             emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
                         }
                         if session_exists {
+                            schedule_render();
                             update_sender.send_replace(());
                         }
                     }
@@ -1395,6 +1421,7 @@ impl NativeTerminalSurfaceHostState {
                             emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
                         }
                         if session_exists {
+                            schedule_render();
                             update_sender.send_replace(());
                         }
                     }
@@ -1469,6 +1496,7 @@ impl NativeTerminalSurfaceHostState {
     /// daemon pump alive, so a backgrounded agent keeps reporting title/bell/agent-state instead of
     /// freezing on its last observed value. Use [`Self::close_session`] to discard the session.
     pub fn detach_session(&self, session_id: &str) {
+        let mut hosts = self.hosts.lock();
         {
             let mut sessions = self.sessions.lock();
             if let Some(session) = sessions.get_mut(session_id) {
@@ -1483,12 +1511,12 @@ impl NativeTerminalSurfaceHostState {
             }
         }
 
-        let mut hosts = self.hosts.lock();
         hosts.remove(session_id);
     }
 
     /// Discards a session entirely, aborting its daemon stream and pump tasks.
     pub fn close_session(&self, session_id: &str) {
+        let mut hosts = self.hosts.lock();
         let mut sessions = self.sessions.lock();
         if let Some(mut session) = sessions.remove(session_id) {
             if let Some(task) = session.stream_task.take() {
@@ -1500,11 +1528,11 @@ impl NativeTerminalSurfaceHostState {
         }
         drop(sessions);
 
-        let mut hosts = self.hosts.lock();
         hosts.remove(session_id);
     }
 
     pub fn teardown(&self) {
+        let mut hosts = self.hosts.lock();
         let mut sessions = self.sessions.lock();
         for (_, session) in sessions.drain() {
             if let Some(task) = session.stream_task {
@@ -1514,7 +1542,8 @@ impl NativeTerminalSurfaceHostState {
                 task.abort();
             }
         }
-        self.hosts.lock().clear();
+        drop(sessions);
+        hosts.clear();
     }
 
     pub fn target_descriptor(&self) -> PlatformCompositorDescriptor {
@@ -1688,7 +1717,7 @@ impl NativeTerminalSurfaceHostState {
         // switching) sends geometry for a session the compositor has already released. Rendering it
         // would rebuild a GPU surface for a pane nobody can see, so report the benign detached state
         // and let the caller drop the update.
-        self.ensure_surface_attached(&session_id)?;
+        let mut hosts = self.lock_attached_hosts(&session_id)?;
         let layout = self.prepare_session_layout(request, cell_metrics)?;
         let render_input = {
             let sessions = self.sessions.lock();
@@ -1698,7 +1727,6 @@ impl NativeTerminalSurfaceHostState {
             session_render_snapshot(session)?
         };
 
-        let mut hosts = self.hosts.lock();
         let host = match hosts.entry(session_id) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -1736,7 +1764,7 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
         focused: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
-        validate_session_id(session_id)?;
+        let mut hosts = self.lock_attached_hosts(session_id)?;
         let (layout, logical_bounds, cell_metrics, render_input) = {
             let mut sessions = self.sessions.lock();
             let session = sessions
@@ -1750,7 +1778,6 @@ impl NativeTerminalSurfaceHostState {
             (layout, logical_bounds, cell_metrics, render_input)
         };
 
-        let mut hosts = self.hosts.lock();
         if let Some(host) = hosts.get_mut(session_id) {
             host.layout = Some(layout);
             host.logical_bounds = Some(logical_bounds);
@@ -1961,13 +1988,16 @@ impl NativeTerminalSurfaceHost {
         frame.present();
         self.target.reveal_after_present();
         self.target.restore_first_responder(window);
-        Ok(NativeTerminalSurfaceReceipt::from_snapshot(
-            layout,
-            snapshot,
-            rebuilt_rows,
-            reused_rows,
-            cell_metrics,
-        ))
+        Ok(NativeTerminalSurfaceReceipt {
+            presented: true,
+            ..NativeTerminalSurfaceReceipt::from_snapshot(
+                layout,
+                snapshot,
+                rebuilt_rows,
+                reused_rows,
+                cell_metrics,
+            )
+        })
     }
 }
 
@@ -1989,6 +2019,94 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn warm_return_reasserts_pty_size_without_replaying_terminal() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "warm-return-size";
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 480.0,
+            scale_factor: 1.0,
+        };
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        state.attach_daemon_attachment_with_bounds::<tauri::Wry>(session_id, DaemonAttachment {
+            session_id: session_id.into(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"retained screen".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        }, None, Some(bounds)).expect("attach");
+        let before = state.snapshot_for_session(session_id).unwrap().unwrap();
+        state.detach_session(session_id);
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&resizes);
+        state.set_pty_resize_sink_if_absent(Arc::new(move |_, cols, rows| {
+            observed.lock().push((cols, rows));
+        }));
+
+        assert!(state.reattach_existing_session_with_bounds(session_id, Some(bounds)).unwrap());
+
+        let after = state.snapshot_for_session(session_id).unwrap().unwrap();
+        assert_eq!(*resizes.lock(), vec![(before.cols, before.rows)]);
+        assert_eq!(before, after);
+        state.teardown();
+    }
+
+    #[test]
+    fn detached_layout_cannot_restore_obsolete_geometry() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let metrics = font_manager::derived_cell_metrics();
+        let request = NativeTerminalBoundsRequest {
+            session_id: "detached-layout".into(),
+            bounds: LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 },
+        };
+        state.prepare_session_layout(request.clone(), metrics).unwrap();
+        state.ensure_surface_attached("detached-layout").unwrap();
+        state.detach_session("detached-layout");
+
+        let result = state.prepare_session_layout(request, metrics);
+
+        assert!(matches!(result, Err(NativeTerminalError::SessionDetached(_))));
+        assert!(state.session_layout("detached-layout").is_none());
+        state.teardown();
+    }
+
+    #[test]
+    fn presentation_ownership_stays_attached_until_host_guard_is_released() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let metrics = font_manager::derived_cell_metrics();
+        state.prepare_session_layout(NativeTerminalBoundsRequest {
+            session_id: "presentation-owner".into(),
+            bounds: LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 },
+        }, metrics).unwrap();
+        let hosts = state.lock_attached_hosts("presentation-owner").unwrap();
+        assert!(state.hosts.try_lock().is_none());
+        let detached = state.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let detach = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            detached.detach_session("presentation-owner");
+        });
+        started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        state.ensure_surface_attached("presentation-owner").unwrap();
+
+        drop(hosts);
+        detach.join().unwrap();
+
+        assert!(matches!(state.lock_attached_hosts("presentation-owner"),
+            Err(NativeTerminalError::SessionDetached(_))));
+        assert!(state.session_layout("presentation-owner").is_none());
+        state.teardown();
+    }
 
     struct DropRecorder {
         name: &'static str,
@@ -2251,6 +2369,7 @@ mod tests {
         assert_eq!(receipt.cell_height_px, cell_metrics.height_px);
         assert_eq!(receipt.rebuilt_rows, 4);
         assert_eq!(receipt.reused_rows, 20);
+        assert!(!receipt.presented);
     }
 
     #[test]
@@ -3010,6 +3129,11 @@ mod tests {
             .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
             .expect("attach daemon session");
 
+        let mut updates = state.subscribe_session_update(session_id).unwrap();
+        let coordinator = state.session_render_coordinator(session_id).unwrap();
+        assert!(coordinator.schedule_render());
+        assert!(coordinator.begin_render());
+
         // Lagged recovery whose last history segment was recorded at a much narrower size;
         // feed_attachment_history resizes the grid through each segment and leaves it at the
         // last one (40x10). The handler must restore the pane layout size (120x30) before
@@ -3031,22 +3155,21 @@ mod tests {
         .await
         .expect("send lagged recovery");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let dims = {
-                let sessions = state.sessions.lock();
-                let session = sessions.get(session_id).unwrap();
-                session.terminal.dimensions().unwrap()
-            };
-            if dims == (120, 30) || std::time::Instant::now() >= deadline {
-                assert_eq!(
-                    dims, (120, 30),
-                    "lagged recovery must restore the pane layout grid dimensions"
-                );
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed())
+            .await.expect("recovery delivered").expect("session alive");
+        let snapshot = state.snapshot_for_session(session_id).unwrap().unwrap();
+        assert_eq!((snapshot.cols, snapshot.rows), (120, 30));
+        assert!(coordinator.finish_render(), "recovery must request a follow-up frame");
+
+        assert!(coordinator.begin_render());
+        tx.send(DaemonStreamMessage::Gap {
+            session_id: session_id.into(),
+            requested_after_sequence: 3,
+            available_from_sequence: 4,
+        }).await.expect("send gap");
+        tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed())
+            .await.expect("gap delivered").expect("session alive");
+        assert!(coordinator.finish_render(), "gap must request a follow-up frame");
 
         state.teardown();
     }

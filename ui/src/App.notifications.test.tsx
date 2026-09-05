@@ -19,7 +19,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { cleanup, render } = await import("@testing-library/react");
+const { act, cleanup, render } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 
@@ -41,6 +41,9 @@ vi.mock("@tauri-apps/api/window", () => ({
     },
   }),
 }));
+
+let notificationActivationListener: (() => void) | null = null;
+let activationQueue: Array<{ workspaceId: string; sessionId: string }> = [];
 
 const native = {
   createWorktree: vi.fn(),
@@ -71,6 +74,17 @@ const native = {
   isStructuredIpcError: (_error: unknown) => false,
   dispatchNotification: vi.fn().mockResolvedValue(undefined),
   playNotificationSound: vi.fn().mockResolvedValue(undefined),
+  onNotificationActivated: vi.fn(async (cb: () => void) => {
+    notificationActivationListener = cb;
+    return () => {
+      notificationActivationListener = null;
+    };
+  }),
+  takeNotificationActivations: vi.fn(async () => {
+    const drained = activationQueue;
+    activationQueue = [];
+    return drained;
+  }),
 };
 
 vi.mock("./lib/tauri", () => ({
@@ -114,6 +128,8 @@ vi.mock("./lib/tauri", () => ({
   isStructuredIpcError: (_error: unknown) => false,
   dispatchNotification: native.dispatchNotification,
   playNotificationSound: native.playNotificationSound,
+  onNotificationActivated: native.onNotificationActivated,
+  takeNotificationActivations: native.takeNotificationActivations,
 }));
 
 const workspaceStoreModule = await import("./state/workspaceStore");
@@ -128,6 +144,7 @@ function emitActivityTargets(): void {
 
 const markTabUnread = vi.fn();
 const markWorktreeUnread = vi.fn();
+const dispatchWorkspaceAction = vi.fn();
 /**
  * The bell reaches App through the store's global native subscription, so the test fires it the
  * same way the store does rather than through a pane prop that only the foreground tab would have.
@@ -169,12 +186,14 @@ const storeState = {
 let currentActivityTargets: ActivityNotificationTarget[] = [];
 let storeSpy: any;
 
+const runtime = {
+  refreshWorktrees: vi.fn(),
+  reportRuntimeError: vi.fn(),
+  runtimeError: null,
+};
+
 vi.mock("./state/workspaceRuntime", () => ({
-  useWorkspaceRuntime: () => ({
-    refreshWorktrees: vi.fn(),
-    reportRuntimeError: vi.fn(),
-    runtimeError: null,
-  }),
+  useWorkspaceRuntime: () => runtime,
 }));
 
 vi.mock("./components/Sidebar", () => ({
@@ -200,6 +219,61 @@ vi.mock("./components/TerminalSplitView", () => ({
 
 const { App } = await import("./App");
 const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
+const { getWorkspaceSnapshot, setWorkspaceSnapshot, clearWorkspaceSnapshot } = await import("./state/workspaceSnapshotCache");
+const { PROJECTS_STORAGE_KEY, ACTIVE_PROJECT_STORAGE_KEY } = await import("./lib/storageKeys");
+
+function parkedProjectSnapshot(sessionId: string | null): import("./state/workspaceStore").WorkspaceState {
+  const sessions = sessionId
+    ? {
+        [sessionId]: {
+          id: sessionId,
+          cwd: "/repo/other",
+          worktreePath: "/repo/other",
+          workspaceId: "other",
+          worktree: null,
+          backendSessionId: "backend-other",
+          lifecycle: "working" as const,
+        },
+      }
+    : {};
+  return {
+    workspaceId: "other",
+    worktrees: [
+      { path: "/repo/other", head: "", branch: "refs/heads/main", bare: false, detached: false, locked: null, prunable: null },
+    ],
+    activeWorktreePath: "/repo/other",
+    sessions,
+    layout: {
+      tabs: sessionId ? [{ id: "tab-r", label: "r", sessionId }] : [],
+      activeTabId: sessionId ? "tab-r" : null,
+      layoutsByTabId: sessionId
+        ? {
+            "tab-r": {
+              root: { type: "leaf" as const, leafId: "leaf-r" },
+              activeLeafId: "leaf-r",
+              expandedLeafId: null,
+              sessionIdsByLeafId: { "leaf-r": sessionId },
+            },
+          }
+        : {},
+    },
+    worktreeLayouts: {},
+    unreadTabIds: {},
+    unreadWorktreePaths: {},
+    activityBySessionId: {},
+  };
+}
+
+function seedTwoProjects() {
+  localStorage.setItem(
+    PROJECTS_STORAGE_KEY,
+    JSON.stringify([
+      { workspaceId: "default", repoRoot: ".", gitRoot: null },
+      { workspaceId: "other", repoRoot: "/repo/other" },
+    ]),
+  );
+  localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+}
 
 describe("App notification coordinator wiring", () => {
   beforeEach(() => {
@@ -236,14 +310,19 @@ describe("App notification coordinator wiring", () => {
     native.playNotificationSound.mockReset();
     markTabUnread.mockReset();
     markWorktreeUnread.mockReset();
+    dispatchWorkspaceAction.mockReset();
+    native.onNotificationActivated.mockClear();
+    native.takeNotificationActivations.mockClear();
+    notificationActivationListener = null;
+    activationQueue = [];
     bellListeners.clear();
     activityListeners.clear();
     currentActivityTargets = [];
 
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
 
-    storeSpy = vi.spyOn(workspaceStoreModule, "useWorkspaceStore").mockImplementation(() => ({
-      state: storeState,
+    storeSpy = vi.spyOn(workspaceStoreModule, "useWorkspaceStore").mockImplementation((options) => ({
+      state: getWorkspaceSnapshot(options?.workspaceId ?? "default") ?? { ...storeState, workspaceId: options?.workspaceId ?? "default" },
       recoveredFromHmr: false,
       agents: [],
       tabActivity: {},
@@ -290,11 +369,13 @@ describe("App notification coordinator wiring", () => {
           bellListeners.delete(listener);
         };
       },
+      dispatchWorkspaceAction,
     } as any));
   });
 
   afterEach(() => {
     cleanup();
+    clearWorkspaceSnapshot();
     storeSpy?.mockRestore();
   });
 
@@ -463,5 +544,56 @@ describe("App notification coordinator wiring", () => {
     expect(native.playNotificationSound).not.toHaveBeenCalled();
     expect(markTabUnread).not.toHaveBeenCalled();
     expect(markWorktreeUnread).not.toHaveBeenCalled();
+  });
+
+  describe("activation navigation", () => {
+    it("recovers a startup click and focuses the active project's target", async () => {
+      activationQueue = [{ workspaceId: "default", sessionId: "sess-1" }];
+      await act(async () => { render(<App />); });
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
+      expect(native.onNotificationActivated.mock.invocationCallOrder[0])
+        .toBeLessThan(native.takeNotificationActivations.mock.invocationCallOrder[0]);
+    });
+
+    it("navigates on a live click by draining the same queue", async () => {
+      await act(async () => { render(<App />); });
+      dispatchWorkspaceAction.mockClear();
+      activationQueue = [{ workspaceId: "default", sessionId: "sess-2" }];
+      await act(async () => { notificationActivationListener?.(); });
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-2" });
+    });
+
+    it.each([
+      { workspaceId: "ghost-project", sessionId: "sess-1" },
+      { workspaceId: "default", sessionId: "ghost-session" },
+    ])("rejects a stale click $workspaceId/$sessionId without navigating", async (target) => {
+      await act(async () => { render(<App />); });
+      dispatchWorkspaceAction.mockClear();
+      activationQueue = [target];
+      await act(async () => { notificationActivationListener?.(); });
+      expect(native.takeNotificationActivations).toHaveBeenCalledTimes(2);
+      expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
+    });
+
+    it("switches to a parked project and focuses its target after the workspace mounts", async () => {
+      seedTwoProjects();
+      setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));
+      activationQueue = [{ workspaceId: "other", sessionId: "sess-remote" }];
+      await act(async () => { render(<App />); });
+      expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("other");
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
+    });
+
+    it("does not switch projects for a closed target in another project", async () => {
+      seedTwoProjects();
+      setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
+      await act(async () => { render(<App />); });
+      dispatchWorkspaceAction.mockClear();
+      activationQueue = [{ workspaceId: "other", sessionId: "sess-remote" }];
+      await act(async () => { notificationActivationListener?.(); });
+      expect(native.takeNotificationActivations).toHaveBeenCalledTimes(2);
+      expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).not.toBe("other");
+      expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
+    });
   });
 });

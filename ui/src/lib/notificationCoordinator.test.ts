@@ -345,6 +345,52 @@ describe("agent state change", () => {
   });
 });
 
+describe("notification navigation target", () => {
+  it("attaches a click target with the frontend workspace and session ids on a bell", () => {
+    const { instance } = coordinator();
+
+    instance.handleTerminalBell({ workspaceId: "ws-1", sessionId: "sess-1", tabId: "t1" });
+
+    expect(dispatchMock.mock.calls[0][0]).toMatchObject({
+      target: { workspaceId: "ws-1", sessionId: "sess-1" },
+    });
+  });
+
+  it("attaches a click target on an agent completion", () => {
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.handleAgentStateChange({
+      workspaceId: "ws-2",
+      sessionId: "sess-2",
+      tabId: "t2",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    expect(dispatchMock.mock.calls[0][0]).toMatchObject({
+      target: { workspaceId: "ws-2", sessionId: "sess-2" },
+    });
+  });
+
+  it("still dispatches but omits the target when the workspace id is missing", () => {
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.handleAgentStateChange({ sessionId: "sess-3", previousState: "running", nextState: "done" });
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock.mock.calls[0][0]).not.toHaveProperty("target");
+  });
+
+  it("still dispatches but omits the target when the session id is missing (probe)", () => {
+    const { instance } = coordinator();
+
+    instance.handleTerminalBell({ workspaceId: "ws-1", tabId: "t1" });
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock.mock.calls[0][0]).not.toHaveProperty("target");
+  });
+});
+
 describe("reset", () => {
   it("clears the bell throttle so the next bell is delivered immediately", () => {
     const { instance } = coordinator();

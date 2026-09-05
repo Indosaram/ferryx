@@ -59,6 +59,7 @@ function isGeometryEqual(a: GeometryState | null, b: GeometryState | null): bool
 }
 
 interface NativeTerminalReceipt {
+  readonly presented: boolean;
   readonly cursorCol: number;
   readonly cursorRow: number;
   readonly cellWidthPx: number;
@@ -1568,9 +1569,14 @@ export function NativeTerminalPane({
     let inFlight = false;
     let pendingGeometry: GeometryState | null = null;
     let isAttached = false;
+    let presentationFrame: number | null = null;
 
     const dispatchBounds = (nextGeometry: GeometryState) => {
       if (!isSubscribed) return;
+      if (presentationFrame !== null) {
+        cancelAnimationFrame(presentationFrame);
+        presentationFrame = null;
+      }
       inFlight = true;
       scaleFactorRef.current = nextGeometry.scaleFactor;
       switchDebug("terminal.surface.bounds.start", {
@@ -1587,6 +1593,14 @@ export function NativeTerminalPane({
       })
         .then((receipt) => {
           if (isSubscribed) {
+            if (receipt?.presented === false) {
+              lastGeometry = null;
+              presentationFrame = requestAnimationFrame(() => {
+                presentationFrame = null;
+                reportBounds();
+              });
+              return;
+            }
             lastGeometry = nextGeometry;
             setError(null);
             updateImeAnchor(receipt);
@@ -1771,6 +1785,9 @@ export function NativeTerminalPane({
       window.removeEventListener("resize", updateDeviceScale);
       if (retryTimer) {
         clearTimeout(retryTimer);
+      }
+      if (presentationFrame !== null) {
+        cancelAnimationFrame(presentationFrame);
       }
       switchDebug("terminal.surface.detach.scheduled", {
         localSessionId: sessionId,

@@ -616,6 +616,7 @@ fn macos_submits_through_user_notifications_not_the_legacy_bridge() {
         title: "Agent finished".into(),
         body: "omo completed a task".into(),
         sound: NotificationSound::System,
+        target: None,
     };
 
     let outcome = crate::notification::permission::macos::submit_notification(&content);

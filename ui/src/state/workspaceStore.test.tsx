@@ -19,7 +19,7 @@ import * as browserTauri from "../lib/browserTauri";
 import { createLayoutState } from "./layout";
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
 import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
-const { useWorkspaceStore, workspaceReducer } = await import("./workspaceStore");
+const { useWorkspaceStore, workspaceReducer, selectGlobalUnreadBadgeCount, hasNavigableSession } = await import("./workspaceStore");
 type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
 
@@ -1525,5 +1525,133 @@ describe("worktree tab and session isolation", () => {
       expect(nextState.sessions["session-1"].agentType).toBe("claude");
       expect(nextState.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "claude-sess-789" });
     });
+  });
+});
+
+describe("FOCUS_EXISTING_SESSION navigation", () => {
+  function doneActivity(title = "codex done") {
+    return { state: "done" as const, seen: false, title, isAgent: true, agentType: "codex" };
+  }
+
+  it("activates a background tab and focuses its leaf for the target session", () => {
+    const base = restoredTwoTabState("tab-primary");
+    const next = workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "session-2" });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.layout.layoutsByTabId["tab-secondary"].activeLeafId).toBe("leaf-secondary");
+  });
+
+  it("focuses a sibling split pane and acknowledges only the intended session", () => {
+    const base: WorkspaceState = {
+      ...restoredSplitState(),
+      activityBySessionId: {
+        "session-1": doneActivity("left done"),
+        "session-2": doneActivity("right done"),
+      },
+    };
+    // active leaf starts on leaf-2/session-2; navigate to the sibling session-1.
+    const next = workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "session-1" });
+
+    expect(next.layout.layoutsByTabId["tab-primary"].activeLeafId).toBe("leaf-1");
+    // Only the focused pane's session is acknowledged; the sibling keeps its unseen attention.
+    expect(next.activityBySessionId?.["session-1"]?.seen).toBe(true);
+    expect(next.activityBySessionId?.["session-2"]?.seen).toBe(false);
+  });
+
+  it("selects the parked owning worktree, then its tab and leaf", () => {
+    const parkedTab: TerminalTab = { id: "tab-feature", label: "feature", sessionId: "session-2" };
+    const base: WorkspaceState = {
+      worktrees: [worktree, featureWorktree],
+      activeWorktreePath: worktree.path,
+      sessions: {
+        "session-1": restoredSession("session-1", "backend-1", worktree.path),
+        "session-2": restoredSession("session-2", "backend-2", featureWorktree.path),
+      },
+      layout: createLayoutState(
+        [{ id: "tab-main", label: "main", sessionId: "session-1" }],
+        "tab-main",
+      ),
+      worktreeLayouts: {
+        [featureWorktree.path]: createLayoutState([parkedTab], parkedTab.id),
+      },
+      unreadTabIds: {},
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+
+    const next = workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "session-2" });
+
+    expect(next.activeWorktreePath).toBe(featureWorktree.path);
+    expect(next.layout.tabs.map((tab) => tab.id)).toContain("tab-feature");
+    expect(next.layout.activeTabId).toBe("tab-feature");
+    // The previously active worktree is parked, not destroyed.
+    expect(next.worktreeLayouts?.[worktree.path]?.tabs.map((tab) => tab.id)).toEqual(["tab-main"]);
+  });
+
+  it("rejects a stale/closed session without navigating or spawning", () => {
+    const base = restoredTwoTabState("tab-primary");
+    const next = workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "ghost-session" });
+
+    expect(next).toBe(base);
+  });
+
+  it("reveals the target when a sibling split pane is zoomed to fill the tab", () => {
+    const base: WorkspaceState = {
+      ...restoredSplitState(),
+      layout: {
+        ...restoredSplitState().layout,
+        layoutsByTabId: {
+          "tab-primary": {
+            ...restoredSplitState().layout.layoutsByTabId["tab-primary"],
+            // The sibling (session-2) is expanded, hiding the target (session-1).
+            expandedLeafId: "leaf-2",
+          },
+        },
+      },
+    };
+
+    const next = workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "session-1" });
+
+    const tabLayout = next.layout.layoutsByTabId["tab-primary"];
+    expect(tabLayout.activeLeafId).toBe("leaf-1");
+    // Expansion moved onto the target so it is visible, not left on the sibling.
+    expect(tabLayout.expandedLeafId).toBe("leaf-1");
+  });
+
+  it("treats a stale primary sessionId with no live root leaf as not navigable", () => {
+    const base: WorkspaceState = {
+      ...restoredTwoTabState("tab-primary"),
+      // The tab's primary sessionId still points at session-2, but its pane layout root only
+      // renders session-1 (session-2's leaf was removed).
+    };
+    base.layout.layoutsByTabId["tab-secondary"] = {
+      root: { type: "leaf", leafId: "leaf-secondary" },
+      activeLeafId: "leaf-secondary",
+      expandedLeafId: null,
+      sessionIdsByLeafId: { "leaf-secondary": "session-1" },
+    };
+
+    expect(hasNavigableSession(base, "session-2")).toBe(false);
+    expect(workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "session-2" })).toBe(base);
+  });
+
+  it("badge seam: focusing the exact target lowers the count while an unseen sibling stays counted", () => {
+    const base: WorkspaceState = {
+      ...restoredSplitState(),
+      workspaceId: "ws-main",
+      activityBySessionId: {
+        "session-1": doneActivity("left done"),
+        "session-2": doneActivity("right done"),
+      },
+    };
+
+    // Background attention on both split panes raises the badge to two.
+    expect(selectGlobalUnreadBadgeCount(base, "ws-main")).toBe(2);
+
+    const focused = workspaceReducer(base, { type: "FOCUS_EXISTING_SESSION", sessionId: "session-1" });
+
+    // Acknowledging exactly the focused pane drops the count by one; the sibling remains.
+    expect(selectGlobalUnreadBadgeCount(focused, "ws-main")).toBe(1);
+    expect(focused.activityBySessionId?.["session-2"]?.seen).toBe(false);
   });
 });

@@ -10,14 +10,15 @@ use crate::ipc::{run_blocking, IpcError};
 use crate::notification::format_badge_label;
 use crate::notification::{
     open_system_notification_settings, picked_audio_file, DispatchNotificationRequest,
-    DispatchNotificationResult, NativeNotificationBackend, NotificationAudioPlayer,
-    NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
-    NotificationProbeResult, NotificationService, NotificationSound, OpenSystemSettingsResult, PickedAudioFile,
-    PlaySoundResult, SetBadgeCountResult, SUPPORTED_AUDIO_EXTENSIONS,
+    DispatchNotificationResult, NativeNotificationBackend, NotificationActivations,
+    NotificationAudioPlayer, NotificationContent, NotificationPermissionRequestDto,
+    NotificationPermissionStatusDto, NotificationProbeResult, NotificationService, NotificationSound,
+    NotificationTarget, OpenSystemSettingsResult, PickedAudioFile, PlaySoundResult,
+    SetBadgeCountResult, SUPPORTED_AUDIO_EXTENSIONS,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
@@ -42,7 +43,30 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
         {
             return crate::notification::permission::macos::submit_notification(content);
         }
-        #[cfg(not(target_os = "macos"))]
+        // Windows/Linux: route clicks through notify-rust when the notification
+        // carries a destination. notify-rust's `wait_for_response` gives us the
+        // real activation the tauri plugin drops. Test / id-less notifications
+        // (no target) still show through the plugin.
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            if content.target.is_some() {
+                let app_id = self.app.config().identifier.clone();
+                return crate::notification::notify_rust_adapter::submit_with_click_routing(
+                    content,
+                    &app_id,
+                    Arc::clone(self.app.state::<Arc<NotificationActivations>>().inner()),
+                );
+            }
+            return self
+                .app
+                .notification()
+                .builder()
+                .title(&content.title)
+                .body(&content.body)
+                .show()
+                .map_err(|error| error.to_string());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             self.app
                 .notification()
@@ -72,6 +96,18 @@ pub async fn cmd_notification_dispatch<R: Runtime>(
     request: DispatchNotificationRequest,
 ) -> Result<DispatchNotificationResult, IpcError> {
     run_blocking(move || Ok(service_for(&app).dispatch(&request))).await
+}
+
+/// Atomically drain every pending notification-click activation.
+///
+/// Called by the frontend on startup and on each `notification_activated` wake
+/// signal. Each queued target is returned by exactly one drain, so the caller
+/// re-selects each originating pane once and never double-routes focus.
+#[tauri::command]
+pub async fn cmd_notification_take_activations(
+    activations: State<'_, Arc<NotificationActivations>>,
+) -> Result<Vec<NotificationTarget>, IpcError> {
+    Ok(activations.drain())
 }
 
 /// Read the current authoritative permission status.
@@ -221,15 +257,53 @@ mod tests {
         is_supported_audio_extension, NotificationAuthorization, NotificationDispatchReason,
         NotificationPlatform, NotificationProbeOutcome, NotificationSource, PlaySoundReason,
     };
+    use crate::notification::NotificationTarget;
     use serde_json::json;
-    use tauri::Manager;
 
-    /// Mock app managing the same audio state `lib.rs` registers.
+    /// Mock app managing the same audio and activation state `lib.rs` registers.
     fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
         tauri::test::mock_builder()
             .manage(Arc::new(NotificationAudioPlayer::new()))
+            .manage(Arc::new(NotificationActivations::new()))
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("mock app")
+    }
+
+    #[tokio::test]
+    async fn take_activations_drains_queued_targets_exactly_once() {
+        let app = mock_app();
+        let activations = app.state::<Arc<NotificationActivations>>();
+        activations.push(NotificationTarget {
+            workspace_id: "ws-1".into(),
+            session_id: "fe-1".into(),
+        });
+        activations.push(NotificationTarget {
+            workspace_id: "ws-2".into(),
+            session_id: "fe-2".into(),
+        });
+
+        let drained = cmd_notification_take_activations(app.state())
+            .await
+            .expect("drain resolves");
+        assert_eq!(
+            drained.iter().map(|t| t.session_id.as_str()).collect::<Vec<_>>(),
+            vec!["fe-1", "fe-2"]
+        );
+
+        // A second drain with no new click yields nothing: routed exactly once.
+        let empty = cmd_notification_take_activations(app.state())
+            .await
+            .expect("second drain resolves");
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn take_activations_on_empty_queue_returns_empty() {
+        let app = mock_app();
+        let drained = cmd_notification_take_activations(app.state())
+            .await
+            .expect("drain resolves");
+        assert!(drained.is_empty());
     }
 
     #[tokio::test]

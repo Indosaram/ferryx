@@ -4,14 +4,20 @@
 //! an application event should notify. React state, active-tab knowledge, and
 //! user-event dedupe deliberately stay out of this module.
 
+pub mod activation;
 pub mod audio;
 pub mod badge;
+#[cfg(target_os = "macos")]
+pub mod macos_delegate;
 pub mod model;
 #[cfg(target_os = "macos")]
 mod macos_submission;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub mod notify_rust_adapter;
 pub mod permission;
 pub mod service;
 
+pub use activation::*;
 pub use audio::*;
 pub use badge::*;
 pub use model::*;

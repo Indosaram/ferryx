@@ -56,6 +56,16 @@ export class NotificationCoordinator {
 
   constructor(private options: NotificationCoordinatorOptions = {}) {}
 
+  // A click can only navigate when both the frontend workspace and session identities are
+  // known. Probes and identity-less events still dispatch, just without a navigation target.
+  private navigationTarget(
+    workspaceId: string | undefined,
+    sessionId: string | undefined,
+  ): Pick<DispatchNotificationArgs, 'target'> {
+    if (!workspaceId || !sessionId) return {};
+    return { target: { workspaceId, sessionId } };
+  }
+
   private isFocused(): boolean {
     return this.options.isWindowFocused ? this.options.isWindowFocused() : isWindowForegroundFocused();
   }
@@ -122,6 +132,7 @@ export class NotificationCoordinator {
           sound: settings.customSoundId === 'system' ? 'system' : 'silent',
           worktreeLabel: params.worktreeLabel || params.worktreeId,
           terminalTitle: params.terminalTitle,
+          ...this.navigationTarget(params.workspaceId, params.sessionId),
         };
         Promise.resolve(dispatchNotification(dispatchArgs))
           .then((result) => {
@@ -202,6 +213,7 @@ export class NotificationCoordinator {
           worktreeLabel: params.worktreeLabel || params.worktreeId,
           terminalTitle: params.terminalTitle,
           agentLabel: params.agentLabel,
+          ...this.navigationTarget(params.workspaceId, params.sessionId),
         };
         Promise.resolve(dispatchNotification(dispatchArgs))
           .then((result) => {

@@ -82,6 +82,8 @@ const native = {
   setBadgeCount: vi.fn().mockResolvedValue({ supported: true, count: 0 }),
   onRemoteSelectionRequested: vi.fn(),
   remoteSelectionHandler: null as null | ((payload: any) => void),
+  onNotificationActivated: vi.fn().mockResolvedValue(() => {}),
+  takeNotificationActivations: vi.fn().mockResolvedValue([]),
 };
 
 const updater = {
@@ -183,6 +185,8 @@ vi.mock("./lib/tauri", () => ({
   onNativeTerminalFocus: vi.fn().mockResolvedValue(() => {}),
   onNativeTerminalTitle: vi.fn().mockResolvedValue(() => {}),
   onWorktreeChanged: vi.fn().mockResolvedValue(() => {}),
+  onNotificationActivated: native.onNotificationActivated,
+  takeNotificationActivations: native.takeNotificationActivations,
   bootTrace: vi.fn().mockResolvedValue(undefined),
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
@@ -433,6 +437,10 @@ describe("App project workspace flow", () => {
         if (native.remoteSelectionHandler === handler) native.remoteSelectionHandler = null;
       };
     });
+    native.onNotificationActivated.mockReset();
+    native.onNotificationActivated.mockResolvedValue(() => {});
+    native.takeNotificationActivations.mockReset();
+    native.takeNotificationActivations.mockResolvedValue([]);
     native.publishFocusedTerminal.mockReset();
     native.publishFocusedTerminal.mockResolvedValue(undefined);
     native.setBadgeCount.mockReset();

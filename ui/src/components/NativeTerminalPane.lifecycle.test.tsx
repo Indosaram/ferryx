@@ -127,6 +127,62 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     }
   });
 
+  it("retains the outgoing pane until a dropped frame is retried and presented", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => { frames.delete(id); });
+    let attempts = 0;
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command !== "cmd_native_terminal_set_bounds") return undefined;
+      const presented = args?.sessionId !== "frame-incoming" || ++attempts > 1;
+      return { presented, cols: 80, rows: 24, cursorCol: 0, cursorRow: 0, cellWidthPx: 10, cellHeightPx: 20 };
+    });
+    const view = render(<NativeTerminalPane session={session("frame-outgoing")} />);
+    await act(async () => {});
+
+    await act(async () => {
+      view.rerender(<NativeTerminalPane session={session("frame-incoming")} />);
+    });
+
+    expect(attempts).toBe(1);
+    expect(lifecycleCalls()).not.toContainEqual(["cmd_native_terminal_detach", "frame-outgoing"]);
+    await act(async () => {
+      const callbacks = [...frames.values()];
+      frames.clear();
+      for (const callback of callbacks) callback(16);
+    });
+    expect(attempts).toBe(2);
+    expect(lifecycleCalls()).toContainEqual(["cmd_native_terminal_detach", "frame-outgoing"]);
+  });
+
+  it("cancels dropped-frame retries when the pane unmounts", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => { frames.delete(id); });
+    tauriInvoke.mockImplementation(async (command) => command === "cmd_native_terminal_set_bounds"
+      ? { presented: false, cols: 80, rows: 24, cursorCol: 0, cursorRow: 0, cellWidthPx: 10, cellHeightPx: 20 }
+      : undefined);
+    const view = render(<NativeTerminalPane session={session("frame-unmount")} />);
+    await act(async () => {});
+    expect(frames.size).toBeGreaterThan(0);
+
+    await act(async () => { view.unmount(); });
+    tauriInvoke.mockClear();
+    await act(async () => {
+      for (const callback of frames.values()) callback(16);
+    });
+
+    expect(tauriInvoke).not.toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.anything());
+  });
+
   it("does not block a new split pane attach behind an unrelated session", async () => {
     let resolveOldAttach: (() => void) | undefined;
     const oldAttach = new Promise<void>((resolve) => {

@@ -112,6 +112,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSArray",
     "NSBundle",
+    "NSDictionary",
     "NSError",
     "NSString",
     "NSGeometry",
@@ -126,10 +127,19 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNNotificationContent",
     "UNNotificationSound",
     "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotification",
     "UNNotificationTrigger",
 ] }
 dispatch2 = "0.3"
 block2 = "0.6"
+
+# Native notification click routing on Windows/Linux. notify-rust exposes a
+# real activation callback (NotificationHandle::wait_for_response) that the
+# tauri-plugin-notification desktop path drops, so the originating pane can be
+# re-selected on click. Already pinned transitively at 4.18.0.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+notify-rust = "4.18.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", default-features = false, features = [

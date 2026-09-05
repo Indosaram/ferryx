@@ -73,7 +73,8 @@ import { replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer } from "./state/workspaceStore";
 import { dagStore } from "./state/dagStore";
-import type { PersistedWorkspaceSession } from "./lib/types";
+import type { NotificationTarget, PersistedWorkspaceSession } from "./lib/types";
+import { subscribeNotificationActivations } from "./lib/notificationActivation";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
 import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
@@ -90,10 +91,10 @@ import { checkForUpdate, registerWindowCloseGuard } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
-import { clearHmrWorkspaceState } from "./state/hmrWorkspaceState";
-import { clearWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
+import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
+import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { selectGlobalUnreadBadgeCount, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { hasNavigableSession, selectGlobalUnreadBadgeCount, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
@@ -1037,6 +1038,7 @@ function WorkspaceApp({
     slug?: string | null;
     tabId?: string | null;
   } | null>(null);
+  const [pendingNotificationTarget, setPendingNotificationTarget] = useState<NotificationTarget | null>(null);
 
   const focusedTerminalPayload = useMemo(
     () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots()),
@@ -1324,6 +1326,66 @@ function WorkspaceApp({
       unlisten?.();
     };
   }, [handleRemoteSelectionRequested]);
+
+  const handleNotificationTarget = useCallback(
+    (target: NotificationTarget) => {
+      if (!target || !target.workspaceId || !target.sessionId) return;
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === target.workspaceId);
+      // An unregistered/removed project is stale: never navigate or fall back to another pane.
+      if (!project) return;
+      if (activeProjectRef.current.workspaceId === target.workspaceId) {
+        // A closed session with no layout leaf is stale: reject without spawning. The reducer
+        // no-ops on the same check, but guarding here avoids a needless dispatch.
+        if (!hasNavigableSession(stateRef.current, target.sessionId)) return;
+        dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId: target.sessionId });
+        return;
+      }
+      // Cross-project: inspect the target workspace's cached state BEFORE switching. A stale or
+      // closed session must not yank the user into another project. Match how the workspace will
+      // mount (HMR first, then the persisted snapshot).
+      const cached = getHmrWorkspaceState(target.workspaceId) ?? getWorkspaceSnapshot(target.workspaceId);
+      if (!cached || !hasNavigableSession(cached, target.sessionId)) return;
+      handleSelectProject(project);
+      setPendingNotificationTarget(target);
+    },
+    [dispatchWorkspaceAction, handleSelectProject],
+  );
+
+  useEffect(() => {
+    if (!pendingNotificationTarget) return;
+    if (pendingNotificationTarget.workspaceId !== activeProject.workspaceId) {
+      setPendingNotificationTarget(null);
+      return;
+    }
+    // Apply only after the desired workspace state is mounted; applying against the outgoing
+    // state would focus the wrong pane.
+    if (state.workspaceId !== pendingNotificationTarget.workspaceId) return;
+    // Now mounted: navigate if still navigable, otherwise drop the pending target so a session
+    // that closed during the switch neither lingers nor triggers a fallback selection.
+    const sessionId = pendingNotificationTarget.sessionId;
+    setPendingNotificationTarget(null);
+    if (hasNavigableSession(state, sessionId)) {
+      dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId });
+    }
+  }, [
+    activeProject.workspaceId,
+    dispatchWorkspaceAction,
+    pendingNotificationTarget,
+    state.sessions,
+    state.workspaceId,
+  ]);
+
+  const handleNotificationTargetRef = useRef(handleNotificationTarget);
+  handleNotificationTargetRef.current = handleNotificationTarget;
+  useEffect(
+    () =>
+      subscribeNotificationActivations(
+        (target) => handleNotificationTargetRef.current(target),
+        undefined,
+        (error) => reportRuntimeErrorRef.current(error),
+      ),
+    [],
+  );
 
   const handleAddTerminalTab = useCallback((shell?: string) => {
     const activeWt = activeWorktreeRef.current;

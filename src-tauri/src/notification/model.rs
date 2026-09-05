@@ -18,6 +18,19 @@ pub const MAX_AUDIO_FILE_BYTES: u64 = 20 * 1024 * 1024;
 pub const SUPPORTED_AUDIO_EXTENSIONS: &[&str] =
     &["wav", "mp3", "flac", "ogg", "oga", "m4a", "mp4", "aac"];
 
+/// Frontend pane a notification originated from.
+///
+/// Both IDs are the frontend's own identifiers (the workspace and the frontend
+/// session id), never a backend/leaf id. They travel unchanged from dispatch,
+/// through the OS payload, and back on click so the UI can re-select the exact
+/// originating pane instead of guessing the most recent one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationTarget {
+    pub workspace_id: String,
+    pub session_id: String,
+}
+
 /// Application event that asked for a notification.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +88,11 @@ pub struct DispatchNotificationRequest {
     pub terminal_title: Option<String>,
     #[serde(default)]
     pub agent_label: Option<String>,
+    /// Pane to re-select when the user clicks the delivered notification.
+    ///
+    /// `None` for test and id-less notifications, which must not route focus.
+    #[serde(default)]
+    pub target: Option<NotificationTarget>,
 }
 
 /// `source` defaults to `test` so a malformed payload cannot silently
@@ -117,6 +135,9 @@ pub struct NotificationContent {
     pub title: String,
     pub body: String,
     pub sound: NotificationSound,
+    /// Carried verbatim to the native payload; echoed back on click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<NotificationTarget>,
 }
 
 /// Host platform, reported so the UI can explain platform differences.
@@ -411,6 +432,7 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
         title: truncate_text(&title, MAX_TITLE_LEN),
         body: truncate_text(&body, MAX_BODY_LEN),
         sound: request.sound,
+        target: request.target.clone(),
     }
 }
 
@@ -471,4 +493,74 @@ pub fn audio_display_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .map(|name| name.to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn notification_target_uses_camel_case_frontend_ids() {
+        let target = NotificationTarget {
+            workspace_id: "ws-1".into(),
+            session_id: "fe-session-7".into(),
+        };
+        let wire = serde_json::to_value(&target).unwrap();
+        assert_eq!(wire, json!({ "workspaceId": "ws-1", "sessionId": "fe-session-7" }));
+
+        let decoded: NotificationTarget = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, target);
+    }
+
+    #[test]
+    fn dispatch_request_target_defaults_to_none() {
+        // A payload without `target` (test / id-less notifications) must not
+        // carry a routing destination.
+        let request: DispatchNotificationRequest = serde_json::from_value(json!({
+            "source": "test"
+        }))
+        .unwrap();
+        assert_eq!(request.target, None);
+    }
+
+    #[test]
+    fn dispatch_request_parses_camel_case_target() {
+        let request: DispatchNotificationRequest = serde_json::from_value(json!({
+            "source": "agentTaskComplete",
+            "target": { "workspaceId": "ws-9", "sessionId": "fe-42" }
+        }))
+        .unwrap();
+        assert_eq!(
+            request.target,
+            Some(NotificationTarget {
+                workspace_id: "ws-9".into(),
+                session_id: "fe-42".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn format_notification_carries_target_through() {
+        let request = DispatchNotificationRequest {
+            source: NotificationSource::AgentTaskComplete,
+            agent_label: Some("Claude".into()),
+            target: Some(NotificationTarget {
+                workspace_id: "ws-3".into(),
+                session_id: "fe-99".into(),
+            }),
+            ..Default::default()
+        };
+        let content = format_notification(&request);
+        assert_eq!(content.target, request.target);
+    }
+
+    #[test]
+    fn format_notification_test_source_has_no_target() {
+        let request = DispatchNotificationRequest {
+            source: NotificationSource::Test,
+            ..Default::default()
+        };
+        assert_eq!(format_notification(&request).target, None);
+    }
 }

@@ -26,6 +26,7 @@ pub struct NativeTerminalLogicalRect {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalBoundsReceipt {
+    pub presented: bool,
     pub session_id: String,
     pub cols: u16,
     pub rows: u16,
@@ -1423,6 +1424,7 @@ fn into_ipc_receipt(
     receipt: NativeTerminalSurfaceReceipt,
 ) -> NativeTerminalBoundsReceipt {
     NativeTerminalBoundsReceipt {
+        presented: receipt.presented,
         session_id,
         cols: receipt.cols,
         rows: receipt.rows,
@@ -1439,6 +1441,24 @@ fn into_ipc_receipt(
 mod tests {
     use super::*;
     use crate::native_terminal::{MouseButton, MousePosition, MouseRendererSize};
+
+    #[test]
+    fn bounds_receipt_serializes_actual_presentation_status() {
+        for presented in [false, true] {
+            let receipt = into_ipc_receipt("presentation".into(), NativeTerminalSurfaceReceipt {
+                presented,
+                cols: 80,
+                rows: 24,
+                rebuilt_rows: 0,
+                reused_rows: 0,
+                cursor_col: 0,
+                cursor_row: 0,
+                cell_width_px: 10,
+                cell_height_px: 20,
+            });
+            assert_eq!(serde_json::to_value(receipt).unwrap()["presented"], presented);
+        }
+    }
 
     fn test_mouse_event(size: Option<MouseRendererSize>) -> MouseEvent {
         MouseEvent {

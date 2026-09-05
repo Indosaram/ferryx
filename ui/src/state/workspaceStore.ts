@@ -192,7 +192,8 @@ export type WorkspaceAction =
   | { type: "MARK_WORKTREE_UNREAD"; worktreePath: string }
   | { type: "CLEAR_WORKTREE_UNREAD"; worktreePath: string }
   | { type: "MARK_SESSION_ACTIVITY_SEEN"; sessionId: string }
-  | { type: "SUPPRESS_NEXT_ATTENTION"; sessionId: string };
+  | { type: "SUPPRESS_NEXT_ATTENTION"; sessionId: string }
+  | { type: "FOCUS_EXISTING_SESSION"; sessionId: string };
 
 type UseWorkspaceStoreOptions = {
   workspaceId?: string;
@@ -1868,6 +1869,46 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const focused = acknowledgeTabCompletions({ ...state, layout }, action.tabId);
       return workspaceReducer(focused, { type: "CLEAR_TAB_UNREAD", tabId: action.tabId });
     }
+    case "FOCUS_EXISTING_SESSION": {
+      // Navigate to a live session's exact pane using the current inventory. A stale or closed
+      // session is rejected with no navigation and no fallback selection or terminal spawn.
+      if (!state.sessions[action.sessionId]) return state;
+      const found = locateSessionAcrossLayouts(state, action.sessionId);
+      if (!found) return state;
+
+      // Select the owning worktree first, parking the current active layout instead of discarding
+      // it. Every live session in either layout is preserved.
+      let working = state;
+      if (found.worktreePath && found.worktreePath !== state.activeWorktreePath) {
+        const nextWorktreeLayouts = { ...(state.worktreeLayouts ?? {}) };
+        if (state.activeWorktreePath) nextWorktreeLayouts[state.activeWorktreePath] = state.layout;
+        const nextLayout = nextWorktreeLayouts[found.worktreePath];
+        delete nextWorktreeLayouts[found.worktreePath];
+        working = { ...state, activeWorktreePath: found.worktreePath, layout: nextLayout, worktreeLayouts: nextWorktreeLayouts };
+      }
+
+      // A single layout-level FOCUS_PANE activates the owning tab group, the tab, and the target
+      // leaf together. Setting the active leaf BEFORE acknowledging is what limits acknowledgment
+      // to the intended session: a split tab's sibling panes keep their unseen attention.
+      let layout = found.leafId
+        ? layoutReducer(working.layout, { type: "FOCUS_PANE", tabId: found.tabId, leafId: found.leafId })
+        : layoutReducer(working.layout, { type: "ACTIVATE_TAB", tabId: found.tabId });
+
+      // FOCUS_PANE leaves expandedLeafId untouched, so a zoomed sibling would keep the target
+      // hidden. Move the expansion onto the target (existing TOGGLE_PANE_EXPANDED semantics) so
+      // it is actually visible; a tab with nothing expanded is left alone.
+      if (found.leafId) {
+        const tabLayout = layout.layoutsByTabId?.[found.tabId];
+        if (tabLayout && tabLayout.expandedLeafId && tabLayout.expandedLeafId !== found.leafId) {
+          layout = layoutReducer(layout, { type: "TOGGLE_PANE_EXPANDED", tabId: found.tabId, leafId: found.leafId });
+        }
+      }
+
+      const unreadTabIds = { ...working.unreadTabIds };
+      delete unreadTabIds[found.tabId];
+      const acknowledged = acknowledgeTabCompletions({ ...working, layout, unreadTabIds }, found.tabId);
+      return clearWorktreeUnreadWhenRead(acknowledged, found.tabId, working);
+    }
     case "SET_PANE_RATIO": {
       const layout = layoutReducer(state.layout, {
         type: "SET_PANE_RATIO",
@@ -2325,6 +2366,56 @@ function findTabIdForSession(state: WorkspaceState, sessionId: string): string |
     if (getTabSessionIds(state, tab.id).has(sessionId)) return tab.id;
   }
   return null;
+}
+
+/**
+ * Resolve the exact tab + leaf that renders a session, requiring membership in the current pane
+ * tree root: a stale `sessionIdsByLeafId` entry for a removed leaf, or a primary `tab.sessionId`
+ * that the root no longer contains, does NOT match. Only a legacy tab with no pane layout falls
+ * back to its primary session id. Returns the owning worktree path (or null for the active
+ * layout) alongside the tab/leaf.
+ */
+function locateSessionLeaf(
+  layout: LayoutState,
+  sessionId: string,
+): { tabId: string; leafId: string | null } | null {
+  for (const tab of layout.tabs) {
+    if (tab.kind === "browser") continue;
+    const tabLayout = layout.layoutsByTabId?.[tab.id];
+    if (tabLayout) {
+      for (const leafId of collectLeafIds(tabLayout.root)) {
+        if (tabLayout.sessionIdsByLeafId[leafId] === sessionId) return { tabId: tab.id, leafId };
+      }
+      // A tab that has a pane layout but no matching live leaf is not a match, even if its
+      // legacy primary sessionId still points at the removed session.
+      continue;
+    }
+    if (tab.sessionId === sessionId) return { tabId: tab.id, leafId: null };
+  }
+  return null;
+}
+
+function locateSessionAcrossLayouts(
+  state: WorkspaceState,
+  sessionId: string,
+): { worktreePath: string | null; tabId: string; leafId: string | null } | null {
+  const inActive = locateSessionLeaf(state.layout, sessionId);
+  if (inActive) return { worktreePath: null, ...inActive };
+  for (const [path, parked] of Object.entries(state.worktreeLayouts ?? {})) {
+    const found = locateSessionLeaf(parked, sessionId);
+    if (found) return { worktreePath: path, ...found };
+  }
+  return null;
+}
+
+/**
+ * Whether a session can actually be navigated to: it exists in the sessions map AND is
+ * referenced by a live layout leaf (active or a parked worktree). A session id that lingers
+ * only in the map without a root leaf, or a closed session, is not navigable. This mirrors
+ * exactly what the FOCUS_EXISTING_SESSION reducer will accept.
+ */
+export function hasNavigableSession(state: WorkspaceState, sessionId: string): boolean {
+  return Boolean(state.sessions[sessionId]) && locateSessionAcrossLayouts(state, sessionId) !== null;
 }
 
 function clearWorktreeUnreadWhenRead(

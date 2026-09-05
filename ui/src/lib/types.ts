@@ -466,8 +466,19 @@ export interface NotificationPermissionRequest {
   error?: string | null;
 }
 
+/**
+ * Where an OS notification click should navigate. `sessionId` is the FRONTEND-local
+ * session id (the pane/tab identity), never a backend/leaf PTY id.
+ */
+export interface NotificationTarget {
+  workspaceId: string;
+  sessionId: string;
+}
+
 export interface DispatchNotificationArgs {
   source?: NotificationSource | string;
+  /** Navigation target stored with the native request and replayed on click. */
+  target?: NotificationTarget;
   sound?: "system" | "silent";
   attentionReason?: "waiting" | "done";
   title?: string;

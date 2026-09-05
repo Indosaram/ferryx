@@ -23,6 +23,7 @@ use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
 #[cfg(all(target_os = "macos", feature = "native-terminal"))]
 use crate::native_terminal::surface_host::NATIVE_TERMINAL_FOCUS_EVENT;
 use ipc::*;
+use notification::activation::{NotificationActivations, NOTIFICATION_ACTIVATED_EVENT};
 use notification::audio::NotificationAudioPlayer;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -621,6 +622,53 @@ fn start_remote_event_bridge<R: tauri::Runtime>(
     });
 }
 
+/// Wire notification-click routing at app setup.
+///
+/// Installs the app-wide wake sink (emitting [`NOTIFICATION_ACTIVATED_EVENT`]
+/// so the frontend drains the activation queue) and, on macOS, installs the
+/// `UNUserNotificationCenter` delegate. The center holds its delegate weakly,
+/// so the strong reference is parked in managed state for the process lifetime.
+fn install_notification_activation_routing<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    activations: Arc<NotificationActivations>,
+) -> tauri::Result<()> {
+    // The wake sink fires only when a real click enqueues a target (startup
+    // drain never pushes), so foregrounding here cannot hijack focus on launch.
+    let app_handle = app.handle().clone();
+    activations.set_wake_sink(Arc::new(move || {
+        if let Err(error) = app_handle.emit(NOTIFICATION_ACTIVATED_EVENT, ()) {
+            tracing::error!("notification activation event failed: {error}");
+        }
+        if let Some(window) = app_handle.get_webview_window("main") {
+            // AppKit/window ops must run on the main thread; schedule rather
+            // than touch the window from the notification callback thread.
+            let main_window = window.clone();
+            if let Err(error) = window.run_on_main_thread(move || {
+                let result = main_window.unminimize()
+                    .and_then(|_| main_window.show())
+                    .and_then(|_| main_window.set_focus());
+                if let Err(error) = result {
+                    tracing::error!("notification window activation failed: {error}");
+                }
+            }) {
+                tracing::error!("notification window scheduling failed: {error}");
+            }
+        }
+    }));
+
+    #[cfg(target_os = "macos")]
+    {
+        // Only meaningful for a bundled .app that can actually receive
+        // notifications; skip silently otherwise so dev runs still launch.
+        if notification::permission::macos::has_bundle_identity() {
+            let delegate = notification::macos_delegate::install_delegate(Arc::clone(&activations));
+            app.manage(delegate);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     let daemon_client = Arc::new(DaemonClient::new());
     let bridge_daemon_client = Arc::clone(&daemon_client);
@@ -630,10 +678,14 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let workspace_registry = WorkspaceRegistry::new();
     // Lazily initialized: a machine with no audio output device must still launch.
     let notification_audio = Arc::new(NotificationAudioPlayer::new());
+    // Thread-safe queue of pending notification-click targets. Fed by the
+    // platform click callback, drained by the frontend over IPC.
+    let notification_activations = Arc::new(NotificationActivations::new());
     let browser_manager = Arc::new(browser::BrowserManager::new());
     let browser_cli_manager = Arc::clone(&browser_manager);
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
+    let setup_activations = Arc::clone(&notification_activations);
 
     // Exactly one canonical workspace is registered for the startup root; the
     // legacy `default` alias is intentionally not registered, and persisted
@@ -722,6 +774,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             )?;
             ipc::native_menu::register_menu_event_forwarder(app.handle());
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
+            install_notification_activation_routing(app, Arc::clone(&setup_activations))?;
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
@@ -733,6 +786,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(remote_manager)
         .manage(workspace_registry)
         .manage(notification_audio)
+        .manage(notification_activations)
         .manage(browser_manager);
 
     #[cfg(desktop)]
@@ -812,6 +866,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_notification_play_sound,
         cmd_notification_pick_audio,
         cmd_notification_set_badge_count,
+        cmd_notification_take_activations,
         cmd_permissions_get_status,
         cmd_permissions_open_settings,
         cmd_permissions_request_accessibility,
