@@ -17,6 +17,7 @@ import {
   type BrowserShortcutAction,
 } from "../lib/browserTauri";
 import { recordBrowserHistory } from "../lib/browserHistory";
+import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
 import type { BrowserTab } from "../lib/types";
 
@@ -77,6 +78,14 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
   const [findError, setFindError] = useState<string | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  // Latest find request wins: async find/clear responses can resolve out of order, so a stale
+  // response for a superseded or cleared query must not overwrite the current result.
+  const findRequestSeqRef = useRef(0);
+  // Native child webviews live above the WKWebView on macOS, so DOM z-index cannot cover them.
+  // The browser surface must yield (hide) whenever a global modal/search surface is mounted, then
+  // be restored only if this owner is itself visible. Mirrors NativeTerminalPane's occlusion fix.
+  const surfaceVisible = useNativeTerminalVisibility();
+  const maskAwareVisible = visible && surfaceVisible;
 
   useEffect(() => {
     setLiveTab((current) => ({ ...current, ...tab }));
@@ -85,6 +94,14 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
   useEffect(() => {
     if (findOpen) findInputRef.current?.focus();
   }, [findOpen]);
+
+  useEffect(() => {
+    // Invalidate any in-flight find when the target browser changes or the pane unmounts, so a
+    // late response cannot apply to a different browser reusing this component instance.
+    return () => {
+      findRequestSeqRef.current += 1;
+    };
+  }, [tab.browserId]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -171,7 +188,7 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
     };
 
     const updateBounds = () => {
-      if (!visible || liveTab.loadError) {
+      if (!maskAwareVisible || liveTab.loadError) {
         updateVisibility(false);
         return;
       }
@@ -204,9 +221,10 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
       // Native child webviews outlive React DOM nodes; cleanup also covers Fast Refresh remounts.
       updateVisibility(false);
     };
-  }, [liveTab.loadError, tab.browserId, visible]);
+  }, [liveTab.loadError, tab.browserId, maskAwareVisible]);
 
   const runFind = async (query: string, backwards = false) => {
+    const seq = ++findRequestSeqRef.current;
     setFindQuery(query);
     setFindError(null);
     if (!query.trim()) {
@@ -215,13 +233,18 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
       return;
     }
     try {
-      setFindResult(await findBrowser(tab.browserId, query, backwards));
+      const result = await findBrowser(tab.browserId, query, backwards);
+      if (seq === findRequestSeqRef.current) setFindResult(result);
     } catch (error) {
-      setFindError(error instanceof Error ? error.message : "Find failed");
+      if (seq === findRequestSeqRef.current) {
+        setFindError(error instanceof Error ? error.message : "Find failed");
+      }
     }
   };
 
   const closeFind = () => {
+    // Supersede any in-flight find so its late response cannot repopulate a closed bar.
+    findRequestSeqRef.current += 1;
     setFindOpen(false);
     setFindQuery("");
     setFindResult({ matchCount: 0, found: false });

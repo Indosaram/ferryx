@@ -9,12 +9,22 @@ import {
 
 const NativeTerminalVisibilityContext = createContext(true);
 const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"]';
+const OPT_OUT_SELECTOR = '[data-native-terminal-yield="off"]';
 
 function isYieldingSurfaceVisible(): boolean {
-  return (
-    typeof document !== "undefined" &&
-    document.querySelector(YIELDING_SURFACE_SELECTOR) !== null
-  );
+  if (typeof document === "undefined") {
+    return false;
+  }
+  // A surface only forces the terminal to yield when it (and its ancestors) has
+  // not opted out. Consulting the closest opt-out for every matching surface
+  // means an opted-out popover cannot suppress a second, real modal.
+  const surfaces = document.querySelectorAll(YIELDING_SURFACE_SELECTOR);
+  for (const surface of surfaces) {
+    if (surface.closest(OPT_OUT_SELECTOR) === null) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function NativeTerminalVisibilityProvider({

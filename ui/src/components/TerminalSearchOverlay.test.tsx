@@ -1,3 +1,4 @@
+import type { NativeTerminalSearchResult } from "./TerminalSearchOverlay";
 import { JSDOM } from "jsdom";
 
 if (typeof window === "undefined") {
@@ -20,7 +21,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("../test/setup");
 
@@ -198,6 +199,151 @@ describe("TerminalSearchOverlay native session search", () => {
     // Previous match via button
     fireEvent.click(screen.getByLabelText("Previous match"));
     expect(screen.getByText("2/3")).toBeInTheDocument();
+  });
+
+  it("ignores an out-of-order stale search result and keeps the newest query's counts", async () => {
+    type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
+    const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
+    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+      let resolve: (value: NativeTerminalSearchResult) => void = () => {};
+      let reject: (error: unknown) => void = () => {};
+      const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      calls.push({ args, d: { promise, resolve, reject } });
+      return promise;
+    });
+    const onClose = vi.fn();
+    render(<TerminalSearchOverlay sessionId="backend-term-1" onClose={onClose} />);
+
+    const input = screen.getByTestId("terminal-search-input");
+    fireEvent.change(input, { target: { value: "err" } });
+    fireEvent.change(input, { target: { value: "error" } });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].args?.query).toBe("err");
+    expect(calls[1].args?.query).toBe("error");
+
+    // Newest request ("error") resolves first with 2 matches.
+    await act(async () => {
+      calls[1].d.resolve({
+        matches: [
+          { row: 0, startCol: 0, endCol: 3 },
+          { row: 2, startCol: 1, endCol: 4 },
+        ],
+        totalMatches: 2,
+      });
+    });
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+
+    // Stale request ("err") resolves late with 5 matches; must be ignored.
+    await act(async () => {
+      calls[0].d.resolve({
+        matches: [0, 1, 2, 3, 4].map((row) => ({ row, startCol: 0, endCol: 3 })),
+        totalMatches: 5,
+      });
+    });
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.queryByText("1/5")).not.toBeInTheDocument();
+  });
+
+  it("does not let a stale rejection overwrite a newer successful result", async () => {
+    type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
+    const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
+    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+      let resolve: (value: NativeTerminalSearchResult) => void = () => {};
+      let reject: (error: unknown) => void = () => {};
+      const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      calls.push({ args, d: { promise, resolve, reject } });
+      return promise;
+    });
+    const onClose = vi.fn();
+    render(<TerminalSearchOverlay sessionId="backend-term-1" onClose={onClose} />);
+
+    const input = screen.getByTestId("terminal-search-input");
+    fireEvent.change(input, { target: { value: "err" } });
+    fireEvent.change(input, { target: { value: "error" } });
+    expect(calls).toHaveLength(2);
+
+    await act(async () => {
+      calls[1].d.resolve({
+        matches: [
+          { row: 0, startCol: 0, endCol: 3 },
+          { row: 2, startCol: 1, endCol: 4 },
+        ],
+        totalMatches: 2,
+      });
+    });
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+
+    await act(async () => {
+      calls[0].d.reject(new Error("stale failure"));
+    });
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.queryByText("0/0")).not.toBeInTheDocument();
+  });
+
+  it("resets stale counts and re-searches the new session on sessionId change", async () => {
+    type Deferred = { promise: Promise<NativeTerminalSearchResult>; resolve: (value: NativeTerminalSearchResult) => void; reject: (error: unknown) => void };
+    const calls: Array<{ args: { query?: string; sessionId?: string } | undefined; d: Deferred }> = [];
+    tauriCoreMocks.invoke.mockImplementation((_cmd: string, args?: { query?: string; sessionId?: string }) => {
+      let resolve: (value: NativeTerminalSearchResult) => void = () => {};
+      let reject: (error: unknown) => void = () => {};
+      const promise = new Promise<NativeTerminalSearchResult>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      calls.push({ args, d: { promise, resolve, reject } });
+      return promise;
+    });
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <TerminalSearchOverlay sessionId="session-a" onClose={onClose} />,
+    );
+
+    const input = screen.getByTestId("terminal-search-input");
+    fireEvent.change(input, { target: { value: "err" } });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args?.sessionId).toBe("session-a");
+
+    await act(async () => {
+      calls[0].d.resolve({
+        matches: [
+          { row: 0, startCol: 0, endCol: 3 },
+          { row: 1, startCol: 0, endCol: 3 },
+        ],
+        totalMatches: 2,
+      });
+    });
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+
+    // Switch to a different backend session.
+    await act(async () => {
+      rerender(<TerminalSearchOverlay sessionId="session-b" onClose={onClose} />);
+    });
+
+    // Stale count from session-a must be gone immediately.
+    expect(screen.queryByText("1/2")).not.toBeInTheDocument();
+    // A fresh search must be issued for session-b using the retained query.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].args?.sessionId).toBe("session-b");
+    expect(calls[1].args?.query).toBe("err");
+
+    await act(async () => {
+      calls[1].d.resolve({
+        matches: [
+          { row: 0, startCol: 0, endCol: 3 },
+          { row: 1, startCol: 0, endCol: 3 },
+          { row: 2, startCol: 0, endCol: 3 },
+        ],
+        totalMatches: 3,
+      });
+    });
+    expect(screen.getByText("1/3")).toBeInTheDocument();
   });
 
   it("closes on Escape and close button, triggering onFocusTerminal", () => {

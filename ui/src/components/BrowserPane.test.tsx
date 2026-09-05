@@ -1,5 +1,5 @@
-import { render, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab } from "../lib/types";
 import { BrowserPane } from "./BrowserPane";
@@ -50,6 +50,8 @@ const tab: BrowserTab = {
   canGoBack: false,
   canGoForward: false,
 };
+
+afterEach(cleanup);
 
 describe("BrowserPane native webview lifecycle", () => {
   beforeEach(() => {

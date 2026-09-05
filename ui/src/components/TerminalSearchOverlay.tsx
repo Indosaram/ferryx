@@ -62,6 +62,12 @@ export function TerminalSearchOverlay({
   const [resultCount, setResultCount] = useState<number | null>(null);
   const [nativeMatches, setNativeMatches] = useState<NativeTerminalSearchMatch[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Monotonic id of the most recent search request. Any in-flight promise whose
+  // captured id no longer matches is stale (superseded by a newer request, a
+  // cleared query, a session change, or unmount) and must not touch state.
+  const requestSeq = useRef(0);
+  const queryRef = useRef(query);
+  queryRef.current = query;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -69,6 +75,7 @@ export function TerminalSearchOverlay({
   }, []);
 
   const performNativeSearch = useCallback((searchQuery: string) => {
+    const seq = ++requestSeq.current;
     if (!sessionId || !isTauri() || !searchQuery) {
       setResultIndex(null);
       setResultCount(searchQuery ? 0 : null);
@@ -82,6 +89,7 @@ export function TerminalSearchOverlay({
       caseSensitive: false,
     })
       .then((response) => {
+        if (seq !== requestSeq.current) return;
         const matches = parseSearchResponse(response);
         if (matches.length > 0) {
           setNativeMatches(matches);
@@ -94,11 +102,32 @@ export function TerminalSearchOverlay({
         }
       })
       .catch(() => {
+        if (seq !== requestSeq.current) return;
         setNativeMatches([]);
         setResultCount(0);
         setResultIndex(null);
       });
   }, [sessionId]);
+
+  // On session change (and initial mount) drop any counts/matches tied to the
+  // previous session, invalidate its in-flight request, and re-run the current
+  // query against the new session so the counter never shows stale results.
+  useEffect(() => {
+    requestSeq.current += 1;
+    setResultIndex(null);
+    setResultCount(null);
+    setNativeMatches([]);
+    const currentQuery = queryRef.current;
+    if (currentQuery) {
+      performNativeSearch(currentQuery);
+    }
+  }, [sessionId, performNativeSearch]);
+
+  // Invalidate any pending search on unmount so a late resolution cannot set
+  // state on an unmounted component.
+  useEffect(() => () => {
+    requestSeq.current += 1;
+  }, []);
 
   const handleFindNext = useCallback(() => {
     if (!query) return;
@@ -131,6 +160,9 @@ export function TerminalSearchOverlay({
   const handleQueryChange = (newQuery: string) => {
     setQuery(newQuery);
     if (!newQuery) {
+      // Clearing the query supersedes any in-flight search so its late result
+      // cannot repopulate counts/matches.
+      requestSeq.current += 1;
       setResultIndex(null);
       setResultCount(null);
       setNativeMatches([]);
