@@ -1,0 +1,164 @@
+{
+  "scope": "F01-F15 notification fixes",
+  "frontend": {
+    "files": 23,
+    "tests": 456,
+    "exit": 0,
+    "buildExit": 0
+  },
+  "rust": {
+    "notificationTests": 99,
+    "inventoryTests": 1,
+    "httpTests": 1,
+    "exit": 0
+  },
+  "lsp": {
+    "requests": 34,
+    "unavailable": 34
+  },
+  "capturedFiles": [
+    "settings-mute.png",
+    "settings-custom-unknown.png",
+    "settings-system-denied.png",
+    "dag-exact-owner.png",
+    "remote-inventory-390.png"
+  ],
+  "sourceHashes": [
+    {
+      "path": "ui/src/App.notifications.test.tsx",
+      "sha256": "5900c716530cec01f704e1e2e28793041e17e69d6054ff4951a06b7a7e91b7cb"
+    },
+    {
+      "path": "ui/src/App.test.tsx",
+      "sha256": "ed48ff01dac072c9c537e4f006f6d2976256c4386e291e1608e501940b1b8a47"
+    },
+    {
+      "path": "ui/src/App.tsx",
+      "sha256": "26c0878651a00da7e9b6f59951754323b03b763b45ceae0df36e6da834cb4a90"
+    },
+    {
+      "path": "ui/src/components/Sidebar.activity.test.tsx",
+      "sha256": "ff0c073f3bcb8a112f17ccc0df771379c7d9854ccb29b9e2381b1b91e53e3a97"
+    },
+    {
+      "path": "ui/src/components/Sidebar.tsx",
+      "sha256": "c4b98771c19310532427d8e1c319bf78caf5fd4e6d136e23dd2415dde49b774c"
+    },
+    {
+      "path": "ui/src/components/TerminalSplitView.test.tsx",
+      "sha256": "b788da8c9c5fcf357edeb6ed6782972a5ead12169a43f5b2e4e57cb876a530d4"
+    },
+    {
+      "path": "ui/src/components/TerminalSplitView.tsx",
+      "sha256": "fe1164c52cee603a9229923b8a42fe546981d44e6ba39b64f655628abb702736"
+    },
+    {
+      "path": "ui/src/components/dag/DagPaneBadge.test.tsx",
+      "sha256": "20d1f8d9e13b5f2295c64a447b8fe0d4535727f6be9179bcb4710314e31237e5"
+    },
+    {
+      "path": "ui/src/components/dag/DagPaneBadge.tsx",
+      "sha256": "e0063c5f873098157564c2a7c6fcf5dd681710e550d42b9c94c8fc065535ef31"
+    },
+    {
+      "path": "ui/src/components/settings/NotificationsSection.test.tsx",
+      "sha256": "57b6b7fb7e40f3983bc838cdef1dc30451773c8d23bfa6053694ad750bb8d738"
+    },
+    {
+      "path": "ui/src/components/settings/NotificationsSection.tsx",
+      "sha256": "694956cdc8e1d761eeef76d550bd769b8086961b947271d0d5a1b2e3606f2f96"
+    },
+    {
+      "path": "ui/src/lib/activity.ts",
+      "sha256": "d7f8f7e71a645ca311c03560ec7b5556e3d58bffc6ebe341eb633cd0409b6b33"
+    },
+    {
+      "path": "ui/src/lib/notificationCoordinator.test.ts",
+      "sha256": "aa9803e286fd1cae5db451a7bb039c8301fa96fb0f435b5f7b97129adeddf699"
+    },
+    {
+      "path": "ui/src/lib/notificationCoordinator.ts",
+      "sha256": "5f0605eadeb414990645c8b70924e7b09e349f8246e1f6c076b980b39859d1f0"
+    },
+    {
+      "path": "ui/src/lib/notificationSoundWire.test.ts",
+      "sha256": "a7ff218cf070eeb9899368d78916ef0e7d4efde8cc76c9a6f8f222d9ff44152f"
+    },
+    {
+      "path": "ui/src/lib/tauri.ts",
+      "sha256": "e9e74bd554069a0dff8b039a32dfa6d65ef65bdc6093d378380779d04f7694d2"
+    },
+    {
+      "path": "ui/src/lib/types.ts",
+      "sha256": "f6092923cb95356ab563b2d147c3881378f96b57e6d7302f6bcfefb9da645b2a"
+    },
+    {
+      "path": "ui/src/remote/RemoteSessionList.tsx",
+      "sha256": "dc44a834c9a80fa91069887b4227e08a6fb244ebad69d8309764ce47f13b35d1"
+    },
+    {
+      "path": "ui/src/remote/attentionInventory.test.ts",
+      "sha256": "3ea748562142e14716303cfd18e659dca92929cebd909b56c12a12075d912f74"
+    },
+    {
+      "path": "ui/src/state/attentionAcknowledgment.test.ts",
+      "sha256": "7efac4d594da6e061f8431e4001ed64d453393686ca0af25f9b7fdcf3d827fe8"
+    },
+    {
+      "path": "ui/src/state/dagRunOwnership.ts",
+      "sha256": "092f6bb16b3ea8e3367d9fcac0db09ffd80a7714ea91fd59e4aae48e93fd60d3"
+    },
+    {
+      "path": "ui/src/state/workspaceNativeActivity.test.tsx",
+      "sha256": "6b82532840f12b9aafc03edf82b15ae4fdf2f69ed5d2b89940d336e116008b0f"
+    },
+    {
+      "path": "ui/src/state/workspaceStore.ts",
+      "sha256": "9c93b295dc50a14b5fd4b12c945f46670a1d854dba15c6d75ee3b64200772fef"
+    },
+    {
+      "path": "src-tauri/src/notification/mod.rs",
+      "sha256": "238dbcda7859a7db43a31f41f11f95f8482e95acd49fd07c2bbab0d57590f54f"
+    },
+    {
+      "path": "src-tauri/src/notification/model.rs",
+      "sha256": "c4d75c4deff17496f74cf9d657cfe28b2dbc6725e28c156b07e41178a4ed05cc"
+    },
+    {
+      "path": "src-tauri/src/notification/permission.rs",
+      "sha256": "3ef30c698b368926cb8b3188205a973d73fe2475fda33f650a2dc904aa3d2f2f"
+    },
+    {
+      "path": "src-tauri/src/notification/service.rs",
+      "sha256": "30ac60c69ff148e5d141da44e63f98343489cdec461eaa3cebc0cea781098e9d"
+    },
+    {
+      "path": "src-tauri/src/notification/tests.rs",
+      "sha256": "aa7717a707dbf8846e8e61b6d702a94e3a52c468321349850be2d8d6517cdebb"
+    },
+    {
+      "path": "src-tauri/src/notification/macos_submission.rs",
+      "sha256": "d09daa8fa9b053d59c87f7eeed5a7c44a6e30f5a1c381b3bc66c89275a8e9e2f"
+    },
+    {
+      "path": "src-tauri/src/ipc/notifications.rs",
+      "sha256": "05434b9aaa5192a806ffef4faec938223ef2f13b6693fc65fcf84f054be2221f"
+    },
+    {
+      "path": "src-tauri/src/ipc/remote.rs",
+      "sha256": "5252db902dc4a73c6f87419b205da86d36ed4f60fc65930f4955a4ac0f9a666c"
+    },
+    {
+      "path": "src-tauri/src/remote/protocol.rs",
+      "sha256": "f5ba38a83b7cfe509d195a253378b2efad13981dee361ef4308645cbb278cb71"
+    },
+    {
+      "path": "src-tauri/src/remote/server.rs",
+      "sha256": "e3fecb23cf863158fa8368054fa610f8ac6b66b8ba1135aa4983c7bc358a226d"
+    },
+    {
+      "path": "src-tauri/src/remote/tests.rs",
+      "sha256": "ef51c8564e62117b7676539ff5642bd3a1f4415de5826fb9715eb567721be5fc"
+    }
+  ]
+}
