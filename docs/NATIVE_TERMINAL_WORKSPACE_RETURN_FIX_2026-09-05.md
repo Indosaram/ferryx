@@ -133,5 +133,20 @@ hypothesis; this patch does not add cross-owner geometry revisions.
 
 The user's desktop was not driven or manipulated. No Windows or Linux desktop
 run, release build, or release installation was performed. The final tests ran
-against the shared working tree; unrelated sessions' staged and unstaged changes
-were preserved and excluded from this repair's commit scope.
+against the shared working tree; unrelated sessions' changes were preserved.
+
+## Commit outcome
+
+The readiness increment is `8ed71b3`. The remaining four implementation/test files
+and two reports were staged for a path-limited terminal commit. During that
+operation, another session created `faad966` (`fix(notification): route
+notification clicks to the originating pane`) from the shared index, including
+these six terminal-repair files alongside its notification changes. The intended
+terminal-only commit then exited with code 1 because its paths already matched
+HEAD. No separate terminal-only commit was created for this increment.
+
+The six repaired paths match `faad966` with no remaining diff. The notification
+portion of `faad966` also matches the staged binary diff captured before this
+session staged its files, verified by SHA-256 comparison. Neither side's content
+was lost. The mixed commit was not amended, reset, or rewritten; separating that
+existing shared history would require explicit authorization.
