@@ -116,8 +116,16 @@ export function DagPaneBadge({
 
   useEffect(() => {
     if (!agentWorking || paneId === undefined || paneId === "") return;
-    for (const candidate of runningRuns) dagRunOwnership.claim(candidate.runId, paneId);
-  }, [agentWorking, paneId, runningRuns]);
+    const sessionList = sessions ? Object.values(sessions) : [];
+    for (const candidate of runningRuns) {
+      const explicitOwner = candidate.rootSessionId
+        ? sessionList.find((session) => session.providerSession?.id === candidate.rootSessionId)?.id
+          ?? (candidate.rootSessionId === providerSessionId ? paneId : undefined)
+        : undefined;
+      if (explicitOwner) dagRunOwnership.claim(candidate.runId, explicitOwner, true);
+      else dagRunOwnership.claim(candidate.runId, paneId);
+    }
+  }, [agentWorking, paneId, runningRuns, sessions, providerSessionId]);
 
   const exactlyMatchedByAnotherPane = useMemo(() => {
     const matchedRunIds = new Set<string>();
@@ -148,7 +156,8 @@ export function DagPaneBadge({
         candidate.rootSessionId === providerSessionId,
     );
     if (exact) return exact;
-    const owned = runningRuns.find((candidate) => ownersByRunId[candidate.runId] === paneId);
+    const owned = runningRuns.find((candidate) =>
+      ownersByRunId[candidate.runId] === paneId && !exactlyMatchedByAnotherPane.has(candidate.runId));
     if (owned) return owned;
     if (!agentPresent) return null;
     return runningRuns.find(

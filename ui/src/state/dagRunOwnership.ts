@@ -34,8 +34,8 @@ export const dagRunOwnership = {
   },
 
   /** First claimer wins, so sibling panes of the same project never take over a live run. */
-  claim(runId: string, ownerId: OwnerId): void {
-    if (owners.has(runId)) return;
+  claim(runId: string, ownerId: OwnerId, explicit = false): void {
+    if (owners.get(runId) === ownerId || (owners.has(runId) && !explicit)) return;
     owners.set(runId, ownerId);
     publish();
   },

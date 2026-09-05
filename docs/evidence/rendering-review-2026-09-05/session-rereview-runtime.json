@@ -1,0 +1,24 @@
+{
+  "commit": "3496f54",
+  "surface": "isolated system WebKit; real React components and CSS; Tauri IPC recorded/faked",
+  "mask": {
+    "hidden": false,
+    "shown": true,
+    "ownerHiddenFinal": false,
+    "dialogRect": {
+      "x": 214,
+      "y": 92,
+      "width": 672,
+      "height": 363
+    },
+    "overflow": false
+  },
+  "search": {
+    "requests": [
+      "err",
+      "error"
+    ],
+    "newest": "1/2",
+    "cleared": ""
+  }
+}

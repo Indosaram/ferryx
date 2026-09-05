@@ -39,6 +39,18 @@ describe("DagPaneBadge", () => {
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
+  it("does not let the first working pane steal an explicitly owned run", () => {
+    dagStore.applySnapshot("/repo/my-project", { ...baseSnapshot, runId: "explicit-owner", status: "running", rootSessionId: "provider-b" });
+    const sessions = [createSession("pane-a", "provider-a"), createSession("pane-b", "provider-b")];
+    const first = render(<DagPaneBadge projectPath="/repo/my-project" paneId="pane-a"
+      providerSessionId="provider-a" sessions={sessions} agentWorking agentPresent />);
+    expect(first.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+    render(<DagPaneBadge projectPath="/repo/my-project" paneId="pane-b"
+      providerSessionId="provider-b" sessions={sessions} agentWorking agentPresent />);
+    expect(screen.getAllByTestId("dag-pane-badge")).toHaveLength(1);
+    expect(dagRunOwnership.ownerOf("explicit-owner")).toBe("pane-b");
+  });
+
   it("idle hidden: renders null when projectPath is undefined or empty", () => {
     const runningRun: DagRunSnapshot = {
       ...baseSnapshot,
