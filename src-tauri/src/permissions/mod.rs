@@ -8,6 +8,8 @@ pub enum PermissionStatus {
     Denied,
     NotDetermined,
     Unsupported,
+    /// The OS manages this externally; Ferryx cannot query it authoritatively.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +18,7 @@ pub struct PermissionItemStatus {
     pub status: PermissionStatus,
     pub granted: bool,
     pub can_request: bool,
+    pub can_open_settings: bool,
     pub description: String,
 }
 
@@ -150,36 +153,70 @@ pub fn request_accessibility() -> bool {
     true
 }
 
+/// Map a notification permission DTO to a UI-facing permission item.
+///
+/// Off-macOS the provider is non-authoritative: the OS manages notification
+/// access externally, so we report `Unknown` (never a fake `can_request` that
+/// would render a dead "Enable Notifications" button) while still exposing an
+/// "open settings" affordance where one exists.
+fn notification_item(
+    platform: &str,
+    raw: &crate::notification::NotificationPermissionStatusDto,
+) -> PermissionItemStatus {
+    const DEFAULT_DESC: &str = "Allows desktop alerts for agent task completions, background builds, and version updates.";
+
+    if raw.authoritative {
+        return match raw.authorization {
+            crate::notification::NotificationAuthorization::Authorized
+            | crate::notification::NotificationAuthorization::Provisional => PermissionItemStatus {
+                status: PermissionStatus::Granted,
+                granted: true,
+                can_request: false,
+                can_open_settings: true,
+                description: DEFAULT_DESC.to_string(),
+            },
+            crate::notification::NotificationAuthorization::Denied => PermissionItemStatus {
+                status: PermissionStatus::Denied,
+                granted: false,
+                can_request: false,
+                can_open_settings: true,
+                description: DEFAULT_DESC.to_string(),
+            },
+            crate::notification::NotificationAuthorization::NotDetermined
+            | crate::notification::NotificationAuthorization::Unknown => PermissionItemStatus {
+                status: PermissionStatus::NotDetermined,
+                granted: false,
+                can_request: true,
+                can_open_settings: true,
+                description: DEFAULT_DESC.to_string(),
+            },
+        };
+    }
+
+    let description = match platform {
+        "windows" => {
+            "Windows manages per-app notification access in Settings > System > Notifications."
+        }
+        "linux" => {
+            "Desktop notifications are managed by the desktop environment; most setups need no per-app grant."
+        }
+        _ => DEFAULT_DESC,
+    };
+
+    PermissionItemStatus {
+        status: PermissionStatus::Unknown,
+        granted: false,
+        can_request: false,
+        can_open_settings: raw.can_open_settings,
+        description: description.to_string(),
+    }
+}
+
 pub fn get_system_permissions_status() -> SystemPermissionsStatus {
     crate::notification::invalidate_permission_cache();
 
     let fda_status = check_full_disk_access();
     let ax_status = check_accessibility();
-
-    let notif_raw = crate::notification::platform_permission_provider().status();
-    let (notif_status, notif_granted, notif_can_request) = match notif_raw.authorization {
-        crate::notification::NotificationAuthorization::Authorized
-        | crate::notification::NotificationAuthorization::Provisional => {
-            (PermissionStatus::Granted, true, false)
-        }
-        crate::notification::NotificationAuthorization::Denied => {
-            (PermissionStatus::Denied, false, false)
-        }
-        crate::notification::NotificationAuthorization::NotDetermined => {
-            (PermissionStatus::NotDetermined, false, true)
-        }
-        crate::notification::NotificationAuthorization::Unknown => {
-            (PermissionStatus::NotDetermined, false, true)
-        }
-    };
-
-    let fda_granted = fda_status == PermissionStatus::Granted;
-    let ax_granted = ax_status == PermissionStatus::Granted;
-
-    #[cfg(target_os = "macos")]
-    let all_granted = fda_granted && ax_granted && notif_granted;
-    #[cfg(not(target_os = "macos"))]
-    let all_granted = notif_granted;
 
     #[cfg(target_os = "macos")]
     let platform = "macos".to_string();
@@ -188,26 +225,40 @@ pub fn get_system_permissions_status() -> SystemPermissionsStatus {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let platform = "linux".to_string();
 
+    let notif_raw = crate::notification::platform_permission_provider().status();
+    let notifications = notification_item(&platform, &notif_raw);
+
+    let fda_granted = fda_status == PermissionStatus::Granted;
+    let ax_granted = ax_status == PermissionStatus::Granted;
+    let notif_granted = notifications.granted;
+
+    #[cfg(target_os = "macos")]
+    let all_granted = fda_granted && ax_granted && notif_granted;
+    #[cfg(not(target_os = "macos"))]
+    let all_granted = notif_granted;
+
+    #[cfg(target_os = "macos")]
+    let deep_links = true;
+    #[cfg(not(target_os = "macos"))]
+    let deep_links = false;
+
     SystemPermissionsStatus {
         platform,
         full_disk_access: PermissionItemStatus {
             status: fda_status,
             granted: fda_granted,
             can_request: false,
+            can_open_settings: deep_links,
             description: "Allows terminal subagents, worktrees, and git tools to read project files without macOS Photo Library or folder access prompts.".to_string(),
         },
         accessibility: PermissionItemStatus {
             status: ax_status,
             granted: ax_granted,
             can_request: true,
+            can_open_settings: deep_links,
             description: "Allows global keyboard shortcuts, native terminal focus management, and automation.".to_string(),
         },
-        notifications: PermissionItemStatus {
-            status: notif_status,
-            granted: notif_granted,
-            can_request: notif_can_request,
-            description: "Allows desktop alerts for agent task completions, background builds, and version updates.".to_string(),
-        },
+        notifications,
         all_granted,
     }
 }
@@ -286,5 +337,101 @@ pub fn open_system_settings_for_target(target: &str) -> OpenPermissionsSettingsR
             target: target.to_string(),
             reason: Some("target unsupported on Linux".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod notification_item_tests {
+    use super::*;
+    use crate::notification::{
+        NotificationAuthorization, NotificationPermissionStatusDto, NotificationPlatform,
+    };
+
+    fn authoritative(auth: NotificationAuthorization) -> NotificationPermissionStatusDto {
+        NotificationPermissionStatusDto {
+            platform: NotificationPlatform::Macos,
+            supported: true,
+            authorization: auth,
+            alerts_enabled: None,
+            sounds_enabled: None,
+            badges_enabled: None,
+            requested: auth != NotificationAuthorization::NotDetermined,
+            authoritative: true,
+            can_open_settings: true,
+        }
+    }
+
+    #[test]
+    fn authoritative_authorized_is_granted() {
+        let item = notification_item(
+            "macos",
+            &authoritative(NotificationAuthorization::Authorized),
+        );
+        assert_eq!(item.status, PermissionStatus::Granted);
+        assert!(item.granted);
+        assert!(!item.can_request);
+        assert!(item.can_open_settings);
+    }
+
+    #[test]
+    fn authoritative_provisional_is_granted() {
+        let item = notification_item(
+            "macos",
+            &authoritative(NotificationAuthorization::Provisional),
+        );
+        assert_eq!(item.status, PermissionStatus::Granted);
+        assert!(item.granted);
+        assert!(!item.can_request);
+        assert!(item.can_open_settings);
+    }
+
+    #[test]
+    fn authoritative_denied_is_denied() {
+        let item =
+            notification_item("macos", &authoritative(NotificationAuthorization::Denied));
+        assert_eq!(item.status, PermissionStatus::Denied);
+        assert!(!item.granted);
+        assert!(!item.can_request);
+        assert!(item.can_open_settings);
+    }
+
+    #[test]
+    fn authoritative_not_determined_can_request() {
+        let item = notification_item(
+            "macos",
+            &authoritative(NotificationAuthorization::NotDetermined),
+        );
+        assert_eq!(item.status, PermissionStatus::NotDetermined);
+        assert!(!item.granted);
+        assert!(item.can_request);
+        assert!(item.can_open_settings);
+    }
+
+    #[test]
+    fn non_authoritative_windows_is_unknown_with_settings() {
+        let raw = NotificationPermissionStatusDto::non_authoritative(
+            NotificationPlatform::Windows,
+            true,
+        );
+        let item = notification_item("windows", &raw);
+        assert_eq!(item.status, PermissionStatus::Unknown);
+        assert!(!item.granted);
+        assert!(!item.can_request);
+        assert!(item.can_open_settings);
+        assert!(item.description.contains("Windows manages"));
+    }
+
+    #[test]
+    fn non_authoritative_linux_is_unknown_no_settings() {
+        let raw = NotificationPermissionStatusDto::non_authoritative(
+            NotificationPlatform::Linux,
+            false,
+        );
+        let item = notification_item("linux", &raw);
+        assert_eq!(item.status, PermissionStatus::Unknown);
+        assert!(!item.granted);
+        assert!(!item.can_request);
+        assert!(!item.can_open_settings);
+        assert!(item.description.contains("desktop environment"));
     }
 }

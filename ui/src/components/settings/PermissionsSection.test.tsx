@@ -25,18 +25,21 @@ const mockStatusNotGranted: SystemPermissionsStatus = {
     status: "denied",
     granted: false,
     canRequest: false,
+    canOpenSettings: true,
     description: "Allows terminal subagents, worktrees, and git tools to read project files without macOS Photo Library or folder access prompts.",
   },
   accessibility: {
     status: "denied",
     granted: false,
     canRequest: true,
+    canOpenSettings: true,
     description: "Allows global keyboard shortcuts, native terminal focus management, and automation.",
   },
   notifications: {
     status: "denied",
     granted: false,
     canRequest: false,
+    canOpenSettings: true,
     description: "Allows desktop alerts for agent task completions, background builds, and version updates.",
   },
 };
@@ -48,19 +51,48 @@ const mockStatusAllGranted: SystemPermissionsStatus = {
     status: "granted",
     granted: true,
     canRequest: false,
+    canOpenSettings: true,
     description: "Allows terminal subagents, worktrees, and git tools to read project files without macOS Photo Library or folder access prompts.",
   },
   accessibility: {
     status: "granted",
     granted: true,
     canRequest: false,
+    canOpenSettings: true,
     description: "Allows global keyboard shortcuts, native terminal focus management, and automation.",
   },
   notifications: {
     status: "granted",
     granted: true,
     canRequest: false,
+    canOpenSettings: true,
     description: "Allows desktop alerts for agent task completions, background builds, and version updates.",
+  },
+};
+
+const mockStatusWindows: SystemPermissionsStatus = {
+  platform: "windows",
+  allGranted: false,
+  fullDiskAccess: {
+    status: "unsupported",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Permissions are managed by the host desktop application.",
+  },
+  accessibility: {
+    status: "unsupported",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: false,
+    description: "Permissions are managed by the host desktop application.",
+  },
+  notifications: {
+    status: "unknown",
+    granted: false,
+    canRequest: false,
+    canOpenSettings: true,
+    description: "Windows manages per-app notification access in Settings > System > Notifications.",
   },
 };
 
@@ -142,6 +174,22 @@ describe("PermissionsSection", () => {
     });
     // Initial load + refetch after request.
     expect(mockTauri.getSystemPermissionsStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders Windows notifications-only surface with OS-managed badge", async () => {
+    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusWindows);
+
+    render(<PermissionsSection />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Desktop Notifications")).toBeDefined();
+    });
+
+    expect(screen.queryByText("Full Disk Access")).toBeNull();
+    expect(screen.queryByText("Accessibility")).toBeNull();
+    expect(screen.getByText("Managed by OS")).toBeDefined();
+    expect(screen.getByTestId("open-notifications-settings")).toBeDefined();
+    expect(screen.queryByTestId("request-notifications")).toBeNull();
   });
 
   it("resets dismissed key and dispatches open-onboarding event on Re-run Welcome Setup", async () => {

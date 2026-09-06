@@ -658,12 +658,13 @@ export type CliLauncherStatus = {
 
 export type { RegisteredProject } from "./tauri";
 
-export type PermissionStatus = "granted" | "denied" | "not_determined" | "unsupported";
+export type PermissionStatus = "granted" | "denied" | "not_determined" | "unsupported" | "unknown";
 
 export interface PermissionItemStatus {
   status: PermissionStatus;
   granted: boolean;
   canRequest: boolean;
+  canOpenSettings: boolean;
   description: string;
 }
 

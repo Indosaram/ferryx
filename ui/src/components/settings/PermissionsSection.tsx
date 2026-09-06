@@ -38,6 +38,13 @@ function StatusBadge({ item }: { item?: PermissionItemStatus }) {
       </Badge>
     );
   }
+  if (item.status === "unknown") {
+    return (
+      <Badge variant="outline" className="text-muted-foreground border-border text-xs">
+        Managed by OS
+      </Badge>
+    );
+  }
   if (item.granted) {
     return (
       <Badge variant="secondary" className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30">
@@ -150,7 +157,7 @@ export function PermissionsSection() {
           <p className="text-sm text-muted-foreground">
             {isMac
               ? "Configure macOS permissions for terminal execution, file system access, and notifications."
-              : "System permissions for terminal execution, background tasks, and notifications."}
+              : "Windows and Linux manage these permissions at the OS level; adjust them in your system settings."}
           </p>
         </div>
         <Button
@@ -182,6 +189,7 @@ export function PermissionsSection() {
       )}
 
       <div className="space-y-4">
+        {status?.platform === "macos" && (
         <Card className="p-4 bg-card/60 border-border">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1">
@@ -217,7 +225,9 @@ export function PermissionsSection() {
             </div>
           </div>
         </Card>
+        )}
 
+        {status?.platform === "macos" && (
         <Card className="p-4 bg-card/60 border-border">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1">
@@ -255,6 +265,7 @@ export function PermissionsSection() {
             </div>
           </div>
         </Card>
+        )}
 
         <Card className="p-4 bg-card/60 border-border">
           <div className="flex items-start justify-between gap-4">
@@ -268,31 +279,45 @@ export function PermissionsSection() {
                   (loading ? "Checking permission status…" : "Allows desktop alerts for agent task completions and updates.")}
               </p>
             </div>
-            {status && !status.notifications.granted ? (
-              <div className="shrink-0">
-                {status.notifications.canRequest ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    data-testid="request-notifications"
-                    onClick={handleRequestNotifications}
-                    className="gap-1.5 text-xs"
-                  >
-                    Enable Notifications
-                  </Button>
-                ) : (
+            {status ? (
+              <div className="shrink-0 flex items-center gap-2">
+                {status.platform === "macos" && !status.notifications.granted ? (
+                  status.notifications.canRequest ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-testid="request-notifications"
+                      onClick={handleRequestNotifications}
+                      className="gap-1.5 text-xs"
+                    >
+                      Enable Notifications
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      data-testid="open-notifications-settings"
+                      disabled={!status.notifications.canOpenSettings}
+                      onClick={() => handleOpenSettings("notifications")}
+                      className="gap-1.5 text-xs"
+                    >
+                      <ExternalLink className="size-3.5" />
+                      Open System Settings
+                    </Button>
+                  )
+                ) : null}
+                {status.platform === "windows" && status.notifications.canOpenSettings ? (
                   <Button
                     variant="secondary"
                     size="sm"
                     data-testid="open-notifications-settings"
-                    disabled={status.notifications.status === "unsupported"}
                     onClick={() => handleOpenSettings("notifications")}
                     className="gap-1.5 text-xs"
                   >
                     <ExternalLink className="size-3.5" />
-                    Open System Settings
+                    Open Windows Settings
                   </Button>
-                )}
+                ) : null}
               </div>
             ) : null}
           </div>

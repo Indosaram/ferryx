@@ -25,18 +25,21 @@ const mockStatusNotGranted: SystemPermissionsStatus = {
     status: "denied",
     granted: false,
     canRequest: false,
+    canOpenSettings: true,
     description: "Full disk access needed.",
   },
   accessibility: {
     status: "denied",
     granted: false,
     canRequest: true,
+    canOpenSettings: true,
     description: "Accessibility needed.",
   },
   notifications: {
     status: "denied",
     granted: false,
     canRequest: true,
+    canOpenSettings: true,
     description: "Notifications needed.",
   },
 };
@@ -48,18 +51,21 @@ const mockStatusAllGranted: SystemPermissionsStatus = {
     status: "granted",
     granted: true,
     canRequest: false,
+    canOpenSettings: true,
     description: "Full disk access granted.",
   },
   accessibility: {
     status: "granted",
     granted: true,
     canRequest: false,
+    canOpenSettings: true,
     description: "Accessibility granted.",
   },
   notifications: {
     status: "granted",
     granted: true,
     canRequest: false,
+    canOpenSettings: true,
     description: "Notifications granted.",
   },
 };

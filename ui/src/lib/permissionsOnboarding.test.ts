@@ -31,18 +31,21 @@ const mockStatusNeedsPermissions: SystemPermissionsStatus = {
     status: "denied",
     granted: false,
     canRequest: false,
+    canOpenSettings: true,
     description: "Full disk access needed.",
   },
   accessibility: {
     status: "denied",
     granted: false,
     canRequest: true,
+    canOpenSettings: true,
     description: "Accessibility needed.",
   },
   notifications: {
     status: "denied",
     granted: false,
     canRequest: true,
+    canOpenSettings: true,
     description: "Notifications needed.",
   },
 };
