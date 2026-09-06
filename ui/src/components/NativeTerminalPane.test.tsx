@@ -14,6 +14,8 @@ import {
   resetNativeTerminalPaneForTest,
   snapBoundsToDevicePixels,
 } from "./NativeTerminalPane";
+import { registerBuiltInBrowserLinkOpener } from "../lib/linkRouting";
+import { saveBrowserSettings } from "../lib/browserSettings";
 
 const tauriCoreMocks = vi.hoisted(() => ({
   invoke: vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined),
@@ -2932,7 +2934,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(pastes).toHaveLength(1);
     expect(pastes[0]?.[1]).toEqual({
       sessionId: "daemon-drop-right",
-      text: "'/Users/indo/divider file.txt'",
+      text: "'/Users/indo/divider file.txt' ",
     });
   });
 
@@ -2972,7 +2974,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-tauri-dnd",
-        text: "/Users/indo/Inside/file.txt",
+        text: "/Users/indo/Inside/file.txt ",
       });
 
       // 1b. Regression discriminator: raw (19, 100) is INSIDE on macOS (19 >= 10),
@@ -2990,7 +2992,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-tauri-dnd",
-        text: "/Users/indo/Boundary/file.txt",
+        text: "/Users/indo/Boundary/file.txt ",
       });
 
       // 2. Point outside the pane (left of left edge 10 / above top 32); macOS reads
@@ -3014,7 +3016,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-tauri-dnd",
-        text: "'/Users/indo/Documents/project report.pdf' /Users/indo/file2.txt",
+        text: "'/Users/indo/Documents/project report.pdf' /Users/indo/file2.txt ",
       });
 
       // 3. Unmount -> invokes unlisten callback
@@ -3026,6 +3028,237 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         value: originalDpr,
       });
     }
+  });
+
+  it("handles Cmd+click to resolve line text and open URLs", async () => {
+    const session = createSession("term-session-cmd-click");
+    let openedUrl: string | null = null;
+    saveBrowserSettings({ showTerminalLinkActions: false, openLinksInBuiltInBrowser: true });
+    const unregister = registerBuiltInBrowserLinkOpener((url) => {
+      openedUrl = url;
+    });
+
+    try {
+      tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+        if (command === "cmd_native_terminal_attach") {
+          return {
+            cellWidthPx: 10,
+            cellHeightPx: 20,
+            cursorCol: 0,
+            cursorRow: 0,
+            cols: 80,
+            rows: 24,
+          };
+        }
+        if (command === "cmd_native_terminal_line_at") {
+          return {
+            text: "See https://ferryx.dev/guide for details",
+            col: args.col,
+            row: args.row,
+          };
+        }
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId="term-session-cmd-click" session={session} />,
+      );
+      const pane = getByTestId("native-terminal-pane");
+      const viewport = getByTestId("native-terminal-viewport");
+
+      // Mock bounding client rects
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        top: 0,
+        right: 800,
+        bottom: 480,
+        width: 800,
+        height: 480,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+
+      // Simulate Cmd+click on the URL (col ~10)
+      act(() => {
+        fireEvent.pointerDown(pane, {
+          button: 0,
+          clientX: 100,
+          clientY: 20,
+          metaKey: true,
+        });
+        window.dispatchEvent(
+          new PointerEvent("pointerup", {
+            clientX: 100,
+            clientY: 20,
+            bubbles: true,
+          }),
+        );
+      });
+
+      // Assert that the real browser opener was invoked with the exact target URL
+      await waitFor(() => {
+        expect(openedUrl).toBe("https://ferryx.dev/guide");
+      });
+    } finally {
+      unregister();
+    }
+  });
+
+  it("handles Cmd+click to resolve line text and open file paths with line/column", async () => {
+    const session = {
+      ...createSession("term-session-file-click", "daemon-file-click"),
+      cwd: "/Users/indo/code/project",
+    };
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return {
+          cellWidthPx: 10,
+          cellHeightPx: 20,
+          cursorCol: 0,
+          cursorRow: 0,
+          cols: 80,
+          rows: 24,
+        };
+      }
+      if (command === "cmd_native_terminal_line_at") {
+        return {
+          text: "ERROR at src/components/App.tsx:42:10 in test",
+          col: args.col,
+          row: args.row,
+        };
+      }
+      if (command === "cmd_open_file_path") {
+        return true;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-file-click" session={session} />,
+    );
+    const pane = getByTestId("native-terminal-pane");
+    const viewport = getByTestId("native-terminal-viewport");
+
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 480,
+      width: 800,
+      height: 480,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    // Simulate Cmd+click on the file path
+    act(() => {
+      fireEvent.pointerDown(pane, {
+        button: 0,
+        clientX: 120,
+        clientY: 20,
+        metaKey: true,
+      });
+      window.dispatchEvent(
+        new PointerEvent("pointerup", {
+          clientX: 120,
+          clientY: 20,
+          bubbles: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      const openCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([command]) => command === "cmd_open_file_path",
+      );
+      expect(openCalls.length).toBeGreaterThanOrEqual(1);
+      expect(openCalls[0]?.[1]).toEqual({
+        path: "src/components/App.tsx",
+        cwd: "/Users/indo/code/project",
+        line: 42,
+        col: 10,
+      });
+    });
+  });
+
+  it("handles Cmd+click on indented lines without coordinate drift", async () => {
+    const session = {
+      ...createSession("term-session-indented-click", "daemon-indented-click"),
+      cwd: "/Users/indo/code/project",
+    };
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return {
+          cellWidthPx: 10,
+          cellHeightPx: 20,
+          cursorCol: 0,
+          cursorRow: 0,
+          cols: 80,
+          rows: 24,
+        };
+      }
+      if (command === "cmd_native_terminal_line_at") {
+        return {
+          text: "        alpha/one.ts:1:1 and beta/two.ts:2:2",
+          col: args.col,
+          row: args.row,
+        };
+      }
+      if (command === "cmd_open_file_path") {
+        return true;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-indented-click" session={session} />,
+    );
+    const pane = getByTestId("native-terminal-pane");
+    const viewport = getByTestId("native-terminal-viewport");
+
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 480,
+      width: 800,
+      height: 480,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    // Grid col 8 corresponds to x=80 (cellWidth=10) -> start of alpha/one.ts
+    act(() => {
+      fireEvent.pointerDown(pane, {
+        button: 0,
+        clientX: 80,
+        clientY: 20,
+        metaKey: true,
+      });
+      window.dispatchEvent(
+        new PointerEvent("pointerup", {
+          clientX: 80,
+          clientY: 20,
+          bubbles: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      const openCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([command]) => command === "cmd_open_file_path",
+      );
+      expect(openCalls.length).toBeGreaterThanOrEqual(1);
+      expect(openCalls[0]?.[1]).toEqual({
+        path: "alpha/one.ts",
+        cwd: "/Users/indo/code/project",
+        line: 1,
+        col: 1,
+      });
+    });
   });
 
   it("handles onWheel scrolling by issuing native scroll IPC command", async () => {

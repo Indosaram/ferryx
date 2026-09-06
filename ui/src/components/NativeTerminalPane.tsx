@@ -13,6 +13,7 @@ import {
 } from "../lib/nativeTerminalLifecycle";
 import { switchDebug } from "../lib/switchDebug";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
+import { openTerminalToken, resolveTokenAtCol } from "../lib/linkRouting";
 import {
   isStructuredIpcError,
   onNativeTerminalCopyOrInterrupt,
@@ -141,7 +142,8 @@ type NativeTerminalIpcCommand =
   | "cmd_native_terminal_copy_selection"
   | "cmd_native_terminal_paste"
   | "cmd_native_terminal_clipboard_content"
-  | "cmd_native_terminal_mouse";
+  | "cmd_native_terminal_mouse"
+  | "cmd_native_terminal_line_at";
 
 const ignoredBrowserKeys = new Set([
   "Alt",
@@ -525,6 +527,8 @@ export function NativeTerminalPane({
   }, []);
   const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
   const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
+  const [isCmdHeld, setIsCmdHeld] = useState(false);
+  const cmdClickDownRef = useRef<{ clientX: number; clientY: number; shiftKey: boolean } | null>(null);
   const lastKillLineCtrlCRef = useRef(0);
   const ctrlCExitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -620,6 +624,47 @@ export function NativeTerminalPane({
         reportNativeTerminalIpcFailure("cmd_native_terminal_scrollbar", error);
       });
   }, [targetSessionId, visible]);
+
+  const handleTerminalClick = useCallback(
+    async (clientX: number, clientY: number, shiftKey: boolean) => {
+      if (!visible || !isTauri() || !targetSessionId) return;
+      const geoViewport = viewportRef.current;
+      if (!geoViewport) return;
+
+      const geoRect = geoViewport.getBoundingClientRect();
+      const scale = scaleFactorRef.current || (typeof window !== "undefined" ? window.devicePixelRatio : 1) || 1;
+      const cellMetrics = cellSizeRef.current;
+      const cellW = cellMetrics && cellMetrics.width > 0 ? cellMetrics.width / scale : 8;
+      const cellH = cellMetrics && cellMetrics.height > 0 ? cellMetrics.height / scale : 16;
+      if (cellW <= 0 || cellH <= 0) return;
+
+      const col = Math.max(0, Math.floor((clientX - geoRect.left) / cellW));
+      const row = Math.max(0, Math.floor((clientY - geoRect.top) / cellH));
+
+      try {
+        const receipt = await invoke<{ text: string; col: number; row: number }>(
+          "cmd_native_terminal_line_at",
+          {
+            sessionId: targetSessionId,
+            col,
+            row,
+          },
+        );
+        if (receipt && receipt.text) {
+          const token = resolveTokenAtCol(receipt.text, receipt.col);
+          if (token) {
+            await openTerminalToken(token, {
+              shiftKey,
+              cwd: session?.cwd || session?.worktreePath,
+            });
+          }
+        }
+      } catch (error) {
+        console.error("Failed to resolve terminal line on Cmd+click:", error);
+      }
+    },
+    [session?.cwd, session?.worktreePath, targetSessionId, visible],
+  );
 
   const sendFocus = useCallback((focused: boolean) => {
     if (!visible || !isTauri() || !targetSessionId) {
@@ -1094,6 +1139,14 @@ export function NativeTerminalPane({
       }
     };
     const finish = (event: PointerEvent) => {
+      if (cmdClickDownRef.current) {
+        const down = cmdClickDownRef.current;
+        cmdClickDownRef.current = null;
+        const dist = Math.hypot(event.clientX - down.clientX, event.clientY - down.clientY);
+        if (dist < 6) {
+          void handleTerminalClick(event.clientX, event.clientY, down.shiftKey || event.shiftKey);
+        }
+      }
       if (scrollbarDragRef.current?.pointerId === event.pointerId) {
         scrollbarDragRef.current = null;
         document.body.style.cursor = "";
@@ -1126,7 +1179,25 @@ export function NativeTerminalPane({
       pendingMotionRef.current = null;
       document.body.style.cursor = "";
     };
-  }, [refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse]);
+  }, [handleTerminalClick, refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse]);
+
+  useEffect(() => {
+    const handleKeyChange = (event: globalThis.KeyboardEvent) => {
+      const isMac = isMacShortcutPlatform();
+      const held = isMac ? event.metaKey : event.ctrlKey;
+      setIsCmdHeld(held);
+    };
+    const handleBlur = () => setIsCmdHeld(false);
+
+    window.addEventListener("keydown", handleKeyChange, true);
+    window.addEventListener("keyup", handleKeyChange, true);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyChange, true);
+      window.removeEventListener("keyup", handleKeyChange, true);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, []);
 
   useEffect(() => {
     if (!visible || !targetSessionId) return;
@@ -1522,7 +1593,10 @@ export function NativeTerminalPane({
               logicalY < rect.bottom
             ) {
               if (payload.paths && payload.paths.length > 0) {
-                const quotedPayload = payload.paths.map(quoteShellPath).join(" ");
+                const quotedPayload = payload.paths.map(quoteShellPath).join(" ") + " ";
+                lastFocusedNativeTerminalSessionId = targetSessionId;
+                inputRef.current?.focus();
+                sendFocus(true);
                 sendPaste(quotedPayload);
               }
             }
@@ -1548,7 +1622,7 @@ export function NativeTerminalPane({
       disposed = true;
       unlisten?.();
     };
-  }, [sendPaste, targetSessionId, visible]);
+  }, [sendFocus, sendPaste, targetSessionId, visible]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -1863,7 +1937,7 @@ export function NativeTerminalPane({
       ref={containerRef}
       data-testid="native-terminal-pane"
       data-native-terminal-visible={visible ? "true" : "false"}
-      className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", className)}
+      className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", isCmdHeld && "cursor-pointer", className)}
       style={{
         marginTop: `${NATIVE_TERMINAL_HANDLE_INSET_PX}px`,
         height: `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX}px)`,
@@ -1889,6 +1963,17 @@ export function NativeTerminalPane({
           retryAttach();
         }
         triggerScrollbarReveal();
+        const isCmdOrCtrl = isMacShortcutPlatform() ? event.metaKey : event.ctrlKey;
+        if (event.button === 0 && isCmdOrCtrl) {
+          cmdClickDownRef.current = {
+            clientX: event.clientX,
+            clientY: event.clientY,
+            shiftKey: event.shiftKey,
+          };
+          inputRef.current?.focus();
+          return;
+        }
+        cmdClickDownRef.current = null;
         const geoViewport = viewportRef.current;
         if (geoViewport) {
           const geoRect = geoViewport.getBoundingClientRect();

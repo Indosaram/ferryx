@@ -114,6 +114,14 @@ pub struct NativeTerminalSearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalLineReceipt {
+    pub text: String,
+    pub col: u16,
+    pub row: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum NativeTerminalClipboardContent {
     Text { text: String },
@@ -779,6 +787,19 @@ pub fn search_attached_native_terminal(
     })
 }
 
+pub fn line_text_attached_native_terminal(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    col: u16,
+    row: u16,
+) -> Result<NativeTerminalLineReceipt, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
+    state.with_session_terminal(session_id, |term| {
+        let text = term.line_text_at(col, row)?;
+        Ok(NativeTerminalLineReceipt { text, col, row })
+    })
+}
+
 /// Query whether mouse tracking is enabled on an attached native session.
 pub fn mouse_tracking_enabled_for_attached_session(
     state: &NativeTerminalSurfaceHostState,
@@ -1312,6 +1333,18 @@ pub async fn cmd_native_terminal_search<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_line_at<R: Runtime>(
+    _app: AppHandle<R>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+    col: u16,
+    row: u16,
+) -> Result<NativeTerminalLineReceipt, IpcError> {
+    line_text_attached_native_terminal(state.inner(), &session_id, col, row)
+        .map_err(|err| IpcError::internal(err.to_string()))
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<NativeTerminalClipboardContent, IpcError> {
@@ -1445,18 +1478,24 @@ mod tests {
     #[test]
     fn bounds_receipt_serializes_actual_presentation_status() {
         for presented in [false, true] {
-            let receipt = into_ipc_receipt("presentation".into(), NativeTerminalSurfaceReceipt {
-                presented,
-                cols: 80,
-                rows: 24,
-                rebuilt_rows: 0,
-                reused_rows: 0,
-                cursor_col: 0,
-                cursor_row: 0,
-                cell_width_px: 10,
-                cell_height_px: 20,
-            });
-            assert_eq!(serde_json::to_value(receipt).unwrap()["presented"], presented);
+            let receipt = into_ipc_receipt(
+                "presentation".into(),
+                NativeTerminalSurfaceReceipt {
+                    presented,
+                    cols: 80,
+                    rows: 24,
+                    rebuilt_rows: 0,
+                    reused_rows: 0,
+                    cursor_col: 0,
+                    cursor_row: 0,
+                    cell_width_px: 10,
+                    cell_height_px: 20,
+                },
+            );
+            assert_eq!(
+                serde_json::to_value(receipt).unwrap()["presented"],
+                presented
+            );
         }
     }
 

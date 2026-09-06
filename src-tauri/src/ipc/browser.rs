@@ -1513,3 +1513,92 @@ pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
     }
     Ok(())
 }
+
+#[tauri::command]
+pub async fn cmd_open_file_path(
+    path: String,
+    cwd: Option<String>,
+    _line: Option<u32>,
+    _col: Option<u32>,
+) -> Result<bool, IpcError> {
+    crate::ipc::run_blocking::<bool, _>(move || {
+        let trimmed = path
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"' || c == '`');
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+
+        let candidate = if trimmed.starts_with("~/") || trimmed == "~" {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|h| h.join(trimmed.trim_start_matches("~/")))
+                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
+        } else if std::path::Path::new(trimmed).is_absolute() {
+            std::path::PathBuf::from(trimmed)
+        } else if let Some(ref cwd_dir) = cwd {
+            std::path::Path::new(cwd_dir).join(trimmed)
+        } else {
+            std::path::PathBuf::from(trimmed)
+        };
+
+        if !candidate.exists() {
+            return Ok(false);
+        }
+
+        let full_path = candidate.to_string_lossy().to_string();
+
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("open").arg(&full_path).status();
+            Ok(status.map(|s| s.success()).unwrap_or(false))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::process::Command::new("xdg-open")
+                .arg(&full_path)
+                .status();
+            Ok(status.map(|s| s.success()).unwrap_or(false))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let status = crate::util::no_window_command("cmd")
+                .args(["/C", "start", "", &full_path])
+                .status();
+            Ok(status.map(|s| s.success()).unwrap_or(false))
+        }
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cmd_open_file_path;
+
+    #[tokio::test]
+    async fn test_cmd_open_file_path_rejects_nonexistent_file() {
+        let res = cmd_open_file_path(
+            "/nonexistent/file/path/that/does/not/exist.txt".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("ipc result");
+        assert_eq!(res, false);
+    }
+
+    #[tokio::test]
+    async fn test_cmd_open_file_path_resolves_relative_with_cwd() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let res = cmd_open_file_path(
+            "Cargo.toml".to_string(),
+            Some(manifest_dir.to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("ipc result");
+        assert_eq!(res, true);
+    }
+}

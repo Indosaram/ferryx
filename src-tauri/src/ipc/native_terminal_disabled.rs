@@ -86,6 +86,11 @@ pub async fn cmd_native_terminal_search() -> Result<(), IpcError> {
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_line_at() -> Result<(), IpcError> {
+    Err(IpcError::native_terminal_unsupported())
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_clipboard_content(
 ) -> Result<NativeTerminalClipboardContent, IpcError> {
     Err(IpcError::native_terminal_unsupported())

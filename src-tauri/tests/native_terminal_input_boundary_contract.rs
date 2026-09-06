@@ -582,6 +582,7 @@ fn native_terminal_commands_are_registered_in_tauri_generate_handler() {
         "cmd_native_terminal_clipboard_content",
         "cmd_native_terminal_mouse",
         "cmd_native_terminal_search",
+        "cmd_native_terminal_line_at",
     ];
 
     for cmd in required_commands {

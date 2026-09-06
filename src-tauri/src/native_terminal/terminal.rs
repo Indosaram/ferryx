@@ -27,8 +27,9 @@ use super::render_pass::capture_render_snapshot;
 use super::scroll::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
 use super::search::search_grid;
 use super::selection::{
-    apply_mouse_gesture, clear_selection, create_selection_gesture, reset_selection_gesture,
-    select_all, select_line_at, select_word_at, selection_range, selection_text,
+    apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at,
+    reset_selection_gesture, select_all, select_line_at, select_word_at, selection_range,
+    selection_text,
 };
 use super::snapshot::RenderSnapshot;
 use super::sys::ffi::{
@@ -434,6 +435,10 @@ impl TerminalEngine for NativeTerminal {
         )
     }
 
+    fn line_text_at(&self, col: u16, row: u16) -> Result<String, NativeTerminalError> {
+        line_text_at(self.handle, col, row)
+    }
+
     fn bell_count(&self) -> u64 {
         self.context.bell_counter.load(Ordering::Relaxed)
     }
@@ -722,7 +727,9 @@ mod tests {
             .handle_mouse_gesture(&event(MouseAction::Motion, 195.0, None))
             .expect("drag motion");
         assert_eq!(
-            terminal.selection_text().expect("query word drag selection"),
+            terminal
+                .selection_text()
+                .expect("query word drag selection"),
             Some("beta gamma delta".to_string()),
         );
 
@@ -762,23 +769,69 @@ mod tests {
 
         // Double click on row 10 in the visible viewport (which has line 37)
         let y = 10.0 * 20.0 + 10.0;
-        terminal.handle_mouse_gesture(&event(MouseAction::Press, 15.0, y, 1_000_000_000)).unwrap();
-        terminal.handle_mouse_gesture(&event(MouseAction::Release, 15.0, y, 1_050_000_000)).unwrap();
-        terminal.handle_mouse_gesture(&event(MouseAction::Press, 15.0, y, 1_150_000_000)).unwrap();
-        terminal.handle_mouse_gesture(&event(MouseAction::Release, 15.0, y, 1_200_000_000)).unwrap();
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 15.0, y, 1_000_000_000))
+            .unwrap();
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 15.0, y, 1_050_000_000))
+            .unwrap();
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 15.0, y, 1_150_000_000))
+            .unwrap();
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 15.0, y, 1_200_000_000))
+            .unwrap();
 
         assert_eq!(terminal.selection_text().unwrap(), Some("line".to_string()));
         // Viewport selection range must map to row 10 of the visible viewport
         assert_eq!(terminal.selection_range().unwrap(), Some((0, 10, 3, 10)));
 
         // Scroll to top: line 37 is now below the viewport, so viewport selection range is None
-        terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Top).unwrap();
+        terminal
+            .scroll_viewport(crate::native_terminal::ScrollViewport::Top)
+            .unwrap();
         assert_eq!(terminal.selection_range().unwrap(), None);
         // But the active selection text remains retained
         assert_eq!(terminal.selection_text().unwrap(), Some("line".to_string()));
 
         // Scroll back to bottom: line 37 is visible at row 10 again
-        terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom).unwrap();
+        terminal
+            .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom)
+            .unwrap();
         assert_eq!(terminal.selection_range().unwrap(), Some((0, 10, 3, 10)));
+    }
+
+    #[test]
+    fn test_line_text_at_reads_unwrapped_line_without_modifying_selection() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"Visit https://ferryx.dev/docs for information\r\n")
+            .unwrap();
+        terminal
+            .feed(b"ERROR at src/components/App.tsx:42:10 in test\r\n")
+            .unwrap();
+
+        // Row 0 has the URL
+        let line0 = terminal.line_text_at(10, 0).expect("read line 0");
+        assert!(line0.contains("https://ferryx.dev/docs"));
+
+        // Row 1 has the file path
+        let line1 = terminal.line_text_at(15, 1).expect("read line 1");
+        assert!(line1.contains("src/components/App.tsx:42:10"));
+
+        // Active selection should remain None (not altered by reading line text)
+        assert_eq!(terminal.selection_text().unwrap(), None);
+    }
+
+    #[test]
+    fn test_line_text_at_preserves_leading_whitespace_for_indented_lines() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"        alpha/one.ts:1:1 and beta/two.ts:2:2\r\n")
+            .unwrap();
+
+        let line = terminal.line_text_at(8, 0).expect("read indented line");
+        assert!(line.starts_with("        alpha/one.ts:1:1"));
+        assert_eq!(&line[8..24], "alpha/one.ts:1:1");
     }
 }

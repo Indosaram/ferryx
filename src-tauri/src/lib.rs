@@ -492,10 +492,7 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     });
 
     let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-            NSEventMask::LeftMouseUp,
-            &block,
-        )
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
     };
     if let Some(monitor) = monitor {
         std::mem::forget(monitor);
@@ -644,7 +641,8 @@ fn install_notification_activation_routing<R: tauri::Runtime>(
             // than touch the window from the notification callback thread.
             let main_window = window.clone();
             if let Err(error) = window.run_on_main_thread(move || {
-                let result = main_window.unminimize()
+                let result = main_window
+                    .unminimize()
                     .and_then(|_| main_window.show())
                     .and_then(|_| main_window.set_focus());
                 if let Err(error) = result {
@@ -832,6 +830,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_native_terminal_clipboard_content,
         cmd_native_terminal_mouse,
         cmd_native_terminal_search,
+        cmd_native_terminal_line_at,
         cmd_remote_status,
         cmd_remote_enable,
         cmd_remote_disable,
@@ -903,6 +902,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_close,
         cmd_browser_list,
         cmd_browser_open_external,
+        cmd_open_file_path,
         dag_list_runs,
         dag_get_run,
         dag_watch_project,

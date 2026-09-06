@@ -138,6 +138,9 @@ pub trait TerminalEngine {
         case_sensitive: bool,
     ) -> Result<Vec<(u16, u16, u16)>, NativeTerminalError>;
 
+    /// Read the unwrapped text of the line at a visible viewport coordinate (col, row).
+    fn line_text_at(&self, col: u16, row: u16) -> Result<String, NativeTerminalError>;
+
     /// Returns the cumulative number of BEL (0x07) characters received.
     fn bell_count(&self) -> u64;
 

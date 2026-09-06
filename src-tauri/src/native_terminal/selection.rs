@@ -25,10 +25,10 @@ use super::sys::types::{
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS,
-    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS,
-    GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS,
-    GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE, GHOSTTY_SELECTION_ORDER_FORWARD, GHOSTTY_SUCCESS,
-    GHOSTTY_TERMINAL_DATA_SELECTION, GHOSTTY_TERMINAL_OPT_SELECTION,
+    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG,
+    GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE,
+    GHOSTTY_SELECTION_ORDER_FORWARD, GHOSTTY_SUCCESS, GHOSTTY_TERMINAL_DATA_SELECTION,
+    GHOSTTY_TERMINAL_OPT_SELECTION,
 };
 
 fn viewport_ref(
@@ -116,15 +116,19 @@ pub fn select_line_at(
     install_selection(handle, &selection)
 }
 
-pub fn selection_text(
+fn format_selection(
     handle: NonNull<GhosttyTerminalImpl>,
+    selection: Option<&GhosttySelection>,
+    trim: bool,
 ) -> Result<Option<String>, NativeTerminalError> {
     let options = GhosttyTerminalSelectionFormatOptions {
         size: std::mem::size_of::<GhosttyTerminalSelectionFormatOptions>(),
         emit: GHOSTTY_FORMATTER_FORMAT_PLAIN,
         unwrap: true,
-        trim: true,
-        selection: std::ptr::null(),
+        trim,
+        selection: selection
+            .map(|s| s as *const GhosttySelection)
+            .unwrap_or(std::ptr::null()),
     };
     let mut ptr = std::ptr::null_mut();
     let mut len = 0usize;
@@ -163,6 +167,70 @@ pub fn selection_text(
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|error| NativeTerminalError::InvalidUtf8(error.to_string()))
+}
+
+pub fn selection_text(
+    handle: NonNull<GhosttyTerminalImpl>,
+) -> Result<Option<String>, NativeTerminalError> {
+    format_selection(handle, None, true)
+}
+
+/// Read the unwrapped text of a line at (col, row) without altering the active selection.
+/// Formatting preserves leading whitespace so grid columns align 1:1 with string character indices.
+pub fn line_text_at(
+    handle: NonNull<GhosttyTerminalImpl>,
+    col: u16,
+    row: u16,
+) -> Result<String, NativeTerminalError> {
+    let options = GhosttyTerminalSelectLineOptions {
+        size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(),
+        grid_ref: viewport_ref(handle, col, row)?,
+        whitespace: std::ptr::null(),
+        whitespace_len: 0,
+        semantic_prompt_boundary: false,
+    };
+    let mut selection = GhosttySelection::default();
+    // SAFETY: Category: Foreign Selection Extraction.
+    // Invariant: options contains a fresh ref from this terminal and default whitespace pointers are null with zero length.
+    let result = unsafe { ghostty_terminal_select_line(handle.as_ptr(), &options, &mut selection) };
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_select_line")?;
+
+    let mut ordered = GhosttySelection::default();
+    // SAFETY: Category: Foreign Selection Ordering.
+    // Invariant: selection is a fresh snapshot from this terminal and no mutation has occurred.
+    let result = unsafe {
+        ghostty_terminal_selection_ordered(
+            handle.as_ptr(),
+            &selection,
+            GHOSTTY_SELECTION_ORDER_FORWARD,
+            &mut ordered,
+        )
+    };
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_selection_ordered")?;
+
+    let mut start = GhosttyPointCoordinate::default();
+    // SAFETY: Category: Foreign Grid Coordinate Conversion.
+    // Invariant: ordered endpoints are fresh refs from this terminal; output is writable stack storage.
+    let start_result = unsafe {
+        ghostty_terminal_point_from_grid_ref(
+            handle.as_ptr(),
+            &ordered.start,
+            GHOSTTY_POINT_TAG_VIEWPORT,
+            &mut start,
+        )
+    };
+    NativeTerminalError::from_c_result(
+        start_result,
+        "ghostty_terminal_point_from_grid_ref(Start)",
+    )?;
+
+    let text = format_selection(handle, Some(&selection), true)?.unwrap_or_default();
+    let start_col = start.x as usize;
+    if start_col > 0 {
+        Ok(format!("{}{}", " ".repeat(start_col), text))
+    } else {
+        Ok(text)
+    }
 }
 
 pub fn clear_selection(handle: NonNull<GhosttyTerminalImpl>) -> Result<(), NativeTerminalError> {
@@ -426,10 +494,7 @@ pub fn apply_mouse_gesture(
                     &time_ns as *const u64 as *const c_void,
                 )
             };
-            NativeTerminalError::from_c_result(
-                res,
-                "ghostty_selection_gesture_event_set(TimeNs)",
-            )?;
+            NativeTerminalError::from_c_result(res, "ghostty_selection_gesture_event_set(TimeNs)")?;
 
             let mut selection = GhosttySelection::default();
             // SAFETY: Category: Foreign Selection Gesture Event Application.
