@@ -328,7 +328,7 @@ fn dispatch_scheduled_render<R: Runtime>(
     let follow_up_window = window.clone();
     let failure_coordinator = Arc::clone(&coordinator);
     let failure_session_id = session_id.clone();
-    if let Err(err) = window.run_on_main_thread(move || {
+    if let Err(err) = dispatch_render_on_main_thread(&window, move || {
         if !coordinator.begin_render() {
             return;
         }
@@ -358,7 +358,7 @@ fn dispatch_scheduled_render<R: Runtime>(
             if let Some(host) = hosts_guard.get_mut(&session_id) {
                 host.layout = Some(layout);
                 host.logical_bounds = Some(logical_bounds);
-                host.target.update_viewport(Some(logical_bounds));
+                host.update_viewport(Some(logical_bounds));
                 match host.render_snapshot(
                     &surface_window,
                     layout,
@@ -402,6 +402,37 @@ fn dispatch_scheduled_render<R: Runtime>(
             "Failed to dispatch native terminal render to main thread"
         );
     }
+}
+
+fn defer_scheduled_render<R: Runtime>(
+    window: WebviewWindow<R>,
+    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
+    session_id: String,
+    coordinator: Arc<RenderScheduleCoordinator>,
+) {
+    #[cfg(test)]
+    let test_window = window.clone();
+    // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries.
+    let _task = tauri::async_runtime::spawn(async move {
+        dispatch_scheduled_render(window, hosts, sessions, session_id, coordinator);
+    });
+    #[cfg(test)]
+    if let Some(dispatch) = test_window.try_state::<tests::RenderDispatch>() {
+        dispatch.submissions.lock().push(_task);
+    }
+}
+
+fn dispatch_render_on_main_thread<R: Runtime>(
+    window: &WebviewWindow<R>,
+    task: impl FnOnce() + Send + 'static,
+) -> tauri::Result<()> {
+    #[cfg(test)]
+    if let Some(dispatch) = window.try_state::<tests::RenderDispatch>() {
+        dispatch.submit(Box::new(task));
+        return Ok(());
+    }
+    window.run_on_main_thread(task)
 }
 
 impl Clone for NativeTerminalSurfaceHostState {
@@ -1571,7 +1602,7 @@ impl NativeTerminalSurfaceHostState {
     pub fn target_descriptor(&self) -> PlatformCompositorDescriptor {
         let hosts = self.hosts.lock();
         if let Some(host) = hosts.values().next() {
-            host.target.descriptor()
+            host.descriptor()
         } else {
             PlatformCompositorDescriptor::active_for_platform()
         }
@@ -1749,7 +1780,7 @@ impl NativeTerminalSurfaceHostState {
             session_render_snapshot(session)?
         };
 
-        let host = match hosts.entry(session_id) {
+        let host = match hosts.entry(session_id.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(NativeTerminalSurfaceHost::new(window, scale_factor)?)
@@ -1766,18 +1797,21 @@ impl NativeTerminalSurfaceHostState {
             },
             theme: RendererTheme::from(cached_terminal_preferences().as_ref()),
         };
-        host.renderer.update_config(renderer_config)?;
+        host.update_config(renderer_config)?;
         host.layout = Some(layout);
         host.logical_bounds = Some(logical_bounds);
 
-        host.render_snapshot(
+        let receipt = host.render_snapshot(
             window,
             layout,
             &render_input.snapshot,
             render_input.selection.as_ref(),
             render_input.scrollbar_overlay.as_ref(),
             render_input.attention_frame,
-        )
+        )?;
+        drop(hosts);
+        self.rearm_dropped_direct_frame(window, &session_id, receipt);
+        Ok(receipt)
     }
 
     pub fn set_focus<R: Runtime>(
@@ -1803,14 +1837,17 @@ impl NativeTerminalSurfaceHostState {
         if let Some(host) = hosts.get_mut(session_id) {
             host.layout = Some(layout);
             host.logical_bounds = Some(logical_bounds);
-            host.render_snapshot(
+            let receipt = host.render_snapshot(
                 window,
                 layout,
                 &render_input.snapshot,
                 render_input.selection.as_ref(),
                 render_input.scrollbar_overlay.as_ref(),
                 render_input.attention_frame,
-            )
+            )?;
+            drop(hosts);
+            self.rearm_dropped_direct_frame(window, session_id, receipt);
+            Ok(receipt)
         } else {
             Ok(NativeTerminalSurfaceReceipt::from_snapshot(
                 layout,
@@ -1819,6 +1856,34 @@ impl NativeTerminalSurfaceHostState {
                 0,
                 cell_metrics,
             ))
+        }
+    }
+
+    fn rearm_dropped_direct_frame<R: Runtime>(
+        &self,
+        window: &WebviewWindow<R>,
+        session_id: &str,
+        receipt: NativeTerminalSurfaceReceipt,
+    ) {
+        if receipt.presented {
+            return;
+        }
+        let coordinator = self
+            .sessions
+            .lock()
+            .get(session_id)
+            .filter(|session| session.surface_attached)
+            .map(|session| Arc::clone(&session.render_coordinator));
+        if let Some(coordinator) = coordinator {
+            if coordinator.schedule_render() {
+                let window = window.clone();
+                let hosts = Arc::clone(&self.hosts);
+                let sessions = Arc::clone(&self.sessions);
+                let session_id = session_id.to_string();
+                // All host/session guards are released. Wry can dispatch inline on the
+                // main thread, so use the same deferred boundary as scheduled completion.
+                defer_scheduled_render(window, hosts, sessions, session_id, coordinator);
+            }
         }
     }
 
@@ -1862,7 +1927,111 @@ impl NativeTerminalSurfaceHostState {
     }
 }
 
-/// Host container managing the active WGPU surface, platform compositor child view, and renderer.
+struct NativeTerminalSurfaceHost {
+    frame_target: HostFrameTarget,
+    layout: Option<SurfaceCompositionLayout>,
+    logical_bounds: Option<LogicalBounds>,
+}
+
+// Only the native frame target is substituted in headless host tests. Session ownership,
+// host-map guards, direct execution and scheduled completion are not substituted.
+enum HostFrameTarget {
+    Native(NativeSurfaceFrameTarget),
+    #[cfg(test)]
+    Injected(tests::InjectedFrameTarget),
+}
+
+impl NativeTerminalSurfaceHost {
+    fn new<R: Runtime>(
+        window: &WebviewWindow<R>,
+        scale_factor: f64,
+    ) -> Result<Self, NativeTerminalError> {
+        Ok(Self {
+            frame_target: HostFrameTarget::Native(NativeSurfaceFrameTarget::new(
+                window,
+                scale_factor,
+            )?),
+            layout: None,
+            logical_bounds: None,
+        })
+    }
+
+    fn descriptor(&self) -> PlatformCompositorDescriptor {
+        match &self.frame_target {
+            HostFrameTarget::Native(target) => target.target.descriptor(),
+            #[cfg(test)]
+            HostFrameTarget::Injected(_) => PlatformCompositorDescriptor::active_for_platform(),
+        }
+    }
+
+    fn update_viewport(&self, bounds: Option<LogicalBounds>) {
+        match &self.frame_target {
+            HostFrameTarget::Native(target) => target.target.update_viewport(bounds),
+            #[cfg(test)]
+            HostFrameTarget::Injected(_) => {}
+        }
+    }
+
+    fn update_config(&mut self, config: RendererConfig) -> Result<(), NativeTerminalError> {
+        match &mut self.frame_target {
+            HostFrameTarget::Native(target) => target.renderer.update_config(config),
+            #[cfg(test)]
+            HostFrameTarget::Injected(target) => {
+                target.cell_metrics = CellMetrics {
+                    width_px: config.cell_width_px,
+                    height_px: config.cell_height_px,
+                };
+                Ok(())
+            }
+        }
+    }
+
+    fn render_snapshot<R: Runtime>(
+        &mut self,
+        window: &WebviewWindow<R>,
+        layout: SurfaceCompositionLayout,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        scrollbar_overlay: Option<&ScrollbarOverlayState>,
+        attention_frame: bool,
+    ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        match &mut self.frame_target {
+            HostFrameTarget::Native(target) => target.render_snapshot(
+                window,
+                self.logical_bounds,
+                layout,
+                snapshot,
+                selection,
+                scrollbar_overlay,
+                attention_frame,
+            ),
+            #[cfg(test)]
+            HostFrameTarget::Injected(target) => target.render_snapshot(layout, snapshot),
+        }
+    }
+}
+
+// The same acquisition/reconfigure sequence is used by native and injected frame targets.
+fn acquire_surface_frame<F>(
+    mut acquire: impl FnMut() -> Result<F, wgpu::SurfaceError>,
+    reconfigure: impl FnOnce() -> Result<(), NativeTerminalError>,
+) -> Result<Option<F>, NativeTerminalError> {
+    let result = match acquire() {
+        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            reconfigure()?;
+            acquire()
+        }
+        result => result,
+    };
+    match result {
+        Ok(frame) => Ok(Some(frame)),
+        Err(error) => match classify_surface_error(error)? {
+            SurfaceFrameAction::Drop => Ok(None),
+        },
+    }
+}
+
+/// Native WGPU surface, platform compositor child view, and renderer.
 ///
 /// # Drop Order Invariant
 ///
@@ -1871,17 +2040,15 @@ impl NativeTerminalSurfaceHostState {
 ///    be dropped and destroyed while the native child NSView (`target`) is still valid and parented.
 /// 2. `target` drops after `surface`: Unparents (`removeFromSuperview`) and releases the child NSView.
 /// 3. `renderer` drops: Releases GPU device, pipelines, and glyph atlas resources.
-struct NativeTerminalSurfaceHost {
+struct NativeSurfaceFrameTarget {
     surface: wgpu::Surface<'static>,
     target: PlatformCompositorTarget,
     renderer: NativeTerminalRenderer,
     format: wgpu::TextureFormat,
     size: PhysicalSize<u32>,
-    layout: Option<SurfaceCompositionLayout>,
-    logical_bounds: Option<LogicalBounds>,
 }
 
-impl NativeTerminalSurfaceHost {
+impl NativeSurfaceFrameTarget {
     fn new<R: Runtime>(
         window: &WebviewWindow<R>,
         scale_factor: f64,
@@ -1913,21 +2080,20 @@ impl NativeTerminalSurfaceHost {
             renderer,
             format,
             size,
-            layout: None,
-            logical_bounds: None,
         })
     }
 
     fn render_snapshot<R: Runtime>(
         &mut self,
         window: &WebviewWindow<R>,
+        logical_bounds: Option<LogicalBounds>,
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
         selection: Option<&super::renderer::SelectionSnapshot>,
         scrollbar_overlay: Option<&ScrollbarOverlayState>,
         attention_frame: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
-        if let Some(bounds) = self.logical_bounds {
+        if let Some(bounds) = logical_bounds {
             self.target.update_viewport(Some(bounds));
             let scale_factor = bounds.scale_factor;
             let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
@@ -1981,7 +2147,7 @@ impl NativeTerminalSurfaceHost {
             ref other => match classify_surface_error(other)? {
                 SurfaceFrameAction::Drop => None,
             },
-        };
+        )?;
         let cell_metrics = CellMetrics {
             width_px: self.renderer.config().cell_width_px,
             height_px: self.renderer.config().cell_height_px,
@@ -2043,6 +2209,504 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type RenderTask = Box<dyn FnOnce() + Send>;
+    pub(super) struct RenderDispatch {
+        sender: tokio::sync::mpsc::UnboundedSender<RenderTask>,
+        owner_thread: std::thread::ThreadId,
+        require_deferred: std::sync::atomic::AtomicBool,
+        pub submissions: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+    }
+
+    impl RenderDispatch {
+        pub fn submit(&self, task: RenderTask) {
+            if self.require_deferred.load(Ordering::SeqCst) {
+                assert_ne!(std::thread::current().id(), self.owner_thread,
+                    "retry dispatch must cross the production off-thread boundary, not recurse inline");
+            }
+            self.sender.send(task).expect("dispatch receiver alive");
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum FrameEvent {
+        Acquire,
+        Reconfigure,
+        Dropped,
+        Presented,
+        Destroyed,
+    }
+
+    pub(super) struct InjectedFrameTarget {
+        acquisitions: std::collections::VecDeque<Result<(), wgpu::SurfaceError>>,
+        pub cell_metrics: CellMetrics,
+        events: Arc<Mutex<Vec<FrameEvent>>>,
+        assert_host_locked: Box<dyn Fn() + Send>,
+    }
+
+    impl InjectedFrameTarget {
+        pub fn render_snapshot(
+            &mut self,
+            layout: SurfaceCompositionLayout,
+            snapshot: &RenderSnapshot,
+        ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+            (self.assert_host_locked)();
+            let frame = acquire_surface_frame(
+                || {
+                    self.events.lock().push(FrameEvent::Acquire);
+                    self.acquisitions
+                        .pop_front()
+                        .expect("unexpected acquisition / retry loop")
+                },
+                || {
+                    self.events.lock().push(FrameEvent::Reconfigure);
+                    Ok(())
+                },
+            )?;
+            let presented = frame.is_some();
+            self.events.lock().push(if presented {
+                FrameEvent::Presented
+            } else {
+                FrameEvent::Dropped
+            });
+            Ok(NativeTerminalSurfaceReceipt {
+                presented,
+                ..NativeTerminalSurfaceReceipt::from_snapshot(
+                    layout,
+                    snapshot,
+                    0,
+                    0,
+                    self.cell_metrics,
+                )
+            })
+        }
+    }
+
+    impl Drop for InjectedFrameTarget {
+        fn drop(&mut self) {
+            self.events.lock().push(FrameEvent::Destroyed);
+        }
+    }
+
+    struct DirectRenderHarness {
+        state: NativeTerminalSurfaceHostState,
+        window: WebviewWindow<tauri::test::MockRuntime>,
+        _app: tauri::App<tauri::test::MockRuntime>,
+        _output: tokio::sync::mpsc::Sender<DaemonStreamMessage<'static>>,
+        request: NativeTerminalBoundsRequest,
+        dispatched: tokio::sync::mpsc::UnboundedReceiver<RenderTask>,
+        events: Arc<Mutex<Vec<FrameEvent>>>,
+    }
+
+    impl DirectRenderHarness {
+        fn new(acquisitions: Vec<Result<(), wgpu::SurfaceError>>) -> Self {
+            // Subscribe before attaching/triggering any direct operation.
+            let (dispatch, dispatched) = tokio::sync::mpsc::unbounded_channel();
+            let app = tauri::test::mock_builder()
+                .manage(RenderDispatch {
+                    sender: dispatch,
+                    owner_thread: std::thread::current().id(),
+                    require_deferred: std::sync::atomic::AtomicBool::new(true),
+                    submissions: Mutex::new(Vec::new()),
+                })
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let window =
+                tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+                    .build()
+                    .unwrap();
+            let state = NativeTerminalSurfaceHostState::default();
+            let request = NativeTerminalBoundsRequest {
+                session_id: "direct-retry".into(),
+                bounds: LogicalBounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 480.0,
+                    scale_factor: 1.0,
+                },
+            };
+            let (output, messages) = tokio::sync::mpsc::channel(1);
+            state
+                .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                    &request.session_id,
+                    DaemonAttachment {
+                        session_id: request.session_id.clone(),
+                        epoch: 1,
+                        start_sequence: Some(1),
+                        end_sequence: Some(1),
+                        gap: None,
+                        history: (0..100)
+                            .map(|line| format!("line {line}\r\n"))
+                            .collect::<String>()
+                            .into_bytes(),
+                        history_segments: Vec::new(),
+                        pty_cols: Some(80),
+                        pty_rows: Some(24),
+                        messages,
+                        stream_task: tokio::spawn(std::future::pending()),
+                    },
+                    None,
+                    Some(request.bounds),
+                )
+                .unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let hosts = Arc::downgrade(&state.hosts);
+            let sessions = Arc::downgrade(&state.sessions);
+            let host = NativeTerminalSurfaceHost {
+                frame_target: HostFrameTarget::Injected(InjectedFrameTarget {
+                    acquisitions: acquisitions.into(),
+                    cell_metrics: font_manager::derived_cell_metrics(),
+                    events: Arc::clone(&events),
+                    assert_host_locked: Box::new(move || {
+                        assert!(
+                            hosts.upgrade().unwrap().try_lock().is_none(),
+                            "presentation must hold host ownership"
+                        );
+                        assert!(
+                            sessions.upgrade().unwrap().try_lock().is_some(),
+                            "snapshot session guard must be released"
+                        );
+                    }),
+                }),
+                layout: state.session_layout(&request.session_id),
+                logical_bounds: Some(request.bounds),
+            };
+            state.hosts.lock().insert(request.session_id.clone(), host);
+            assert!(!state.is_session_render_pending(&request.session_id));
+            Self {
+                state,
+                window,
+                _app: app,
+                _output: output,
+                request,
+                dispatched,
+                events,
+            }
+        }
+
+        fn scroll_once(&self) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+            let before = self
+                .state
+                .with_session_terminal(&self.request.session_id, |term| term.scrollbar())?;
+            crate::ipc::native_terminal::scroll_attached_native_terminal(
+                &self.state,
+                &self.request.session_id,
+                super::super::ScrollViewport::Top,
+            )?;
+            let after = self
+                .state
+                .with_session_terminal(&self.request.session_id, |term| term.scrollbar())?;
+            assert_ne!(
+                before.offset, after.offset,
+                "one-shot input must actually change VT scroll position"
+            );
+            self.state.render(&self.window, self.request.clone())
+        }
+
+        async fn await_submissions(&self) {
+            let tasks =
+                std::mem::take(&mut *self.window.state::<RenderDispatch>().submissions.lock());
+            for task in tasks {
+                tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                    .await
+                    .expect("deferred dispatch task must complete")
+                    .expect("dispatch task must not panic");
+            }
+        }
+
+        async fn execute_dispatched(&mut self) {
+            self.await_submissions().await;
+            let task =
+                tokio::time::timeout(std::time::Duration::from_secs(5), self.dispatched.recv())
+                    .await
+                    .expect("production completion must dispatch a retry")
+                    .expect("dispatch channel open");
+            assert!(
+                self.state.hosts.try_lock().is_some(),
+                "dispatch after host guard release"
+            );
+            assert!(
+                self.state.sessions.try_lock().is_some(),
+                "dispatch after session guard release"
+            );
+            task(); // Execute the submitted main-thread task; never schedule another render here.
+            self.await_submissions().await;
+        }
+    }
+
+    impl Drop for DirectRenderHarness {
+        fn drop(&mut self) {
+            self.state.teardown();
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_execution_characterization() {
+        let harness = DirectRenderHarness::new(vec![Ok(()), Ok(())]);
+        let receipt = harness.scroll_once().unwrap();
+        assert!(receipt.presented);
+        assert!(receipt.cols > 0 && receipt.rows > 0);
+        let focused = harness
+            .state
+            .set_focus(&harness.window, &harness.request.session_id, true)
+            .unwrap();
+        assert!(focused.presented);
+        assert!(harness.state.sessions.lock()[&harness.request.session_id].focused);
+        assert!(!harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        assert_eq!(
+            *harness.events.lock(),
+            vec![
+                FrameEvent::Acquire,
+                FrameEvent::Presented,
+                FrameEvent::Acquire,
+                FrameEvent::Presented
+            ]
+        );
+        harness.state.detach_session(&harness.request.session_id);
+        assert!(matches!(
+            harness
+                .state
+                .render(&harness.window, harness.request.clone()),
+            Err(NativeTerminalError::SessionDetached(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_shot_render_requeues_when_frame_is_dropped() {
+        let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+        let receipt = harness.scroll_once().unwrap();
+        assert!(
+            !receipt.presented,
+            "original direct receipt must remain dropped"
+        );
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Dropped]
+        );
+        assert!(
+            harness
+                .state
+                .is_session_render_pending(&harness.request.session_id),
+            "dropped direct frame must rearm the attached session coordinator"
+        );
+        harness.execute_dispatched().await;
+        assert_eq!(
+            *harness.events.lock(),
+            vec![
+                FrameEvent::Acquire,
+                FrameEvent::Dropped,
+                FrameEvent::Acquire,
+                FrameEvent::Presented
+            ]
+        );
+        assert!(!harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        assert!(harness.dispatched.try_recv().is_err());
+        eprintln!("D5_ENTRY: attached daemon history -> scroll_attached_native_terminal -> public render -> Timeout -> original presented=false -> deferred dispatch -> begin_render -> ownership/snapshot -> acquisition success -> presented -> finish_render idle; events={:?}", *harness.events.lock());
+    }
+
+    #[tokio::test]
+    async fn direct_retry_recovers_lost_then_timeout() {
+        let mut harness = DirectRenderHarness::new(vec![
+            Err(wgpu::SurfaceError::Lost),
+            Err(wgpu::SurfaceError::Timeout),
+            Ok(()),
+        ]);
+        assert!(!harness.scroll_once().unwrap().presented);
+        harness.execute_dispatched().await;
+        assert_eq!(
+            *harness.events.lock(),
+            vec![
+                FrameEvent::Acquire,
+                FrameEvent::Reconfigure,
+                FrameEvent::Acquire,
+                FrameEvent::Dropped,
+                FrameEvent::Acquire,
+                FrameEvent::Presented
+            ]
+        );
+        assert!(!harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        assert!(harness.dispatched.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_retry_scheduled_timeout_rearms_without_inline_recursion() {
+        let mut harness = DirectRenderHarness::new(vec![
+            Err(wgpu::SurfaceError::Timeout),
+            Err(wgpu::SurfaceError::Timeout),
+            Ok(()),
+        ]);
+        assert!(!harness.scroll_once().unwrap().presented);
+        harness.execute_dispatched().await;
+        assert!(harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        harness.execute_dispatched().await;
+        assert_eq!(
+            *harness.events.lock(),
+            vec![
+                FrameEvent::Acquire,
+                FrameEvent::Dropped,
+                FrameEvent::Acquire,
+                FrameEvent::Dropped,
+                FrameEvent::Acquire,
+                FrameEvent::Presented
+            ]
+        );
+        assert!(!harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        assert!(harness.dispatched.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_retry_focus_preserves_dropped_receipt() {
+        let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+        let receipt = harness
+            .state
+            .set_focus(&harness.window, &harness.request.session_id, true)
+            .unwrap();
+        assert!(!receipt.presented);
+        assert!(harness.state.sessions.lock()[&harness.request.session_id].focused);
+        harness.execute_dispatched().await;
+        assert_eq!(
+            *harness.events.lock(),
+            vec![
+                FrameEvent::Acquire,
+                FrameEvent::Dropped,
+                FrameEvent::Acquire,
+                FrameEvent::Presented
+            ]
+        );
+        assert!(!harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+    }
+
+    #[tokio::test]
+    async fn direct_retry_detach_or_close_before_dispatch_cannot_reveal_or_resurrect() {
+        for close in [false, true] {
+            let mut harness =
+                DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+            let coordinator = harness
+                .state
+                .session_render_coordinator(&harness.request.session_id)
+                .unwrap();
+            assert!(!harness.scroll_once().unwrap().presented);
+            if close {
+                harness.state.close_session(&harness.request.session_id);
+            } else {
+                harness.state.detach_session(&harness.request.session_id);
+            }
+            harness.execute_dispatched().await;
+            assert_eq!(
+                *harness.events.lock(),
+                vec![
+                    FrameEvent::Acquire,
+                    FrameEvent::Dropped,
+                    FrameEvent::Destroyed
+                ]
+            );
+            assert!(!harness.state.has_session_host(&harness.request.session_id));
+            assert!(matches!(
+                harness
+                    .state
+                    .ensure_surface_attached(&harness.request.session_id),
+                Err(NativeTerminalError::SessionDetached(_))
+            ));
+            assert!(!coordinator.is_render_pending());
+            assert!(harness.dispatched.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_retry_fatal_errors_do_not_loop() {
+        for focus in [false, true] {
+            let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::OutOfMemory)]);
+            let result = if focus {
+                harness
+                    .state
+                    .set_focus(&harness.window, &harness.request.session_id, true)
+            } else {
+                harness.scroll_once()
+            };
+            assert!(matches!(result, Err(NativeTerminalError::OutOfMemory)));
+            assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire]);
+            assert!(!harness
+                .state
+                .is_session_render_pending(&harness.request.session_id));
+            assert!(harness.dispatched.try_recv().is_err());
+        }
+        let mut harness = DirectRenderHarness::new(vec![
+            Err(wgpu::SurfaceError::Timeout),
+            Err(wgpu::SurfaceError::OutOfMemory),
+        ]);
+        assert!(!harness.scroll_once().unwrap().presented);
+        harness.execute_dispatched().await;
+        assert_eq!(
+            *harness.events.lock(),
+            vec![
+                FrameEvent::Acquire,
+                FrameEvent::Dropped,
+                FrameEvent::Acquire
+            ]
+        );
+        assert!(!harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        assert!(harness.dispatched.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_retry_coalesces_with_existing_pending_render() {
+        let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+        // A real independent preedit request supplies the already-pending frame, not the missing retry.
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        harness
+            .state
+            .set_preedit(
+                &harness.window,
+                &harness.request.session_id,
+                Some("x".into()),
+            )
+            .unwrap();
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(true, Ordering::SeqCst);
+        assert!(harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        assert!(!harness.scroll_once().unwrap().presented);
+        harness.execute_dispatched().await;
+        assert_eq!(
+            *harness.events.lock(),
+            vec![
+                FrameEvent::Acquire,
+                FrameEvent::Dropped,
+                FrameEvent::Acquire,
+                FrameEvent::Presented
+            ]
+        );
+        assert!(!harness
+            .state
+            .is_session_render_pending(&harness.request.session_id));
+        assert!(
+            harness.dispatched.try_recv().is_err(),
+            "the direct drop must not submit duplicate work"
+        );
+    }
 
     #[tokio::test]
     async fn warm_return_reasserts_pty_size_without_replaying_terminal() {
@@ -2178,7 +2842,7 @@ mod tests {
         }
     }
 
-    /// Mirrors the field order of `NativeTerminalSurfaceHost` to statically and
+    /// Mirrors the field order of `NativeSurfaceFrameTarget` to statically and
     /// dynamically prove the drop sequence: `surface` -> `target` -> `renderer`.
     struct SurfaceHostDropOrderSeam {
         _surface: DropRecorder,
