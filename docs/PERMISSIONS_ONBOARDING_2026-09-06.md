@@ -56,3 +56,42 @@ and Notifications.
   `ferryx:open-permissions-onboarding` window event (OPEN_PERMISSIONS_ONBOARDING_EVENT in
   ui/src/lib/permissionsOnboarding.ts, subscribed in App.tsx). Suites: PermissionsSection 5,
   dialog 4, lib 7 -- all green.
+
+## Windows/Linux port and real-device verification (2026-09-06, commit 049c673 + e404e76)
+
+Port: non-mac backend now maps notification permission to `Unknown` with
+`canRequest=false` (no requestable-prompt claim) and exposes `canOpenSettings`;
+UI is platform-conditional -- macOS 3 cards, Windows notifications-only with
+"Managed by OS" badge and an "Open Windows Settings" deep link
+(`ms-settings:notifications` via `cmd_permissions_open_settings`), Linux
+informational text with no buttons; onboarding stays macOS-only. TS wire union
+extended with `unknown`/`canOpenSettings`; web stub returns `canOpenSettings:false`.
+
+Real-device evidence (all commands run natively on each host at HEAD e404e76):
+
+- omaki (Arch Linux x86_64, ssh indo@100.91.254.71): `cargo test --lib permissions`
+  6/6 pass (RC=0); vitest 3 suites 17/17 (RC=0, node v22.23.2); `bun run build` RC=0;
+  ghostty pin 6a508fd5 verified; code synced via incremental git bundles
+  (e2a6785..049c673 then 049c673..e404e76).
+- maho-win (Windows x86_64 msvc, ssh maho-win, C:\Users\sook\ferryx-permqa):
+  `cargo test --lib permissions` 6/6 pass (RC=0, ghostty-vt-static.lib built from
+  junctioned source, sha 6a508fd5); `bun run build` (tsc + vite) RC=0 after giving the
+  QA checkout its own node_modules (the junction to the winbuild clone was stale --
+  pre-sonner -- and tauri build.rs requires ui/dist to exist before cargo test);
+  vitest 3 suites 17/17 (RC=0, node v22.23.2 direct).
+- macOS (local): 17/17 under both `bun run test` and node-run vitest; cargo
+  permissions 6/6; vite build exit 0.
+
+Host-portability lessons baked into the tree/tests:
+
+- vitest under the Bun runtime silently breaks `vi.mock` interception (mocks never
+  install; the real tauri module's web stub rendered instead). Both remote hosts had
+  no real Node, so `bun run` shimmed node->bun. Fix: user-local Node v22 + direct
+  `node node_modules/vitest/vitest.mjs run` invocation. Vitest requires Node.
+- `detectMacPlatform()` reads host navigator.platform/userAgent/process.platform, so
+  mac-gated UI tests must pin the host (the rerun-onboarding test now pins
+  navigator.platform/userAgent to macOS and restores in finally; commit e404e76).
+  Delegation note: the gemini quota gateway rate-limited (150min retry) so this
+  minimal test-only fix was implemented directly.
+- Windows GUI cannot be verified over OpenSSH (Session 0 windows are not
+  user-visible); interactive checklist handed to the user separately.
