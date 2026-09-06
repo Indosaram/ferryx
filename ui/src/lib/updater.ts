@@ -84,6 +84,7 @@ export async function getCurrentVersion(): Promise<string | null> {
 export async function checkForUpdate(): Promise<void> {
   if (!isTauri()) return;
   if (await updatesManagedExternally()) return;
+  if (status.state !== "idle" && status.state !== "error") return;
 
   setStatus({ state: "checking" });
   try {
@@ -146,4 +147,32 @@ export async function relaunchApp(): Promise<void> {
   if (!isTauri()) return;
   await flushCloseGuards();
   await relaunch();
+}
+
+export const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+let pollGeneration = 0;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function stopUpdatePolling(): void {
+  pollGeneration += 1;
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+export function startUpdatePolling(intervalMs: number = UPDATE_CHECK_INTERVAL_MS): () => void {
+  stopUpdatePolling();
+  const generation = pollGeneration;
+  void checkForUpdate();
+  const tick = (): void => {
+    void checkForUpdate().finally(() => {
+      if (pollGeneration === generation) {
+        pollTimer = setTimeout(tick, intervalMs);
+      }
+    });
+  };
+  pollTimer = setTimeout(tick, intervalMs);
+  return stopUpdatePolling;
 }

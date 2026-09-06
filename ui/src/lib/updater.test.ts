@@ -212,6 +212,76 @@ describe("updater status machine", () => {
   });
 });
 
+describe("periodic update polling", () => {
+  beforeEach(() => {
+    check.mockReset();
+    relaunch.mockReset();
+    getVersion.mockReset();
+    invoke.mockReset();
+    invoke.mockResolvedValue(false);
+    isTauri.mockReturnValue(true);
+  });
+
+  it("checks immediately, then once per interval until stopped", async () => {
+    vi.useFakeTimers();
+    try {
+      check.mockResolvedValue(null);
+      const updater = await freshModule();
+
+      const stop = updater.startUpdatePolling(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(check).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(check).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(check).toHaveBeenCalledTimes(3);
+
+      stop();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(check).toHaveBeenCalledTimes(3);
+      expect(updater.getUpdateStatus()).toEqual({ state: "idle" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-check while an update is already offered", async () => {
+    vi.useFakeTimers();
+    try {
+      check.mockResolvedValue(updateHandle([]));
+      const updater = await freshModule();
+
+      const stop = updater.startUpdatePolling(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(updater.getUpdateStatus().state).toBe("available");
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(check).toHaveBeenCalledTimes(1);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never polls outside the desktop shell", async () => {
+    vi.useFakeTimers();
+    try {
+      isTauri.mockReturnValue(false);
+      const updater = await freshModule();
+
+      updater.startUpdatePolling(1000);
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(check).not.toHaveBeenCalled();
+      updater.stopUpdatePolling();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("non-Tauri runtime", () => {
   beforeEach(() => {
     check.mockReset();

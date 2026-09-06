@@ -88,7 +88,7 @@ import {
   type WorkspaceTab,
   type Worktree,
 } from "./lib/types";
-import { checkForUpdate, registerWindowCloseGuard } from "./lib/updater";
+import { registerWindowCloseGuard, startUpdatePolling } from "./lib/updater";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
@@ -203,7 +203,7 @@ export function App() {
   );
 
   useEffect(() => {
-    if (isNativeRuntime) void checkForUpdate();
+    if (isNativeRuntime) return startUpdatePolling();
   }, [isNativeRuntime]);
 
   useEffect(() => {
