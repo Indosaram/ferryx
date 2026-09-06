@@ -801,6 +801,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
 
     builder.invoke_handler(tauri::generate_handler![
         crate::ipc::updater::cmd_updater_managed_externally,
+        crate::ipc::updater::cmd_distribution_channel,
         cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,

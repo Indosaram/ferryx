@@ -89,6 +89,7 @@ import {
   type Worktree,
 } from "./lib/types";
 import { registerWindowCloseGuard, startUpdatePolling } from "./lib/updater";
+import { maybeShowWindowsStoreMigrationNotice } from "./lib/windowsStoreMigration";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
@@ -204,6 +205,10 @@ export function App() {
 
   useEffect(() => {
     if (isNativeRuntime) return startUpdatePolling();
+  }, [isNativeRuntime]);
+
+  useEffect(() => {
+    if (isNativeRuntime) void maybeShowWindowsStoreMigrationNotice();
   }, [isNativeRuntime]);
 
   useEffect(() => {

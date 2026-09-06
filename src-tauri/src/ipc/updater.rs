@@ -18,3 +18,19 @@ pub fn updater_managed_externally() -> bool {
 pub async fn cmd_updater_managed_externally() -> Result<bool, IpcError> {
     Ok(updater_managed_externally())
 }
+
+/// Windows ships through two channels with different update ownership: MSIX installs are
+/// updated by the Microsoft Store, NSIS installs by the in-app updater. Other platforms
+/// always self-update.
+pub fn distribution_channel() -> &'static str {
+    if cfg!(windows) {
+        if updater_managed_externally() { "store" } else { "installer" }
+    } else {
+        "native"
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_distribution_channel() -> Result<&'static str, IpcError> {
+    Ok(distribution_channel())
+}
