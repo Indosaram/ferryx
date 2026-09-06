@@ -7,7 +7,7 @@
 //! # Safety Invariants
 //!
 //! 1. **Handle Lifetime**: `NativeChildViewHandle` retains the owned child HWND, which is
-//!    destroyed with the compositor target.
+//!    scheduled for owner-thread destruction when the compositor target drops.
 //! 2. **Thread Affinity**: The child HWND is created and destroyed on the Tauri main thread,
 //!    which owns the parent window and pumps its message queue.
 //! 3. **Pointer Transparency**: `WM_NCHITTEST` answers `HTTRANSPARENT` so pointer input keeps
@@ -37,7 +37,6 @@ const WS_CHILD: u32 = 0x4000_0000;
 const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
-const SW_HIDE: i32 = 0;
 const SW_SHOWNOACTIVATE: i32 = 4;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_NOZORDER: u32 = 0x0004;
@@ -46,6 +45,7 @@ const SWP_NOSIZE: u32 = 0x0001;
 const HWND_TOP: isize = 0;
 const HTTRANSPARENT: isize = -1;
 const WM_NCHITTEST: u32 = 0x0084;
+const WM_DESTROY_CHILD: u32 = 0x8000 + 1;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const CS_OWNDC: u32 = 0x0020;
@@ -85,6 +85,7 @@ unsafe extern "system" {
     ) -> Hwnd;
     fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
     fn DestroyWindow(hwnd: Hwnd) -> i32;
+    fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn SetWindowPos(
         hwnd: Hwnd,
         insert_after: Hwnd,
@@ -110,6 +111,14 @@ unsafe extern "system" fn child_wnd_proc(
 ) -> isize {
     if msg == WM_NCHITTEST {
         return HTTRANSPARENT;
+    }
+    if msg == WM_DESTROY_CHILD {
+        // Window procedures execute on the HWND's owner. No target state is retained
+        // by this message: the GPU surface and Rust target have already been dropped.
+        if unsafe { DestroyWindow(hwnd) } == 0 {
+            tracing::warn!(error = %std::io::Error::last_os_error(), "Failed to destroy native terminal child");
+        }
+        return 0;
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
@@ -330,10 +339,286 @@ impl Drop for WindowsCompositorTarget {
         if let Ok(mut visibility) = self.visibility.lock() {
             visibility.mark_detached();
         }
-        // SAFETY: The child HWND was created by this target and is destroyed exactly once.
-        unsafe {
-            ShowWindow(self.handle.hwnd.get() as Hwnd, SW_HIDE);
-            DestroyWindow(self.handle.hwnd.get() as Hwnd);
+        // Detach/close may drop us on a worker while holding the host mutex. Post only:
+        // neither ShowWindow nor DestroyWindow may synchronously wait on the UI here.
+        // SAFETY: PostMessageW transfers this private, pointer-free message to the
+        // child owner; its window procedure needs no Rust state after this Drop.
+        if unsafe { PostMessageW(self.handle.hwnd.get() as Hwnd, WM_DESTROY_CHILD, 0, 0) } == 0 {
+            let error = std::io::Error::last_os_error();
+            // Destroying the parent already destroys its children (ERROR_INVALID_WINDOW_HANDLE).
+            if error.raw_os_error() != Some(1400) {
+                tracing::warn!(%error, "Failed to queue native terminal child destruction");
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const WM_NCDESTROY: u32 = 0x0082;
+    const DROP_COMPLETE: u32 = 0x8000 + 73;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Msg {
+        hwnd: Hwnd,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        time: u32,
+        point: [i32; 2],
+        private: u32,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn IsWindow(hwnd: Hwnd) -> i32;
+        fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
+        fn SendMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
+        fn PostThreadMessageW(thread: u32, message: u32, wparam: usize, lparam: isize) -> i32;
+        fn PeekMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32, remove: u32) -> i32;
+        fn DispatchMessageW(msg: *const Msg) -> isize;
+        fn MsgWaitForMultipleObjectsEx(
+            count: u32,
+            handles: *const *mut c_void,
+            milliseconds: u32,
+            mask: u32,
+            flags: u32,
+        ) -> u32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+
+    #[link(name = "comctl32")]
+    unsafe extern "system" {
+        fn SetWindowSubclass(
+            hwnd: Hwnd,
+            callback: Option<
+                unsafe extern "system" fn(Hwnd, u32, usize, isize, usize, usize) -> isize,
+            >,
+            id: usize,
+            data: usize,
+        ) -> i32;
+        fn DefSubclassProc(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
+    }
+
+    unsafe extern "system" fn observe_destroy(
+        hwnd: Hwnd,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        _id: usize,
+        data: usize,
+    ) -> isize {
+        if message == WM_NCDESTROY {
+            // The boxed observation lives through owner-thread window cleanup. Subclassing
+            // observes, but forwards every message to the actual production child procedure.
+            unsafe { (*(data as *mut Vec<u32>)).push(GetCurrentThreadId()) };
+        }
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    struct Windows {
+        parent: Hwnd,
+        child: Hwnd,
+        destroyed_on: Box<Vec<u32>>,
+    }
+
+    impl Drop for Windows {
+        fn drop(&mut self) {
+            unsafe {
+                if IsWindow(self.child) != 0 {
+                    let result = DestroyWindow(self.child);
+                    eprintln!(
+                        "D6 cleanup surviving child={:?} result={result}",
+                        self.child
+                    );
+                }
+                if IsWindow(self.parent) != 0 {
+                    let result = DestroyWindow(self.parent);
+                    eprintln!("D6 cleanup parent={:?} result={result}", self.parent);
+                }
+                eprintln!(
+                    "D6 cleanup child_live={} parent_live={} destruction_threads={:?}",
+                    IsWindow(self.child),
+                    IsWindow(self.parent),
+                    self.destroyed_on
+                );
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum DropFrom {
+        Worker,
+        Owner,
+        DestroyedParent,
+    }
+
+    fn exercise_drop(from: DropFrom) {
+        // All HWND operations except the production worker Drop happen on this pumping owner.
+        let owner = unsafe { GetCurrentThreadId() };
+        let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+        ensure_child_class(instance).unwrap();
+        let static_class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let mut windows = Windows {
+            parent: unsafe {
+                CreateWindowExW(
+                    0,
+                    static_class.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    16,
+                    16,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    instance,
+                    std::ptr::null_mut(),
+                )
+            },
+            child: std::ptr::null_mut(),
+            destroyed_on: Box::default(),
+        };
+        assert!(!windows.parent.is_null(), "native parent creation failed");
+        windows.child = unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                CHILD_CLASS_NAME.as_ptr(),
+                std::ptr::null(),
+                WS_CHILD | WS_CLIPSIBLINGS,
+                0,
+                0,
+                1,
+                1,
+                windows.parent,
+                std::ptr::null_mut(),
+                instance,
+                std::ptr::null_mut(),
+            )
+        };
+        let hwnd = NonZeroIsize::new(windows.child as isize).expect("native child creation failed");
+        let target = WindowsCompositorTarget {
+            handle: Arc::new(NativeChildViewHandle {
+                hwnd,
+                hinstance: NonZeroIsize::new(instance as isize),
+            }),
+            visibility: Mutex::new(ChildSurfaceVisibility::default()),
+        };
+        assert_ne!(
+            unsafe {
+                SetWindowSubclass(
+                    windows.child,
+                    Some(observe_destroy),
+                    1,
+                    (&mut *windows.destroyed_on as *mut Vec<u32>) as usize,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { GetWindowLongPtrW(windows.child, -16) } & 0x1000_0000,
+            0,
+            "child must start hidden"
+        );
+        assert_eq!(
+            unsafe { SendMessageW(windows.child, WM_NCHITTEST, 0, 0) },
+            HTTRANSPARENT
+        );
+        target.reveal();
+        assert_ne!(
+            unsafe { GetWindowLongPtrW(windows.child, -16) } & 0x1000_0000,
+            0,
+            "first presentation must reveal child (parent remains hidden in this test)"
+        );
+        eprintln!(
+            "D6 created parent={:?} child={:?} owner={owner} case={from:?}; observer subscribed",
+            windows.parent, windows.child
+        );
+        if matches!(from, DropFrom::DestroyedParent) {
+            assert_ne!(unsafe { DestroyWindow(windows.parent) }, 0);
+        }
+        let worker = if matches!(from, DropFrom::Owner) {
+            drop(target);
+            assert_ne!(unsafe { PostThreadMessageW(owner, DROP_COMPLETE, 0, 0) }, 0);
+            None
+        } else {
+            Some(std::thread::spawn(move || {
+                let worker = unsafe { GetCurrentThreadId() };
+                eprintln!(
+                    "D6 dropping production WindowsCompositorTarget worker={worker} owner={owner}"
+                );
+                drop(target);
+                // FIFO posted-message barrier: any teardown posted by Drop must be dispatched
+                // before this marker. No sleep or timeout is used to decide success/failure.
+                assert_ne!(unsafe { PostThreadMessageW(owner, DROP_COMPLETE, 0, 0) }, 0);
+                worker
+            }))
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut completed = false;
+        'pump: while Instant::now() < deadline {
+            let mut msg = Msg::default();
+            while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, 1) } != 0 {
+                if msg.message == DROP_COMPLETE && msg.hwnd.is_null() {
+                    completed = true;
+                    break 'pump;
+                }
+                unsafe { DispatchMessageW(&msg) };
+            }
+            // Message-queue event wait, not polling. The deadline only fails a stuck test.
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u32;
+            let result = unsafe {
+                MsgWaitForMultipleObjectsEx(0, std::ptr::null(), remaining, 0x04ff, 0x0004)
+            };
+            if result != 0 {
+                break;
+            }
+        }
+        let observed = windows.destroyed_on.as_ref().clone();
+        let child_live = unsafe { IsWindow(windows.child) } != 0;
+        eprintln!("D6 barrier={completed} child_live={child_live} destruction_threads={observed:?} owner={owner}");
+        // Crucially, RED's surviving child is destroyed on its owner BEFORE the assertion.
+        drop(windows);
+        assert!(
+            completed,
+            "owner message queue did not reach worker Drop barrier"
+        );
+        if let Some(worker) = worker {
+            assert_ne!(worker.join().unwrap(), owner);
+        }
+        assert!(
+            !child_live,
+            "production WindowsCompositorTarget::drop left child HWND alive after worker barrier"
+        );
+        assert_eq!(
+            observed,
+            vec![owner],
+            "WM_NCDESTROY must occur exactly once on the owner"
+        );
+    }
+
+    #[test]
+    fn child_is_destroyed_on_owner_thread_when_detached_by_worker() {
+        exercise_drop(DropFrom::Worker);
+    }
+
+    #[test]
+    fn child_is_destroyed_when_dropped_by_owner() {
+        exercise_drop(DropFrom::Owner);
+    }
+
+    #[test]
+    fn drop_after_parent_destruction_is_harmless() {
+        exercise_drop(DropFrom::DestroyedParent);
     }
 }
