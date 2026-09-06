@@ -1,5 +1,5 @@
 import type { CSSProperties, KeyboardEvent, ReactElement } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -535,6 +535,13 @@ export function NativeTerminalPane({
   // supply `sessionId` without a `session` object, fall back safely to `sessionId``.
   // When a `session` object is provided, require `backendSessionId` so we never attach with local frontend ID.
   const targetSessionId = session ? (session.backendSessionId ?? null) : (sessionId ?? null);
+  const surfaceOwnerRef = useRef<{ readonly sessionId: string } | null>(null);
+  // Commit-scoped identity: A -> B -> A and hide/show must not revive old input.
+  // Layout cleanup invalidates it before passive surface teardown or queued IPC.
+  useLayoutEffect(() => {
+    surfaceOwnerRef.current = visible && targetSessionId ? { sessionId: targetSessionId } : null;
+    return () => { surfaceOwnerRef.current = null; };
+  }, [targetSessionId, visible]);
   const previousTargetSessionIdRef = useRef(targetSessionId);
   const isBackendRebind = previousTargetSessionIdRef.current === null && targetSessionId !== null;
 
@@ -720,6 +727,8 @@ export function NativeTerminalPane({
   }, []);
 
   const performAttach = useCallback((targetId: string, force = false): Promise<void> => {
+    const owner = surfaceOwnerRef.current;
+    if (!owner || owner.sessionId !== targetId) return Promise.resolve();
     const initialGeometry = measureGeometry();
     if (initialGeometry) {
       scaleFactorRef.current = initialGeometry.scaleFactor;
@@ -733,8 +742,9 @@ export function NativeTerminalPane({
       force,
     });
     const attachOp = force ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
-    return attachOp(targetId, () =>
-      invoke("cmd_native_terminal_attach", {
+    return attachOp(targetId, async () => {
+      if (surfaceOwnerRef.current !== owner) return;
+      await invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
         ...(initialGeometry
           ? {
@@ -742,8 +752,8 @@ export function NativeTerminalPane({
               scaleFactor: initialGeometry.scaleFactor,
             }
           : {}),
-      }),
-    );
+      });
+    });
   }, [measureGeometry, sessionId]);
 
   const restoreFocusIfLost = useCallback(() => {
@@ -778,13 +788,17 @@ export function NativeTerminalPane({
     }
 
     const currentSessionId = targetSessionId;
+    const owner = surfaceOwnerRef.current;
+    const isCurrentOwner = () => owner !== null && owner.sessionId === currentSessionId && surfaceOwnerRef.current === owner;
 
     const executeInput = async (isRetry = false): Promise<void> => {
+      if (!isCurrentOwner()) return;
       try {
         const receipt = await invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
           sessionId: currentSessionId,
           input,
         });
+        if (!isCurrentOwner()) return;
         updateImeAnchor(receipt);
         switchDebug("terminal.surface.input.sent", {
           backendSessionId: currentSessionId,
@@ -797,6 +811,7 @@ export function NativeTerminalPane({
         });
         setError(null);
       } catch (error: unknown) {
+        if (!isCurrentOwner()) return;
         if (!isRetry) {
           switchDebug("terminal.surface.input.error.recovering", {
             backendSessionId: currentSessionId,
@@ -813,9 +828,11 @@ export function NativeTerminalPane({
 
           try {
             await recovery;
+            if (!isCurrentOwner()) return;
             restoreFocusIfLost();
             await executeInput(true);
           } catch (recoveryError: unknown) {
+            if (!isCurrentOwner()) return;
             switchDebug("terminal.surface.input.recover.failed", {
               backendSessionId: currentSessionId,
               error: String(recoveryError),
