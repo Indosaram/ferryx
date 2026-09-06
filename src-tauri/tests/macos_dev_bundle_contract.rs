@@ -45,3 +45,15 @@ fn development_runner_launches_named_macos_app_bundle() {
         "the development runner must launch from the named app bundle"
     );
 }
+
+#[test]
+fn development_runner_synthesizes_missing_dev_info_plist() {
+    assert!(
+        DEV_RUNNER.contains("DEV_PLIST=\"$TARGET_DIR/Contents/Info.plist\""),
+        "a clean or rebuilt target/ has no Contents/Info.plist: the runner must locate it"
+    );
+    assert!(
+        DEV_RUNNER.contains("cat > \"$DEV_PLIST\""),
+        "when the plist is absent the runner must synthesize a minimal dev one instead of failing cp"
+    );
+}

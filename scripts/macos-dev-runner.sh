@@ -57,6 +57,37 @@ install_atomic() {
 }
 
 install_atomic "$TARGET_DIR/ferryx" "$MACOS_DIR/ferryx"
+
+# `cargo tauri dev` never emits an Info.plist for the debug profile; only `tauri build`
+# (release bundling) does. A clean or rebuilt target/ therefore has no
+# `$TARGET_DIR/Contents/Info.plist` to copy, which used to abort the run with
+# "cp: .../Contents/Info.plist: No such file or directory". Synthesize the minimal dev
+# plist once per target dir so a fresh checkout can always assemble the dev bundle.
+DEV_PLIST="$TARGET_DIR/Contents/Info.plist"
+if [[ ! -f "$DEV_PLIST" ]]; then
+    mkdir -p "$(dirname "$DEV_PLIST")"
+    cat > "$DEV_PLIST" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>English</string>
+    <key>CFBundleDisplayName</key><string>Ferryx</string>
+    <key>CFBundleExecutable</key><string>ferryx</string>
+    <key>CFBundleIdentifier</key><string>com.ferryx.app</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Ferryx</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.0.0-dev</string>
+    <key>CFBundleVersion</key><string>0.0.0-dev</string>
+    <key>CFBundleIconFile</key><string>icon</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+    <key>LSMinimumSystemVersion</key><string>10.15</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+fi
 install_atomic "$TARGET_DIR/Contents/Info.plist" "$CONTENTS_DIR/Info.plist"
 install_atomic "$SRC_TAURI_DIR/icons/icon.icns" "$RESOURCES_DIR/icon.icns"
 
