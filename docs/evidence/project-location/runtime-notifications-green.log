@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/App.notifications.test.tsx "--reporter=dot"
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90m/Users/indo/code/project/orca-lite/ui[39m
+
+[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m11 passed[39m[22m[90m (11)[39m
+[2m   Start at [22m 02:03:16
+[2m   Duration [22m 1.70s[2m (transform 248ms, setup 174ms, collect 952ms, tests 75ms, environment 349ms, prepare 42ms)[22m
+

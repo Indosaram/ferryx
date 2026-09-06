@@ -1,0 +1,64 @@
+$ vitest run --maxWorkers=1 src/App.notifications.test.tsx "--reporter=dot"
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90m/Users/indo/code/project/orca-lite/ui[39m
+
+[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[32m·[39m[33m[39m[31mx[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/App.notifications.test.tsx[2m > [22mApp notification coordinator wiring[2m > [22mactivation navigation[2m > [22mdoes not switch projects for a closed target in another project
+[31m[1mError[22m: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+[36m [2m❯[22m src/App.notifications.test.tsx:[2m587:5[22m[39m
+    [90m585| [39m    })[33m;[39m
+    [90m586| [39m
+    [90m587| [39m    it("does not switch projects for a closed target in another projec…
+    [90m   | [39m    [31m^[39m
+    [90m588| [39m      [34mseedTwoProjects[39m()[33m;[39m
+    [90m589| [39m      [34msetWorkspaceSnapshot[39m([32m"other"[39m[33m,[39m [34mparkedProjectSnapshot[39m([35mnull[39m))[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Unhandled Errors [49m[22m[31m⎯⎯⎯⎯⎯⎯[39m
+[31m[1m
+Vitest caught 1 unhandled error during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.[22m[39m
+
+[31m⎯⎯⎯⎯[39m[1m[41m Unhandled Rejection [49m[22m[31m⎯⎯⎯⎯⎯[39m
+[31m[1mError[22m: [vitest] No "getSystemPermissionsStatus" export is defined on the "./lib/tauri" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+[39m
+vi[33m.[39m[34mmock[39m([35mimport[39m([32m"./lib/tauri"[39m)[33m,[39m [35masync[39m (importOriginal) [33m=>[39m {
+  [35mconst[39m actual [33m=[39m [35mawait[39m [34mimportOriginal[39m()
+  [35mreturn[39m {
+    [33m...[39mactual[33m,[39m
+    [90m// your mocked methods[39m
+  }
+})
+
+[90m [2m❯[22m VitestMocker.createError node_modules/vitest/dist/chunks/execute.B7h3T_Hc.js:[2m284:17[22m[39m
+[90m [2m❯[22m Object.get node_modules/vitest/dist/chunks/execute.B7h3T_Hc.js:[2m330:16[22m[39m
+[36m [2m❯[22m Timeout._onTimeout src/App.tsx:[2m1710:28[22m[39m
+    [90m1708| [39m    [35mconst[39m timer [33m=[39m [34msetTimeout[39m([35masync[39m () [33m=>[39m {
+    [90m1709| [39m      [35mif[39m ([34mloadPermissionsOnboardingDismissed[39m()) [35mreturn[39m[33m;[39m
+    [90m1710| [39m      const status = await getSystemPermissionsStatus().catch(() => nu…
+    [90m   | [39m                           [31m^[39m
+    [90m1711| [39m      if (!cancelled && shouldShowPermissionsOnboarding(status, false)…
+    [90m1712| [39m        [34msetIsOnboardingOpen[39m([35mtrue[39m)[33m;[39m
+[90m [2m❯[22m listOnTimeout node:internal/timers:[2m585:17[22m[39m
+[90m [2m❯[22m processTimers node:internal/timers:[2m521:7[22m[39m
+
+[31mThis error originated in "[1msrc/App.notifications.test.tsx[22m" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.[39m
+[31mThe latest test that might've caused the error is "[1mdoes not switch projects for a closed target in another project[22m". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.[39m
+[31m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m10 passed[39m[22m[90m (11)[39m
+[2m     Errors [22m [1m[31m1 error[39m[22m
+[2m   Start at [22m 02:00:50
+[2m   Duration [22m 7.51s[2m (transform 340ms, setup 112ms, collect 1.12s, tests 5.09s, environment 260ms, prepare 50ms)[22m
+
+error: script "test" exited with code 1

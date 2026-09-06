@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 src/lib/remoteProject.test.ts src/App.remote.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/App.remote.test.tsx (12 tests) 325ms
+ ✓ src/lib/remoteProject.test.ts (5 tests) 4ms
+
+ Test Files  2 passed (2)
+      Tests  17 passed (17)
+   Start at  02:12:05
+   Duration  2.81s (transform 382ms, setup 318ms, collect 1.30s, tests 329ms, environment 590ms, prepare 66ms)
+

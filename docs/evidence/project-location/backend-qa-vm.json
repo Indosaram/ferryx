@@ -1,0 +1,16 @@
+{
+  "host": {
+    "id": "eclipticrd-ci",
+    "label": "eclipticrd-ci QA VM",
+    "hostname": "192.168.64.197",
+    "username": "admin",
+    "port": 22,
+    "source": "manual",
+    "authMethod": "agent",
+    "disabled": false
+  },
+  "knownHostsFile": "/tmp/ferryx-project-location-qa.VM4GNI/known_hosts",
+  "repoPath": "/Users/admin",
+  "expectedRepoRoot": "/Users/admin",
+  "expectedGitRoot": null
+}

@@ -1,0 +1,404 @@
+$ vitest run --maxWorkers=1 src/App.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/App.test.tsx (89 tests | 1 failed) 3142ms
+   ✓ App project workspace flow > routes the native Cmd+T menu accelerator through the normal new-terminal callback 47ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close the active tab 7ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab 5ms
+   ✓ App project workspace flow > routes the web Cmd+W shortcut to close the focused pane in a split terminal tab 5ms
+   ✓ App project workspace flow > routes the native Cmd+W menu accelerator to close an active browser tab 6ms
+   ✓ App project workspace flow > shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm 39ms
+   ✓ App project workspace flow > uses the canonical folder-derived project on an empty native startup 10ms
+   ✓ App project workspace flow > falls back to stored projects and initializes bootstrap when getInitialProject rejects 5ms
+   × App project workspace flow > checks for a signed update when the native app starts 1009ms
+     → expected "spy" to be called once, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html[39m
+  [33mdata-accent[39m=[32m"default"[39m
+  [33mdata-density[39m=[32m"compact"[39m
+  [33mdata-theme[39m=[32m"charcoal"[39m
+  [33mdata-theme-preference[39m=[32m"charcoal"[39m
+  [33mstyle[39m=[32m"color-scheme: dark; --terminal: #282c34; --terminal-rgb: 40 44 52;"[39m
+[36m>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33maria-atomic[39m=[32m"false"[39m
+          [33maria-label[39m=[32m"Notifications alt+T"[39m
+          [33maria-live[39m=[32m"polite"[39m
+          [33maria-relevant[39m=[32m"additions text"[39m
+          [33mdata-react-aria-top-layer[39m=[32m"true"[39m
+          [33mtabindex[39m=[32m"-1"[39m
+        [36m/>[39m
+        [36m<div[39m
+          [33mdata-open[39m=[32m"true"[39m
+          [33mdata-testid[39m=[32m"mock-sidebar"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mHide sidebar[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mOpen settings[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mAdd project[0m
+          [36m</button>[39m
+          [36m<span>[39m
+            [0mActive project [0m
+            [0morca-lite[0m
+          [36m</span>[39m
+          [36m<div>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mProject [0m
+              [0morca-lite[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mAdd worktree to [0m
+              [0morca-lite[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mRemove project [0m
+              [0morca-lite[0m
+            [36m</button>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/main[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/main[0m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/feature[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/feature[0m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/bugfix[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/bugfix[0m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/docs[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/docs[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mdata-default-agent-id[39m=[32m""[39m
+            [33mdata-search-leaf-id[39m=[32m""[39m
+            [33mdata-testid[39m=[32m"terminal-split-view"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mNew browser tab[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m...
+   ✓ App project workspace flow > restores projects lost from WebView storage using the native session catalog 16ms
+   ✓ App project workspace flow > restores multi-project native session catalog when single persisted project differs from startup 15ms
+   ✓ App project workspace flow > does not restore historical projects into an existing multi-project catalog 12ms
+   ✓ App project workspace flow > keeps the native shell initializing until persisted workspace tabs are preloaded 60ms
+   ✓ App project workspace flow > migrates the legacy default placeholder to the canonical native project 4ms
+   ✓ App project workspace flow > removes a project via RemoveProjectDialog and switches active project when removing the active one 36ms
+   ✓ App project workspace flow > shows a genuine empty state and does not re-register the default project after removing the last project 30ms
+   ✓ App project workspace flow > scopes WorktreeDeleteDialog workspaceId to the owning project of the deleted worktree 14ms
+   ✓ App project workspace flow > migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10) 9ms
+   ✓ App project workspace flow > heals a legacy project entry (no gitRoot) into a git-backed project on startup 13ms
+   ✓ App project workspace flow > re-registers the active persisted project before refreshing its worktrees 8ms
+   ✓ App project workspace flow > opens a registered project's real branch-dropdown worktree flow 50ms
+   ✓ App project workspace flow > opens worktree creation for the clicked non-active project 23ms
+   ✓ App project workspace flow > switches to the non-active project before opening its created worktree 39ms
+   ✓ App project workspace flow > switches the active project when selecting a project row in the nested tree 15ms
+   ✓ App project workspace flow > shows the original project's worktrees again after switching away and clicking back 44ms
+   ✓ App project workspace flow > adopts the canonical workspaceId the backend returns for an already-registered root 9ms
+   ✓ App project workspace flow > retries registration on window focus after a transient failure instead of gating forever 10ms
+   ✓ App project workspace flow > persists the outgoing project's session when switching away 70ms
+   ✓ App project workspace flow > discards a parked worktree selection that belongs to a project no longer active 35ms
+   ✓ App project workspace flow > surfaces a genuine same-id different-root registration conflict instead of silently listing 8ms
+   ✓ App project workspace flow > switches project instead of activating when the worktree belongs to another project 23ms
+   ✓ App project workspace flow > switches project for a branch-less worktree nested under another project's root 19ms
+   ✓ App project workspace flow > activates a worktree directly when it belongs to the active project 11ms
+   ✓ App project workspace flow > walks visible worktrees top to bottom across expanded projects with Cmd+1.. 16ms
+   ✓ App project workspace flow > skips a collapsed project's rows when counting Cmd+N positions 7ms
+   ✓ App project workspace flow > selects a worktree when macOS forwards Cmd+N through the native key monitor 7ms
+   ✓ App project workspace flow > targets the synthesized root row of a visible non-Git project via native Cmd+digit 14ms
+   ✓ App project workspace flow > targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit 10ms
+   ✓ App project workspace flow > keeps out-of-range Cmd+N presses a no-op 4ms
+   ✓ App project workspace flow > navigates workspaces with Cmd+1..4 and terminal tabs with Ctrl+1..4 ignoring out-of-range keys 3ms
+   ✓ App project workspace flow > toggles sidebar visibility with Cmd+B and persists state across mounts 20ms
+   ✓ App project workspace flow > requests fresh backends for restored tabs whose daemon sessions are gone 8ms
+   ✓ App project workspace flow > waits until project registration and authoritative worktree refresh complete before restoring workspace and recovering stale session backends 14ms
+   ✓ App project workspace flow > restores persisted terminal sessions only once when restored state changes effect dependencies 7ms
+   ✓ App project workspace flow > preserves live backend sessions when restoring during dev/HMR 6ms
+   ✓ App project workspace flow > reconciles live and missing sessions across split panes without auto-respawning dead sessions 11ms
+   ✓ App project workspace flow > reconciles daemonEpoch and lastOutputSequence on startup, marking epoch mismatch as exited 6ms
+   ✓ App project workspace flow > toggles the settings dialog with Cmd+, 10ms
+   ✓ App project workspace flow > activates in-terminal search on active pane with Cmd+F 3ms
+   ✓ App project workspace flow > moves pane focus next and previous with Cmd+] and Cmd+[ 2ms
+   ✓ App project workspace flow > detects agents on mount and launches agent via spawnTerminal and writeTerminal 106ms
+   ✓ App project workspace flow > surfaces the stored defaultAgentId first with a Default label in the New Tab agent list 24ms
+   ✓ App project workspace flow > opens a browser tab at the configured homepage from the new-tab menu 13ms
+   ✓ App project workspace flow > opens a blank browser tab from the new-tab menu when no homepage is set 11ms
+   ✓ App project workspace flow > preserves every registered workspace when saving session instead of clobbering inactive workspaces 9ms
+   ✓ App project workspace flow > conditionally mounts SettingsDialog and CommandPalette only when open 2ms
+   ✓ App project workspace flow > lazy-loads SettingsDialog via React.lazy with Suspense 1ms
+   ✓ App project workspace flow > does not list state in registerWindowCloseGuard effect dependencies 0ms
+   ✓ App project workspace flow > does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval 14ms
+   ✓ App project workspace flow > does not pass inline arrow functions for onOpenSettings or onCloseSearch 1ms
+   ✓ App project workspace flow > preserves layout ownership and marks dead sessions exited across active and parked layouts without auto-respawning 8ms
+   ✓ App project workspace flow > successfully completes session restore under React StrictMode double-mount without skipping 9ms
+   ✓ App project workspace flow > skips native disk session restore when store was hydrated from HMR handoff and no HMR state exists 5ms
+   ✓ App project workspace flow > reconciles stale sessions and triggers ensureSessionBackends on HMR handoff when daemon restarted 9ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId 1ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes terminal tabs from every worktree with safe labels 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes the primary worktree with no managed slug 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane when a remote selection names a leaf-addressed entry 7ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > exposes every split pane of a tab as its own remote entry addressed by leaf 1ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps a single-pane tab addressed by its plain tab id 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > derives per-tab activityState and agentType when present in activityBySessionId 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > keeps publishing the terminal inventory with an empty focus when a browser tab is active 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > returns null only when the desktop has no terminal tab at all 0ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > does not republish unchanged terminal inventory on unrelated workspace renders 6ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes focused terminal to native IPC on mount and layout changes 4ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes per-tab agent activity state and agent type to native IPC 6ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > publishes real backendSessionId after session backend is bound or rebound 6ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > routes publishFocusedTerminal rejection to reportRuntimeError 8ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles native remote_selection_requested and activates requested worktree context 7ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles same-worktree tab selection request and activates exact tab 4ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles primary worktree selection within current project when on secondary worktree 7ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-worktree selection with tabId activating tab after worktree switch 8ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > handles cross-project remote selection by switching project and then activating worktree 6ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > drops a queued remote slug when the user switches to a third project first 9ms
+   ✓ App project workspace flow > Ferryx desktop focused-terminal publisher and remote selection listener > activates the exact pane after a queued cross-project selection names a leaf entry 59ms
+   ✓ App project workspace flow > badge count synchronization > synchronizes badge count from unique true unreadTabIds in workspace state 5ms
+   ✓ App project workspace flow > badge count synchronization > routes native badge synchronization errors to reportRuntimeError 6ms
+   ✓ App project workspace flow > Automatic agent session resume on workspace restore > auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed  921ms
+   ✓ App project workspace flow > Automatic agent session resume on workspace restore > does not crash and degrades silently when auto-resume spawn fails 10ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.test.tsx > App project workspace flow > checks for a signed update when the native app starts
+AssertionError: expected "spy" to be called once, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html[39m
+  [33mdata-accent[39m=[32m"default"[39m
+  [33mdata-density[39m=[32m"compact"[39m
+  [33mdata-theme[39m=[32m"charcoal"[39m
+  [33mdata-theme-preference[39m=[32m"charcoal"[39m
+  [33mstyle[39m=[32m"color-scheme: dark; --terminal: #282c34; --terminal-rgb: 40 44 52;"[39m
+[36m>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"[39m
+      [36m>[39m
+        [36m<section[39m
+          [33maria-atomic[39m=[32m"false"[39m
+          [33maria-label[39m=[32m"Notifications alt+T"[39m
+          [33maria-live[39m=[32m"polite"[39m
+          [33maria-relevant[39m=[32m"additions text"[39m
+          [33mdata-react-aria-top-layer[39m=[32m"true"[39m
+          [33mtabindex[39m=[32m"-1"[39m
+        [36m/>[39m
+        [36m<div[39m
+          [33mdata-open[39m=[32m"true"[39m
+          [33mdata-testid[39m=[32m"mock-sidebar"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mHide sidebar[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mOpen settings[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mAdd project[0m
+          [36m</button>[39m
+          [36m<span>[39m
+            [0mActive project [0m
+            [0morca-lite[0m
+          [36m</span>[39m
+          [36m<div>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mProject [0m
+              [0morca-lite[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mAdd worktree to [0m
+              [0morca-lite[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mRemove project [0m
+              [0morca-lite[0m
+            [36m</button>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/main[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/main[0m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/feature[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/feature[0m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/bugfix[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/bugfix[0m
+              [36m</button>[39m
+            [36m</div>[39m
+            [36m<div>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mWorktree [0m
+                [0m/repo/docs[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0mDelete worktree [0m
+                [0m/repo/docs[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<main[39m
+          [33mclass[39m=[32m"flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mdata-default-agent-id[39m=[32m""[39m
+            [33mdata-search-leaf-id[39m=[32m""[39m
+            [33mdata-testid[39m=[32m"terminal-split-view"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mNew browser tab[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</main>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m...
+ ❯ src/App.test.tsx:662:56
+    660|     render(<App />);
+    661| 
+    662|     await waitFor(() => expect(updater.checkForUpdate).toHaveBeenCalle…
+       |                                                        ^
+    663|   });
+    664| 
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 88 passed (89)
+   Start at  01:39:14
+   Duration  5.76s (transform 605ms, setup 251ms, collect 1.30s, tests 3.14s, environment 590ms, prepare 64ms)
+
+error: script "test" exited with code 1

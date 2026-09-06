@@ -1,0 +1,23 @@
+$ vitest run --maxWorkers=1 src/App.remote.test.tsx src/state/inactiveProjectWorktrees.remote.test.tsx src/components/Sidebar.remote.test.tsx src/lib/projectIdentity.test.ts src/state/inactiveProjectWorktrees.test.tsx src/state/workspaceRuntime.test.tsx src/state/workspaceRestore.test.tsx src/state/workspaceStore.test.tsx src/lib/sessionPersistence.test.ts src/lib/worktreeOwnership.test.ts src/components/Sidebar.test.tsx src/components/Sidebar.dnd.test.tsx src/components/Sidebar.activity.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/state/workspaceRuntime.test.tsx (11 tests) 704ms
+ ✓ src/components/Sidebar.test.tsx (30 tests) 1104ms
+ ✓ src/App.remote.test.tsx (12 tests) 737ms
+ ✓ src/components/Sidebar.dnd.test.tsx (7 tests) 213ms
+ ✓ src/components/Sidebar.activity.test.tsx (4 tests) 119ms
+ ✓ src/state/workspaceStore.test.tsx (43 tests) 84ms
+ ✓ src/components/Sidebar.remote.test.tsx (3 tests) 187ms
+ ✓ src/state/workspaceRestore.test.tsx (17 tests) 127ms
+ ✓ src/state/inactiveProjectWorktrees.test.tsx (7 tests) 28ms
+ ✓ src/lib/sessionPersistence.test.ts (25 tests) 37ms
+ ✓ src/state/inactiveProjectWorktrees.remote.test.tsx (1 test) 9ms
+ ✓ src/lib/projectIdentity.test.ts (3 tests) 4ms
+ ✓ src/lib/worktreeOwnership.test.ts (7 tests) 2ms
+
+ Test Files  13 passed (13)
+      Tests  170 passed (170)
+   Start at  01:41:26
+   Duration  23.96s (transform 2.20s, setup 2.17s, collect 8.43s, tests 3.35s, environment 5.94s, prepare 788ms)
+

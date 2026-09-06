@@ -1,0 +1,148 @@
+$ vitest run --maxWorkers=1 src/App.remote.test.tsx src/state/inactiveProjectWorktrees.remote.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/App.remote.test.tsx (2 tests | 2 failed) 108ms
+   × App SSH project lifecycle > loads a stored remote target without registering its path locally 63ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "ssh:remote",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × App SSH project lifecycle > handles the chooser's registered remote project through actual App registration 44ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "ssh:remote",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/state/inactiveProjectWorktrees.remote.test.tsx (1 test | 1 failed) 10ms
+   × never registers or lists an inactive SSH path with local project services 9ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "ssh:build",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > loads a stored remote target without registering its path locally
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "ssh:remote",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/App.remote.test.tsx:90:40
+     88|     native.registerRemoteProject.mockReturnValue(registration.promise);
+     89|     await mount();
+     90|     expect(native.registerProject).not.toHaveBeenCalled();
+       |                                        ^
+     91|     expect(native.registerRemoteProject).toHaveBeenCalledWith({ worksp…
+     92|     await act(async () => { registration.resolve(registered); await re…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/App.remote.test.tsx > App SSH project lifecycle > handles the chooser's registered remote project through actual App registration
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "ssh:remote",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/App.remote.test.tsx:109:40
+    107|     await act(async () => { fireEvent.click(screen.getByTestId("add-pr…
+    108|     await act(async () => { registration.resolve(registered); await re…
+    109|     expect(native.registerProject).not.toHaveBeenCalled();
+       |                                        ^
+    110|     expect(native.registerRemoteProject).toHaveBeenLastCalledWith({ wo…
+    111|     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remo…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/state/inactiveProjectWorktrees.remote.test.tsx > never registers or lists an inactive SSH path with local project services
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "ssh:build",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/state/inactiveProjectWorktrees.remote.test.tsx:12:40
+     10|   const hook = renderHook(() => useInactiveProjectWorktrees([project],…
+     11|   await act(async () => { await Promise.all(services.registerProject.m…
+     12|   expect(services.registerProject).not.toHaveBeenCalled();
+       |                                        ^
+     13|   expect(services.listWorktrees).not.toHaveBeenCalled();
+     14|   expect(hook.result.current[project.workspaceId]).toEqual([expect.obj…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  2 failed (2)
+      Tests  3 failed (3)
+   Start at  01:17:44
+   Duration  2.08s (transform 299ms, setup 184ms, collect 853ms, tests 118ms, environment 472ms, prepare 64ms)
+
+error: script "test" exited with code 1

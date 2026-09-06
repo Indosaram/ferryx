@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.remote.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/components/Sidebar.remote.test.tsx (3 tests) 84ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  02:01:26
+   Duration  1.63s (transform 93ms, setup 156ms, collect 718ms, tests 84ms, environment 320ms, prepare 35ms)
+
