@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use super::rasterizer::{rasterize_glyph_with_scale, RasterizedGlyph};
 use super::types::{GlyphAtlasStats, RendererConfig};
 
-const ATLAS_WIDTH: u32 = 512;
-const ATLAS_HEIGHT: u32 = 512;
-const MAX_CAPACITY_BYTES: usize = 4 * 1024 * 1024; // 4 MB
+const ATLAS_WIDTH: u32 = 1024;
+const ATLAS_HEIGHT: u32 = 1024;
+// Truthful texture budget reported in stats: mask RGBA (4 B/px) + color RGBA
+// accounting uses the same 5-B/px basis as `allocated_bytes` in `stats()`
+// (4 B mask + 1 B mask-alpha accounting). Kept in lockstep with the atlas size.
+const MAX_CAPACITY_BYTES: usize = (ATLAS_WIDTH * ATLAS_HEIGHT * 5) as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
@@ -36,6 +39,7 @@ pub struct GlyphAtlas {
     cursor_x: u32,
     cursor_y: u32,
     row_height: u32,
+    overflow_pending: bool,
 }
 
 impl GlyphAtlas {
@@ -92,7 +96,14 @@ impl GlyphAtlas {
             cursor_x: 0,
             cursor_y: 0,
             row_height: 0,
+            overflow_pending: false,
         }
+    }
+
+    pub fn take_overflow_pending(&mut self) -> bool {
+        let pending = self.overflow_pending;
+        self.overflow_pending = false;
+        pending
     }
 
     pub fn get_entry(&self, text: &str, bold: bool, italic: bool) -> Option<AtlasEntry> {
@@ -141,12 +152,10 @@ impl GlyphAtlas {
         }
 
         if self.cursor_y + height > ATLAS_HEIGHT {
-            // Capacity boundary reached: clear and reset
-            self.entries.clear();
-            self.cursor_x = 0;
-            self.cursor_y = 0;
-            self.row_height = 0;
-            self.generation = self.generation.wrapping_add(1);
+            // Capacity boundary reached: defer the clear to the start of the next
+            // frame so we never invalidate entries already used in this frame.
+            self.overflow_pending = true;
+            return None;
         }
 
         let rasterized = rasterize_glyph_with_scale(
@@ -159,6 +168,12 @@ impl GlyphAtlas {
         );
 
         let is_color = rasterized.is_color();
+
+        // Skip all-zero non-color rasters (whitespace, uncovered PUA, etc.): they
+        // waste an atlas slot and render nothing. Color glyphs are never skipped.
+        if !is_color && rasterized.buffer().iter().all(|&b| b == 0) {
+            return None;
+        }
 
         match rasterized {
             RasterizedGlyph::Alpha(alpha_bytes) => {
@@ -271,6 +286,7 @@ impl GlyphAtlas {
         self.cursor_x = 0;
         self.cursor_y = 0;
         self.row_height = 0;
+        self.overflow_pending = false;
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -331,5 +347,90 @@ mod tests {
             let queried_color = atlas.get_entry("😺", false, false).expect("find '😺'");
             assert!(queried_color.is_color);
         }
+    }
+
+    #[test]
+    fn atlas_overflow_never_invalidates_earlier_entries_mid_frame() {
+        let gpu = match GpuContext::new() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let mut atlas = GlyphAtlas::new(&gpu.device);
+        let config = RendererConfig {
+            cell_width_px: 16,
+            cell_height_px: 32,
+            device_scale_factor: 2.0,
+            theme: RendererTheme::default(),
+        };
+        let first = atlas
+            .get_or_insert("a0", false, false, false, &config, &gpu.queue)
+            .expect("first insert must succeed");
+        let generation_after_first = atlas.generation;
+
+        // Insert unique narrow glyphs far beyond capacity (unique text keys, e.g. "a1".."a3000").
+        let mut saw_overflow = false;
+        for i in 1..3000u32 {
+            if atlas
+                .get_or_insert(&format!("a{i}"), false, false, false, &config, &gpu.queue)
+                .is_none()
+            {
+                saw_overflow = true;
+                break;
+            }
+        }
+        assert!(saw_overflow, "3000 unique 16x32 slots must exceed any atlas budget");
+        assert_eq!(
+            atlas.generation, generation_after_first,
+            "overflow must NOT bump generation mid-frame"
+        );
+        assert_eq!(
+            atlas.get_entry("a0", false, false),
+            Some(first),
+            "overflow must NOT evict entries inserted earlier in the frame"
+        );
+        assert!(atlas.take_overflow_pending(), "overflow flag must be set");
+
+        // After the frame-start deferred clear, fresh inserts must succeed again.
+        atlas.clear();
+        assert!(
+            atlas
+                .get_or_insert("a0", false, false, false, &config, &gpu.queue)
+                .is_some(),
+            "insert after deferred clear must succeed"
+        );
+    }
+
+    #[test]
+    fn atlas_skips_all_zero_raster_without_allocating_slot() {
+        let gpu = match GpuContext::new() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let mut atlas = GlyphAtlas::new(&gpu.device);
+        let config = RendererConfig {
+            cell_width_px: 16,
+            cell_height_px: 32,
+            device_scale_factor: 2.0,
+            theme: RendererTheme::default(),
+        };
+        let before = atlas.stats().entry_count;
+        let result = atlas.get_or_insert(
+            "\u{10FFFD}",
+            false,
+            false,
+            false,
+            &config,
+            &gpu.queue,
+        );
+        assert!(result.is_none(), "all-zero raster must return None");
+        assert_eq!(
+            atlas.stats().entry_count,
+            before,
+            "all-zero raster must not allocate an atlas slot"
+        );
+        assert!(
+            !atlas.take_overflow_pending(),
+            "all-zero raster must not set overflow flag"
+        );
     }
 }

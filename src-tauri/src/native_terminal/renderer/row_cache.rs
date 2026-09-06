@@ -27,6 +27,10 @@ impl RowCacheManager {
         atlas: &mut GlyphAtlas,
         queue: &wgpu::Queue,
     ) -> (Vec<RectInstance>, Vec<GlyphInstance>, u16, u16) {
+        if atlas.take_overflow_pending() {
+            atlas.clear();
+        }
+
         if atlas.generation != self.last_atlas_generation {
             self.entries.clear();
             self.last_atlas_generation = atlas.generation;
