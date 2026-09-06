@@ -8,11 +8,13 @@ import {
   Shield,
 } from "lucide-react";
 
+import { OPEN_PERMISSIONS_ONBOARDING_EVENT, resetPermissionsOnboardingDismissed } from "../../lib/permissionsOnboarding";
 import { isMacShortcutPlatform } from "../../lib/shortcuts";
 import {
   getSystemPermissionsStatus,
   openPermissionsSystemSettings,
   requestAccessibilityPermission,
+  requestNotificationPermission,
 } from "../../lib/tauri";
 import type { PermissionItemStatus, SystemPermissionsStatus } from "../../lib/types";
 import { Alert, AlertDescription } from "../ui/alert";
@@ -120,6 +122,20 @@ export function PermissionsSection() {
       setStatus(null);
     }
   }, [fetchStatus]);
+
+  const handleRequestNotifications = useCallback(async () => {
+    try {
+      await requestNotificationPermission();
+      void fetchStatus();
+    } catch {
+      setStatus(null);
+    }
+  }, [fetchStatus]);
+
+  const handleRerunOnboarding = useCallback(() => {
+    resetPermissionsOnboardingDismissed();
+    window.dispatchEvent(new CustomEvent(OPEN_PERMISSIONS_ONBOARDING_EVENT));
+  }, []);
 
   const allGranted = status?.allGranted ?? false;
 
@@ -252,22 +268,50 @@ export function PermissionsSection() {
                   (loading ? "Checking permission status…" : "Allows desktop alerts for agent task completions and updates.")}
               </p>
             </div>
-            <div className="shrink-0">
-              <Button
-                variant="secondary"
-                size="sm"
-                data-testid="open-notifications-settings"
-                disabled={status?.notifications.status === "unsupported"}
-                onClick={() => handleOpenSettings("notifications")}
-                className="gap-1.5 text-xs"
-              >
-                <ExternalLink className="size-3.5" />
-                Open System Settings
-              </Button>
-            </div>
+            {status && !status.notifications.granted ? (
+              <div className="shrink-0">
+                {status.notifications.canRequest ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="request-notifications"
+                    onClick={handleRequestNotifications}
+                    className="gap-1.5 text-xs"
+                  >
+                    Enable Notifications
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    data-testid="open-notifications-settings"
+                    disabled={status.notifications.status === "unsupported"}
+                    onClick={() => handleOpenSettings("notifications")}
+                    className="gap-1.5 text-xs"
+                  >
+                    <ExternalLink className="size-3.5" />
+                    Open System Settings
+                  </Button>
+                )}
+              </div>
+            ) : null}
           </div>
         </Card>
       </div>
+
+      {isMac && (
+        <div className="flex justify-end">
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="rerun-permissions-onboarding"
+            onClick={handleRerunOnboarding}
+            className="text-xs text-muted-foreground"
+          >
+            Re-run Welcome Setup
+          </Button>
+        </div>
+      )}
 
       {isMac && (
         <div className="rounded-lg border border-border/70 bg-muted/20 p-4 text-xs text-muted-foreground space-y-2">

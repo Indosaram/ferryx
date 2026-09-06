@@ -8,12 +8,14 @@ const mockTauri = vi.hoisted(() => ({
   getSystemPermissionsStatus: vi.fn(),
   openPermissionsSystemSettings: vi.fn(),
   requestAccessibilityPermission: vi.fn(),
+  requestNotificationPermission: vi.fn(),
 }));
 
 vi.mock("../../lib/tauri", () => ({
   getSystemPermissionsStatus: () => mockTauri.getSystemPermissionsStatus(),
   openPermissionsSystemSettings: (target: string) => mockTauri.openPermissionsSystemSettings(target),
   requestAccessibilityPermission: () => mockTauri.requestAccessibilityPermission(),
+  requestNotificationPermission: () => mockTauri.requestNotificationPermission(),
 }));
 
 const mockStatusNotGranted: SystemPermissionsStatus = {
@@ -67,6 +69,7 @@ describe("PermissionsSection", () => {
     mockTauri.getSystemPermissionsStatus.mockReset();
     mockTauri.openPermissionsSystemSettings.mockReset();
     mockTauri.requestAccessibilityPermission.mockReset();
+    mockTauri.requestNotificationPermission.mockReset();
   });
 
   afterEach(() => {
@@ -112,5 +115,51 @@ describe("PermissionsSection", () => {
     });
 
     expect(screen.getByText(/All system permissions granted/i)).toBeDefined();
+  });
+
+  it("requests notification permission and refreshes when Enable Notifications is clicked", async () => {
+    const canRequestStatus: SystemPermissionsStatus = {
+      ...mockStatusNotGranted,
+      notifications: {
+        ...mockStatusNotGranted.notifications,
+        canRequest: true,
+        granted: false,
+      },
+    };
+    mockTauri.getSystemPermissionsStatus.mockResolvedValue(canRequestStatus);
+    mockTauri.requestNotificationPermission.mockResolvedValue({ granted: true, status: "granted" });
+
+    render(<PermissionsSection />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("request-notifications")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("request-notifications"));
+
+    await waitFor(() => {
+      expect(mockTauri.requestNotificationPermission).toHaveBeenCalledTimes(1);
+    });
+    // Initial load + refetch after request.
+    expect(mockTauri.getSystemPermissionsStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("resets dismissed key and dispatches open-onboarding event on Re-run Welcome Setup", async () => {
+    window.localStorage.setItem("ferryx.permissions.onboarding-dismissed", "true");
+    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusNotGranted);
+
+    const onEvent = vi.fn();
+    window.addEventListener("ferryx:open-permissions-onboarding", onEvent, { once: true });
+
+    render(<PermissionsSection />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("rerun-permissions-onboarding")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId("rerun-permissions-onboarding"));
+
+    expect(window.localStorage.getItem("ferryx.permissions.onboarding-dismissed")).toBeNull();
+    expect(onEvent).toHaveBeenCalledTimes(1);
   });
 });

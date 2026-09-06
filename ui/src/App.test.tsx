@@ -152,6 +152,13 @@ vi.mock("./lib/tauri", () => ({
   deleteWorktreeDestructive: vi.fn(),
   unregisterProject: vi.fn().mockResolvedValue(undefined),
   getInitialProject: native.getInitialProject,
+  getSystemPermissionsStatus: vi.fn().mockResolvedValue({
+    platform: "web",
+    allGranted: true,
+    fullDiskAccess: { status: "unsupported", granted: false, canRequest: false, description: "" },
+    accessibility: { status: "unsupported", granted: false, canRequest: false, description: "" },
+    notifications: { status: "unsupported", granted: false, canRequest: false, description: "" },
+  }),
   listProjectBranches: native.listProjectBranches,
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,

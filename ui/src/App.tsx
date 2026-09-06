@@ -25,7 +25,12 @@ import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/na
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
-import { initPermissionsToast } from "./lib/permissionsToast";
+import {
+  loadPermissionsOnboardingDismissed,
+  OPEN_PERMISSIONS_ONBOARDING_EVENT,
+  savePermissionsOnboardingDismissed,
+  shouldShowPermissionsOnboarding,
+} from "./lib/permissionsOnboarding";
 import type { SectionId } from "./components/settings/types";
 import {
   AGENTS_SETTINGS_CHANGED_EVENT,
@@ -46,6 +51,7 @@ import {
   DEFAULT_WORKSPACE_ID,
   detectAgents,
   getInitialProject,
+  getSystemPermissionsStatus,
   isTauriRuntime,
   loadSession,
   onCloseTabMenu,
@@ -103,6 +109,11 @@ const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, 
 const loadSettingsDialog = () =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
 const SettingsDialog = lazy(loadSettingsDialog);
+const PermissionsOnboardingDialog = lazy(() =>
+  import("./components/onboarding/PermissionsOnboardingDialog").then((m) => ({
+    default: m.PermissionsOnboardingDialog,
+  }))
+);
 let settingsDialogPreloaded = false;
 const preloadSettingsDialog = () => {
   if (settingsDialogPreloaded) return;
@@ -1042,6 +1053,7 @@ function WorkspaceApp({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
@@ -1652,11 +1664,38 @@ function WorkspaceApp({
     setSettingsInitialSection(undefined);
   }, []);
 
+  const handleCloseOnboarding = useCallback((dontShowAgain: boolean) => {
+    if (dontShowAgain) {
+      savePermissionsOnboardingDismissed();
+    }
+    setIsOnboardingOpen(false);
+  }, []);
+
   useEffect(() => {
-    return initPermissionsToast({
-      onOpenSettings: (section) => handleOpenSettings(section),
-    });
-  }, [handleOpenSettings]);
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      if (loadPermissionsOnboardingDismissed()) return;
+      const status = await getSystemPermissionsStatus().catch(() => null);
+      if (!cancelled && shouldShowPermissionsOnboarding(status, false)) {
+        setIsOnboardingOpen(true);
+      }
+    }, 1200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleOpenOnboarding = () => {
+      setIsOnboardingOpen(true);
+    };
+    window.addEventListener(OPEN_PERMISSIONS_ONBOARDING_EVENT, handleOpenOnboarding);
+    return () => {
+      window.removeEventListener(OPEN_PERMISSIONS_ONBOARDING_EVENT, handleOpenOnboarding);
+    };
+  }, []);
+
   const handleToggleSettings = useCallback(() => {
     preloadSettingsDialog();
     setIsSettingsOpen((current) => !current);
@@ -1980,6 +2019,11 @@ function WorkspaceApp({
           }
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings} />
+        </Suspense>
+      ) : null}
+      {isOnboardingOpen ? (
+        <Suspense fallback={null}>
+          <PermissionsOnboardingDialog open onClose={handleCloseOnboarding} />
         </Suspense>
       ) : null}
       {isAddProjectOpen ? (
