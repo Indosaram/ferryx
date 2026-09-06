@@ -4,13 +4,9 @@ use std::collections::HashMap;
 
 use super::rasterizer::{rasterize_glyph_with_scale, RasterizedGlyph};
 use super::types::{GlyphAtlasStats, RendererConfig};
+use crate::native_terminal::error::NativeTerminalError;
 
-const ATLAS_WIDTH: u32 = 1024;
-const ATLAS_HEIGHT: u32 = 1024;
-// Truthful texture budget reported in stats: mask RGBA (4 B/px) + color RGBA
-// accounting uses the same 5-B/px basis as `allocated_bytes` in `stats()`
-// (4 B mask + 1 B mask-alpha accounting). Kept in lockstep with the atlas size.
-const MAX_CAPACITY_BYTES: usize = (ATLAS_WIDTH * ATLAS_HEIGHT * 5) as usize;
+const BASE_DIMENSION: u32 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
@@ -28,6 +24,112 @@ pub struct AtlasEntry {
     pub is_color: bool,
 }
 
+/// One rasterization/classification retained for both fit and recovery insertion.
+pub struct PreparedGlyph {
+    pub key: GlyphKey,
+    width: u32,
+    height: u32,
+    raster: Option<RasterizedGlyph>,
+}
+
+impl PreparedGlyph {
+    pub fn new(key: GlyphKey, is_wide: bool, config: &RendererConfig) -> Self {
+        let width = config.cell_width_px * if is_wide { 2 } else { 1 };
+        let height = config.cell_height_px;
+        let raster = if key.text.is_empty() || key.text.chars().all(char::is_whitespace) {
+            None
+        } else {
+            let raster = rasterize_glyph_with_scale(
+                &key.text,
+                width,
+                height,
+                key.bold,
+                key.italic,
+                config.device_scale_factor,
+            );
+            // Color rasters retain their slots even when all bytes are zero.
+            (raster.is_color() || raster.buffer().iter().any(|&b| b != 0)).then_some(raster)
+        };
+        Self {
+            key,
+            width,
+            height,
+            raster,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct PreparedGlyphs {
+    ordered: Vec<PreparedGlyph>,
+    by_key: HashMap<GlyphKey, usize>,
+}
+
+impl PreparedGlyphs {
+    pub fn add(&mut self, key: GlyphKey, is_wide: bool, config: &RendererConfig) {
+        if !self.by_key.contains_key(&key) {
+            self.by_key.insert(key.clone(), self.ordered.len());
+            self.ordered.push(PreparedGlyph::new(key, is_wide, config));
+        }
+    }
+
+    pub fn get(&self, key: &GlyphKey) -> &PreparedGlyph {
+        &self.ordered[self.by_key[key]]
+    }
+
+    pub fn fitting_dimension(
+        &self,
+        current: u32,
+        maximum: u32,
+    ) -> Result<u32, NativeTerminalError> {
+        let mut candidate = current.min(maximum);
+        loop {
+            let mut shelf = Shelf::default();
+            if self
+                .ordered
+                .iter()
+                .all(|g| g.raster.is_none() || shelf.place(g.width, g.height, candidate).is_some())
+            {
+                return Ok(candidate);
+            }
+            if candidate == maximum {
+                return Err(NativeTerminalError::LimitExceeded);
+            }
+            candidate = candidate.saturating_mul(2).min(maximum);
+        }
+    }
+}
+
+/// Simulation and real uploads share this placement operation. Failure never mutates shelves.
+#[derive(Clone, Copy, Default)]
+struct Shelf {
+    x: u32,
+    y: u32,
+    height: u32,
+}
+
+impl Shelf {
+    fn place(&mut self, width: u32, height: u32, dimension: u32) -> Option<[u32; 2]> {
+        if width > dimension || height > dimension {
+            return None;
+        }
+        let mut next = *self;
+        if next.x.checked_add(width)? > dimension {
+            next.x = 0;
+            next.y = next.y.checked_add(next.height)?;
+            next.height = 0;
+        }
+        if next.y.checked_add(height)? > dimension {
+            return None;
+        }
+        let origin = [next.x, next.y];
+        next.x = next.x.checked_add(width)?.checked_add(1)?;
+        next.height = next.height.max(height);
+        *self = next;
+        Some(origin)
+    }
+}
+
 pub struct GlyphAtlas {
     pub mask_texture: wgpu::Texture,
     pub mask_view: wgpu::TextureView,
@@ -36,19 +138,29 @@ pub struct GlyphAtlas {
     pub sampler: wgpu::Sampler,
     pub generation: u64,
     entries: HashMap<GlyphKey, AtlasEntry>,
-    cursor_x: u32,
-    cursor_y: u32,
-    row_height: u32,
-    overflow_pending: bool,
+    shelf: Shelf,
+    pub dimension: u32,
+    pub max_dimension: u32,
+    #[cfg(test)]
+    pub growth_count: usize,
+    #[cfg(test)]
+    pub fail_after_insertions: Option<usize>,
 }
 
 impl GlyphAtlas {
     pub fn new(device: &wgpu::Device) -> Self {
-        let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+        Self::with_dimension(
+            device,
+            BASE_DIMENSION.min(device.limits().max_texture_dimension_2d),
+        )
+    }
+
+    fn with_dimension(device: &wgpu::Device, dimension: u32) -> Self {
+        let descriptor = wgpu::TextureDescriptor {
             label: Some("Ferryx Glyph Atlas Mask Texture"),
             size: wgpu::Extent3d {
-                width: ATLAS_WIDTH,
-                height: ATLAS_HEIGHT,
+                width: dimension,
+                height: dimension,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -57,25 +169,14 @@ impl GlyphAtlas {
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
-        });
+        };
+        let mask_texture = device.create_texture(&descriptor);
         let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Ferryx Glyph Atlas Color Texture"),
-            size: wgpu::Extent3d {
-                width: ATLAS_WIDTH,
-                height: ATLAS_HEIGHT,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+            ..descriptor
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Ferryx Glyph Atlas Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -84,7 +185,6 @@ impl GlyphAtlas {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-
         Self {
             mask_texture,
             mask_view,
@@ -93,17 +193,29 @@ impl GlyphAtlas {
             sampler,
             generation: 0,
             entries: HashMap::new(),
-            cursor_x: 0,
-            cursor_y: 0,
-            row_height: 0,
-            overflow_pending: false,
+            shelf: Shelf::default(),
+            dimension,
+            max_dimension: device.limits().max_texture_dimension_2d,
+            #[cfg(test)]
+            growth_count: 0,
+            #[cfg(test)]
+            fail_after_insertions: None,
         }
     }
 
-    pub fn take_overflow_pending(&mut self) -> bool {
-        let pending = self.overflow_pending;
-        self.overflow_pending = false;
-        pending
+    pub fn reset_for_rebuild(&mut self, device: &wgpu::Device, dimension: u32) {
+        if dimension != self.dimension {
+            let mut replacement = Self::with_dimension(device, dimension);
+            replacement.generation = self.generation;
+            replacement.max_dimension = self.max_dimension;
+            #[cfg(test)]
+            {
+                replacement.growth_count = self.growth_count + 1;
+                replacement.fail_after_insertions = self.fail_after_insertions;
+            }
+            *self = replacement;
+        }
+        self.clear();
     }
 
     pub fn get_entry(&self, text: &str, bold: bool, italic: bool) -> Option<AtlasEntry> {
@@ -123,181 +235,112 @@ impl GlyphAtlas {
         is_wide: bool,
         config: &RendererConfig,
         queue: &wgpu::Queue,
-    ) -> Option<AtlasEntry> {
-        if text.is_empty() || text.chars().all(|c| c.is_whitespace()) {
-            return None;
+    ) -> Result<Option<AtlasEntry>, NativeTerminalError> {
+        if text.is_empty() || text.chars().all(char::is_whitespace) {
+            return Ok(None);
         }
-
+        if let Some(entry) = self.get_entry(text, bold, italic) {
+            return Ok(Some(entry));
+        }
         let key = GlyphKey {
             text: text.to_string(),
             bold,
             italic,
         };
+        self.insert_prepared(&PreparedGlyph::new(key, is_wide, config), queue)
+    }
 
-        if let Some(&entry) = self.entries.get(&key) {
-            return Some(entry);
+    /// Empty is successful absence; Full is typed LimitExceeded, never a missing glyph.
+    pub fn insert_prepared(
+        &mut self,
+        glyph: &PreparedGlyph,
+        queue: &wgpu::Queue,
+    ) -> Result<Option<AtlasEntry>, NativeTerminalError> {
+        if let Some(&entry) = self.entries.get(&glyph.key) {
+            return Ok(Some(entry));
         }
-
-        let width = if is_wide {
-            config.cell_width_px * 2
-        } else {
-            config.cell_width_px
+        let Some(rasterized) = &glyph.raster else {
+            return Ok(None);
         };
-        let height = config.cell_height_px;
-
-        if self.cursor_x + width > ATLAS_WIDTH {
-            self.cursor_x = 0;
-            self.cursor_y += self.row_height;
-            self.row_height = 0;
+        #[cfg(test)]
+        if let Some(remaining) = &mut self.fail_after_insertions {
+            if *remaining == 0 {
+                return Err(NativeTerminalError::LimitExceeded);
+            }
+            *remaining -= 1;
         }
-
-        if self.cursor_y + height > ATLAS_HEIGHT {
-            // Capacity boundary reached: defer the clear to the start of the next
-            // frame so we never invalidate entries already used in this frame.
-            self.overflow_pending = true;
-            return None;
-        }
-
-        let rasterized = rasterize_glyph_with_scale(
-            text,
-            width,
-            height,
-            bold,
-            italic,
-            config.device_scale_factor,
-        );
-
+        let (width, height) = (glyph.width, glyph.height);
+        let [x, y] = self
+            .shelf
+            .place(width, height, self.dimension)
+            .ok_or(NativeTerminalError::LimitExceeded)?;
         let is_color = rasterized.is_color();
-
-        // Skip all-zero non-color rasters (whitespace, uncovered PUA, etc.): they
-        // waste an atlas slot and render nothing. Color glyphs are never skipped.
-        if !is_color && rasterized.buffer().iter().all(|&b| b == 0) {
-            return None;
-        }
-
-        match rasterized {
-            RasterizedGlyph::Alpha(alpha_bytes) => {
-                let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-                for &a in &alpha_bytes {
-                    rgba.extend_from_slice(&[a, a, a, a]);
-                }
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.mask_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: self.cursor_x,
-                            y: self.cursor_y,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &rgba,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(width * 4),
-                        rows_per_image: Some(height),
-                    },
-                    wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                );
+        let alpha_rgba;
+        let (texture, bytes) = match rasterized {
+            RasterizedGlyph::Alpha(alpha) => {
+                alpha_rgba = alpha.iter().flat_map(|&a| [a, a, a, a]).collect::<Vec<_>>();
+                (&self.mask_texture, alpha_rgba.as_slice())
             }
-            RasterizedGlyph::Subpixel(subpixel_bytes) => {
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.mask_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: self.cursor_x,
-                            y: self.cursor_y,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &subpixel_bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(width * 4),
-                        rows_per_image: Some(height),
-                    },
-                    wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
-            RasterizedGlyph::Color(color_bytes) => {
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.color_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: self.cursor_x,
-                            y: self.cursor_y,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &color_bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(width * 4),
-                        rows_per_image: Some(height),
-                    },
-                    wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
-        }
-
-        let uv_min = [
-            self.cursor_x as f32 / ATLAS_WIDTH as f32,
-            self.cursor_y as f32 / ATLAS_HEIGHT as f32,
-        ];
-        let uv_max = [
-            (self.cursor_x + width) as f32 / ATLAS_WIDTH as f32,
-            (self.cursor_y + height) as f32 / ATLAS_HEIGHT as f32,
-        ];
-
+            RasterizedGlyph::Subpixel(bytes) => (&self.mask_texture, bytes.as_slice()),
+            RasterizedGlyph::Color(bytes) => (&self.color_texture, bytes.as_slice()),
+        };
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
         let entry = AtlasEntry {
-            uv_min,
-            uv_max,
+            uv_min: [
+                x as f32 / self.dimension as f32,
+                y as f32 / self.dimension as f32,
+            ],
+            uv_max: [
+                (x + width) as f32 / self.dimension as f32,
+                (y + height) as f32 / self.dimension as f32,
+            ],
             width,
             height,
             is_color,
         };
-
-        self.cursor_x += width + 1;
-        self.row_height = self.row_height.max(height);
-        self.entries.insert(key, entry);
-
-        Some(entry)
+        self.entries.insert(glyph.key.clone(), entry);
+        Ok(Some(entry))
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.cursor_x = 0;
-        self.cursor_y = 0;
-        self.row_height = 0;
-        self.overflow_pending = false;
+        self.shelf = Shelf::default();
         self.generation = self.generation.wrapping_add(1);
     }
 
-    pub fn stats(&self) -> GlyphAtlasStats {
-        let entry_overhead = self.entries.len() * std::mem::size_of::<(GlyphKey, AtlasEntry)>();
-        let allocated_bytes = (ATLAS_WIDTH * ATLAS_HEIGHT * 5) as usize + entry_overhead;
-
+    pub fn stats(&self, config: &RendererConfig) -> GlyphAtlasStats {
+        let pair_bytes = std::mem::size_of::<(GlyphKey, AtlasEntry)>();
+        // Cast before byte arithmetic. The theoretical maximum saturates if a
+        // device's bound exceeds the address space; current payload stays exact.
+        let dimension = self.dimension as usize;
+        let maximum = self.max_dimension as usize;
+        let max_entries = (maximum / config.cell_height_px as usize)
+            .saturating_mul(maximum.saturating_add(1) / (config.cell_width_px as usize + 1));
         GlyphAtlasStats {
             entry_count: self.entries.len(),
-            allocated_bytes,
-            max_capacity_bytes: MAX_CAPACITY_BYTES,
+            allocated_bytes: dimension * dimension * 8 + self.entries.len() * pair_bytes,
+            max_capacity_bytes: maximum
+                .saturating_mul(maximum)
+                .saturating_mul(8)
+                .saturating_add(max_entries.saturating_mul(pair_bytes)),
         }
     }
 }
@@ -325,6 +368,7 @@ mod tests {
 
         let mask_entry = atlas
             .get_or_insert("A", false, false, false, &config, &gpu.queue)
+            .unwrap()
             .expect("must insert 'A'");
         assert!(
             !mask_entry.is_color,
@@ -335,10 +379,11 @@ mod tests {
         {
             let color_entry = atlas
                 .get_or_insert("😺", false, false, true, &config, &gpu.queue)
+                .unwrap()
                 .expect("must insert '😺'");
             assert!(color_entry.is_color, "'😺' should be a color entry");
 
-            let stats = atlas.stats();
+            let stats = atlas.stats(&config);
             assert_eq!(stats.entry_count, 2, "both mask and color entries coexist");
 
             let queried_mask = atlas.get_entry("A", false, false).expect("find 'A'");
@@ -364,6 +409,7 @@ mod tests {
         };
         let first = atlas
             .get_or_insert("a0", false, false, false, &config, &gpu.queue)
+            .unwrap()
             .expect("first insert must succeed");
         let generation_after_first = atlas.generation;
 
@@ -372,13 +418,16 @@ mod tests {
         for i in 1..3000u32 {
             if atlas
                 .get_or_insert(&format!("a{i}"), false, false, false, &config, &gpu.queue)
-                .is_none()
+                .is_err()
             {
                 saw_overflow = true;
                 break;
             }
         }
-        assert!(saw_overflow, "3000 unique 16x32 slots must exceed any atlas budget");
+        assert!(
+            saw_overflow,
+            "3000 unique 16x32 slots must exceed any atlas budget"
+        );
         assert_eq!(
             atlas.generation, generation_after_first,
             "overflow must NOT bump generation mid-frame"
@@ -388,15 +437,15 @@ mod tests {
             Some(first),
             "overflow must NOT evict entries inserted earlier in the frame"
         );
-        assert!(atlas.take_overflow_pending(), "overflow flag must be set");
 
-        // After the frame-start deferred clear, fresh inserts must succeed again.
+        // After a between-frame clear, fresh inserts must succeed again.
         atlas.clear();
         assert!(
             atlas
                 .get_or_insert("a0", false, false, false, &config, &gpu.queue)
+                .unwrap()
                 .is_some(),
-            "insert after deferred clear must succeed"
+            "insert after clear must succeed"
         );
     }
 
@@ -413,24 +462,16 @@ mod tests {
             device_scale_factor: 2.0,
             theme: RendererTheme::default(),
         };
-        let before = atlas.stats().entry_count;
-        let result = atlas.get_or_insert(
-            "\u{10FFFD}",
-            false,
-            false,
-            false,
-            &config,
-            &gpu.queue,
+        let before = atlas.stats(&config).entry_count;
+        let result = atlas.get_or_insert("\u{10FFFD}", false, false, false, &config, &gpu.queue);
+        assert!(
+            result.unwrap().is_none(),
+            "all-zero raster must return None"
         );
-        assert!(result.is_none(), "all-zero raster must return None");
         assert_eq!(
-            atlas.stats().entry_count,
+            atlas.stats(&config).entry_count,
             before,
             "all-zero raster must not allocate an atlas slot"
-        );
-        assert!(
-            !atlas.take_overflow_pending(),
-            "all-zero raster must not set overflow flag"
         );
     }
 }

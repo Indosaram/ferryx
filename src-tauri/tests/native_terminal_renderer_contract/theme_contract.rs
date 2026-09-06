@@ -235,7 +235,7 @@ fn test_rendered_row_instances_honor_preference_theme_colors() {
     let snapshot = make_test_snapshot(10, 5, "A");
     // Row 1 has no cursor (cursor is on row 0)
     let (bg_instances, _glyph_instances) =
-        build_row_instances(1, &snapshot, None, &config, &mut atlas, &gpu.queue);
+        build_row_instances(1, &snapshot, None, &config, &mut atlas, &gpu.queue, None).unwrap();
 
     let expected_bg = [
         0x12 as f32 / 255.0,
@@ -253,7 +253,8 @@ fn test_rendered_row_instances_honor_preference_theme_colors() {
     assert_eq!(bg_instances[0].color, expected_bg);
 
     // Row 0 has glyph 'A' at col 0
-    let (_bg_0, glyph_0) = build_row_instances(0, &snapshot, None, &config, &mut atlas, &gpu.queue);
+    let (_bg_0, glyph_0) =
+        build_row_instances(0, &snapshot, None, &config, &mut atlas, &gpu.queue, None).unwrap();
     assert!(
         !glyph_0.is_empty(),
         "Glyph instance for 'A' should be created"
@@ -269,7 +270,9 @@ fn test_rendered_row_instances_honor_preference_theme_colors() {
         &config,
         &mut atlas,
         &gpu.queue,
-    );
+        None,
+    )
+    .unwrap();
     assert!(
         !glyph_1.is_empty(),
         "Glyph instance on row 1 should be created"
@@ -298,7 +301,7 @@ fn test_rendered_row_instances_fallback_on_invalid_hex() {
     snapshot.cursor.visible = false;
 
     let (bg_instances, glyph_instances) =
-        build_row_instances(0, &snapshot, None, &config, &mut atlas, &gpu.queue);
+        build_row_instances(0, &snapshot, None, &config, &mut atlas, &gpu.queue, None).unwrap();
 
     assert_eq!(bg_instances[0].color, DEFAULT_RENDERER_BACKGROUND);
     assert!(!glyph_instances.is_empty());
@@ -336,8 +339,16 @@ fn test_renderer_cursor_visual_style_preference_and_unfocused_hollow() {
     // Focused snapshot with default Block visual_style -> honors preferences 'underline'
     let mut snapshot_focused = make_test_snapshot(10, 5, " ");
     snapshot_focused.cursor.visual_style = CursorVisualStyle::Block;
-    let (bg_focused, _) =
-        build_row_instances(0, &snapshot_focused, None, &config, &mut atlas, &gpu.queue);
+    let (bg_focused, _) = build_row_instances(
+        0,
+        &snapshot_focused,
+        None,
+        &config,
+        &mut atlas,
+        &gpu.queue,
+        None,
+    )
+    .unwrap();
 
     // Should have 10 cell background rects + 1 underline rect decoration = 11 total
     assert_eq!(bg_focused.len(), 10 + 1);
@@ -355,7 +366,9 @@ fn test_renderer_cursor_visual_style_preference_and_unfocused_hollow() {
         &config,
         &mut atlas,
         &gpu.queue,
-    );
+        None,
+    )
+    .unwrap();
 
     // BlockHollow adds 4 border rects right after cell 0 (indices 1..4) + 9 other cells = 14 total
     assert_eq!(bg_unfocused.len(), 10 + 4);

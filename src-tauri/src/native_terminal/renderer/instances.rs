@@ -3,11 +3,44 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::atlas::GlyphAtlas;
+use super::atlas::{GlyphAtlas, GlyphKey, PreparedGlyphs};
 use super::pipeline::{GlyphInstance, RectInstance};
 use super::types::{RendererConfig, SelectionSnapshot};
 use crate::native_terminal::cursor::CursorVisualStyle;
-use crate::native_terminal::snapshot::{CellWide, RenderSnapshot};
+use crate::native_terminal::error::NativeTerminalError;
+use crate::native_terminal::snapshot::{CellSnapshot, CellWide, RenderSnapshot};
+
+fn visible_glyph(cell: &CellSnapshot) -> bool {
+    cell.wide != CellWide::SpacerTail
+        && cell.wide != CellWide::SpacerHead
+        && !cell.text.is_empty()
+        && !cell.invisible
+}
+
+pub fn prepare_visible_glyphs(
+    snapshot: &RenderSnapshot,
+    config: &RendererConfig,
+) -> PreparedGlyphs {
+    let mut prepared = PreparedGlyphs::default();
+    for row in snapshot.grid.iter().take(snapshot.rows as usize) {
+        for cell in row
+            .iter()
+            .take(snapshot.cols as usize)
+            .filter(|c| visible_glyph(c))
+        {
+            prepared.add(
+                GlyphKey {
+                    text: cell.text.clone(),
+                    bold: cell.bold,
+                    italic: cell.italic,
+                },
+                cell.wide == CellWide::Wide,
+                config,
+            );
+        }
+    }
+    prepared
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct RowCacheEntry {
@@ -75,7 +108,8 @@ pub fn build_row_instances(
     config: &RendererConfig,
     atlas: &mut GlyphAtlas,
     queue: &wgpu::Queue,
-) -> (Vec<RectInstance>, Vec<GlyphInstance>) {
+    prepared: Option<&PreparedGlyphs>,
+) -> Result<(Vec<RectInstance>, Vec<GlyphInstance>), NativeTerminalError> {
     let mut bg_instances = Vec::with_capacity(snapshot.cols as usize);
     let mut glyph_instances = Vec::new();
     let (cell_w, cell_h) = (config.cell_width_px as f32, config.cell_height_px as f32);
@@ -178,15 +212,20 @@ pub fn build_row_instances(
                 });
             }
 
-            if c.wide != CellWide::SpacerTail
-                && c.wide != CellWide::SpacerHead
-                && !c.text.is_empty()
-                && !c.invisible
-            {
+            if visible_glyph(c) {
                 let is_wide = c.wide == CellWide::Wide;
-                if let Some(entry) =
-                    atlas.get_or_insert(&c.text, c.bold, c.italic, is_wide, config, queue)
-                {
+                let entry = match prepared {
+                    Some(prepared) => atlas.insert_prepared(
+                        prepared.get(&GlyphKey {
+                            text: c.text.clone(),
+                            bold: c.bold,
+                            italic: c.italic,
+                        }),
+                        queue,
+                    ),
+                    None => atlas.get_or_insert(&c.text, c.bold, c.italic, is_wide, config, queue),
+                }?;
+                if let Some(entry) = entry {
                     glyph_instances.push(GlyphInstance {
                         rect: [px_x, px_y, entry.width as f32, entry.height as f32],
                         uv: [
@@ -204,7 +243,7 @@ pub fn build_row_instances(
         }
     }
 
-    (bg_instances, glyph_instances)
+    Ok((bg_instances, glyph_instances))
 }
 
 fn append_cursor_decorations(
@@ -285,7 +324,9 @@ mod tests {
             &config,
             &mut atlas,
             &gpu.queue,
-        );
+            None,
+        )
+        .unwrap();
         let mut under = base;
         under.underline = true;
         let (bg_under, _) = build_row_instances(
@@ -295,7 +336,9 @@ mod tests {
             &config,
             &mut atlas,
             &gpu.queue,
-        );
+            None,
+        )
+        .unwrap();
         assert_eq!(
             bg_under.len(),
             bg_plain.len() + 1,
@@ -330,7 +373,9 @@ mod tests {
             &config,
             &mut atlas,
             &gpu.queue,
-        );
+            None,
+        )
+        .unwrap();
         assert!(bg_strike.len() >= 2, "strikethrough produces rect");
         let deco_y = bg_strike.last().unwrap().rect[1];
         let cell_h = config.cell_height_px as f32;
@@ -362,7 +407,9 @@ mod tests {
             &config,
             &mut atlas,
             &gpu.queue,
-        );
+            None,
+        )
+        .unwrap();
         assert!(bg_over.len() >= 2, "overline produces rect");
         let deco_y = bg_over.last().unwrap().rect[1];
         let cell_h = config.cell_height_px as f32;
@@ -393,7 +440,9 @@ mod tests {
             &config,
             &mut atlas,
             &gpu.queue,
-        );
+            None,
+        )
+        .unwrap();
         assert_eq!(bg_invis.len(), 1, "invisible cell keeps background rect");
         assert_eq!(
             glyph_invis.len(),
@@ -428,7 +477,9 @@ mod tests {
             &config,
             &mut atlas,
             &gpu.queue,
-        );
+            None,
+        )
+        .unwrap();
         let mut faint = normal;
         faint.faint = true;
         let (_, glyph_faint) = build_row_instances(
@@ -438,7 +489,9 @@ mod tests {
             &config,
             &mut atlas,
             &gpu.queue,
-        );
+            None,
+        )
+        .unwrap();
         assert_eq!(glyph_normal.len(), 1);
         assert_eq!(glyph_faint.len(), 1);
         assert_ne!(
