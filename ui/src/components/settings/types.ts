@@ -7,7 +7,8 @@ export type SectionId =
   | "browser"
   | "notifications"
   | "remote"
-  | "permissions";
+  | "permissions"
+  | "ssh";
 
 export interface TerminalSectionProps {
   fontFamily: string;

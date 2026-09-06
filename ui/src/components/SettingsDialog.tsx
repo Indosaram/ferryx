@@ -7,6 +7,7 @@ import {
   Keyboard,
   Palette,
   Radio,
+  Server,
   Settings2,
   Shield,
   TerminalSquare,
@@ -22,6 +23,7 @@ import { NotificationsSection } from "./settings/NotificationsSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
 import { RemoteAccessSection } from "./settings/RemoteAccessSection";
 import { ShortcutsSection } from "./settings/ShortcutsSection";
+import { SshSection } from "./settings/SshSection";
 import { TerminalSection } from "./settings/TerminalSection";
 import type { SectionId } from "./settings/types";
 
@@ -51,6 +53,7 @@ const VALID_SECTIONS: readonly SectionId[] = [
   "notifications",
   "remote",
   "permissions",
+  "ssh",
 ];
 
 function sanitizeSectionId(candidate: unknown): SectionId {
@@ -143,6 +146,7 @@ function SettingsDialogBody({ onClose, initialSection }: SettingsDialogBodyProps
             <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
             <NavButton active={section === "permissions"} icon={<Shield />} label="Permissions" onClick={() => setSection("permissions")} />
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote Access" onClick={() => setSection("remote")} />
+            <NavButton active={section === "ssh"} icon={<Server />} label="SSH Machines" onClick={() => setSection("ssh")} />
           </nav>
         </div>
       </aside>
@@ -176,6 +180,7 @@ function SettingsDialogBody({ onClose, initialSection }: SettingsDialogBodyProps
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "permissions" ? <PermissionsSection /> : null}
           {section === "remote" ? <RemoteAccessSection /> : null}
+          {section === "ssh" ? <SshSection /> : null}
         </div>
       </main>
     </div>
@@ -216,3 +221,4 @@ export { AgentsSection, AgentsSection as AgentsSettings } from "./settings/Agent
 export { BrowserSection, BrowserSection as BrowserSettings, BrowserSection as BrowserSettingsPanel } from "./settings/BrowserSection";
 export { NotificationsSection, NotificationsSection as NotificationSettings } from "./settings/NotificationsSection";
 export { RemoteAccessSection, RemoteAccessSection as RemoteAccessSettings } from "./settings/RemoteAccessSection";
+export { SshSection } from "./settings/SshSection";
