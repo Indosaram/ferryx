@@ -7,7 +7,7 @@ use tauri::{Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
 
 use super::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
-    SurfaceCompositionLayout,
+    SurfaceCompositionLayout, SurfacePresentationGeometry,
 };
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
@@ -131,7 +131,7 @@ fn panic_free_layout(
     SurfaceCompositionLayout::compute(bounds, cell_metrics)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NativeTerminalSurfaceReceipt {
     pub presented: bool,
     pub cols: u16,
@@ -142,6 +142,7 @@ pub struct NativeTerminalSurfaceReceipt {
     pub cursor_row: u16,
     pub cell_width_px: u32,
     pub cell_height_px: u32,
+    pub effective_scale_factor: Option<f64>,
 }
 
 impl NativeTerminalSurfaceReceipt {
@@ -151,6 +152,7 @@ impl NativeTerminalSurfaceReceipt {
         rebuilt_rows: u16,
         reused_rows: u16,
         cell_metrics: CellMetrics,
+        logical_bounds: Option<LogicalBounds>,
     ) -> Self {
         Self {
             presented: false,
@@ -162,6 +164,7 @@ impl NativeTerminalSurfaceReceipt {
             cursor_row: snapshot.cursor.y,
             cell_width_px: cell_metrics.width_px,
             cell_height_px: cell_metrics.height_px,
+            effective_scale_factor: logical_bounds.map(|bounds| bounds.scale_factor),
         }
     }
 }
@@ -1017,6 +1020,13 @@ impl NativeTerminalSurfaceHostState {
         Ok(layout)
     }
 
+    fn presentation_geometry_for_session(&self, session_id: &str) -> SurfacePresentationGeometry {
+        self.hosts.lock().get(session_id).map_or(
+            SurfacePresentationGeometry::Default,
+            |host| host.target.presentation_geometry(),
+        )
+    }
+
     pub fn attach_daemon_attachment_with_bounds<R: Runtime>(
         &self,
         session_id: &str,
@@ -1031,14 +1041,20 @@ impl NativeTerminalSurfaceHostState {
             if let Some(session) = self.sessions.lock().get_mut(session_id) {
                 session.surface_attached = true;
             }
-            let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
-            if let Err(error) = self.prepare_session_layout(
-                NativeTerminalBoundsRequest {
-                    session_id: session_id.to_string(),
-                    bounds,
-                },
-                metrics,
-            ) {
+            let layout = self
+                .presentation_geometry_for_session(session_id)
+                .resolve(bounds)
+                .and_then(|bounds| {
+                    let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
+                    self.prepare_session_layout(
+                        NativeTerminalBoundsRequest {
+                            session_id: session_id.to_string(),
+                            bounds,
+                        },
+                        metrics,
+                    )
+                });
+            if let Err(error) = layout {
                 tracing::warn!(
                     session_id,
                     ?error,
@@ -1055,6 +1071,9 @@ impl NativeTerminalSurfaceHostState {
         bounds: Option<LogicalBounds>,
     ) -> Result<bool, NativeTerminalError> {
         validate_session_id(session_id)?;
+        // A warm attach may schedule output before the next explicit bounds render. Keep
+        // its stored grid and density coherent with the already-created native child.
+        let geometry = self.presentation_geometry_for_session(session_id);
         let mut sessions = self.sessions.lock();
         let Some(session) = sessions.get_mut(session_id) else {
             return Ok(false);
@@ -1073,13 +1092,15 @@ impl NativeTerminalSurfaceHostState {
 
         session.surface_attached = true;
         let resized_dimensions = if let Some(bounds) = bounds {
-            let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
-            let layout = match (NativeTerminalBoundsRequest {
-                session_id: session_id.to_string(),
-                bounds,
-            }
-            .layout(metrics))
-            {
+            let layout = match geometry.resolve(bounds).and_then(|bounds| {
+                let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
+                NativeTerminalBoundsRequest {
+                    session_id: session_id.to_string(),
+                    bounds,
+                }
+                .layout(metrics)
+                .map(|layout| (bounds, metrics, layout))
+            }) {
                 Ok(layout) => Some(layout),
                 Err(error) => {
                     tracing::warn!(
@@ -1090,7 +1111,7 @@ impl NativeTerminalSurfaceHostState {
                     None
                 }
             };
-            if let Some(layout) = layout {
+            if let Some((bounds, metrics, layout)) = layout {
                 if session.terminal.dimensions()? != (layout.cols, layout.rows) {
                     let prior_scrollbar = session.terminal.scrollbar().ok();
                     let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
@@ -1754,23 +1775,34 @@ impl NativeTerminalSurfaceHostState {
             0,
             0,
             cell_metrics,
+            session.logical_bounds,
         ))
     }
 
     pub fn render<R: Runtime>(
         &self,
         window: &WebviewWindow<R>,
-        request: NativeTerminalBoundsRequest,
+        mut request: NativeTerminalBoundsRequest,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
-        let scale_factor = request.bounds.scale_factor;
-        let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
-        let logical_bounds = request.bounds;
         let session_id = request.session_id.clone();
         // A pane that unmounted while its ResizeObserver callback was still in flight (rapid tab
         // switching) sends geometry for a session the compositor has already released. Rendering it
         // would rebuild a GPU surface for a pane nobody can see, so report the benign detached state
         // and let the caller drop the update.
         let mut hosts = self.lock_attached_hosts(&session_id)?;
+        let host = match hosts.entry(session_id.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(NativeTerminalSurfaceHost::new(
+                    window,
+                    request.bounds.scale_factor,
+                )?)
+            }
+        };
+        request.bounds = host.target.presentation_geometry().resolve(request.bounds)?;
+        let scale_factor = request.bounds.scale_factor;
+        let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
+        let logical_bounds = request.bounds;
         let layout = self.prepare_session_layout(request, cell_metrics)?;
         let render_input = {
             let sessions = self.sessions.lock();
@@ -1778,13 +1810,6 @@ impl NativeTerminalSurfaceHostState {
                 .get(&session_id)
                 .ok_or(NativeTerminalError::NoValue)?;
             session_render_snapshot(session)?
-        };
-
-        let host = match hosts.entry(session_id.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(NativeTerminalSurfaceHost::new(window, scale_factor)?)
-            }
         };
 
         let renderer_config = RendererConfig {
@@ -1855,6 +1880,7 @@ impl NativeTerminalSurfaceHostState {
                 0,
                 0,
                 cell_metrics,
+                Some(logical_bounds),
             ))
         }
     }
@@ -2171,6 +2197,7 @@ impl NativeSurfaceFrameTarget {
                 0,
                 0,
                 cell_metrics,
+                self.logical_bounds,
             ));
         };
         let view = frame
@@ -2198,6 +2225,7 @@ impl NativeSurfaceFrameTarget {
                 rebuilt_rows,
                 reused_rows,
                 cell_metrics,
+                self.logical_bounds,
             )
         })
     }
@@ -3096,7 +3124,7 @@ mod tests {
         let (snapshot, _) = snapshot_for_layout(layout);
 
         let receipt =
-            NativeTerminalSurfaceReceipt::from_snapshot(layout, &snapshot, 4, 20, cell_metrics);
+            NativeTerminalSurfaceReceipt::from_snapshot(layout, &snapshot, 4, 20, cell_metrics, None);
 
         assert_eq!(receipt.cursor_col, snapshot.cursor.x);
         assert_eq!(receipt.cursor_row, snapshot.cursor.y);
@@ -3105,6 +3133,42 @@ mod tests {
         assert_eq!(receipt.rebuilt_rows, 4);
         assert_eq!(receipt.reused_rows, 20);
         assert!(!receipt.presented);
+        assert_eq!(receipt.effective_scale_factor, None);
+    }
+
+    #[test]
+    fn receipt_reports_effective_presentation_scale() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let bounds = SurfacePresentationGeometry::WaylandSubsurface
+            .resolve(LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 480.0,
+                scale_factor: 1.5,
+            })
+            .expect("resolved presentation bounds");
+        let cell_metrics = CellMetrics { width_px: 16, height_px: 32 };
+        state
+            .prepare_session_layout(
+                NativeTerminalBoundsRequest { session_id: "receipt-scale".into(), bounds },
+                cell_metrics,
+            )
+            .expect("stored layout");
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let receipt = state.get_receipt(&window, "receipt-scale").expect("session receipt");
+        assert_eq!(
+            state.sessions.lock()["receipt-scale"].logical_bounds.unwrap().scale_factor,
+            2.0,
+        );
+        assert_eq!(receipt.effective_scale_factor, Some(2.0));
+        assert_eq!((receipt.cell_width_px, receipt.cell_height_px), (16, 32));
+        state.teardown();
     }
 
     #[test]

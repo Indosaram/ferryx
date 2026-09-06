@@ -65,6 +65,7 @@ interface NativeTerminalReceipt {
   readonly cursorRow: number;
   readonly cellWidthPx: number;
   readonly cellHeightPx: number;
+  readonly effectiveScaleFactor?: number | null;
 }
 
 interface ImeAnchor {
@@ -594,7 +595,9 @@ export function NativeTerminalPane({
       return;
     }
 
-    const scaleFactor = scaleFactorRef.current;
+    // Receipt pixels use the native presentation density, which may differ from
+    // the raw WebView DPR retained for geometry requests (e.g. Wayland 1.5 -> 2).
+    const scaleFactor = receipt.effectiveScaleFactor ?? scaleFactorRef.current;
     cellSizeRef.current = {
       width: receipt.cellWidthPx,
       height: receipt.cellHeightPx,

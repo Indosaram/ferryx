@@ -188,6 +188,40 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     }
   });
 
+  it.each([
+    ["uses effective native scale for IME anchor at fractional webview density", 1.5, 2, 16, 48, 8, 16],
+    ["keeps ordinary equal-scale IME anchors", 2, 2, 16, 48, 8, 16],
+    ["falls back to raw density for legacy IME receipts", 1.5, undefined, 32 / 1.5, 64, 16 / 1.5, 32 / 1.5],
+    ["falls back to raw density when native geometry is absent", 1.5, null, 32 / 1.5, 64, 16 / 1.5, 32 / 1.5],
+  ])("%s", async (_name, dpr, effectiveScaleFactor, left, top, width, height) => {
+    const originalDpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: dpr });
+    const boundsStarted = deferred();
+    const bounds = deferred();
+    tauriInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_set_bounds") {
+        boundsStarted.resolve();
+        await bounds.promise;
+        return { presented: true, cursorCol: 2, cursorRow: 3, cellWidthPx: 16, cellHeightPx: 32, effectiveScaleFactor };
+      }
+      return undefined;
+    });
+    try {
+      const view = render(<NativeTerminalPane session={session("ime-scale")} />);
+      await act(async () => { await boundsStarted.promise; bounds.resolve(); });
+      const sink = view.getByTestId("native-terminal-focus-sink");
+      expect(sink.style.left).toBe(`${left}px`);
+      expect(sink.style.top).toBe(`${top}px`);
+      expect(sink.style.width).toBe(`${width}px`);
+      expect(sink.style.height).toBe(`${height}px`);
+      for (const cmd of ["cmd_native_terminal_attach", "cmd_native_terminal_set_bounds"]) {
+        expect(tauriInvoke).toHaveBeenCalledWith(cmd, expect.objectContaining({ scaleFactor: dpr }));
+      }
+    } finally {
+      if (originalDpr) Object.defineProperty(window, "devicePixelRatio", originalDpr);
+    }
+  });
+
   it("does not reclaim the outgoing surface when input fails after tab replacement", async () => {
     const boundary = inputRecoveryBoundary();
     const view = render(<NativeTerminalPane session={session("owner-a")} />);

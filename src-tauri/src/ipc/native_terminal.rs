@@ -23,7 +23,7 @@ pub struct NativeTerminalLogicalRect {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalBoundsReceipt {
     pub presented: bool,
@@ -36,6 +36,8 @@ pub struct NativeTerminalBoundsReceipt {
     pub cursor_row: u16,
     pub cell_width_px: u32,
     pub cell_height_px: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_scale_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,7 +93,7 @@ pub struct NativeTerminalSelectionReceipt {
     pub range: Option<NativeTerminalSelectionRange>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalMouseReceipt {
     pub mouse_tracking_enabled: bool,
@@ -1504,6 +1506,7 @@ fn into_ipc_receipt(
         cursor_row: receipt.cursor_row,
         cell_width_px: receipt.cell_width_px,
         cell_height_px: receipt.cell_height_px,
+        effective_scale_factor: receipt.effective_scale_factor,
     }
 }
 
@@ -1513,25 +1516,76 @@ mod tests {
     use crate::native_terminal::{MouseButton, MousePosition, MouseRendererSize};
 
     #[test]
-    fn bounds_receipt_serializes_actual_presentation_status() {
-        for presented in [false, true] {
-            let receipt = into_ipc_receipt(
-                "presentation".into(),
-                NativeTerminalSurfaceReceipt {
-                    presented,
-                    cols: 80,
-                    rows: 24,
-                    rebuilt_rows: 0,
-                    reused_rows: 0,
-                    cursor_col: 0,
-                    cursor_row: 0,
-                    cell_width_px: 10,
-                    cell_height_px: 20,
+    fn wire_receipt_reports_effective_presentation_scale() {
+        use crate::native_terminal::composition::SurfacePresentationGeometry;
+
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "wire-receipt-scale";
+        let bounds = SurfacePresentationGeometry::WaylandSubsurface
+            .resolve(LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 480.0,
+                scale_factor: 1.5,
+            })
+            .expect("resolved presentation bounds");
+        state
+            .prepare_session_layout(
+                NativeTerminalBoundsRequest {
+                    session_id: session_id.into(),
+                    bounds,
                 },
+                CellMetrics { width_px: 16, height_px: 32 },
+            )
+            .expect("stored layout");
+        assert_eq!(state.session_logical_bounds(session_id).unwrap().scale_factor, 2.0);
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let receipt = state.get_receipt(&window, session_id).expect("session receipt");
+        let json = serde_json::to_value(into_ipc_receipt(session_id.into(), receipt)).unwrap();
+        state.teardown();
+
+        assert_eq!(json["cellWidthPx"], 16);
+        assert_eq!(json["cellHeightPx"], 32);
+        assert_eq!(json["effectiveScaleFactor"], 2.0);
+    }
+
+    #[test]
+    fn bounds_receipt_serializes_actual_presentation_status() {
+        for (presented, effective_scale_factor) in [
+            (false, None),
+            (false, Some(2.0)),
+            (true, Some(1.5)),
+            (true, Some(2.0)),
+        ] {
+            let receipt = into_ipc_receipt("presentation".into(), NativeTerminalSurfaceReceipt {
+                presented,
+                cols: 80,
+                rows: 24,
+                rebuilt_rows: 0,
+                reused_rows: 0,
+                cursor_col: 0,
+                cursor_row: 0,
+                cell_width_px: 10,
+                cell_height_px: 20,
+                effective_scale_factor,
+            });
+            let json = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(json["presented"], presented);
+            assert_eq!(json["effectiveScaleFactor"].as_f64(), effective_scale_factor);
+            assert_eq!(
+                json.get("effectiveScaleFactor").is_some(),
+                effective_scale_factor.is_some(),
             );
             assert_eq!(
-                serde_json::to_value(receipt).unwrap()["presented"],
-                presented
+                serde_json::from_value::<NativeTerminalBoundsReceipt>(json).unwrap(),
+                receipt,
             );
         }
     }

@@ -66,17 +66,22 @@ impl WaylandSubsurfaceGeometry {
             return None;
         }
 
-        // `set_buffer_scale` only accepts integers, so a 1.5x output renders at 2x and is
-        // downscaled by the compositor rather than rendering blurry at 1x.
+        // Without a viewport destination, both the position and extent must be integral
+        // surface-local coordinates. Snap shared edges, not independent sizes, so adjacent
+        // panes agree. Multiply only afterwards to keep buffers divisible by their scale.
         let buffer_scale = bounds.scale_factor.round().max(1.0);
-        let width = (bounds.width * buffer_scale).round();
-        let height = (bounds.height * buffer_scale).round();
+        if buffer_scale > i32::MAX as f64 || bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return None;
+        }
+        let position_x = bounds.x.round().clamp(0.0, i32::MAX as f64);
+        let position_y = bounds.y.round().clamp(0.0, i32::MAX as f64);
+        let right = (bounds.x.max(0.0) + bounds.width).round();
+        let bottom = (bounds.y.max(0.0) + bounds.height).round();
+        let width = (right - position_x) * buffer_scale;
+        let height = (bottom - position_y) * buffer_scale;
         if width < 1.0 || height < 1.0 || width > u32::MAX as f64 || height > u32::MAX as f64 {
             return None;
         }
-
-        let position_x = bounds.x.round().clamp(0.0, i32::MAX as f64);
-        let position_y = bounds.y.round().clamp(0.0, i32::MAX as f64);
 
         Some(Self {
             position_x: position_x as i32,

@@ -349,6 +349,10 @@ impl LinuxCompositorTarget {
         }
     }
 
+    pub fn uses_wayland_subsurface(&self) -> bool {
+        matches!(self.child, Some(LinuxChild::Wayland(_)))
+    }
+
     pub fn update_viewport(&self, bounds: Option<LogicalBounds>) {
         let Some(child) = self.child.as_ref() else {
             return;
