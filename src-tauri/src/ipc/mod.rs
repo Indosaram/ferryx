@@ -19,6 +19,7 @@ pub mod remote;
 pub mod session;
 pub mod ssh;
 pub mod terminal;
+pub mod updater;
 pub mod worktree;
 
 pub(crate) async fn run_blocking<T, F>(operation: F) -> Result<T, error::IpcError>

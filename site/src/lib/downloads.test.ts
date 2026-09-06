@@ -31,24 +31,22 @@ describe('Cross-Platform Download Configuration', () => {
     }
   });
 
-  test('Windows platform configuration and assets are valid', () => {
+  test('Windows distribution goes through the Microsoft Store', () => {
     const windows = PLATFORMS.windows;
     expect(windows.id).toBe('windows');
     expect(windows.name).toBe('Windows');
     expect(windows.defaultAsset).toBeDefined();
-    expect(windows.defaultAsset.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`);
-    expect(windows.defaultAsset.fileType).toBe('.exe');
+    expect(windows.defaultAsset.id).toBe('windows-store');
+    expect(windows.defaultAsset.url).toBe('https://apps.microsoft.com/search?query=Ferryx');
 
     const assetIds = windows.assets.map((a) => a.id);
-    expect(assetIds).toContain('windows-exe');
-    expect(assetIds).toContain('windows-msi');
+    expect(assetIds).toEqual(['windows-store']);
 
-    const exeAsset = windows.assets.find((a) => a.id === 'windows-exe');
-    expect(exeAsset?.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`);
-
-    const msiAsset = windows.assets.find((a) => a.id === 'windows-msi');
-    expect(msiAsset?.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64.msi`);
-    expect(msiAsset?.fileType).toBe('.msi');
+    // Store-only: no direct installers leak through the GitHub release channel
+    for (const asset of windows.assets) {
+      expect(asset.url.startsWith(GITHUB_RELEASE_DOWNLOAD_BASE)).toBe(false);
+      expect(['.exe', '.msi', '.msix']).not.toContain(asset.fileType);
+    }
   });
 
   test('Linux platform configuration and assets are valid', () => {

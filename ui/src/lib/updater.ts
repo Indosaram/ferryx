@@ -1,5 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -51,6 +51,19 @@ export function getUpdateStatus(): UpdateStatus {
   return status;
 }
 
+let managedExternallyCache: boolean | null = null;
+
+async function updatesManagedExternally(): Promise<boolean> {
+  if (managedExternallyCache === null) {
+    try {
+      managedExternallyCache = await invoke<boolean>("updater_managed_externally");
+    } catch {
+      managedExternallyCache = false;
+    }
+  }
+  return managedExternallyCache;
+}
+
 export function subscribeUpdateStatus(listener: StatusListener): () => void {
   statusListeners.add(listener);
   return () => {
@@ -70,6 +83,7 @@ export async function getCurrentVersion(): Promise<string | null> {
 
 export async function checkForUpdate(): Promise<void> {
   if (!isTauri()) return;
+  if (await updatesManagedExternally()) return;
 
   setStatus({ state: "checking" });
   try {

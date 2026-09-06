@@ -29,8 +29,7 @@ No Electron anywhere.
 | Platform | Package | |
 | :--- | :--- | :--- |
 | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | NSIS installer (x64) | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
-| **Windows** | MSI installer, managed deployment (x64) | [`.msi`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64.msi) |
+| **Windows** | Microsoft Store (x64, auto-updates) | [Store](https://apps.microsoft.com/search?query=Ferryx) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
 

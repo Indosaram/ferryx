@@ -4,11 +4,15 @@ const check = vi.fn();
 const relaunch = vi.fn();
 const getVersion = vi.fn();
 const isTauri = vi.fn(() => true);
+const invoke = vi.fn();
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: (...args: unknown[]) => check(...args) }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: (...args: unknown[]) => relaunch(...args) }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: (...args: unknown[]) => getVersion(...args) }));
-vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => isTauri() }));
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => isTauri(),
+  invoke: (...args: unknown[]) => invoke(...args),
+}));
 
 async function freshModule() {
   vi.resetModules();
@@ -36,6 +40,8 @@ describe("updater status machine", () => {
     check.mockReset();
     relaunch.mockReset();
     getVersion.mockReset();
+    invoke.mockReset();
+    invoke.mockResolvedValue(false);
     isTauri.mockReturnValue(true);
   });
 
@@ -168,6 +174,41 @@ describe("updater status machine", () => {
     const updater = await freshModule();
 
     await expect(updater.getCurrentVersion()).resolves.toBe("2026.08.25");
+  });
+
+  it("skips the update check when the install is Store-managed", async () => {
+    invoke.mockResolvedValue(true);
+    const updater = await freshModule();
+    const seen: string[] = [];
+    updater.subscribeUpdateStatus((status) => seen.push(status.state));
+
+    await updater.checkForUpdate();
+    await updater.downloadAndInstallUpdate();
+
+    expect(check).not.toHaveBeenCalled();
+    expect(seen).toEqual([]);
+    expect(updater.getUpdateStatus()).toEqual({ state: "idle" });
+  });
+
+  it("caches the Store-managed probe across checks", async () => {
+    invoke.mockResolvedValue(true);
+    const updater = await freshModule();
+
+    await updater.checkForUpdate();
+    await updater.checkForUpdate();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a failed Store-managed probe as updater-owned", async () => {
+    invoke.mockRejectedValue(new Error("command not found"));
+    check.mockResolvedValue(null);
+    const updater = await freshModule();
+
+    await updater.checkForUpdate();
+
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(updater.getUpdateStatus()).toEqual({ state: "idle" });
   });
 });
 

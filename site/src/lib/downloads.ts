@@ -19,6 +19,9 @@ export interface PlatformConfig {
 
 export const GITHUB_RELEASE_LATEST = 'https://github.com/Indosaram/ferryx/releases/latest';
 export const GITHUB_RELEASE_DOWNLOAD_BASE = 'https://github.com/Indosaram/ferryx/releases/latest/download';
+// Interim pointer until the Store listing has a stable product page URL; replace with the
+// apps.microsoft.com detail URL (ProductId) once Partner Center publishes the listing.
+export const MICROSOFT_STORE_URL = 'https://apps.microsoft.com/search?query=Ferryx';
 
 export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = {
   macos: {
@@ -53,31 +56,23 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
     badge: 'Windows 10/11 (64-bit)',
     systemReqs: 'x64 Architecture with WebView2',
     defaultAsset: {
-      id: 'windows-exe',
-      name: 'Direct Installer (.exe)',
-      architecture: 'x64 NSIS Installer',
-      fileType: '.exe',
-      url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
+      id: 'windows-store',
+      name: 'Microsoft Store',
+      architecture: 'x64 · MSIX',
+      fileType: 'Store',
+      url: MICROSOFT_STORE_URL,
       recommended: true,
-      notes: 'Standard standalone NSIS installer',
+      notes: 'Distributed through the Microsoft Store — the Store keeps Ferryx up to date automatically',
     },
     assets: [
       {
-        id: 'windows-exe',
-        name: 'Direct Setup (.exe)',
-        architecture: 'NSIS Installer (x64)',
-        fileType: '.exe',
-        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
+        id: 'windows-store',
+        name: 'Microsoft Store',
+        architecture: 'x64 · MSIX',
+        fileType: 'Store',
+        url: MICROSOFT_STORE_URL,
         recommended: true,
-        notes: 'Recommended direct NSIS installer',
-      },
-      {
-        id: 'windows-msi',
-        name: 'MSI Installer (.msi)',
-        architecture: 'Windows Installer (x64)',
-        fileType: '.msi',
-        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64.msi`,
-        notes: 'For managed or scripted deployment',
+        notes: 'Get Ferryx from the Microsoft Store with automatic background updates',
       },
     ],
   },

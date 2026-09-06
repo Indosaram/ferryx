@@ -790,12 +790,17 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(browser_manager);
 
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = if crate::ipc::updater::updater_managed_externally() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    };
 
     #[cfg(feature = "native-terminal")]
     let builder = builder.manage(native_terminal_surface_host);
 
     builder.invoke_handler(tauri::generate_handler![
+        crate::ipc::updater::cmd_updater_managed_externally,
         cmd_switch_debug_log,
         cmd_terminal_output_channel,
         cmd_terminal_spawn,
