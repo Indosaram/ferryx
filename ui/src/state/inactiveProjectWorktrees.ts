@@ -7,6 +7,7 @@ import {
 } from "../lib/tauri";
 import type { RegisteredProject, Worktree, WorktreeChangedPayload } from "../lib/types";
 import { switchDebug } from "../lib/switchDebug";
+import { projectRootWorktree as plainRootWorktree } from "../lib/projectIdentity";
 
 export type InactiveProjectWorktreeServices = {
   registerProject: (request: { workspaceId: string; repoPath: string }) => Promise<RegisteredProject>;
@@ -19,18 +20,6 @@ const defaultServices: InactiveProjectWorktreeServices = {
   listWorktrees: defaultListWorktrees,
   onWorktreeChanged: defaultOnWorktreeChanged,
 };
-
-function plainRootWorktree(project: RegisteredProject): Worktree {
-  return {
-    path: project.repoRoot,
-    head: "",
-    branch: null,
-    bare: false,
-    detached: false,
-    locked: null,
-    prunable: null,
-  };
-}
 
 /**
  * The workspace store only holds the active project's worktrees, so sidebar rows
@@ -59,10 +48,8 @@ export function useInactiveProjectWorktrees(
     }
   }, [activeProjectId, activeWorktrees]);
 
-  const inactiveKey = projects
-    .filter((project) => project.workspaceId !== activeProjectId)
-    .map((project) => `${project.workspaceId}\u0000${project.repoRoot}\u0000${project.gitRoot ?? ""}`)
-    .join("\u0001");
+  const inactiveTargets = projects.filter((project) => project.workspaceId !== activeProjectId);
+  const inactiveKey = JSON.stringify(inactiveTargets);
 
   // Deletions of an inactive project's worktree (sidebar trash icon, another
   // desktop, remote client) arrive as backend `worktree_changed` events. The
@@ -70,12 +57,7 @@ export function useInactiveProjectWorktrees(
   // affected inactive project — otherwise its deleted row lingers in the
   // sidebar as stale and still actionable.
   const inactiveTargetsRef = useRef<RegisteredProject[]>([]);
-  inactiveTargetsRef.current = inactiveKey
-    ? inactiveKey.split("\u0001").map((entry) => {
-        const [workspaceId, repoRoot, gitRoot] = entry.split("\u0000");
-        return { workspaceId, repoRoot, gitRoot: gitRoot ? gitRoot : null } satisfies RegisteredProject;
-      })
-    : [];
+  inactiveTargetsRef.current = inactiveTargets;
   const servicesRef = useRef(services);
   servicesRef.current = services;
 
@@ -94,6 +76,7 @@ export function useInactiveProjectWorktrees(
       if (!inactiveTargetsRef.current.some((project) => project.workspaceId === payload.workspaceId)) return;
       const workspaceId = payload.workspaceId;
       const target = inactiveTargetsRef.current.find((project) => project.workspaceId === workspaceId);
+      if (target?.target?.kind === "ssh") return;
       switchDebug("inactive-worktrees.relist", { workspaceId, kind: payload.kind });
       void servicesRef.current
         .listWorktrees(workspaceId)
@@ -118,7 +101,7 @@ export function useInactiveProjectWorktrees(
   }, []);
 
   useEffect(() => {
-    if (!inactiveKey) {
+    if (inactiveTargetsRef.current.length === 0) {
       switchDebug("inactive-worktrees.cleared", {
         activeProjectId,
       });
@@ -126,10 +109,7 @@ export function useInactiveProjectWorktrees(
     }
 
     let cancelled = false;
-    const targets = inactiveKey.split("\u0001").map((entry) => {
-      const [workspaceId, repoRoot, gitRoot] = entry.split("\u0000");
-      return { workspaceId, repoRoot, gitRoot: gitRoot ? gitRoot : null } satisfies RegisteredProject;
-    });
+    const targets = inactiveTargetsRef.current;
     switchDebug("inactive-worktrees.load.start", {
       activeProjectId,
       targetWorkspaceIds: targets.map((project) => project.workspaceId),
@@ -138,6 +118,9 @@ export function useInactiveProjectWorktrees(
     void (async () => {
       const resolved = await Promise.all(
         targets.map(async (project) => {
+          // Inactive SSH rows are metadata, not local Git worktrees. Selecting
+          // one revalidates the host/path through App's remote registration.
+          if (project.target?.kind === "ssh") return [project.workspaceId, [plainRootWorktree(project)]] as const;
           try {
             // A rejection means this ID is bound to a different root, so listing
             // would report another repository's worktrees under this project.

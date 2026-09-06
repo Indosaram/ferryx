@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 import { deserializeWorkspaceState, serializeWorkspaceState } from "../lib/sessionPersistence";
 import { resetAgentAutoResumeGuard } from "../lib/agentAutoResume";
@@ -14,13 +14,20 @@ export type WorkspaceRestoreStatus = "idle" | "loading" | "restored" | "failed";
 
 const restoreStatusByWorkspace = new Map<string, WorkspaceRestoreStatus>();
 const preloadedRestoreStateByWorkspace = new Map<string, WorkspaceState | null>();
+const restoreStatusListeners = new Set<() => void>();
+function subscribeRestoreStatus(listener: () => void) {
+  restoreStatusListeners.add(listener);
+  return () => { restoreStatusListeners.delete(listener); };
+}
 
 export function getWorkspaceRestoreStatus(workspaceId: string): WorkspaceRestoreStatus {
   return restoreStatusByWorkspace.get(workspaceId) ?? "idle";
 }
 
 export function setWorkspaceRestoreStatus(workspaceId: string, status: WorkspaceRestoreStatus): void {
+  if (getWorkspaceRestoreStatus(workspaceId) === status) return;
   restoreStatusByWorkspace.set(workspaceId, status);
+  for (const listener of restoreStatusListeners) listener();
 }
 
 /**
@@ -30,7 +37,7 @@ export function setWorkspaceRestoreStatus(workspaceId: string, status: Workspace
  */
 export function reopenWorkspaceRestore(workspaceId: string): void {
   if (restoreStatusByWorkspace.get(workspaceId) === "restored") {
-    restoreStatusByWorkspace.delete(workspaceId);
+    setWorkspaceRestoreStatus(workspaceId, "idle");
   }
 }
 
@@ -320,5 +327,5 @@ export function useWorkspaceRestore({
     };
   }, [enabled, workspaceId, recoveredFromHmr, restoreWorkspace, loadSessionFn, listLiveBackendSessionIdsFn]);
 
-  return getWorkspaceRestoreStatus(workspaceId);
+  return useSyncExternalStore(subscribeRestoreStatus, () => getWorkspaceRestoreStatus(workspaceId));
 }

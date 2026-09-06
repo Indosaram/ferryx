@@ -74,6 +74,8 @@ import {
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
 import { reconnectAgentSession } from "./lib/agentReconnect";
+import { registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
+import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
@@ -134,9 +136,9 @@ function recoverProjectBootstrap(session: PersistedWorkspaceSession | null): Pro
   if (!session) return null;
 
   const projects = Object.values(session.workspaces).reduce<RegisteredProject[]>((recovered, workspace) => {
-    if (!workspace.workspaceId || !workspace.repoRoot) return recovered;
+    if (!workspace.workspaceId || !workspace.repoRoot || !hasValidProjectTarget(workspace)) return recovered;
     if (!recovered.some((project) => project.workspaceId === workspace.workspaceId)) {
-      recovered.push({ workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot });
+      recovered.push({ workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot, target: workspace.target, gitRoot: workspace.gitRoot });
     }
     return recovered;
   }, []);
@@ -187,6 +189,7 @@ function mergeRecoveredProjectBootstrap(
 
 function isInitialProjectPlaceholder(project: RegisteredProject, startup: RegisteredProject) {
   return (
+    project.target?.kind !== "ssh" &&
     project.workspaceId === DEFAULT_WORKSPACE_ID &&
     (project.repoRoot === "." || project.repoRoot === "" || project.repoRoot === startup.repoRoot)
   );
@@ -643,18 +646,10 @@ function WorkspaceApp({
   ]);
   const plainRootWorktree = useMemo(
     () =>
-      activeProject.gitRoot === null
-        ? {
-            path: activeProject.repoRoot,
-            head: "",
-            branch: null,
-            bare: false,
-            detached: false,
-            locked: null,
-            prunable: null,
-          }
+      activeProject.gitRoot === null || activeProject.target?.kind === "ssh"
+        ? projectRootWorktree(activeProject)
         : null,
-    [activeProject.gitRoot, activeProject.repoRoot],
+    [activeProject],
   );
 
   const { runtimeError, refreshWorktrees, reportRuntimeError } = useWorkspaceRuntime({
@@ -665,6 +660,7 @@ function WorkspaceApp({
     // Plain (non-Git) projects have no git worktrees; their folder root acts
     // as the primary "worktree" so a terminal opens there like anywhere else.
     plainRootWorktree,
+    rootOnly: activeProject.target?.kind === "ssh",
     registeredWorkspaceId: registeredProjectId,
   });
   reportRuntimeErrorRef.current = reportRuntimeError;
@@ -679,21 +675,24 @@ function WorkspaceApp({
   // Dag journals: watch every known project root, worktree and live session root so any omo
   // graph run anywhere lights up the activity badge, regardless of which cwd the app started in.
   const dagWatchedPathsRef = useRef<Set<string>>(new Set());
-  const activeWorktreePathsKey = state.worktrees.map((worktree) => worktree.path).join("\n");
-  const projectRootsKey = projects.map((project) => project.repoRoot).join("\n");
+  const stateProject = projects.find((project) => project.workspaceId === (state.workspaceId ?? activeProject.workspaceId));
+  const isRemoteState = stateProject?.target?.kind === "ssh";
+  const activeWorktreePathsKey = isRemoteState ? "" : state.worktrees.map((worktree) => worktree.path).join("\n");
+  const projectRootsKey = projects.filter((project) => project.target?.kind !== "ssh").map((project) => project.repoRoot).join("\n");
   const sessionDagRootsKey = useMemo(
     () =>
-      collectDagWatchRoots({ projectRoots: [], worktreePaths: [], sessions: state.sessions })
+      isRemoteState ? "" : collectDagWatchRoots({ projectRoots: [], worktreePaths: [], sessions: state.sessions })
         .sort()
         .join("\n"),
-    [state.sessions],
+    [isRemoteState, state.sessions],
   );
   useEffect(() => {
     const paths = collectDagWatchRoots({
-      projectRoots: projectsRef.current.map((project) => project.repoRoot),
+      projectRoots: projectRootsKey.split("\n"),
       worktreePaths: [
-        ...Object.values(inactiveProjectWorktreesRef.current).flatMap((worktrees) =>
-          worktrees.map((worktree) => worktree.path),
+        ...Object.entries(inactiveProjectWorktreesRef.current).flatMap(([workspaceId, worktrees]) =>
+          projectsRef.current.some((project) => project.workspaceId === workspaceId && project.target?.kind !== "ssh")
+            ? worktrees.map((worktree) => worktree.path) : [],
         ),
         ...activeWorktreePathsKey.split("\n"),
         ...sessionDagRootsKey.split("\n"),
@@ -766,6 +765,7 @@ function WorkspaceApp({
     const isPlaceholder =
       projects.length === 1 &&
       projects[0].workspaceId === DEFAULT_WORKSPACE_ID &&
+      projects[0].target?.kind !== "ssh" &&
       projects[0].repoRoot === ".";
     // With no user projects left there is nothing to register: the fallback
     // DEFAULT_PROJECT (".") must never be silently (re-)registered behind the
@@ -779,10 +779,14 @@ function WorkspaceApp({
       repoRoot: activeProject.repoRoot,
       registrationAttempt,
     });
-    void registerProject({
-      workspaceId: activeProject.workspaceId,
-      repoPath: activeProject.repoRoot,
-    })
+    const registration = activeProject.target?.kind === "ssh"
+      ? registerRemoteProject({
+          workspaceId: activeProject.workspaceId,
+          hostId: activeProject.target.hostId,
+          repoPath: activeProject.repoRoot,
+        }).then(toRegisteredProject)
+      : registerProject({ workspaceId: activeProject.workspaceId, repoPath: activeProject.repoRoot });
+    void registration
       .then(async (registered) => {
         if (cancelled) {
           switchDebug("project.register.ignored", {
@@ -795,7 +799,8 @@ function WorkspaceApp({
         // existing project when this root is already registered under another
         // ID, so adopt that ID instead of keeping a stale alias.
         const adopted =
-          registered.workspaceId !== activeProject.workspaceId && registered.repoRoot === activeProject.repoRoot;
+          registered.workspaceId !== activeProject.workspaceId &&
+          (activeProject.target?.kind === "ssh" || registered.repoRoot === activeProject.repoRoot);
         switchDebug("project.register.success", {
           requestedWorkspaceId: activeProject.workspaceId,
           registeredWorkspaceId: registered.workspaceId,
@@ -808,7 +813,8 @@ function WorkspaceApp({
               (candidate) =>
                 candidate.workspaceId === registered.workspaceId &&
                 candidate.repoRoot === registered.repoRoot &&
-                candidate.gitRoot === registered.gitRoot,
+                candidate.gitRoot === registered.gitRoot &&
+                JSON.stringify(candidate.target) === JSON.stringify(registered.target),
             )
           ) {
             return current;
@@ -835,6 +841,8 @@ function WorkspaceApp({
           persistActiveProjectId(registered.workspaceId);
           return;
         }
+        // Canonical-path changes re-render the runtime's root before it syncs.
+        if (registered.repoRoot !== activeProject.repoRoot) return;
         switchDebug("project.register.refresh.start", {
           workspaceId: activeProject.workspaceId,
         });
@@ -864,7 +872,7 @@ function WorkspaceApp({
         workspaceId: activeProject.workspaceId,
       });
     };
-  }, [activeProject.repoRoot, activeProject.workspaceId, projects.length, registrationAttempt, refreshWorktrees, reportRuntimeError]);
+  }, [activeProject.repoRoot, activeProject.workspaceId, activeProject.target, projects.length, registrationAttempt, refreshWorktrees, reportRuntimeError]);
 
   // A failed registration leaves the runtime gated, so retry when the window
   // regains focus rather than staying empty until the app restarts.
@@ -896,7 +904,7 @@ function WorkspaceApp({
   );
 
   // Initial session restore on startup & HMR recovery managed by coordinator.
-  useWorkspaceRestore({
+  const workspaceRestoreStatus = useWorkspaceRestore({
     workspaceId: activeProject.workspaceId,
     recoveredFromHmr,
     restoreWorkspace: restoreWorkspaceAndReconnect,
@@ -926,6 +934,7 @@ function WorkspaceApp({
           repoRoot,
           currentState,
           existing,
+          projectsRef.current.find((project) => project.workspaceId === workspaceId),
         );
         cachedLoadedSessionRef.current = session;
         await saveSession(session);
@@ -1157,7 +1166,12 @@ function WorkspaceApp({
 
   const handleRegisteredProject = useCallback((project: RegisteredProject) => {
     const current = projectsRef.current;
-    const next = [...current.filter((candidate) => candidate.workspaceId !== project.workspaceId), project];
+    const next = [...current.filter((candidate) => candidate.workspaceId !== project.workspaceId && !(
+      candidate.repoRoot === project.repoRoot &&
+      (candidate.target?.kind === "ssh"
+        ? project.target?.kind === "ssh" && candidate.target.hostId === project.target.hostId
+        : project.target?.kind !== "ssh")
+    )), project];
     persistProjects(next);
     setProjects(next);
     setActiveProjectId(project.workspaceId);
@@ -1208,6 +1222,10 @@ function WorkspaceApp({
         setPendingWorktreePath(worktree.path);
         return;
       }
+      if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) {
+        setPendingWorktreePath(worktree.path);
+        return;
+      }
       void ensureTabForWorktree(worktree).catch(reportRuntimeError);
     },
     [ensureTabForWorktree, handleSelectProject, reportRuntimeError],
@@ -1215,6 +1233,8 @@ function WorkspaceApp({
 
   useEffect(() => {
     if (!pendingWorktreePath) return;
+    if (activeProject.target?.kind === "ssh" && (registeredProjectId !== activeProject.workspaceId ||
+      workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading")) return;
     const target = state.worktrees.find((worktree) => worktree.path === pendingWorktreePath);
     if (!target) {
       switchDebug("worktree.select.pending", {
@@ -1233,8 +1253,11 @@ function WorkspaceApp({
     void ensureTabForWorktree(target).catch(reportRuntimeError);
   }, [
     activeProject.workspaceId,
+    activeProject.target,
     ensureTabForWorktree,
     pendingWorktreePath,
+    registeredProjectId,
+    workspaceRestoreStatus,
     reportRuntimeError,
     state.layout.tabs.length,
     state.worktrees,
@@ -1416,6 +1439,7 @@ function WorkspaceApp({
   );
 
   const handleAddTerminalTab = useCallback((shell?: string) => {
+    if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
     const activeWt = activeWorktreeRef.current;
     if (!activeWt) return;
     void openTab(activeWt, undefined, undefined, shell).catch(reportRuntimeError);
@@ -1423,6 +1447,7 @@ function WorkspaceApp({
 
   const handleLaunchAgent = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
+      if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
       try {
         const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
         if (!targetWorktree) return;
@@ -1630,7 +1655,12 @@ function WorkspaceApp({
   const handleOpenAddProject = useCallback(() => setIsAddProjectOpen(true), []);
   const handleCloseAddProject = useCallback(() => setIsAddProjectOpen(false), []);
   const handleOpenCreateWorktree = useCallback((project?: RegisteredProject) => {
-    setCreateTargetProject(project ?? activeProjectRef.current);
+    const target = project ?? activeProjectRef.current;
+    if (target.target?.kind === "ssh") {
+      toast.error("Git worktrees are unavailable for direct SSH projects.");
+      return;
+    }
+    setCreateTargetProject(target);
     setIsCreateOpen(true);
   }, []);
   const handleCloseCreateWorktree = useCallback(() => {
@@ -1652,6 +1682,7 @@ function WorkspaceApp({
         "browser",
         "notifications",
         "remote",
+        "ssh",
         "permissions",
       ].includes(section)
         ? (section as SectionId)
@@ -1659,6 +1690,7 @@ function WorkspaceApp({
     setSettingsInitialSection(validSection);
     setIsSettingsOpen(true);
   }, []);
+  const handleOpenSshSettings = useCallback(() => handleOpenSettings("ssh"), [handleOpenSettings]);
   const handleCloseSettings = useCallback(() => {
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
@@ -1738,6 +1770,7 @@ function WorkspaceApp({
 
   const handleSplitPane = useCallback(
     (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second" }) => {
+      if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
       void splitPane(tabId, leafId, direction, options).catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
@@ -2031,6 +2064,7 @@ function WorkspaceApp({
           projects={projects}
           onClose={handleCloseAddProject}
           onRegistered={handleRegisteredProject}
+          onOpenSettings={handleOpenSshSettings}
         />
       ) : null}
       {isCreateOpen ? (
@@ -2123,21 +2157,10 @@ function listVisibleWorktrees(
       project.workspaceId === activeProjectId
         ? (owned.length > 0 ? owned : cached)
         : [...cached, ...owned];
-    if (project.gitRoot === null && rows.length === 0) {
-      rows = [
-        {
-          path: project.repoRoot,
-          head: "",
-          branch: null,
-          bare: false,
-          detached: false,
-          locked: null,
-          prunable: null,
-        },
-      ];
-    }
+    if (project.target?.kind === "ssh") rows = [projectRootWorktree(project)];
+    else if (project.gitRoot === null && rows.length === 0) rows = [projectRootWorktree(project)];
     for (const row of rows) {
-      if (visible.some((candidate) => candidate.path === row.path)) continue;
+      if (visible.some((candidate) => candidate.path === row.path && candidate.workspaceId === row.workspaceId)) continue;
       visible.push(row);
     }
   }
@@ -2172,12 +2195,14 @@ function loadProjects(): RegisteredProject[] {
           project &&
           typeof project.workspaceId === "string" &&
           typeof project.repoRoot === "string" &&
-          project.repoRoot !== "/" &&
+          hasValidProjectTarget(project) &&
+          (project.repoRoot !== "/" || project.target?.kind === "ssh") &&
           project.repoRoot !== "\\",
       )
       .map((project) => ({
         workspaceId: project.workspaceId,
         repoRoot: project.repoRoot,
+        target: project.target,
         // Entries persisted before gitRoot existed can only be git projects
         // (the old backend rejected non-git folders), and their repoRoot was
         // already the canonical git root. Only an explicit null means non-git.
@@ -2188,7 +2213,8 @@ function loadProjects(): RegisteredProject[] {
               ? null
               : project.repoRoot,
       }));
-    return valid.length > 0 ? valid : [DEFAULT_PROJECT];
+    if (valid.length !== parsed.length) console.error("Ignored invalid stored project records; invalid targets cannot be opened locally.");
+    return valid;
   } catch {
     return [DEFAULT_PROJECT];
   }

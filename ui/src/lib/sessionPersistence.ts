@@ -34,6 +34,7 @@ export function serializeWorkspaceState(
   repoRoot: string,
   state: WorkspaceState,
   existingSession?: PersistedWorkspaceSession | null,
+  project?: Pick<import("./types").RegisteredProject, "target" | "gitRoot">,
 ): PersistedWorkspaceSession {
   const browserSettings = loadBrowserSettings();
   const restoreBrowserTabs = browserSettings.restoreTabsOnLaunch;
@@ -242,6 +243,8 @@ export function serializeWorkspaceState(
   const workspace: PersistedWorkspace = {
     workspaceId,
     repoRoot,
+    target: project?.target ?? existingSession?.workspaces[workspaceId]?.target,
+    gitRoot: project?.gitRoot === undefined ? existingSession?.workspaces[workspaceId]?.gitRoot : project.gitRoot,
     worktrees: persistedWorktrees,
     activeWorktreePath: state.activeWorktreePath,
     layout: persistedLayout,
@@ -342,6 +345,8 @@ export function deserializeWorkspaceState(
   }
 
   const worktrees: Worktree[] = (ws.worktrees || []).map((wt) => ({
+    // HMR snapshots predate project metadata but retain the reserved backend ID.
+    ...(ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:") ? { workspaceId } : {}),
     path: wt.path,
     branch: wt.branch ? (wt.branch.startsWith("refs/heads/") ? wt.branch : `refs/heads/${wt.branch}`) : null,
     head: wt.head,

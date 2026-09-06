@@ -1,7 +1,19 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderGit2, FolderPlus, GitBranch, LoaderCircle, Trash2, X } from "lucide-react";
+import {
+  ArrowLeft,
+  FolderGit2,
+  FolderPlus,
+  GitBranch,
+  LoaderCircle,
+  Radio,
+  Settings,
+  Trash2,
+  X,
+} from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
+import { registerRemoteProject, toRegisteredProject } from "../lib/remoteProject";
+import { formatSshTarget, useSshHosts } from "../lib/sshHosts";
 import {
   createWorktree,
   isTauriRuntime,
@@ -53,18 +65,41 @@ export function deriveWorkspaceId(folderPath: string, existingProjects: Register
   return `${baseId}-${index}`;
 }
 
-type AddProjectDialogProps = {
+export type AddProjectDialogProps = {
   projects?: RegisteredProject[];
   onClose: () => void;
   onRegistered: (project: RegisteredProject) => void;
+  onOpenSettings?: (section: "ssh") => void;
 };
 
-export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddProjectDialogProps) {
+type AddProjectStep =
+  | "choose-location"
+  | "local-pending"
+  | "local-confirm"
+  | "local-manual"
+  | "remote-form";
+
+export function AddProjectDialog({
+  projects = [],
+  onClose,
+  onRegistered,
+  onOpenSettings,
+}: AddProjectDialogProps) {
+  const [step, setStep] = useState<AddProjectStep>("choose-location");
   const [workspaceId, setWorkspaceId] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  // Remote flow state
+  const { hosts, loading: hostsLoading, error: hostsLoadError, refresh: refreshHosts } = useSshHosts();
+  const enabledHosts = hosts.filter((h) => !h.disabled);
+  const [selectedHostId, setSelectedHostId] = useState<string>("");
+  const [remoteRepoPath, setRemoteRepoPath] = useState("");
+  const [remoteWorkspaceId, setRemoteWorkspaceId] = useState("");
+  const [remoteIdEdited, setRemoteIdEdited] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
 
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -72,53 +107,186 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
   onRegisteredRef.current = onRegistered;
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
+  const onOpenSettingsRef = useRef(onOpenSettings);
+  onOpenSettingsRef.current = onOpenSettings;
 
   const pickerOpenedRef = useRef(false);
+  const dismissedRef = useRef(false);
+  const isMountedRef = useRef(false);
+  const hasHadSelectionRef = useRef(false);
   const isTauri = checkIsTauri();
 
   useEffect(() => {
-    // `pickerOpenedRef` alone guards against duplicate invocations (parent
-    // re-renders and StrictMode's double-mounted effects). The selection must
-    // NOT be discarded when StrictMode runs the effect cleanup, or a picked
-    // folder would silently vanish — hence no "alive" cancellation flag.
-    if (!isTauri || pickerOpenedRef.current) return;
-    pickerOpenedRef.current = true;
-    void open({
-      directory: true,
-      multiple: false,
-      title: "Add Project",
-    })
-      .then((selected) => {
-        if (typeof selected === "string" && selected.length > 0) {
-          setSelectedPath(selected);
-        } else {
-          onCloseRef.current();
-        }
-      })
-      .catch((cause) => {
-        console.error(cause);
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setError(message || "Could not open folder picker.");
-      });
-  }, [isTauri]);
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
-  if (isTauri && selectedPath) {
-    const handleConfirm = async () => {
-      if (submitting || !selectedPath) return;
-      setSubmitting(true);
-      setError(null);
-      const derivedId = deriveWorkspaceId(selectedPath, projectsRef.current);
-      try {
-        const project = await registerProject({ workspaceId: derivedId, repoPath: selectedPath });
-        onRegisteredRef.current(project);
-        onCloseRef.current();
-      } catch (cause) {
-        setError(extractErrorMessage(cause, "Could not register this project."));
-      } finally {
+  // Sync selectedHostId with available enabled hosts
+  useEffect(() => {
+    if (enabledHosts.length === 0) {
+      setSelectedHostId("");
+      return;
+    }
+    setSelectedHostId((prev) => {
+      if (prev) {
+        if (enabledHosts.some((h) => h.id === prev)) {
+          return prev;
+        }
+        // Previously selected host was deleted or disabled: clear selection and require explicit choice.
+        return "";
+      }
+      // Initial auto-selection
+      if (!hasHadSelectionRef.current) {
+        hasHadSelectionRef.current = true;
+        return enabledHosts[0].id;
+      }
+      return "";
+    });
+  }, [enabledHosts]);
+
+  const handleDismiss = () => {
+    dismissedRef.current = true;
+    onCloseRef.current();
+  };
+
+  const handleChooseLocal = () => {
+    if (isTauri) {
+      setStep("local-pending");
+      if (pickerOpenedRef.current) return;
+      pickerOpenedRef.current = true;
+      void open({
+        directory: true,
+        multiple: false,
+        title: "Add Project",
+      })
+        .then((selected) => {
+          if (dismissedRef.current || !isMountedRef.current) return;
+          if (typeof selected === "string" && selected.length > 0) {
+            setSelectedPath(selected);
+            setStep("local-confirm");
+          } else {
+            handleDismiss();
+          }
+        })
+        .catch((cause) => {
+          if (dismissedRef.current || !isMountedRef.current) return;
+          console.error(cause);
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setLocalError(message || "Could not open folder picker.");
+          setStep("local-manual");
+        })
+        .finally(() => {
+          pickerOpenedRef.current = false;
+        });
+    } else {
+      setStep("local-manual");
+    }
+  };
+
+  const handleChooseRemote = () => {
+    setRemoteError(null);
+    setStep("remote-form");
+  };
+
+  const handleLocalConfirm = async () => {
+    if (submitting || !selectedPath) return;
+    setSubmitting(true);
+    setLocalError(null);
+    const derivedId = deriveWorkspaceId(selectedPath, projectsRef.current);
+    try {
+      const project = await registerProject({ workspaceId: derivedId, repoPath: selectedPath });
+      if (dismissedRef.current || !isMountedRef.current) return;
+      onRegisteredRef.current(project);
+      handleDismiss();
+    } catch (cause) {
+      if (dismissedRef.current || !isMountedRef.current) return;
+      setLocalError(extractErrorMessage(cause, "Could not register this project."));
+    } finally {
+      if (!dismissedRef.current && isMountedRef.current) {
         setSubmitting(false);
       }
-    };
+    }
+  };
 
+  const handleManualSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    const trimmedWorkspaceId = workspaceId.trim();
+    const trimmedPath = repoPath.trim();
+    if (!trimmedWorkspaceId || !trimmedPath || submitting) return;
+    setSubmitting(true);
+    setLocalError(null);
+    try {
+      const project = await registerProject({ workspaceId: trimmedWorkspaceId, repoPath: trimmedPath });
+      if (dismissedRef.current || !isMountedRef.current) return;
+      onRegisteredRef.current(project);
+      handleDismiss();
+    } catch (cause) {
+      if (dismissedRef.current || !isMountedRef.current) return;
+      setLocalError(extractErrorMessage(cause, "Could not register this project."));
+    } finally {
+      if (!dismissedRef.current && isMountedRef.current) {
+        setSubmitting(false);
+      }
+    }
+  };
+
+  const handleRemoteSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    const trimmedWorkspaceId = remoteWorkspaceId.trim();
+    const trimmedPath = remoteRepoPath.trim();
+    const hostId = selectedHostId;
+    if (!trimmedWorkspaceId || !trimmedPath || !hostId || submitting) return;
+
+    setSubmitting(true);
+    setRemoteError(null);
+
+    // Refresh authoritative list to prevent submitting stale/disabled/removed host
+    let authoritativeHosts: typeof hosts;
+    try {
+      authoritativeHosts = await refreshHosts();
+    } catch (cause) {
+      if (dismissedRef.current || !isMountedRef.current) return;
+      setRemoteError(extractErrorMessage(cause, "Failed to refresh SSH machines."));
+      setSubmitting(false);
+      return;
+    }
+
+    if (dismissedRef.current || !isMountedRef.current) return;
+
+    const host = authoritativeHosts.find((h) => h.id === hostId);
+    if (!host || host.disabled) {
+      setRemoteError("The selected SSH machine is no longer available or has been disabled.");
+      setSubmitting(false);
+      return;
+    }
+
+    try {
+      const response = await registerRemoteProject({
+        workspaceId: trimmedWorkspaceId,
+        hostId,
+        repoPath: trimmedPath,
+      });
+
+      if (dismissedRef.current || !isMountedRef.current) return;
+
+      const project = toRegisteredProject(response);
+
+      onRegisteredRef.current(project);
+      handleDismiss();
+    } catch (cause) {
+      if (dismissedRef.current || !isMountedRef.current) return;
+      setRemoteError(extractErrorMessage(cause, "Could not register this remote project."));
+    } finally {
+      if (!dismissedRef.current && isMountedRef.current) {
+        setSubmitting(false);
+      }
+    }
+  };
+
+  // 1. Initial Location Chooser
+  if (step === "choose-location") {
     return (
       <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
         <div
@@ -132,43 +300,56 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
             <button
               type="button"
               aria-label="Close Add Project"
-              disabled={submitting}
-              className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"
-              onClick={() => onCloseRef.current()}
+              className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              onClick={handleDismiss}
             >
               <X className="size-3.5" />
             </button>
           </div>
-          <div className="selectable space-y-3 p-3">
+          <div className="space-y-3 p-3">
             <p className="text-xs text-muted-foreground">
-              Add this folder as a separate Ferryx project.
+              Select where the project repository is located.
             </p>
-            <div className="rounded-md border border-border/70 bg-muted/35 px-3 py-2 text-xs">
-              <div className="break-all font-mono text-muted-foreground">{selectedPath}</div>
+            <div className="space-y-2">
+              <button
+                type="button"
+                data-testid="project-type-local"
+                onClick={handleChooseLocal}
+                className="group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+              >
+                <FolderGit2 className="mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105" />
+                <div>
+                  <div className="text-xs font-medium text-foreground">Local Project</div>
+                  <div className="mt-0.5 text-[11px] leading-normal text-muted-foreground">
+                    Choose a folder on this machine using the folder picker.
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                data-testid="project-type-remote"
+                onClick={handleChooseRemote}
+                className="group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+              >
+                <Radio className="mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105" />
+                <div>
+                  <div className="text-xs font-medium text-foreground">Remote (SSH)</div>
+                  <div className="mt-0.5 text-[11px] leading-normal text-muted-foreground">
+                    Connect to a repository hosted on an SSH machine.
+                  </div>
+                </div>
+              </button>
             </div>
-            {error ? <p className="text-xs text-destructive">{error}</p> : null}
           </div>
           <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
             <button
               type="button"
-              disabled={submitting}
-              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"
-              onClick={() => onCloseRef.current()}
+              data-testid="add-project-cancel"
+              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"
+              onClick={handleDismiss}
             >
               Cancel
-            </button>
-            <button
-              type="button"
-              disabled={submitting || !selectedPath}
-              onClick={handleConfirm}
-              className="inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
-            >
-              {submitting ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : (
-                <FolderPlus className="size-3.5" />
-              )}
-              Add Project
             </button>
           </div>
         </div>
@@ -176,14 +357,8 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
     );
   }
 
-  // The native folder picker is a sheet on the main window, and it resolves
-  // asynchronously. Rendering nothing while it is pending broke two things:
-  // the `[role="dialog"]` surface that makes the native terminal compositor
-  // yield (`lib/nativeTerminalVisibility.tsx`) never existed, and a picker that
-  // never resolves left `isAddProjectOpen` latched true with no visible dialog,
-  // so every later "Add project" click was a silent no-op. Mount a real dialog
-  // surface for the pending phase instead.
-  if (isTauri && !error) {
+  // 2. Pending native folder picker
+  if (step === "local-pending") {
     return (
       <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
         <div
@@ -199,7 +374,7 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
               type="button"
               aria-label="Close Add Project"
               className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={() => onCloseRef.current()}
+              onClick={handleDismiss}
             >
               <X className="size-3.5" />
             </button>
@@ -212,7 +387,7 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
             <button
               type="button"
               className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"
-              onClick={() => onCloseRef.current()}
+              onClick={handleDismiss}
             >
               Cancel
             </button>
@@ -222,39 +397,274 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
     );
   }
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    const trimmedWorkspaceId = workspaceId.trim();
-    const trimmedPath = repoPath.trim();
-    if (!trimmedWorkspaceId || !trimmedPath || submitting) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      const project = await registerProject({ workspaceId: trimmedWorkspaceId, repoPath: trimmedPath });
-      onRegisteredRef.current(project);
-      onCloseRef.current();
-    } catch (cause) {
-      setError(extractErrorMessage(cause, "Could not register this project."));
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  // 3. Confirm picked local folder
+  if (step === "local-confirm" && selectedPath) {
+    return (
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
+        <div
+          role="dialog"
+          aria-label="Add Project"
+          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        >
+          <div className="flex h-9 items-center border-b border-border px-3">
+            <FolderGit2 className="mr-2 size-3.5 text-muted-foreground" />
+            <h2 className="text-[13px] font-medium">Add Project</h2>
+            <button
+              type="button"
+              aria-label="Close Add Project"
+              disabled={submitting}
+              className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"
+              onClick={handleDismiss}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+          <div className="selectable space-y-3 p-3">
+            <p className="text-xs text-muted-foreground">
+              Add this folder as a separate Ferryx project.
+            </p>
+            <div className="rounded-md border border-border/70 bg-muted/35 px-3 py-2 text-xs">
+              <div className="break-all font-mono text-muted-foreground">{selectedPath}</div>
+            </div>
+            {localError ? <p className="text-xs text-destructive">{localError}</p> : null}
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
+            <button
+              type="button"
+              disabled={submitting}
+              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"
+              onClick={handleDismiss}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={submitting || !selectedPath}
+              onClick={handleLocalConfirm}
+              className="inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
+            >
+              {submitting ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <FolderPlus className="size-3.5" />
+              )}
+              Add Project
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
+  // 4. Remote SSH project form
+  if (step === "remote-form") {
+    return (
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
+        <form
+          role="dialog"
+          aria-label="Add Project"
+          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          onSubmit={handleRemoteSubmit}
+        >
+          <div className="flex h-9 items-center border-b border-border px-3">
+            <button
+              type="button"
+              aria-label="Back"
+              data-testid="add-project-back"
+              disabled={submitting}
+              className="mr-1.5 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"
+              onClick={() => {
+                setRemoteError(null);
+                setStep("choose-location");
+              }}
+            >
+              <ArrowLeft className="size-3.5" />
+            </button>
+            <Radio className="mr-2 size-3.5 text-muted-foreground" />
+            <h2 className="text-[13px] font-medium">Add Remote Project</h2>
+            <button
+              type="button"
+              aria-label="Close Add Project"
+              className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              onClick={handleDismiss}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+
+          <div className="space-y-3 p-3">
+            {hostsLoading ? (
+              <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+                <LoaderCircle className="size-3.5 animate-spin" />
+                <span>Loading SSH machines...</span>
+              </div>
+            ) : enabledHosts.length === 0 ? (
+              <div className="space-y-3 py-1">
+                <p className="text-xs text-muted-foreground">
+                  No active SSH machines found. Configure SSH machines in Settings before adding a remote project.
+                </p>
+                {hostsLoadError ? (
+                  <p className="text-[11px] text-destructive">{hostsLoadError}</p>
+                ) : null}
+                <div>
+                  <button
+                    type="button"
+                    data-testid="configure-ssh-settings"
+                    className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 text-xs text-foreground hover:bg-accent"
+                    onClick={() => {
+                      onOpenSettingsRef.current?.("ssh");
+                      handleDismiss();
+                    }}
+                  >
+                    <Settings className="size-3.5 text-muted-foreground" />
+                    Configure SSH Machines in Settings
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <label className="block space-y-1 text-[11px] text-muted-foreground" htmlFor="remote-host-select">
+                  <span>SSH Machine</span>
+                  <select
+                    id="remote-host-select"
+                    aria-label="SSH Machine"
+                    data-testid="remote-host-select"
+                    className={fieldClass}
+                    value={selectedHostId}
+                    disabled={submitting}
+                    onChange={(event) => setSelectedHostId(event.target.value)}
+                  >
+                    {!selectedHostId ? (
+                      <option value="" disabled>
+                        Select an SSH machine...
+                      </option>
+                    ) : null}
+                    {enabledHosts.map((h) => (
+                      <option key={h.id} value={h.id}>
+                        {h.label} ({formatSshTarget(h)})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block space-y-1 text-[11px] text-muted-foreground" htmlFor="remote-repo-path">
+                  <span>Remote repository path</span>
+                  <input
+                    id="remote-repo-path"
+                    aria-label="Remote repository path"
+                    data-testid="remote-repo-path-input"
+                    className={fieldClass}
+                    value={remoteRepoPath}
+                    disabled={submitting}
+                    onChange={(event) => {
+                      const val = event.target.value;
+                      setRemoteRepoPath(val);
+                      if (!remoteIdEdited) {
+                        setRemoteWorkspaceId(deriveWorkspaceId(val, projectsRef.current));
+                      }
+                    }}
+                    placeholder="/home/ubuntu/my-app"
+                    autoFocus
+                  />
+                </label>
+
+                <label className="block space-y-1 text-[11px] text-muted-foreground" htmlFor="remote-workspace-id">
+                  <span>Workspace id</span>
+                  <input
+                    id="remote-workspace-id"
+                    aria-label="Workspace id"
+                    data-testid="remote-workspace-id-input"
+                    className={fieldClass}
+                    value={remoteWorkspaceId}
+                    disabled={submitting}
+                    onChange={(event) => {
+                      setRemoteIdEdited(true);
+                      setRemoteWorkspaceId(event.target.value);
+                    }}
+                    placeholder="my-app"
+                  />
+                </label>
+
+                {remoteError ? <p className="text-[11px] text-destructive">{remoteError}</p> : null}
+              </>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
+            <button
+              type="button"
+              disabled={submitting}
+              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"
+              onClick={() => {
+                setRemoteError(null);
+                setStep("choose-location");
+              }}
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"
+              onClick={handleDismiss}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              data-testid="add-project-confirm-remote"
+              disabled={
+                submitting ||
+                enabledHosts.length === 0 ||
+                !selectedHostId ||
+                !remoteRepoPath.trim() ||
+                !remoteWorkspaceId.trim()
+              }
+              className="inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
+            >
+              {submitting ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <FolderPlus className="size-3.5" />
+              )}
+              Add Project
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
+  // 5. Manual fallback entry (non-Tauri or picker capability error)
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
       <form
+        role="dialog"
         aria-label="Add Project"
         className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
-        onSubmit={submit}
+        onSubmit={handleManualSubmit}
       >
         <div className="flex h-9 items-center border-b border-border px-3">
+          <button
+            type="button"
+            aria-label="Back"
+            data-testid="add-project-back"
+            disabled={submitting}
+            className="mr-1.5 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"
+            onClick={() => {
+              setLocalError(null);
+              setStep("choose-location");
+            }}
+          >
+            <ArrowLeft className="size-3.5" />
+          </button>
           <FolderGit2 className="mr-2 size-3.5 text-muted-foreground" />
           <h2 className="text-[13px] font-medium">Add Project</h2>
           <button
             type="button"
             aria-label="Close Add Project"
-            className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={() => onCloseRef.current()}
+            disabled={submitting}
+            className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"
+            onClick={handleDismiss}
           >
             <X className="size-3.5" />
           </button>
@@ -266,6 +676,7 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
               aria-label="Workspace id"
               className={fieldClass}
               value={workspaceId}
+              disabled={submitting}
               onChange={(event) => setWorkspaceId(event.target.value)}
               placeholder="my-project"
               autoFocus
@@ -277,14 +688,31 @@ export function AddProjectDialog({ projects = [], onClose, onRegistered }: AddPr
               aria-label="Repository path"
               className={fieldClass}
               value={repoPath}
+              disabled={submitting}
               onChange={(event) => setRepoPath(event.target.value)}
               placeholder="/path/to/repository"
             />
           </label>
-          {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
+          {localError ? <p className="text-[11px] text-destructive">{localError}</p> : null}
         </div>
         <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
-          <button type="button" className="h-7 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-accent" onClick={() => onCloseRef.current()}>
+          <button
+            type="button"
+            disabled={submitting}
+            className="h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"
+            onClick={() => {
+              setLocalError(null);
+              setStep("choose-location");
+            }}
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            className="h-7 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"
+            onClick={handleDismiss}
+          >
             Cancel
           </button>
           <button
@@ -450,6 +878,20 @@ type RemoveProjectDialogProps = {
 };
 
 export function RemoveProjectDialog({ project, onClose, onConfirm }: RemoveProjectDialogProps) {
+  const { hosts } = useSshHosts();
+  const target = project.target;
+  const isRemote = target?.kind === "ssh";
+  const remoteHostId = target?.kind === "ssh" ? target.hostId : null;
+  const hostLabel = remoteHostId
+    ? hosts.find((h) => h.id === remoteHostId)?.label ?? remoteHostId
+    : null;
+  const remoteFolder = isRemote
+    ? project.repoRoot.split(/[/\\]/).filter(Boolean).at(-1) ?? project.repoRoot
+    : null;
+  const displayName = isRemote
+    ? `${remoteFolder} (${hostLabel})`
+    : project.workspaceId;
+
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"
@@ -476,7 +918,7 @@ export function RemoveProjectDialog({ project, onClose, onConfirm }: RemoveProje
         </div>
         <div className="selectable space-y-2 p-3 text-xs">
           <p className="text-foreground">
-            Are you sure you want to remove <span className="font-semibold">{project.workspaceId}</span> from Ferryx?
+            Are you sure you want to remove <span className="font-semibold">{displayName}</span> from Ferryx?
           </p>
           <p className="text-[11px] text-muted-foreground">
             This only removes the project from your sidebar. Your repository files at{" "}

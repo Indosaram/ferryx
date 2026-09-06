@@ -45,6 +45,17 @@ vi.mock("@tauri-apps/api/window", () => ({
 let notificationActivationListener: (() => void) | null = null;
 let activationQueue: Array<{ workspaceId: string; sessionId: string }> = [];
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
+const grantedPermission = {
+  status: "granted" as const, granted: true, canRequest: false,
+  canOpenSettings: true, description: "",
+};
+
 const native = {
   createWorktree: vi.fn(),
   getWorktreeStatus: vi.fn(),
@@ -99,6 +110,12 @@ vi.mock("./lib/tauri", () => ({
   deleteWorktree: vi.fn(),
   deleteWorktreeDestructive: vi.fn(),
   getInitialProject: native.getInitialProject,
+  getSystemPermissionsStatus: vi.fn(async () => ({
+    platform: "macos", allGranted: true,
+    fullDiskAccess: grantedPermission,
+    accessibility: grantedPermission,
+    notifications: grantedPermission,
+  } satisfies import("./lib/types").SystemPermissionsStatus)),
   listProjectBranches: native.listProjectBranches,
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
@@ -145,6 +162,9 @@ function emitActivityTargets(): void {
 const markTabUnread = vi.fn();
 const markWorktreeUnread = vi.fn();
 const dispatchWorkspaceAction = vi.fn();
+// The real store memoizes this callback. Recreating it per render would restart
+// restoration whenever the subscribed restore status changes.
+const restoreWorkspace = vi.fn();
 /**
  * The bell reaches App through the store's global native subscription, so the test fires it the
  * same way the store does rather than through a pane prop that only the foreground tab would have.
@@ -218,7 +238,7 @@ vi.mock("./components/TerminalSplitView", () => ({
 }));
 
 const { App } = await import("./App");
-const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
+const { getWorkspaceRestoreStatus, resetWorkspaceRestore } = await import("./state/workspaceRestore");
 const { getWorkspaceSnapshot, setWorkspaceSnapshot, clearWorkspaceSnapshot } = await import("./state/workspaceSnapshotCache");
 const { PROJECTS_STORAGE_KEY, ACTIVE_PROJECT_STORAGE_KEY } = await import("./lib/storageKeys");
 
@@ -311,6 +331,7 @@ describe("App notification coordinator wiring", () => {
     markTabUnread.mockReset();
     markWorktreeUnread.mockReset();
     dispatchWorkspaceAction.mockReset();
+    restoreWorkspace.mockReset();
     native.onNotificationActivated.mockClear();
     native.takeNotificationActivations.mockClear();
     notificationActivationListener = null;
@@ -361,7 +382,7 @@ describe("App notification coordinator wiring", () => {
       reloadBrowserTab: vi.fn().mockResolvedValue(undefined),
       openWorkspacePortInBrowser: vi.fn().mockResolvedValue("browser-tab-1"),
       syncWorktrees: vi.fn(),
-      restoreWorkspace: vi.fn(),
+      restoreWorkspace,
       updateSessionTitleActivity: vi.fn(),
       subscribeTerminalBell: (listener: (sessionId: string, tabId: string) => void) => {
         bellListeners.add(listener);
@@ -587,12 +608,35 @@ describe("App notification coordinator wiring", () => {
     it("does not switch projects for a closed target in another project", async () => {
       seedTwoProjects();
       setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
+      const restoreStarted = deferred<void>();
+      const savedSession = deferred<null>();
+      native.loadSession.mockImplementation(() => {
+        restoreStarted.resolve();
+        return savedSession.promise;
+      });
       await act(async () => { render(<App />); });
+      await restoreStarted.promise;
+      expect(getWorkspaceRestoreStatus("default")).toBe("loading");
+      await act(async () => { savedSession.resolve(null); await savedSession.promise; });
+      expect(getWorkspaceRestoreStatus("default")).toBe("restored");
+      expect(native.loadSession).toHaveBeenCalledTimes(1);
+
       dispatchWorkspaceAction.mockClear();
-      activationQueue = [{ workspaceId: "other", sessionId: "sess-remote" }];
-      await act(async () => { notificationActivationListener?.(); });
+      const drainStarted = deferred<void>();
+      const activations = deferred<typeof activationQueue>();
+      native.takeNotificationActivations.mockImplementationOnce(() => {
+        drainStarted.resolve();
+        return activations.promise;
+      });
+      expect(notificationActivationListener).not.toBeNull();
+      await act(async () => { notificationActivationListener!(); await drainStarted.promise; });
+      await act(async () => {
+        activations.resolve([{ workspaceId: "other", sessionId: "sess-remote" }]);
+        await activations.promise;
+      });
       expect(native.takeNotificationActivations).toHaveBeenCalledTimes(2);
       expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).not.toBe("other");
+      expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("default");
       expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
     });
   });

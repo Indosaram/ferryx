@@ -641,9 +641,8 @@ export function useWorkspaceStore({
               sessionId,
               backendSessionId,
             });
-          } catch {
-            // Spawn failed; allow subsequent attempts
           } finally {
+            // Let the caller surface registration/host failures, while allowing retry.
             spawningSessionIdsRef.current.delete(sessionId);
           }
         }),

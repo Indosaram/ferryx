@@ -24,13 +24,17 @@ export function resolveWorktreeOwnerId(
   projects: readonly RegisteredProject[],
   fallbackProjectId?: string,
 ): string | undefined {
+  if (worktree.workspaceId && projects.some((project) => project.workspaceId === worktree.workspaceId)) {
+    return worktree.workspaceId;
+  }
+  const localProjects = projects.filter((project) => project.target?.kind !== "ssh");
   const identityOwner = worktreeIdentity(worktree)?.wsId;
   if (
     identityOwner &&
-    projects.some((project) => project.workspaceId === identityOwner) &&
+    localProjects.some((project) => project.workspaceId === identityOwner) &&
     // A managed worktree legitimately lives inside some project's root
     // (`.orca-worktrees/`), so only an exact root match outranks its branch.
-    !projects.some(
+    !localProjects.some(
       (project) =>
         project.workspaceId !== identityOwner &&
         normalizePath(project.repoRoot) === normalizePath(worktree.path),
@@ -39,7 +43,7 @@ export function resolveWorktreeOwnerId(
     return identityOwner;
   }
 
-  const pathOwner = projects
+  const pathOwner = localProjects
     .filter((project) => ownsPath(project.repoRoot, worktree.path))
     .sort((left, right) => normalizePath(right.repoRoot).length - normalizePath(left.repoRoot).length)[0];
   if (pathOwner) return pathOwner.workspaceId;

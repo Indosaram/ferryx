@@ -28,6 +28,8 @@ import { toast } from "sonner";
 
 import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
+import { projectRootWorktree } from "../lib/projectIdentity";
+import { useSshHosts } from "../lib/sshHosts";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
@@ -373,7 +375,18 @@ export function Sidebar({
                           items={projectWorktrees.map((row) => worktreeSortableId(project.workspaceId, row.path))}
                           strategy={verticalListSortingStrategy}
                         >
-                          <WorktreeList
+                          {project.target?.kind === "ssh" ? (
+                            <button
+                              type="button"
+                              className={cn("my-0.5 w-full truncate rounded-md border px-2 py-1 text-left text-xs hover:bg-white/5",
+                                activeWorktreeOwnerId === project.workspaceId ? "border-[#6c6c6c] bg-[#3f3f3f]" : "border-transparent")}
+                              aria-current={activeWorktreeOwnerId === project.workspaceId ? "true" : undefined}
+                              title="Remote SSH root. Git worktrees and local file-manager reveal are unavailable."
+                              onClick={() => onSelectWorktree(projectRootWorktree(project))}
+                            >
+                              {project.repoRoot} <span className="text-muted-foreground">SSH root</span>
+                            </button>
+                          ) : <WorktreeList
                             worktrees={projectWorktrees}
                             agents={agents}
                             activePath={activeWorktreeOwnerId === project.workspaceId ? activePath : ""}
@@ -387,7 +400,7 @@ export function Sidebar({
                             onDelete={onDeleteWorktree}
                             sortableWorkspaceId={project.workspaceId}
                             label={`${project.workspaceId} worktrees`}
-                          />
+                          />}
                         </SortableContext>
                       </div>
                     ) : null}
@@ -488,6 +501,12 @@ function ProjectHeader({
   onRemoveProject,
   inert = false,
 }: ProjectHeaderProps) {
+  const { hosts } = useSshHosts();
+  const remote = project.target?.kind === "ssh" ? project.target : null;
+  const hostLabel = remote ? hosts.find((host) => host.id === remote.hostId)?.label ?? remote.hostId : null;
+  const projectLabel = remote
+    ? `${project.repoRoot.split("/").filter(Boolean).at(-1) ?? "/"} (${hostLabel})`
+    : project.workspaceId;
   const menuUnlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -502,8 +521,8 @@ function ProjectHeader({
     event.preventDefault();
     event.stopPropagation();
     const items: NativeMenuEntry[] = [
-      { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
-      { kind: "item", id: "reveal", label: fileManagerActionLabel(), icon: "reveal" },
+      { kind: "item", id: "add-worktree", label: remote ? "Git worktrees unavailable over SSH" : "Add Worktree", enabled: !remote && project.gitRoot !== null, icon: "add" },
+      { kind: "item", id: "reveal", label: remote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !remote, icon: "reveal" },
       { kind: "item", id: "copy-path", label: "Copy Project Path" },
       { kind: "separator" },
       { kind: "item", id: "remove", label: "Remove Project", enabled: Boolean(onRemoveProject), icon: "trash" },
@@ -516,8 +535,8 @@ function ProjectHeader({
       (id) => {
         menuUnlistenRef.current?.();
         menuUnlistenRef.current = null;
-        if (id === "add-worktree") onCreateWorktree?.();
-        else if (id === "reveal") {
+        if (id === "add-worktree" && !remote) onCreateWorktree?.();
+        else if (id === "reveal" && !remote) {
           revealPath(project.repoRoot).catch((err: unknown) => {
             toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);
           });
@@ -551,7 +570,7 @@ function ProjectHeader({
           onClick={onToggle}
           onPointerDown={(event) => event.stopPropagation()}
           aria-expanded={expanded}
-          aria-label={`${expanded ? "Collapse" : "Expand"} ${project.workspaceId}`}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${projectLabel}`}
           className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
         >
           <ChevronRight
@@ -564,11 +583,12 @@ function ProjectHeader({
           disabled={inert}
           onClick={onSelect}
           aria-current={active ? "true" : undefined}
-          aria-label={project.workspaceId}
+          aria-label={projectLabel}
+          title={remote ? `SSH: ${hostLabel} - ${project.repoRoot}` : project.repoRoot}
           className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
         >
           <Folder className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{project.workspaceId}</span>
+          <span className="min-w-0 flex-1 truncate">{projectLabel}</span>
           {activity.runningCount > 0 ? (
             <span
               data-testid="project-running-badge"
@@ -588,7 +608,7 @@ function ProjectHeader({
             </span>
           ) : null}
         </button>
-        {project.gitRoot !== null ? (
+        {!remote && project.gitRoot !== null ? (
           <IconButton
             label={`Add worktree to ${project.workspaceId}`}
             size="sm"
@@ -602,7 +622,7 @@ function ProjectHeader({
         ) : null}
         {onRemoveProject ? (
           <IconButton
-            label={`Remove project ${project.workspaceId}`}
+            label={`Remove project ${projectLabel}`}
             size="sm"
             disabled={inert}
             className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100 hover:text-destructive"
@@ -679,18 +699,10 @@ function groupWorktreesByProject(
   // folder row its group would render empty and the folder would be
   // unselectable - including while it is the active project.
   for (const project of projects) {
-    if (project.gitRoot !== null) continue;
+    if (project.gitRoot !== null && project.target?.kind !== "ssh") continue;
     const bucket = grouped.get(project.workspaceId);
     if (!bucket || bucket.length > 0) continue;
-    bucket.push({
-      path: project.repoRoot,
-      head: "",
-      branch: null,
-      bare: false,
-      detached: false,
-      locked: null,
-      prunable: null,
-    });
+    bucket.push(projectRootWorktree(project));
   }
 
   return grouped;

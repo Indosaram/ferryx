@@ -977,22 +977,31 @@ describe("App project workspace flow", () => {
   });
 
   it("opens a registered project's real branch-dropdown worktree flow", async () => {
-    native.registerProject.mockResolvedValue({ workspaceId: "rorca", repoRoot: "/repos/rorca" });
-    native.listProjectBranches.mockResolvedValue([{ name: "main", isCurrent: true }]);
+    const registration = Promise.resolve({ workspaceId: "rorca", repoRoot: "/repos/rorca" });
+    const branches = Promise.resolve([{ name: "main", isCurrent: true }]);
+    native.registerProject.mockReturnValue(registration);
+    native.listProjectBranches.mockReturnValue(branches);
 
-    render(<App />);
+    await act(async () => { render(<App />); });
 
     fireEvent.click(screen.getByRole("button", { name: "Add project" }));
-    expect(screen.getByRole("form", { name: "Add Project" })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("project-type-local"));
+    expect(screen.getByRole("dialog", { name: "Add Project" })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "Workspace id" }), { target: { value: "rorca" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Repository path" }), { target: { value: "/repos/rorca" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
+      await registration;
+    });
 
-    await waitFor(() => expect(screen.getByText("Project rorca")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Add worktree to rorca" }));
+    expect(screen.getByText("Project rorca")).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add worktree to rorca" }));
+      await branches;
+    });
 
     expect(screen.getByRole("form", { name: "Add Worktree" })).toBeInTheDocument();
-    await waitFor(() => expect(native.listProjectBranches).toHaveBeenCalledWith("rorca"));
+    expect(native.listProjectBranches).toHaveBeenCalledWith("rorca");
     expect(screen.getByRole("combobox", { name: "Base branch" })).toBeInTheDocument();
   });
 

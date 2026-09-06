@@ -6,6 +6,8 @@ export type WorktreeIdentity = {
 };
 
 export type Worktree = {
+  /** Explicit owner for SSH roots, whose paths can equal paths on other hosts. */
+  workspaceId?: string;
   path: string;
   head: string;
   branch: string | null;
@@ -632,6 +634,8 @@ export interface PersistedTerminalSession {
 export interface PersistedWorkspace {
   workspaceId: string;
   repoRoot: string;
+  target?: import("./scopedContracts").RunTarget;
+  gitRoot?: string | null;
   worktrees: PersistedWorktree[];
   activeWorktreePath: string | null;
   layout: PersistedLayout;

@@ -1,4 +1,5 @@
 import type { DagRunSnapshot } from "./dagTypes";
+import type { RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -50,6 +51,7 @@ export type RegisteredProject = {
   workspaceId: string;
   repoRoot: string;
   gitRoot?: string | null;
+  target?: RunTarget;
 };
 
 export type LocalBranch = {

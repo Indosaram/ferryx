@@ -27,6 +27,8 @@ type UseWorkspaceRuntimeOptions = {
   /// Synthesized primary "worktree" for plain (non-Git) workspaces whose root
   /// is the project folder itself. Used when the backend lists no worktrees.
   plainRootWorktree?: Worktree | null;
+  /** Direct SSH exposes its root only; never ask the local Git manager to list it. */
+  rootOnly?: boolean;
   /// Workspace ID the backend registry has accepted. Listing worktrees before
   /// registration completes fails with WORKSPACE_NOT_FOUND and leaves the
   /// sidebar empty, so syncing waits for this to match `workspaceId`.
@@ -92,6 +94,7 @@ export function useWorkspaceRuntime({
   syncWorktrees,
   ensureTabForWorktree,
   plainRootWorktree = null,
+  rootOnly = false,
   registeredWorkspaceId,
   services = defaultServices,
 }: UseWorkspaceRuntimeOptions) {
@@ -130,6 +133,8 @@ export function useWorkspaceRuntime({
   // re-run the initialize effect (listener re-registration + refresh) forever.
   const plainRootRef = useRef(plainRootWorktree);
   plainRootRef.current = plainRootWorktree;
+  const rootOnlyRef = useRef(rootOnly);
+  rootOnlyRef.current = rootOnly;
 
   const refreshWorktrees = useCallback(
     (options?: { allowCreate?: boolean }) => {
@@ -156,7 +161,7 @@ export function useWorkspaceRuntime({
             allowCreate: options?.allowCreate ?? true,
             activeWorktreePath: activeWorktreePathRef.current,
           });
-          const listed = await servicesRef.current.listWorktrees(workspaceId);
+          const listed = rootOnlyRef.current ? [] : await servicesRef.current.listWorktrees(workspaceId);
           switchDebug("worktree.refresh.listed", {
             workspaceId,
             generation,

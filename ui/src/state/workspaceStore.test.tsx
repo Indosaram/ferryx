@@ -1409,7 +1409,7 @@ describe("worktree tab and session isolation", () => {
     });
 
     it("guards against concurrent double-spawns and retries on spawn failure after clearing in-flight guard", async () => {
-      let deferredSpawn!: { resolve: (id: string) => void; reject: (err: Error) => void; promise: Promise<string> };
+      let deferredSpawn!: { resolve: (id: string) => void; reject: (err: Error) => void; promise: Promise<string>; started: Promise<void>; start: () => void };
       const resetDeferred = () => {
         let resolve!: (id: string) => void;
         let reject!: (err: Error) => void;
@@ -1417,12 +1417,14 @@ describe("worktree tab and session isolation", () => {
           resolve = res;
           reject = rej;
         });
-        deferredSpawn = { resolve, reject, promise };
+        let start!: () => void;
+        const started = new Promise<void>((resolveStarted) => { start = resolveStarted; });
+        deferredSpawn = { resolve, reject, promise, started, start };
       };
       resetDeferred();
 
       const { services } = createServices();
-      services.spawnTerminal = vi.fn(() => deferredSpawn.promise);
+      services.spawnTerminal = vi.fn(() => { deferredSpawn.start(); return deferredSpawn.promise; });
 
       const { result } = renderHook(() =>
         useWorkspaceStore({ initialWorktrees: [worktree], services }),
@@ -1459,15 +1461,17 @@ describe("worktree tab and session isolation", () => {
         call2 = (result.current as any).ensureSessionBackends(["session-inflight"]);
       });
       await act(async () => {
-        await Promise.resolve();
+        await deferredSpawn.started;
       });
 
       expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
 
-      // 2. Reject the in-flight spawn to test error swallowing and clearing in-flight entry
+      // 2. Surface the spawn error and still clear the in-flight entry for retry.
       await act(async () => {
-        deferredSpawn.reject(new Error("PTY spawn failed"));
-        await expect(Promise.all([call1, call2])).resolves.toBeDefined();
+        const error = new Error("PTY spawn failed");
+        const rejected = expect(Promise.all([call1, call2])).rejects.toBe(error);
+        deferredSpawn.reject(error);
+        await rejected;
       });
 
       expect(result.current.state.sessions["session-inflight"].backendSessionId).toBeNull();
@@ -1479,7 +1483,7 @@ describe("worktree tab and session isolation", () => {
         retryCall = (result.current as any).ensureSessionBackends(["session-inflight"]);
       });
       await act(async () => {
-        await Promise.resolve();
+        await deferredSpawn.started;
       });
       expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
 

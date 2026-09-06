@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { RegisteredProject, Worktree, WorktreeChangedPayload } from "../lib/types";
@@ -44,6 +44,13 @@ function createServices(overrides?: Partial<InactiveProjectWorktreeServices>) {
   } satisfies InactiveProjectWorktreeServices;
 }
 
+async function settleServices(services: InactiveProjectWorktreeServices) {
+  await act(async () => {
+    await Promise.allSettled(vi.mocked(services.registerProject).mock.results.map((result) => result.value));
+    await Promise.allSettled(vi.mocked(services.listWorktrees).mock.results.map((result) => result.value));
+  });
+}
+
 describe("useInactiveProjectWorktrees", () => {
   it("registers then lists worktrees for inactive projects only", async () => {
     const services = createServices();
@@ -51,7 +58,8 @@ describe("useInactiveProjectWorktrees", () => {
       useInactiveProjectWorktrees([gitProject, plainProject], plainProject.workspaceId, [], services),
     );
 
-    await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]));
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]);
 
     expect(services.registerProject).toHaveBeenCalledWith({
       workspaceId: gitProject.workspaceId,
@@ -68,8 +76,8 @@ describe("useInactiveProjectWorktrees", () => {
       useInactiveProjectWorktrees([gitProject, plainProject], gitProject.workspaceId, [], services),
     );
 
-    await waitFor(() =>
-      expect(result.current[plainProject.workspaceId]).toEqual([
+    await settleServices(services);
+    expect(result.current[plainProject.workspaceId]).toEqual([
         {
           path: plainProject.repoRoot,
           head: "",
@@ -79,8 +87,7 @@ describe("useInactiveProjectWorktrees", () => {
           locked: null,
           prunable: null,
         },
-      ]),
-    );
+      ]);
   });
 
   it("does not list worktrees for a project whose registration reports a root conflict", async () => {
@@ -94,7 +101,8 @@ describe("useInactiveProjectWorktrees", () => {
       useInactiveProjectWorktrees([gitProject, plainProject], "superwiki-mail-otp", [], services),
     );
 
-    await waitFor(() => expect(services.registerProject).toHaveBeenCalled());
+    await settleServices(services);
+    expect(services.registerProject).toHaveBeenCalled();
     expect(services.listWorktrees).not.toHaveBeenCalledWith("orca-lite");
     expect(result.current["orca-lite"] ?? []).toEqual([]);
   });
@@ -110,7 +118,8 @@ describe("useInactiveProjectWorktrees", () => {
       useInactiveProjectWorktrees([gitProject, plainProject], "other", [], services),
     );
 
-    await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([]));
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([]);
     expect(result.current[plainProject.workspaceId]).toHaveLength(1);
   });
 
@@ -149,8 +158,8 @@ describe("useInactiveProjectWorktrees", () => {
 
     expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]);
 
-    resolveGitProjectListing([mainWorktree]);
-    await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]));
+    await act(async () => { resolveGitProjectListing([mainWorktree]); await gitProjectListingPromise; });
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]);
   });
 
   it("re-lists an inactive project when the backend reports one of its worktrees deleted", async () => {
@@ -172,17 +181,19 @@ describe("useInactiveProjectWorktrees", () => {
       useInactiveProjectWorktrees([gitProject, plainProject], plainProject.workspaceId, [], services),
     );
 
-    await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]));
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]);
 
     expect(worktreeChangedHandler).not.toBeNull();
     services.listWorktrees = vi.fn(async () => []);
-    worktreeChangedHandler!({
+    act(() => { worktreeChangedHandler!({
       workspaceId: gitProject.workspaceId,
       kind: "deleted",
       worktree: { wsId: gitProject.workspaceId, slug: "main" },
-    });
+    }); });
 
-    await waitFor(() => expect(result.current[gitProject.workspaceId]).toEqual([]));
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([]);
   });
 
   it("ignores worktree change events for projects it does not track", async () => {
@@ -195,16 +206,15 @@ describe("useInactiveProjectWorktrees", () => {
       useInactiveProjectWorktrees([gitProject, plainProject], gitProject.workspaceId, [], services),
     );
 
-    // Wait for the initial inactive listing to settle (plain project gets its folder root).
-    await waitFor(() => expect(result.current[plainProject.workspaceId]).toHaveLength(1));
+    await settleServices(services);
+    expect(result.current[plainProject.workspaceId]).toHaveLength(1);
     const callsBefore = (services.listWorktrees as ReturnType<typeof vi.fn>).mock.calls.length;
 
-    worktreeChangedHandlerRef?.({
+    act(() => { worktreeChangedHandlerRef?.({
       workspaceId: "untracked-ws",
       kind: "deleted",
       worktree: { wsId: "untracked-ws", slug: "main" },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    }); });
 
     const callsAfter = (services.listWorktrees as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(callsAfter).toBe(callsBefore);
