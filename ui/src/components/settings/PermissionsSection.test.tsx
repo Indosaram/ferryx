@@ -193,21 +193,36 @@ describe("PermissionsSection", () => {
   });
 
   it("resets dismissed key and dispatches open-onboarding event on Re-run Welcome Setup", async () => {
-    window.localStorage.setItem("ferryx.permissions.onboarding-dismissed", "true");
-    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusNotGranted);
-
-    const onEvent = vi.fn();
-    window.addEventListener("ferryx:open-permissions-onboarding", onEvent, { once: true });
-
-    render(<PermissionsSection />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("rerun-permissions-onboarding")).toBeDefined();
+    const nav = window.navigator as Navigator & Record<string, unknown>;
+    const savedPlatform = Object.getOwnPropertyDescriptor(nav, "platform");
+    const savedUserAgent = Object.getOwnPropertyDescriptor(nav, "userAgent");
+    Object.defineProperty(nav, "platform", { value: "MacIntel", configurable: true });
+    Object.defineProperty(nav, "userAgent", {
+      value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      configurable: true,
     });
+    try {
+      window.localStorage.setItem("ferryx.permissions.onboarding-dismissed", "true");
+      mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusNotGranted);
 
-    fireEvent.click(screen.getByTestId("rerun-permissions-onboarding"));
+      const onEvent = vi.fn();
+      window.addEventListener("ferryx:open-permissions-onboarding", onEvent, { once: true });
 
-    expect(window.localStorage.getItem("ferryx.permissions.onboarding-dismissed")).toBeNull();
-    expect(onEvent).toHaveBeenCalledTimes(1);
+      render(<PermissionsSection />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("rerun-permissions-onboarding")).toBeDefined();
+      });
+
+      fireEvent.click(screen.getByTestId("rerun-permissions-onboarding"));
+
+      expect(window.localStorage.getItem("ferryx.permissions.onboarding-dismissed")).toBeNull();
+      expect(onEvent).toHaveBeenCalledTimes(1);
+    } finally {
+      if (savedPlatform) Object.defineProperty(nav, "platform", savedPlatform);
+      else Reflect.deleteProperty(nav, "platform");
+      if (savedUserAgent) Object.defineProperty(nav, "userAgent", savedUserAgent);
+      else Reflect.deleteProperty(nav, "userAgent");
+    }
   });
 });
