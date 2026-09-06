@@ -197,4 +197,45 @@ describe("NotificationsSection", () => {
       window.removeEventListener(NOTIFICATION_SETTINGS_EVENT, listener);
     }
   });
+
+  it("renders dock badge off hint on macos when dock badge is disabled", async () => {
+    native.getNotificationPermissionStatus.mockResolvedValue({
+      authorization: "authorized",
+      authoritative: true,
+      supported: true,
+      platform: "macos",
+      badgesEnabled: false,
+    });
+    await act(async () => { render(<NotificationsSection />); });
+
+    expect(screen.getByText("Dock badge: Off")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Enable 'Badge application icon' under System Settings → Notifications → Ferryx."
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("shows registered-capability notice when requesting permission while already authorized", async () => {
+    native.getNotificationPermissionStatus.mockResolvedValue({
+      authorization: "authorized",
+      authoritative: true,
+      supported: true,
+      platform: "macos",
+      badgesEnabled: false,
+    });
+    native.requestNotificationPermission.mockResolvedValue({ granted: true });
+
+    await act(async () => { render(<NotificationsSection />); });
+
+    const requestButton = screen.getByRole("button", { name: /request permission/i });
+    await act(async () => { fireEvent.click(requestButton); });
+
+    expect(native.requestNotificationPermission).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText(
+        "macOS does not re-prompt apps that already have permission. The badge capability was registered — enable 'Badge application icon' under System Settings → Notifications → Ferryx if the Dock badge is missing."
+      )
+    ).toBeInTheDocument();
+  });
 });

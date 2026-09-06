@@ -253,6 +253,7 @@ pub(crate) mod test_support {
             authorization,
             alerts_enabled: Some(authorization == NotificationAuthorization::Authorized),
             sounds_enabled: Some(authorization == NotificationAuthorization::Authorized),
+            badges_enabled: Some(authorization == NotificationAuthorization::Authorized),
             requested: authorization != NotificationAuthorization::NotDetermined,
             authoritative: true,
             can_open_settings: true,

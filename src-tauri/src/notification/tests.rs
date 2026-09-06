@@ -25,6 +25,7 @@ fn notification_fallback_does_not_claim_permission() {
     assert_eq!(status.authorization, NotificationAuthorization::Unknown);
     assert_eq!(status.alerts_enabled, None);
     assert_eq!(status.sounds_enabled, None);
+    assert_eq!(status.badges_enabled, None);
 }
 
 fn request(source: NotificationSource) -> DispatchNotificationRequest {
@@ -310,6 +311,7 @@ fn permission_status_dto_matches_the_documented_wire_shape() {
         authorization: NotificationAuthorization::NotDetermined,
         alerts_enabled: Some(true),
         sounds_enabled: None,
+        badges_enabled: Some(false),
         requested: false,
         authoritative: true,
         can_open_settings: true,
@@ -323,11 +325,35 @@ fn permission_status_dto_matches_the_documented_wire_shape() {
             "authorization": "not-determined",
             "alertsEnabled": true,
             "soundsEnabled": null,
+            "badgesEnabled": false,
             "requested": false,
             "authoritative": true,
             "canOpenSettings": true,
         })
     );
+}
+
+#[test]
+fn permission_status_dto_round_trips_badges_enabled() {
+    for badge_val in [Some(true), Some(false), None] {
+        let status = NotificationPermissionStatusDto {
+            platform: NotificationPlatform::Macos,
+            supported: true,
+            authorization: NotificationAuthorization::Authorized,
+            alerts_enabled: Some(true),
+            sounds_enabled: Some(true),
+            badges_enabled: badge_val,
+            requested: true,
+            authoritative: true,
+            can_open_settings: true,
+        };
+
+        let encoded = serde_json::to_string(&status).expect("encode");
+        let decoded: NotificationPermissionStatusDto =
+            serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, status);
+        assert_eq!(decoded.badges_enabled, badge_val);
+    }
 }
 
 #[test]

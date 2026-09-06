@@ -68,6 +68,7 @@ export function NotificationsSection() {
   const [permissionStatus, setPermissionStatus] = useState<NotificationPermissionStatus | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [requestNotice, setRequestNotice] = useState<string | null>(null);
 
   const refreshPermission = useCallback(async () => {
     try {
@@ -85,10 +86,25 @@ export function NotificationsSection() {
     return () => window.removeEventListener("focus", onFocus);
   }, [refreshPermission]);
 
+  const auth = permissionStatus?.supported === false ? "unavailable"
+    : permissionStatus?.authoritative === false ? "unknown"
+    : permissionStatus?.authorization ?? "unknown";
+
+  const isAuthorized = auth === "authorized" || auth === "provisional";
+  const isDenied = auth === "denied";
+  const canRequestPermission = auth !== "unavailable";
+
   const handleRequestPermission = async () => {
+    const preClickAuth = auth;
+    setRequestNotice(null);
     try {
       await requestNotificationPermission();
       await refreshPermission();
+      if (preClickAuth === "authorized" || preClickAuth === "provisional") {
+        setRequestNotice(
+          "macOS does not re-prompt apps that already have permission. The badge capability was registered — enable 'Badge application icon' under System Settings → Notifications → Ferryx if the Dock badge is missing."
+        );
+      }
     } catch (err) {
       console.error("Failed to request notification permission:", err);
     }
@@ -149,14 +165,6 @@ export function NotificationsSection() {
       setIsTesting(false);
     }
   };
-
-  const auth = permissionStatus?.supported === false ? "unavailable"
-    : permissionStatus?.authoritative === false ? "unknown"
-    : permissionStatus?.authorization ?? "unknown";
-
-  const isAuthorized = auth === "authorized" || auth === "provisional";
-  const isDenied = auth === "denied";
-  const canRequestPermission = auth !== "unavailable";
 
   let permissionBadgeClass =
     "border-status-warning/20 bg-status-warning/10 text-status-warning";
@@ -220,6 +228,38 @@ export function NotificationsSection() {
             </Button>
           ) : null}
         </div>
+
+        {permissionStatus &&
+        permissionStatus.supported &&
+        permissionStatus.platform === "macos" &&
+        permissionStatus.badgesEnabled !== undefined &&
+        permissionStatus.badgesEnabled !== null ? (
+          <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-border/50 pt-2 text-[11px]">
+            <Badge
+              variant="outline"
+              className={`px-2 py-0.5 text-[11px] font-medium ${
+                permissionStatus.badgesEnabled
+                  ? "border-status-success/20 bg-status-success/10 text-status-success"
+                  : "border-status-warning/20 bg-status-warning/10 text-status-warning"
+              }`}
+            >
+              Dock badge: {permissionStatus.badgesEnabled ? "On" : "Off"}
+            </Badge>
+            {!permissionStatus.badgesEnabled ? (
+              <span className="text-muted-foreground">
+                Enable 'Badge application icon' under System Settings → Notifications → Ferryx.
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        {requestNotice ? (
+          <Alert role="alert" className="mt-3">
+            <AlertDescription className="text-[11px] leading-normal">
+              {requestNotice}
+            </AlertDescription>
+          </Alert>
+        ) : null}
       </Card>
 
       <SettingsGroup

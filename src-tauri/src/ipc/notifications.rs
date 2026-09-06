@@ -409,6 +409,7 @@ mod tests {
             authorization: NotificationAuthorization::Denied,
             alerts_enabled: Some(false),
             sounds_enabled: Some(true),
+            badges_enabled: Some(true),
             requested: true,
             authoritative: true,
             can_open_settings: true,

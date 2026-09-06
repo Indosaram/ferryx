@@ -136,6 +136,7 @@ pub mod macos {
             authorization,
             alerts_enabled: map_notification_setting(settings.alertSetting()),
             sounds_enabled: map_notification_setting(settings.soundSetting()),
+            badges_enabled: map_notification_setting(settings.badgeSetting()),
             requested: authorization != NotificationAuthorization::NotDetermined,
             authoritative: true,
             can_open_settings: true,

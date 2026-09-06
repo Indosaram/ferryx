@@ -454,6 +454,7 @@ export interface NotificationPermissionStatus {
   authorization: NotificationAuthorization;
   alertsEnabled?: boolean | null;
   soundsEnabled?: boolean | null;
+  badgesEnabled?: boolean | null;
   requested?: boolean;
   authoritative?: boolean;
   canOpenSettings?: boolean;
