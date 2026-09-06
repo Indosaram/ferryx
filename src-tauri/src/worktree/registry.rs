@@ -15,8 +15,11 @@ impl WorkspaceRegistry {
         Self::default()
     }
 
-    fn validate_workspace_id(workspace_id: &str) -> Result<&str, WorktreeError> {
+    pub(crate) fn validate_workspace_id(workspace_id: &str) -> Result<&str, WorktreeError> {
         let workspace_id = workspace_id.trim();
+        if crate::ssh::projects::is_remote(workspace_id) {
+            return Err(WorktreeError::RemoteUnsupported);
+        }
         if workspace_id.is_empty() {
             return Err(WorktreeError::InvalidNamespace {
                 reason: "Workspace registry ID cannot be empty".into(),

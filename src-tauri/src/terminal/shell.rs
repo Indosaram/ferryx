@@ -4,6 +4,8 @@ use portable_pty::CommandBuilder;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentResumeError {
+    #[error("SSH startup requires daemon workspace resolution")]
+    RemoteSshRequiresWorkspace,
     #[error("Unsupported agent type: {0}")]
     UnsupportedAgent(String),
     #[error("Invalid provider session id: {0}")]
@@ -389,6 +391,9 @@ where
     E: Fn(&str) -> Option<String>,
 {
     match startup {
+        Some(TerminalStartup::RemoteSsh { .. }) => {
+            Err(AgentResumeError::RemoteSshRequiresWorkspace)
+        }
         Some(TerminalStartup::AgentResume {
             agent_type,
             provider_session,

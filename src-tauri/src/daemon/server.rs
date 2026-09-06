@@ -742,7 +742,10 @@ impl ProviderSessionClaimKey {
         let TerminalStartup::AgentResume {
             agent_type,
             provider_session,
-        } = startup?;
+        } = startup?
+        else {
+            return None;
+        };
         let agent_type = agent_type.trim().to_ascii_lowercase();
         let transcript_path = if matches!(agent_type.as_str(), "pi" | "prime-agent") {
             provider_session
@@ -1404,7 +1407,9 @@ impl DaemonServer {
                     session_id,
                     after_sequence,
                 }) => {
-                    if self.session_router.is_local_session(&session_id) {
+                    if let Err(error) = self.validate_session_ssh_target(&session_id).await {
+                        DaemonResponse::Error { message: error.to_string() }
+                    } else if self.session_router.is_local_session(&session_id) {
                         match self
                             .terminal_service
                             .attach_with_sequence(&session_id, after_sequence)
@@ -1770,6 +1775,7 @@ impl DaemonServer {
         workspace_id: &str,
         repo_root: &str,
     ) -> Result<(), String> {
+        WorkspaceRegistry::validate_workspace_id(workspace_id).map_err(|e| e.to_string())?;
         let path = PathBuf::from(repo_root);
         if !path.is_absolute() {
             return Err("repo_root must be an absolute path".into());
@@ -1897,6 +1903,32 @@ impl DaemonServer {
             return Err(SpawnError::Other("clientRequestId cannot be empty".into()));
         }
 
+        let remote = match (
+            crate::ssh::projects::is_remote(workspace_id),
+            startup.as_ref(),
+        ) {
+            (true, Some(TerminalStartup::RemoteSsh { host_store_path })) => {
+                if worktree.is_some() || cwd.is_some() || shell.is_some() {
+                    return Err(SpawnError::Other(
+                        "SSH worktrees, custom CWD and local shell overrides are unsupported"
+                            .into(),
+                    ));
+                }
+                let path = host_store_path.clone();
+                let id = workspace_id.to_string();
+                Some(
+                    crate::ipc::run_blocking(move || crate::ssh::projects::resolve(&path, &id))
+                        .await
+                        .map_err(|e| SpawnError::Other(e.to_string()))?,
+                )
+            }
+            (true, _) | (false, Some(TerminalStartup::RemoteSsh { .. })) => {
+                return Err(SpawnError::Other(
+                    "SSH workspace requires stored SSH routing; local fallback is forbidden".into(),
+                ));
+            }
+            (false, _) => None,
+        };
         let _spawn_guard = self.spawn_lock.lock().await;
 
         let now = Instant::now();
@@ -1950,65 +1982,79 @@ impl DaemonServer {
             return Ok(live_session_id);
         }
 
-        // Resolve manager from workspace registry; workspace MUST be registered.
-        let (mgr, default_cwd) = self
-            .workspace_registry
-            .resolve_terminal_target(workspace_id, worktree.as_ref())
+        let (session_id, mut lifecycle_rx, resolved_cwd) = if let Some((project, host)) = remote {
+            let service = self.terminal_service.clone();
+            let root = project.repo_root.clone();
+            let (id, rx) = crate::ipc::run_blocking(move || {
+                service
+                    .spawn_ssh(&host, &root, cols, rows)
+                    .map_err(crate::ipc::IpcError::from)
+            })
+            .await
             .map_err(|e| SpawnError::Other(e.to_string()))?;
+            (id, rx, PathBuf::from(project.repo_root))
+        } else {
+            // Resolve manager from workspace registry; workspace MUST be registered.
+            let (mgr, default_cwd) = self
+                .workspace_registry
+                .resolve_terminal_target(workspace_id, worktree.as_ref())
+                .map_err(|e| SpawnError::Other(e.to_string()))?;
 
-        let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {
-            let custom_path = PathBuf::from(custom_cwd_str);
-            if !custom_path.exists() {
-                return Err(SpawnError::Other(format!(
-                    "CWD does not exist: {custom_cwd_str}"
-                )));
-            }
-            if !custom_path.is_dir() {
-                return Err(SpawnError::Other(format!(
-                    "CWD is not a directory: {custom_cwd_str}"
-                )));
-            }
-            let canonical = fs::canonicalize(&custom_path).map_err(|e| {
-                SpawnError::Other(format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))
-            })?;
-            let allowed = mgr.canonical_allowed_path(&canonical).map_err(|e| {
-                SpawnError::Other(format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))
-            })?;
-            if allowed != default_cwd && !allowed.starts_with(&default_cwd) {
-                return Err(SpawnError::Other(format!(
+            let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {
+                let custom_path = PathBuf::from(custom_cwd_str);
+                if !custom_path.exists() {
+                    return Err(SpawnError::Other(format!(
+                        "CWD does not exist: {custom_cwd_str}"
+                    )));
+                }
+                if !custom_path.is_dir() {
+                    return Err(SpawnError::Other(format!(
+                        "CWD is not a directory: {custom_cwd_str}"
+                    )));
+                }
+                let canonical = fs::canonicalize(&custom_path).map_err(|e| {
+                    SpawnError::Other(format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))
+                })?;
+                let allowed = mgr.canonical_allowed_path(&canonical).map_err(|e| {
+                    SpawnError::Other(format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))
+                })?;
+                if allowed != default_cwd && !allowed.starts_with(&default_cwd) {
+                    return Err(SpawnError::Other(format!(
                     "CWD '{custom_cwd_str}' is outside the resolved workspace/worktree root '{}'",
                     default_cwd.display()
                 )));
-            }
-            allowed
-        } else {
-            default_cwd
-        };
+                }
+                allowed
+            } else {
+                default_cwd
+            };
 
-        let mut cmd = match crate::terminal::shell::resolve_startup_command(
-            shell.as_deref(),
-            startup.as_ref(),
-        ) {
-            Ok(cmd) => cmd,
-            Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
-        };
-        if let Some(claim) = provider_claim.as_ref() {
-            if let Some(existing_session_id) = self.provider_session_claims.lock().get(claim) {
-                return Err(SpawnError::AgentSessionConflict {
-                    agent_type: claim.agent_type.clone(),
-                    provider_key: claim.provider_key,
-                    provider_id: claim.provider_id.clone(),
-                    existing_session_id: existing_session_id.clone(),
-                });
+            let mut cmd = match crate::terminal::shell::resolve_startup_command(
+                shell.as_deref(),
+                startup.as_ref(),
+            ) {
+                Ok(cmd) => cmd,
+                Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
+            };
+            if let Some(claim) = provider_claim.as_ref() {
+                if let Some(existing_session_id) = self.provider_session_claims.lock().get(claim) {
+                    return Err(SpawnError::AgentSessionConflict {
+                        agent_type: claim.agent_type.clone(),
+                        provider_key: claim.provider_key,
+                        provider_id: claim.provider_id.clone(),
+                        existing_session_id: existing_session_id.clone(),
+                    });
+                }
             }
-        }
-        cmd.env("PROMPT_EOL_MARK", "");
-        cmd.cwd(normalize_process_cwd(&resolved_cwd));
+            cmd.env("PROMPT_EOL_MARK", "");
+            cmd.cwd(normalize_process_cwd(&resolved_cwd));
 
-        let (session_id, mut lifecycle_rx) = self
-            .terminal_service
-            .spawn_in_worktree(cmd, cols, rows, &mgr, &resolved_cwd)
-            .map_err(|e| SpawnError::Other(e.to_string()))?;
+            let (session_id, lifecycle_rx) = self
+                .terminal_service
+                .spawn_in_worktree(cmd, cols, rows, &mgr, &resolved_cwd)
+                .map_err(|e| SpawnError::Other(e.to_string()))?;
+            (session_id, lifecycle_rx, resolved_cwd)
+        };
 
         // Store idempotency entry and session metadata before releasing the request lock.
         self.spawn_idempotency_cache.lock().insert(
@@ -2063,6 +2109,24 @@ impl DaemonServer {
         });
 
         Ok(session_id)
+    }
+
+    async fn validate_session_ssh_target(
+        &self,
+        session_id: &str,
+    ) -> Result<(), crate::ipc::IpcError> {
+        let meta = self.session_metadata.read().get(session_id).cloned();
+        if let Some(meta) = meta {
+            if let Some(TerminalStartup::RemoteSsh { host_store_path }) =
+                meta.spawn_fingerprint.startup
+            {
+                crate::ipc::run_blocking(move || {
+                    crate::ssh::projects::resolve(&host_store_path, &meta.workspace_id)
+                })
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn handle_close(&self, session_id: &str) -> Result<(), crate::terminal::PtyError> {
@@ -2438,6 +2502,10 @@ impl DaemonServer {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "remote_ssh_tests.rs"]
+mod remote_ssh_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

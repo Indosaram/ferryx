@@ -629,6 +629,7 @@ async fn cmd_project_unregister_removes_registry_entry() {
         .expect("mock app");
 
     cmd_project_unregister(
+        app.handle().clone(),
         app.state::<Arc<DaemonClient>>(),
         app.state::<WorkspaceRegistry>(),
         UnregisterProjectRequest {
@@ -643,6 +644,7 @@ async fn cmd_project_unregister_removes_registry_entry() {
     // Unregistering an unknown workspace is an acknowledged no-op, not an error:
     // the frontend catalog is the source of truth and may already be gone.
     cmd_project_unregister(
+        app.handle().clone(),
         app.state::<Arc<DaemonClient>>(),
         app.state::<WorkspaceRegistry>(),
         UnregisterProjectRequest {
@@ -657,9 +659,16 @@ async fn cmd_project_unregister_removes_registry_entry() {
 
 #[tokio::test]
 async fn cmd_path_reveal_rejects_nonexistent_path_with_invalid_path_code() {
-    let err = cmd_path_reveal("/definitely/not/a/real/path/orca-lite-probe".to_string())
-        .await
-        .expect_err("nonexistent path must be rejected before any spawn");
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let err = cmd_path_reveal(
+        app.handle().clone(),
+        "/definitely/not/a/real/path/orca-lite-probe".to_string(),
+        None,
+    )
+    .await
+    .expect_err("nonexistent path must be rejected before any spawn");
     assert_eq!(err.code, IpcErrorCode::InvalidPath);
 }
 

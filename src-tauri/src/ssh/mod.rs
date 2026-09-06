@@ -1,5 +1,7 @@
 pub mod config;
+pub mod direct;
 pub mod exec;
+pub mod projects;
 pub mod worktree;
 
 use serde::{Deserialize, Serialize};

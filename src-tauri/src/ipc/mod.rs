@@ -15,6 +15,7 @@ pub mod notifications;
 pub mod permissions;
 pub mod preferences;
 pub mod project;
+pub mod project_remote;
 pub mod remote;
 pub mod session;
 pub mod ssh;

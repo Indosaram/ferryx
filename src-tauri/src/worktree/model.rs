@@ -124,6 +124,9 @@ pub struct BranchDeletionPreview {
 
 #[derive(Debug, Error)]
 pub enum WorktreeError {
+    #[error("Local filesystem and Git operations are unsupported for direct SSH projects")]
+    RemoteUnsupported,
+
     #[error("Git command failed ({command}): {stderr} (exit code: {code:?})")]
     GitError {
         command: String,

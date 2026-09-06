@@ -8,12 +8,19 @@ pub fn probe_argv(host: &SshHost) -> Vec<String> {
         "-o".to_string(),
         "ConnectTimeout=2.5".to_string(),
     ];
+    append_options(&mut argv, host);
     append_target(&mut argv, host);
     argv
 }
 
 pub fn interactive_argv(host: &SshHost) -> Vec<String> {
     let mut argv = vec!["ssh".to_string(), "-tt".to_string()];
+    append_options(&mut argv, host);
+    append_target(&mut argv, host);
+    argv
+}
+
+fn append_options(argv: &mut Vec<String>, host: &SshHost) {
     if let Some(port) = host.port {
         argv.push("-p".to_string());
         argv.push(port.to_string());
@@ -26,8 +33,6 @@ pub fn interactive_argv(host: &SshHost) -> Vec<String> {
         argv.push("-J".to_string());
         argv.push(jump.clone());
     }
-    append_target(&mut argv, host);
-    argv
 }
 
 fn append_target(argv: &mut Vec<String>, host: &SshHost) {
@@ -57,6 +62,26 @@ mod tests {
             source: SshHostSource::Config,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+        }
+    }
+
+    #[test]
+    fn probe_honors_saved_connection_options() {
+        let argv = probe_argv(&host(
+            Some(2200),
+            Some("/keys/key with space"),
+            Some("jump"),
+            Some("user"),
+        ));
+        for pair in [
+            ["-p", "2200"],
+            ["-i", "/keys/key with space"],
+            ["-J", "jump"],
+        ] {
+            assert!(
+                argv.windows(2).any(|args| args == pair),
+                "missing {pair:?} in {argv:?}"
+            );
         }
     }
 

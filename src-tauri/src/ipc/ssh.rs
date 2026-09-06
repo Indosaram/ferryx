@@ -1,9 +1,5 @@
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::ssh::config::parse_ssh_config;
-use crate::ssh::exec::probe_argv;
-use crate::ssh::worktree::{
-    parse_worktree_porcelain, remote_add_argv, remote_list_argv, remote_remove_argv,
-};
 use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -28,7 +24,7 @@ pub struct SshHostStore {
     pub tombstones: Vec<String>,
 }
 
-fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
+pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
     let app_dir = app.path().app_data_dir().map_err(|e| {
         IpcError::new(
             IpcErrorCode::IoError,
@@ -160,50 +156,22 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_ssh_test_connection(host: SshHost) -> Result<SshTargetSummary, IpcError> {
-    run_blocking(move || {
-        let output = std::process::Command::new(&probe_argv(&host)[0])
-            .args(&probe_argv(&host)[1..])
-            .output();
-        let (reachable, last_error) = match output {
-            Ok(result) if result.status.success() => (true, None),
-            Ok(result) => {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                let message = stderr.lines().last().unwrap_or("ssh failed").to_string();
-                (false, Some(message))
-            }
-            Err(error) => (false, Some(format!("failed to spawn ssh: {error}"))),
-        };
-        Ok(SshTargetSummary {
-            host,
-            reachable,
-            last_error,
-            checked_at: now_millis(),
-        })
+    let plan = crate::ssh::direct::ssh_plan(&host, "true".into(), false)?;
+    let result = crate::ssh::direct::bounded_output(&plan, std::time::Duration::from_secs(8)).await;
+    Ok(SshTargetSummary {
+        host,
+        reachable: result.is_ok(),
+        last_error: result.err().map(|e| e.message),
+        checked_at: now_millis(),
     })
-    .await
 }
 
 #[tauri::command]
 pub async fn cmd_ssh_list_remote_worktrees(
     host: SshHost,
 ) -> Result<Vec<crate::ssh::worktree::RemoteWorktree>, IpcError> {
-    run_blocking(move || {
-        let argv = remote_list_argv(&host);
-        let output = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .map_err(|error| IpcError::internal(format!("failed to spawn ssh: {error}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(IpcError::internal(format!(
-                "remote worktree list failed: {stderr}"
-            )));
-        }
-        Ok(parse_worktree_porcelain(&String::from_utf8_lossy(
-            &output.stdout,
-        )))
-    })
-    .await
+    let _ = host;
+    Err(crate::ssh::projects::unsupported())
 }
 
 #[tauri::command]
@@ -214,41 +182,14 @@ pub async fn cmd_ssh_create_remote_worktree(
     slug: String,
     base_ref: Option<String>,
 ) -> Result<(), IpcError> {
-    run_blocking(move || {
-        let argv = remote_add_argv(&host, &path, &ws_id, &slug, base_ref.as_deref())
-            .map_err(IpcError::internal)?;
-        let output = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .map_err(|error| IpcError::internal(format!("failed to spawn ssh: {error}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(IpcError::internal(format!(
-                "remote worktree create failed: {stderr}"
-            )));
-        }
-        Ok(())
-    })
-    .await
+    let _ = (host, path, ws_id, slug, base_ref);
+    Err(crate::ssh::projects::unsupported())
 }
 
 #[tauri::command]
 pub async fn cmd_ssh_delete_remote_worktree(host: SshHost, path: String) -> Result<(), IpcError> {
-    run_blocking(move || {
-        let argv = remote_remove_argv(&host, &path);
-        let output = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .map_err(|error| IpcError::internal(format!("failed to spawn ssh: {error}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(IpcError::internal(format!(
-                "remote worktree remove failed: {stderr}"
-            )));
-        }
-        Ok(())
-    })
-    .await
+    let _ = (host, path);
+    Err(crate::ssh::projects::unsupported())
 }
 
 #[cfg(test)]

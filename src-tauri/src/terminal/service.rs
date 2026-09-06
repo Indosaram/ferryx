@@ -45,10 +45,35 @@ impl TerminalService {
         worktree_manager: &WorktreeManager,
         worktree_path: &Path,
     ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
-        let (session_id, mut pty_rx) =
+        let (session_id, pty_rx) =
             self.pty_manager
                 .spawn_in_worktree(cmd, cols, rows, worktree_manager, worktree_path)?;
+        Ok(self.register_output(session_id, pty_rx, cols, rows))
+    }
 
+    pub fn spawn_ssh(
+        &self,
+        host: &crate::ssh::SshHost,
+        remote_root: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
+        let plan = crate::ssh::direct::shell_plan(host, remote_root)
+            .map_err(|e| PtyError::Other(e.to_string()))?;
+        let mut cmd = CommandBuilder::new(&plan.program);
+        cmd.args(&plan.args);
+        // No remote path is ever used as the local SSH process working directory.
+        let (session_id, pty_rx) = self.pty_manager.spawn(cmd, cols, rows)?;
+        Ok(self.register_output(session_id, pty_rx, cols, rows))
+    }
+
+    fn register_output(
+        &self,
+        session_id: String,
+        mut pty_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        cols: u16,
+        rows: u16,
+    ) -> (String, broadcast::Receiver<Vec<u8>>) {
         let broadcast_rx = self.output_hub.register_session(&session_id);
         self.output_hub.record_initial_size(&session_id, cols, rows);
 
@@ -67,7 +92,7 @@ impl TerminalService {
             output_hub.remove_session(&session_id_clone);
         });
 
-        Ok((session_id, broadcast_rx))
+        (session_id, broadcast_rx)
     }
 
     pub fn attach(

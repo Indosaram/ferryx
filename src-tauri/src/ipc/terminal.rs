@@ -578,127 +578,158 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
 
     let cols = request.cols.unwrap_or(80);
     let rows = request.rows.unwrap_or(24);
-    let registry = (*registry).clone();
-    let workspace_id = request.workspace_id.clone();
-    let identity = request.worktree.clone();
-    // Inherit the live CWD of an existing backend session when the frontend did not
-    // pin one, removing the separate getTerminalCwd IPC hop on split/restore paths.
-    let requested_cwd = match (request.cwd.clone(), request.inherit_from_session_id.clone()) {
-        (Some(cwd), _) => Some(cwd),
-        (None, Some(inherit_session_id)) => {
-            if let Some(cached) = get_cached_cwd(&inherit_session_id) {
-                Some(cached)
-            } else {
-                match daemon_client.describe_session(&inherit_session_id).await {
-                    Ok(details) => details.cwd.map(PathBuf::from),
-                    Err(err) => {
-                        eprintln!(
+    let spawn_result = if crate::ssh::projects::is_remote(&request.workspace_id) {
+        if request.worktree.is_some() || request.startup.is_some() {
+            return Err(crate::ssh::projects::unsupported());
+        }
+        let host_store_path = super::ssh::get_ssh_store_path(&app)?;
+        let lookup = host_store_path.clone();
+        let id = request.workspace_id.clone();
+        run_blocking(move || crate::ssh::projects::resolve(&lookup, &id)).await?;
+        // Splits and cold restore intentionally start at the registered remote root.
+        // Never inherit or canonicalize the local ssh process CWD.
+        daemon_client
+            .spawn_terminal_with_startup(
+                request
+                    .client_request_id
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                request.workspace_id,
+                None,
+                None,
+                cols,
+                rows,
+                None,
+                Some(TerminalStartup::RemoteSsh { host_store_path }),
+            )
+            .await?
+    } else {
+        if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
+            return Err(crate::ssh::projects::unsupported());
+        }
+        let registry = (*registry).clone();
+        let workspace_id = request.workspace_id.clone();
+        let identity = request.worktree.clone();
+        // Inherit the live CWD of an existing backend session when the frontend did not
+        // pin one, removing the separate getTerminalCwd IPC hop on split/restore paths.
+        let requested_cwd = match (request.cwd.clone(), request.inherit_from_session_id.clone()) {
+            (Some(cwd), _) => Some(cwd),
+            (None, Some(inherit_session_id)) => {
+                if let Some(cached) = get_cached_cwd(&inherit_session_id) {
+                    Some(cached)
+                } else {
+                    match daemon_client.describe_session(&inherit_session_id).await {
+                        Ok(details) => details.cwd.map(PathBuf::from),
+                        Err(err) => {
+                            eprintln!(
                             "[cmd_terminal_spawn] stage=inherit_cwd failed session={inherit_session_id} code={:?}",
                             err.code
                         );
-                        None
+                            None
+                        }
                     }
                 }
             }
-        }
-        (None, None) => None,
-    };
-
-    let (worktree_manager, worktree_root) = match run_blocking(move || {
-        registry
-            .resolve_terminal_target(&workspace_id, identity.as_ref())
-            .map_err(IpcError::from)
-    })
-    .await
-    {
-        Ok(target) => target,
-        Err(err) => {
-            eprintln!(
-                "[cmd_terminal_spawn] stage=resolve_target failed code={:?}",
-                err.code
-            );
-            return Err(err);
-        }
-    };
-
-    let worktree_for_validation = worktree_manager.clone();
-    let worktree_root_for_validation = worktree_root.clone();
-    let cwd = match run_blocking(move || {
-        let Some(requested) = requested_cwd else {
-            return Ok(worktree_root_for_validation);
+            (None, None) => None,
         };
-        let canonical = worktree_for_validation
-            .canonical_allowed_path(&requested)
-            .map_err(IpcError::from)?;
-        if canonical != worktree_root_for_validation
-            && !canonical.starts_with(&worktree_root_for_validation)
+
+        let (worktree_manager, worktree_root) = match run_blocking(move || {
+            registry
+                .resolve_terminal_target(&workspace_id, identity.as_ref())
+                .map_err(IpcError::from)
+        })
+        .await
         {
-            return Err(IpcError::from(WorktreeError::PathOutsideWorkspace {
-                path: requested,
-                root: worktree_root_for_validation,
-            }));
-        }
-        if !canonical.is_dir() {
-            return Err(IpcError::from(WorktreeError::InvalidPath {
-                path: canonical,
-                reason: "terminal cwd must be a directory".into(),
-            }));
-        }
-        Ok(canonical)
-    })
-    .await
-    {
-        Ok(cwd) => cwd,
-        Err(err) => {
+            Ok(target) => target,
+            Err(err) => {
+                eprintln!(
+                    "[cmd_terminal_spawn] stage=resolve_target failed code={:?}",
+                    err.code
+                );
+                return Err(err);
+            }
+        };
+
+        let worktree_for_validation = worktree_manager.clone();
+        let worktree_root_for_validation = worktree_root.clone();
+        let cwd = match run_blocking(move || {
+            let Some(requested) = requested_cwd else {
+                return Ok(worktree_root_for_validation);
+            };
+            let canonical = worktree_for_validation
+                .canonical_allowed_path(&requested)
+                .map_err(IpcError::from)?;
+            if canonical != worktree_root_for_validation
+                && !canonical.starts_with(&worktree_root_for_validation)
+            {
+                return Err(IpcError::from(WorktreeError::PathOutsideWorkspace {
+                    path: requested,
+                    root: worktree_root_for_validation,
+                }));
+            }
+            if !canonical.is_dir() {
+                return Err(IpcError::from(WorktreeError::InvalidPath {
+                    path: canonical,
+                    reason: "terminal cwd must be a directory".into(),
+                }));
+            }
+            Ok(canonical)
+        })
+        .await
+        {
+            Ok(cwd) => cwd,
+            Err(err) => {
+                eprintln!(
+                    "[cmd_terminal_spawn] stage=validate_cwd failed code={:?}",
+                    err.code
+                );
+                return Err(err);
+            }
+        };
+
+        let repo_root_str = worktree_manager.repo_root().to_string_lossy().to_string();
+        if let Err(err) = daemon_client
+            .register_workspace(&request.workspace_id, &repo_root_str)
+            .await
+        {
             eprintln!(
-                "[cmd_terminal_spawn] stage=validate_cwd failed code={:?}",
+                "[cmd_terminal_spawn] stage=daemon_register failed code={:?}",
                 err.code
             );
             return Err(err);
         }
-    };
 
-    let repo_root_str = worktree_manager.repo_root().to_string_lossy().to_string();
-    if let Err(err) = daemon_client
-        .register_workspace(&request.workspace_id, &repo_root_str)
-        .await
-    {
-        eprintln!(
-            "[cmd_terminal_spawn] stage=daemon_register failed code={:?}",
-            err.code
-        );
-        return Err(err);
-    }
+        let client_request_id = request
+            .client_request_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let effective_shell = request.shell.filter(|s| !s.trim().is_empty()).or_else(|| {
+            crate::terminal::cached_terminal_preferences()
+                .default_shell
+                .clone()
+        });
+        let spawn_result = match daemon_client
+            .spawn_terminal_with_startup(
+                client_request_id,
+                request.workspace_id,
+                request.worktree,
+                Some(cwd.to_string_lossy().to_string()),
+                cols,
+                rows,
+                effective_shell,
+                request.startup,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!(
+                    "[cmd_terminal_spawn] stage=daemon_spawn failed code={:?}",
+                    err.code
+                );
+                return Err(err);
+            }
+        };
 
-    let client_request_id = request
-        .client_request_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let effective_shell = request.shell.filter(|s| !s.trim().is_empty()).or_else(|| {
-        crate::terminal::cached_terminal_preferences()
-            .default_shell
-            .clone()
-    });
-    let spawn_result = match daemon_client
-        .spawn_terminal_with_startup(
-            client_request_id,
-            request.workspace_id,
-            request.worktree,
-            Some(cwd.to_string_lossy().to_string()),
-            cols,
-            rows,
-            effective_shell,
-            request.startup,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(err) => {
-            eprintln!(
-                "[cmd_terminal_spawn] stage=daemon_spawn failed code={:?}",
-                err.code
-            );
-            return Err(err);
-        }
+        spawn_result
     };
 
     let session_id = spawn_result.session_id.clone();

@@ -54,6 +54,7 @@ pub enum IpcErrorCode {
     CliPlatformUnsupported,
     CliExecutableNotFound,
     InternalError,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,6 +190,7 @@ impl From<WorktreeError> for IpcError {
             })),
             WorktreeError::ParseError(_) => Self::new(IpcErrorCode::ParseError, message),
             WorktreeError::Io(_) => Self::new(IpcErrorCode::IoError, message),
+            WorktreeError::RemoteUnsupported => Self::new(IpcErrorCode::Unsupported, message),
         }
     }
 }

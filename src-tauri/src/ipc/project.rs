@@ -76,6 +76,9 @@ fn register_canonical_project(
     repo_path: &Path,
     preferred_id: Option<&str>,
 ) -> Result<RegisteredProject, IpcError> {
+    if let Some(id) = preferred_id {
+        WorkspaceRegistry::validate_workspace_id(id).map_err(IpcError::from)?;
+    }
     // `try_new` canonicalizes the root (walking up to the Git top level when
     // the path lives inside a repository) and falls back to the folder itself
     // for plain directories, so the uniqueness check below compares
@@ -247,7 +250,8 @@ pub struct UnregisterProjectRequest {
 }
 
 #[tauri::command]
-pub async fn cmd_project_unregister(
+pub async fn cmd_project_unregister<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     daemon_client: State<'_, Arc<DaemonClient>>,
     workspace_registry: State<'_, WorkspaceRegistry>,
     request: UnregisterProjectRequest,
@@ -259,12 +263,23 @@ pub async fn cmd_project_unregister(
     daemon_client
         .unregister_workspace(&request.workspace_id)
         .await?;
-    workspace_registry.unregister(&request.workspace_id);
+    if crate::ssh::projects::is_remote(&request.workspace_id) {
+        let path = super::ssh::get_ssh_store_path(&app)?;
+        run_blocking(move || crate::ssh::projects::unregister(&path, &request.workspace_id))
+            .await?;
+    } else {
+        workspace_registry.unregister(&request.workspace_id);
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn cmd_path_reveal(path: String) -> Result<(), IpcError> {
+pub async fn cmd_path_reveal<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    path: String,
+    workspace_id: Option<String>,
+) -> Result<(), IpcError> {
+    crate::ssh::projects::guard_reveal(workspace_id.as_deref())?;
     run_blocking(move || {
         let p = std::path::Path::new(&path);
         if !p.exists() {

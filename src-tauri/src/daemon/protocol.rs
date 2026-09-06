@@ -51,6 +51,10 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalStartup {
+    /// Desktop-derived inventory location; the daemon resolves the workspace and
+    /// enabled host from disk on every spawn. Never accepts an arbitrary program.
+    #[serde(rename_all = "camelCase")]
+    RemoteSsh { host_store_path: std::path::PathBuf },
     #[serde(rename_all = "camelCase")]
     AgentResume {
         agent_type: String,

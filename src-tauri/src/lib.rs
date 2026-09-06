@@ -843,6 +843,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_project_initial,
         cmd_boot_trace,
         cmd_project_register,
+        ipc::project_remote::cmd_project_register_remote,
         cmd_project_unregister,
         cmd_path_reveal,
         ipc::ssh::cmd_ssh_list_hosts,
