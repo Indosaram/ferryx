@@ -21,7 +21,8 @@ content_view.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below
 1. `tauri.conf.json` already sets `"transparent": true` on the main window.
 2. `ui/src/index.css` (commit `75c4d36`) already scopes `background: transparent !important` to `html.platform-macos:has([data-testid="native-terminal-pane"])` and its entire ancestor DOM chain down to the terminal pane surface.
 3. With `WKWebView` placed above the native terminal view, the native terminal is visible through the transparent DOM, while DOM elements with opaque backgrounds (such as `<Toaster />` with `--normal-bg: var(--popover)`) naturally render **on top of** the native terminal.
-4. The toast stays in its canonical `bottom-right` position and renders on the topmost visual layer without being clipped by the terminal.
+4. `TabGroupDropSurface` (`[data-testid="tab-group-body"]`, `[data-tab-group-body-id]`, `[data-dnd-type="group-body"]`) is also explicitly included in the `html.platform-macos` transparency rule so its `bg-terminal` (`#282c34`) does not mask the native terminal canvas underneath.
+5. The toast stays in its canonical `bottom-right` position and renders on the topmost visual layer without being clipped by the terminal.
 
 ## Verification Evidence
 - `cargo check --manifest-path src-tauri/Cargo.toml`: exit code 0
