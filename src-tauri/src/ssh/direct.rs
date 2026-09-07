@@ -101,12 +101,15 @@ pub fn shell_plan(host: &SshHost, root: &str) -> Result<ShellCommandPlan, IpcErr
 
 pub fn probe_command(path: &str) -> Result<String, IpcError> {
     validate_remote_path(path)?;
-    Ok(format!("cd {} && root=$(pwd -P) && printf 'FERRYX_REMOTE_V1\\0%s\\0' \"$root\" && if gitroot=$(git rev-parse --show-toplevel 2>/dev/null); then printf '%s\\0' \"$gitroot\"; else printf '\\0'; fi", quote_posix(path)))
+    Ok(format!("cd {} && root=$(pwd -P) && printf 'FERRYX_REMOTE_V1\\0%s\\0' \"$root\" && if gitroot=$(git rev-parse --show-toplevel 2>/dev/null); then printf '%s\\0' \"$gitroot\"; else printf '\\0'; fi && if origin=$(git remote get-url origin 2>/dev/null); then printf '%s\\0' \"$origin\"; else printf '\\0'; fi", quote_posix(path)))
 }
 
-pub fn parse_probe(bytes: &[u8]) -> Result<(String, Option<String>), IpcError> {
+pub fn parse_probe(bytes: &[u8]) -> Result<(String, Option<String>, Option<String>), IpcError> {
     let parts = bytes.split(|b| *b == 0).collect::<Vec<_>>();
-    if parts.len() != 4 || parts[0] != b"FERRYX_REMOTE_V1" || !parts[3].is_empty() {
+    if (parts.len() != 4 && parts.len() != 5)
+        || parts[0] != b"FERRYX_REMOTE_V1"
+        || !parts.last().unwrap().is_empty()
+    {
         return Err(invalid("Invalid remote directory probe response"));
     }
     let root = std::str::from_utf8(parts[1]).map_err(|_| invalid("Remote path is not UTF-8"))?;
@@ -118,10 +121,20 @@ pub fn parse_probe(bytes: &[u8]) -> Result<(String, Option<String>), IpcError> {
         validate_remote_path(git)?;
         Some(git.to_string())
     };
-    Ok((root.to_string(), git_root))
+    let git_remote = if parts.len() == 5 {
+        let remote = std::str::from_utf8(parts[3]).map_err(|_| invalid("Remote origin URL is not UTF-8"))?;
+        if remote.trim().is_empty() {
+            None
+        } else {
+            Some(remote.trim().to_string())
+        }
+    } else {
+        None
+    };
+    Ok((root.to_string(), git_root, git_remote))
 }
 
-pub async fn probe(host: &SshHost, path: &str) -> Result<(String, Option<String>), IpcError> {
+pub async fn probe(host: &SshHost, path: &str) -> Result<(String, Option<String>, Option<String>), IpcError> {
     let plan = ssh_plan(host, probe_command(path)?, false)?;
     let output = bounded_output(&plan, Duration::from_secs(8)).await?;
     parse_probe(&output)

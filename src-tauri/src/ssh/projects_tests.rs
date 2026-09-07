@@ -39,6 +39,7 @@ pub(crate) fn project(host: &SshHost, root: &str) -> RemoteProject {
         host_id: host.id.clone(),
         repo_root: root.into(),
         git_root: None,
+        git_remote: None,
     }
 }
 

@@ -88,7 +88,7 @@ fn remote_shell_probe_canonicalizes_quoted_directory_and_reports_plain_or_git() 
     assert!(output.status.success());
     assert_eq!(
         parse_probe(&output.stdout).unwrap(),
-        (root.canonicalize().unwrap().to_str().unwrap().into(), None)
+        (root.canonicalize().unwrap().to_str().unwrap().into(), None, None)
     );
     assert!(std::process::Command::new("git")
         .arg("init")
@@ -97,12 +97,20 @@ fn remote_shell_probe_canonicalizes_quoted_directory_and_reports_plain_or_git() 
         .unwrap()
         .status
         .success());
+    assert!(std::process::Command::new("git")
+        .args(["remote", "add", "origin", "https://github.com/example/test.git"])
+        .current_dir(&root)
+        .output()
+        .unwrap()
+        .status
+        .success());
     let output = std::process::Command::new("/bin/sh")
         .args(["-c", &command])
         .output()
         .unwrap();
-    let (actual, git) = parse_probe(&output.stdout).unwrap();
+    let (actual, git, remote) = parse_probe(&output.stdout).unwrap();
     assert_eq!(git, Some(actual));
+    assert_eq!(remote, Some("https://github.com/example/test.git".to_string()));
 }
 
 #[test]

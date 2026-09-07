@@ -91,6 +91,12 @@ fn register_canonical_project(
     };
     let repo_root = manager.repo_root().to_path_buf();
 
+    let git_remote = if manager.is_git_backed() {
+        crate::worktree::git::git_remote_origin_url(&repo_root)
+    } else {
+        None
+    };
+
     if let Some((workspace_id, _)) = registry
         .list()
         .into_iter()
@@ -100,6 +106,7 @@ fn register_canonical_project(
             workspace_id,
             repo_root,
             git_root,
+            git_remote,
         });
     }
 
@@ -117,6 +124,7 @@ fn register_canonical_project(
         workspace_id,
         repo_root,
         git_root,
+        git_remote,
     })
 }
 
@@ -135,6 +143,8 @@ pub struct RegisteredProject {
     /// Canonical Git root when the workspace is a Git repository; `None` for
     /// plain-folder (terminal-only) workspaces.
     pub git_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -73,9 +73,11 @@ import {
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
+import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
 import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
+import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
@@ -645,10 +647,18 @@ function WorkspaceApp({
     state.worktrees.length,
   ]);
   const plainRootWorktree = useMemo(
-    () =>
-      activeProject.gitRoot === null || activeProject.target?.kind === "ssh"
-        ? projectRootWorktree(activeProject)
-        : null,
+    () => {
+      const target = activeProject.target;
+      if (activeProject.gitRoot === null || target?.kind === "ssh") {
+        const hostLabel = target?.kind === "ssh"
+          ? (typeof getCachedSshHosts === "function"
+              ? getCachedSshHosts()?.find((h) => h.id === target.hostId)?.label ?? target.hostId
+              : target.hostId)
+          : undefined;
+        return projectRootWorktree(activeProject, hostLabel);
+      }
+      return null;
+    },
     [activeProject],
   );
 
@@ -814,6 +824,7 @@ function WorkspaceApp({
                 candidate.workspaceId === registered.workspaceId &&
                 candidate.repoRoot === registered.repoRoot &&
                 candidate.gitRoot === registered.gitRoot &&
+                candidate.gitRemote === registered.gitRemote &&
                 JSON.stringify(candidate.target) === JSON.stringify(registered.target),
             )
           ) {
@@ -2139,16 +2150,13 @@ function listVisibleWorktrees(
   activeProjectId: string,
   inactiveProjectWorktrees: Record<string, Worktree[]> = {},
 ): Worktree[] {
+  const groups = groupProjects(projects);
   const collapsed = loadCollapsedProjectIds(projects, activeProjectId);
-  // Cmd+N counts the rows the sidebar actually renders, so this must mirror
-  // `groupWorktreesByProject`: inactive projects contribute their own listed
-  // rows, and ownership comes from the shared resolver rather than a bare
-  // branch identity that would attribute every branch-less row to the active
-  // project.
   const visible: Worktree[] = [];
 
-  for (const project of projects) {
-    if (collapsed.has(project.workspaceId)) continue;
+  for (const group of groups) {
+    if (collapsed.has(group.groupId)) continue;
+    const project = group.primaryProject;
     const owned = worktrees.filter(
       (worktree) => resolveWorktreeOwnerId(worktree, projects, activeProjectId) === project.workspaceId,
     );
@@ -2157,8 +2165,22 @@ function listVisibleWorktrees(
       project.workspaceId === activeProjectId
         ? (owned.length > 0 ? owned : cached)
         : [...cached, ...owned];
-    if (project.target?.kind === "ssh") rows = [projectRootWorktree(project)];
-    else if (project.gitRoot === null && rows.length === 0) rows = [projectRootWorktree(project)];
+    if (project.target?.kind === "ssh" && group.memberProjects.length === 1) {
+      rows = [projectRootWorktree(project)];
+    } else {
+      if (project.gitRoot === null && rows.length === 0) rows = [projectRootWorktree(project)];
+      for (const member of group.memberProjects) {
+        const target = member.target;
+        if (target?.kind === "ssh") {
+          if (!rows.some((candidate) => candidate.path === member.repoRoot && candidate.workspaceId === member.workspaceId)) {
+            const hostLabel = typeof getCachedSshHosts === "function"
+              ? getCachedSshHosts()?.find((h) => h.id === target.hostId)?.label ?? target.hostId
+              : target.hostId;
+            rows.push(projectRootWorktree(member, hostLabel));
+          }
+        }
+      }
+    }
     for (const row of rows) {
       if (visible.some((candidate) => candidate.path === row.path && candidate.workspaceId === row.workspaceId)) continue;
       visible.push(row);
@@ -2203,6 +2225,12 @@ function loadProjects(): RegisteredProject[] {
         workspaceId: project.workspaceId,
         repoRoot: project.repoRoot,
         target: project.target,
+        gitRemote:
+          typeof project.gitRemote === "string"
+            ? project.gitRemote
+            : project.gitRemote === null
+              ? null
+              : undefined,
         // Entries persisted before gitRoot existed can only be git projects
         // (the old backend rejected non-git folders), and their repoRoot was
         // already the canonical git root. Only an explicit null means non-git.

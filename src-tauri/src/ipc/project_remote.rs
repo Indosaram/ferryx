@@ -21,6 +21,8 @@ pub struct RegisteredRemoteProject {
     pub workspace_id: String,
     pub repo_root: String,
     pub git_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote: Option<String>,
     pub host_id: String,
     pub host_label: String,
 }
@@ -46,12 +48,13 @@ pub async fn register_remote_project(
     direct::validate_remote_path(&request.repo_path)?;
     let lookup = host_store.clone();
     let host = run_blocking(move || projects::enabled_host(&lookup, &request.host_id)).await?;
-    let (repo_root, git_root) = direct::probe(&host, &request.repo_path).await?;
+    let (repo_root, git_root, git_remote) = direct::probe(&host, &request.repo_path).await?;
     let project = projects::RemoteProject {
         workspace_id: projects::identity(&host.id, &repo_root),
         host_id: host.id.clone(),
         repo_root,
         git_root,
+        git_remote,
     };
     let probed_host = host.clone();
     let project = run_blocking(move || {
@@ -68,6 +71,7 @@ pub async fn register_remote_project(
         workspace_id: project.workspace_id,
         repo_root: project.repo_root,
         git_root: project.git_root,
+        git_remote: project.git_remote,
         host_id: project.host_id,
         host_label: host.label,
     })

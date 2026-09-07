@@ -17,6 +17,8 @@ pub struct RemoteProject {
     pub host_id: String,
     pub repo_root: String,
     pub git_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote: Option<String>,
 }
 
 pub fn is_remote(id: &str) -> bool {

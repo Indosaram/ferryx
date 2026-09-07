@@ -10,9 +10,9 @@ export function hasValidProjectTarget(project: { workspaceId: string; target?: u
     typeof target.hostId === "string" && target.hostId.trim().length > 0;
 }
 
-export function projectRootWorktree(project: RegisteredProject): Worktree {
+export function projectRootWorktree(project: RegisteredProject, hostLabel?: string): Worktree {
   return {
-    ...(project.target?.kind === "ssh" ? { workspaceId: project.workspaceId } : {}),
+    ...(project.target?.kind === "ssh" ? { workspaceId: project.workspaceId, hostLabel } : {}),
     path: project.repoRoot, head: "", branch: null, bare: false,
     detached: false, locked: null, prunable: null,
   };

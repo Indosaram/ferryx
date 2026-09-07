@@ -8,6 +8,7 @@ export type WorktreeIdentity = {
 export type Worktree = {
   /** Explicit owner for SSH roots, whose paths can equal paths on other hosts. */
   workspaceId?: string;
+  hostLabel?: string;
   path: string;
   head: string;
   branch: string | null;

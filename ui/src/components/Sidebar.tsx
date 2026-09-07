@@ -29,7 +29,8 @@ import { toast } from "sonner";
 import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
 import { projectRootWorktree } from "../lib/projectIdentity";
-import { useSshHosts } from "../lib/sshHosts";
+import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
+import { getCachedSshHosts, useSshHosts } from "../lib/sshHosts";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
@@ -169,8 +170,16 @@ export function Sidebar({
     });
   }, []);
 
+  const projectGroups = useMemo(() => groupProjects(projects), [projects]);
+
   const naturalWorktreesByProject = useMemo(
-    () => groupWorktreesByProject(worktrees, projects, activeProjectId, inactiveProjectWorktrees),
+    () => groupWorktreesByProject(
+      worktrees,
+      projects,
+      activeProjectId,
+      inactiveProjectWorktrees,
+      typeof getCachedSshHosts === "function" ? getCachedSshHosts() ?? undefined : undefined,
+    ),
     [activeProjectId, inactiveProjectWorktrees, projects, worktrees],
   );
   const worktreesByProject = useMemo(
@@ -178,8 +187,8 @@ export function Sidebar({
     [naturalWorktreesByProject, worktreeOrder],
   );
   const projectSortableItems = useMemo(
-    () => projects.map((project) => projectSortableId(project.workspaceId)),
-    [projects],
+    () => projectGroups.map((group) => projectSortableId(group.groupId)),
+    [projectGroups],
   );
 
   // The active row is highlighted in whichever project's group actually renders
@@ -188,9 +197,17 @@ export function Sidebar({
   // up an inactive project whose list still contained that path.
   const activeWorktreeOwnerId = useMemo(() => {
     if (!activePath || !activeProjectId) return undefined;
-    const activeRows = worktreesByProject.get(activeProjectId);
-    return activeRows?.some((row) => row.path === activePath) ? activeProjectId : undefined;
-  }, [activePath, activeProjectId, worktreesByProject]);
+    const activeGroup = projectGroups.find((g) => isProjectGroupActive(g, activeProjectId));
+    if (!activeGroup) return undefined;
+    const activeRows = worktreesByProject.get(activeGroup.primaryProject.workspaceId);
+    return activeRows?.some(
+      (row) =>
+        row.path === activePath &&
+        (row.workspaceId ? row.workspaceId === activeProjectId : true),
+    )
+      ? activeGroup.primaryProject.workspaceId
+      : undefined;
+  }, [activePath, activeProjectId, projectGroups, worktreesByProject]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -337,9 +354,10 @@ export function Sidebar({
             ) : null}
 
             <SortableContext items={projectSortableItems} strategy={verticalListSortingStrategy}>
-              {projects.map((project) => {
-                const active = project.workspaceId === activeProjectId;
-                const expanded = !collapsedProjects.has(project.workspaceId);
+              {projectGroups.map((group) => {
+                const project = group.primaryProject;
+                const active = isProjectGroupActive(group, activeProjectId);
+                const expanded = !collapsedProjects.has(group.groupId);
                 const projectWorktrees = worktreesByProject.get(project.workspaceId) ?? [];
                 const projectActivity = summarizeProjectActivity(
                   projectWorktrees,
@@ -354,28 +372,33 @@ export function Sidebar({
                     expanded={expanded}
                     activity={projectActivity}
                     attentionState={attentionState}
-                    onToggle={() => toggleProject(project.workspaceId)}
+                    onToggle={() => toggleProject(group.groupId)}
                     onSelect={() => {
                       onSelectProject(project);
-                      toggleProject(project.workspaceId);
+                      toggleProject(group.groupId);
                     }}
                     onCreateWorktree={() => onCreateWorktree(project)}
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
                   />
                 );
 
+                const isStandaloneRemote =
+                  project.target?.kind === "ssh" &&
+                  group.memberProjects.length === 1 &&
+                  !group.memberProjects.some((p) => p.target?.kind !== "ssh");
+
                 return (
-                  <SortableProjectSection key={project.workspaceId} workspaceId={project.workspaceId} header={header}>
+                  <SortableProjectSection key={group.groupId} workspaceId={group.groupId} header={header}>
                     {expanded ? (
                       <div
                         className="pl-5 pr-0.5 pt-0.5"
                         onPointerDown={(event) => event.stopPropagation()}
                       >
                         <SortableContext
-                          items={projectWorktrees.map((row) => worktreeSortableId(project.workspaceId, row.path))}
+                          items={projectWorktrees.map((row) => worktreeSortableId(group.groupId, row.path, row.workspaceId))}
                           strategy={verticalListSortingStrategy}
                         >
-                          {project.target?.kind === "ssh" ? (
+                          {isStandaloneRemote ? (
                             <button
                               type="button"
                               className={cn("my-0.5 w-full truncate rounded-md border px-2 py-1 text-left text-xs hover:bg-white/5",
@@ -390,16 +413,17 @@ export function Sidebar({
                             worktrees={projectWorktrees}
                             agents={agents}
                             activePath={activeWorktreeOwnerId === project.workspaceId ? activePath : ""}
+                            activeWorkspaceId={activeProjectId}
                             statuses={statuses}
                             unreadWorktreePaths={unreadWorktreePaths}
                             activityByWorktreePath={activityByWorktreePath}
                             onSelect={onSelectWorktree}
                             onCreateWorktree={
-                              project.gitRoot !== null ? () => onCreateWorktree(project) : undefined
+                              project.gitRoot !== null && project.target?.kind !== "ssh" ? () => onCreateWorktree(project) : undefined
                             }
                             onDelete={onDeleteWorktree}
-                            sortableWorkspaceId={project.workspaceId}
-                            label={`${project.workspaceId} worktrees`}
+                            sortableWorkspaceId={group.groupId}
+                            label={`${group.groupId} worktrees`}
                           />}
                         </SortableContext>
                       </div>
@@ -666,28 +690,59 @@ function groupWorktreesByProject(
   projects: RegisteredProject[],
   activeProjectId: string | undefined,
   inactiveProjectWorktrees?: Record<string, Worktree[]>,
+  hosts?: Array<{ id: string; label: string }>,
 ) {
+  const groups = groupProjects(projects);
   const grouped = new Map<string, Worktree[]>();
-  for (const project of projects) {
-    const listed = project.workspaceId === activeProjectId ? [] : inactiveProjectWorktrees?.[project.workspaceId];
-    grouped.set(project.workspaceId, listed ? [...listed] : []);
+  for (const group of groups) {
+    const primaryId = group.primaryProject.workspaceId;
+    const isPrimaryActive = activeProjectId === primaryId;
+    const listed = isPrimaryActive ? [] : inactiveProjectWorktrees?.[primaryId];
+    grouped.set(primaryId, listed ? [...listed] : []);
   }
 
   for (const worktree of worktrees) {
     const owner = resolveWorktreeOwnerId(worktree, projects, activeProjectId);
     if (!owner) continue;
-    const bucket = grouped.get(owner);
-    if (!bucket || bucket.some((candidate) => candidate.path === worktree.path)) continue;
-    bucket.push(worktree);
+    const targetGroup = groups.find((g) => g.memberProjects.some((m) => m.workspaceId === owner));
+    const targetId = targetGroup ? targetGroup.primaryProject.workspaceId : owner;
+    const bucket = grouped.get(targetId);
+    const resolvedWorkspaceId = worktree.workspaceId ?? owner;
+    if (
+      !bucket ||
+      bucket.some(
+        (candidate) =>
+          candidate.path === worktree.path &&
+          (candidate.workspaceId ?? targetId) === resolvedWorkspaceId,
+      )
+    ) {
+      continue;
+    }
+    const member = targetGroup?.memberProjects.find((m) => m.workspaceId === resolvedWorkspaceId);
+    let resolvedWorktree = worktree;
+    const memberTarget = member?.target;
+    if (!resolvedWorktree.hostLabel && memberTarget?.kind === "ssh") {
+      const hostLabel = hosts?.find((h) => h.id === memberTarget.hostId)?.label ?? memberTarget.hostId;
+      resolvedWorktree = { ...resolvedWorktree, hostLabel, ...(worktree.workspaceId ? {} : { workspaceId: owner }) };
+    }
+    bucket.push(resolvedWorktree);
   }
 
   if (activeProjectId) {
-    const activeBucket = grouped.get(activeProjectId);
+    const activeGroup = groups.find((g) => g.memberProjects.some((m) => m.workspaceId === activeProjectId));
+    const activePrimaryId = activeGroup ? activeGroup.primaryProject.workspaceId : activeProjectId;
+    const activeBucket = grouped.get(activePrimaryId);
     if (activeBucket && activeBucket.length === 0) {
-      const cached = inactiveProjectWorktrees?.[activeProjectId];
+      const cached = inactiveProjectWorktrees?.[activePrimaryId];
       if (cached && cached.length > 0) {
         for (const row of cached) {
-          if (!activeBucket.some((candidate) => candidate.path === row.path)) {
+          if (
+            !activeBucket.some(
+              (candidate) =>
+                candidate.path === row.path &&
+                (candidate.workspaceId ?? activePrimaryId) === (row.workspaceId ?? activePrimaryId),
+            )
+          ) {
             activeBucket.push(row);
           }
         }
@@ -698,11 +753,30 @@ function groupWorktreesByProject(
   // A non-Git project has no git worktrees at all, so without a synthesized
   // folder row its group would render empty and the folder would be
   // unselectable - including while it is the active project.
-  for (const project of projects) {
-    if (project.gitRoot !== null && project.target?.kind !== "ssh") continue;
+  for (const group of groups) {
+    const project = group.primaryProject;
     const bucket = grouped.get(project.workspaceId);
-    if (!bucket || bucket.length > 0) continue;
-    bucket.push(projectRootWorktree(project));
+    if (!bucket) continue;
+    if (project.gitRoot === null && project.target?.kind !== "ssh" && bucket.length === 0) {
+      bucket.push(projectRootWorktree(project));
+    }
+
+    for (const member of group.memberProjects) {
+      const target = member.target;
+      if (target?.kind === "ssh") {
+        const existingIndex = bucket.findIndex(
+          (candidate) =>
+            candidate.path === member.repoRoot &&
+            (candidate.workspaceId ?? project.workspaceId) === member.workspaceId,
+        );
+        const hostLabel = hosts?.find((h) => h.id === target.hostId)?.label ?? target.hostId;
+        if (existingIndex === -1) {
+          bucket.push(projectRootWorktree(member, hostLabel));
+        } else if (!bucket[existingIndex].hostLabel && hostLabel) {
+          bucket[existingIndex] = { ...bucket[existingIndex], hostLabel };
+        }
+      }
+    }
   }
 
   return grouped;
@@ -711,18 +785,20 @@ function groupWorktreesByProject(
 function applyWorktreeOrder(grouped: Map<string, Worktree[]>, order: WorktreeOrder) {
   const ordered = new Map<string, Worktree[]>();
   for (const [workspaceId, rows] of grouped) {
-    const byPath = new Map(rows.map((row) => [row.path, row]));
+    const rowKey = (r: Worktree) => (r.workspaceId ? `${r.workspaceId}:${r.path}` : r.path);
+    const byKey = new Map(rows.map((row) => [rowKey(row), row]));
     const seen = new Set<string>();
     const next: Worktree[] = [];
     for (const path of order[workspaceId] ?? []) {
-      const row = byPath.get(path);
-      if (!row || seen.has(path)) continue;
-      seen.add(path);
+      const row = byKey.get(path) ?? rows.find((r) => r.path === path && !seen.has(rowKey(r)));
+      if (!row || seen.has(rowKey(row))) continue;
+      seen.add(rowKey(row));
       next.push(row);
     }
     for (const row of rows) {
-      if (seen.has(row.path)) continue;
-      seen.add(row.path);
+      const key = rowKey(row);
+      if (seen.has(key)) continue;
+      seen.add(key);
       next.push(row);
     }
     ordered.set(workspaceId, next);
@@ -804,12 +880,14 @@ function seedCollapsedProjects(
   projects: RegisteredProject[],
   activeProjectId: string | undefined,
 ) {
-  const seeded = projects.filter(
-    (project) => project.workspaceId !== activeProjectId && !collapsed.has(project.workspaceId),
+  const groups = groupProjects(projects);
+  const activeGroup = groups.find((g) => isProjectGroupActive(g, activeProjectId));
+  const seeded = groups.filter(
+    (group) => group.groupId !== activeGroup?.groupId && !collapsed.has(group.groupId),
   );
   if (seeded.length === 0) return collapsed;
   const next = new Set(collapsed);
-  for (const project of seeded) next.add(project.workspaceId);
+  for (const group of seeded) next.add(group.groupId);
   return next;
 }
 

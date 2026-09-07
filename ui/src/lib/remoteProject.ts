@@ -11,6 +11,7 @@ export interface RegisteredRemoteProject {
   workspaceId: string;
   repoRoot: string;
   gitRoot: string | null;
+  gitRemote?: string | null;
   hostId: string;
   hostLabel: string;
 }
@@ -20,6 +21,7 @@ export function toRegisteredProject(remote: RegisteredRemoteProject): Registered
     workspaceId: remote.workspaceId,
     repoRoot: remote.repoRoot,
     gitRoot: remote.gitRoot ?? null,
+    ...(remote.gitRemote ? { gitRemote: remote.gitRemote } : {}),
     target: {
       kind: "ssh",
       hostId: remote.hostId,

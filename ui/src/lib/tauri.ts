@@ -51,6 +51,7 @@ export type RegisteredProject = {
   workspaceId: string;
   repoRoot: string;
   gitRoot?: string | null;
+  gitRemote?: string | null;
   target?: RunTarget;
 };
 

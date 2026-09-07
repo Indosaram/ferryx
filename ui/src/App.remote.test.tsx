@@ -157,7 +157,7 @@ describe("App SSH project lifecycle", () => {
     const restore = deferred<null>();
     native.loadSession.mockReturnValueOnce(restore.promise);
     native.registerRemoteProject.mockReturnValueOnce(registration.promise);
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: `${remote.repoRoot} SSH root` })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /build SSH/ })); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     await act(async () => { registration.resolve(registered); await registration.promise; });

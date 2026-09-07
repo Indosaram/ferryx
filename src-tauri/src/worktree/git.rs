@@ -412,6 +412,13 @@ pub fn git_branch_delete(
     Ok(())
 }
 
+pub fn git_remote_origin_url(repo_root: &Path) -> Option<String> {
+    run_git(repo_root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,6 +16,7 @@ import { StatusDot, type StatusDotState } from "./ui/StatusDot";
 type WorktreeListProps = {
   readonly worktrees: readonly Worktree[];
   readonly activePath: string;
+  readonly activeWorkspaceId?: string;
   readonly agents: readonly ActiveAgent[];
   readonly statuses: Record<string, DirtyState | undefined>;
   readonly unreadWorktreePaths?: Record<string, boolean>;
@@ -71,9 +72,12 @@ export const WorktreeRow = memo(function WorktreeRow({
     };
   }, []);
 
-  const primary = isPrimaryWorktree(worktree);
-  const canDelete = !primary;
-  const displayName = workspaceName(worktree);
+  const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:"));
+  const primary = !isRemote && isPrimaryWorktree(worktree);
+  const canDelete = !primary && !isRemote;
+  const displayName = isRemote
+    ? (worktree.hostLabel ? `${worktree.hostLabel}` : workspaceName(worktree))
+    : workspaceName(worktree);
   const displaySummary = activitySummary
     ? activitySummary.hasUnread === unread
       ? activitySummary
@@ -87,8 +91,8 @@ export const WorktreeRow = memo(function WorktreeRow({
     event.preventDefault();
     event.stopPropagation();
     const items: NativeMenuEntry[] = [
-      { kind: "item", id: "reveal", label: fileManagerActionLabel(), icon: "reveal" },
-      { kind: "item", id: "copy-path", label: "Copy Worktree Path" },
+      { kind: "item", id: "reveal", label: isRemote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !isRemote, icon: "reveal" },
+      { kind: "item", id: "copy-path", label: isRemote ? "Copy Remote Path" : "Copy Worktree Path" },
     ];
     if (worktree.branch) {
       items.push({ kind: "item", id: "copy-branch", label: "Copy Branch Name" });
@@ -153,6 +157,7 @@ export const WorktreeRow = memo(function WorktreeRow({
           type="button"
           onClick={() => onSelect(worktree)}
           aria-current={active ? "true" : undefined}
+          title={isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined}
           className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <span className="flex min-w-0 flex-col">
@@ -177,18 +182,28 @@ export const WorktreeRow = memo(function WorktreeRow({
                   primary
                 </span>
               ) : null}
+              {isRemote ? (
+                <span className="shrink-0 rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]">
+                  SSH
+                </span>
+              ) : null}
               {status?.isDirty ? (
                 <span className="shrink-0 text-[10px] text-status-warning">
                   Dirty · {status.files.length} {status.files.length === 1 ? "file" : "files"}
                 </span>
               ) : null}
             </span>
+            {isRemote ? (
+              <span className="truncate text-[10px] text-muted-foreground pl-3.5">
+                {worktree.path}
+              </span>
+            ) : null}
           </span>
         </button>
 
         <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
           {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
-          {onCreateWorktree ? (
+          {onCreateWorktree && !isRemote ? (
             <IconButton
               label="Add worktree"
               size="sm"
@@ -250,6 +265,7 @@ const SortableWorktreeRow = memo(function SortableWorktreeRow({
 export function WorktreeList({
   worktrees,
   activePath,
+  activeWorkspaceId,
   agents,
   statuses,
   unreadWorktreePaths,
@@ -273,7 +289,10 @@ export function WorktreeList({
   return (
     <div role="list" aria-label={label} className="m-0 p-0">
       {worktrees.map((worktree) => {
-        const active = worktree.path === activePath;
+        const effectiveWorkspaceId = worktree.workspaceId ?? sortableWorkspaceId;
+        const active =
+          worktree.path === activePath &&
+          (!activeWorkspaceId || !effectiveWorkspaceId || effectiveWorkspaceId === activeWorkspaceId);
         const agent = agentsByPath.get(worktree.path);
         const status = statuses[worktree.path];
         const summary = activityByWorktreePath?.[worktree.path];
@@ -291,10 +310,12 @@ export function WorktreeList({
           onDelete,
         };
 
+        const rowKey = worktree.workspaceId ? `${worktree.workspaceId}:${worktree.path}` : worktree.path;
+
         return sortableWorkspaceId ? (
-          <SortableWorktreeRow key={worktree.path} workspaceId={sortableWorkspaceId} {...rowProps} />
+          <SortableWorktreeRow key={rowKey} workspaceId={sortableWorkspaceId} {...rowProps} />
         ) : (
-          <div key={worktree.path} role="listitem">
+          <div key={rowKey} role="listitem">
             <WorktreeRow {...rowProps} />
           </div>
         );
@@ -303,6 +324,8 @@ export function WorktreeList({
   );
 }
 
-export function worktreeSortableId(workspaceId: string, worktreePath: string) {
-  return `sidebar-worktree:${workspaceId}:${worktreePath}`;
+export function worktreeSortableId(workspaceId: string, worktreePath: string, rowWorkspaceId?: string) {
+  return rowWorkspaceId
+    ? `sidebar-worktree:${workspaceId}:${rowWorkspaceId}:${worktreePath}`
+    : `sidebar-worktree:${workspaceId}:${worktreePath}`;
 }
