@@ -15,7 +15,8 @@ use super::sys::types::{
     GHOSTTY_TERMINAL_DATA_CURSOR_X, GHOSTTY_TERMINAL_DATA_CURSOR_Y,
     GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, GHOSTTY_TERMINAL_DATA_ROWS,
     GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, GHOSTTY_TERMINAL_DATA_TITLE,
-    GHOSTTY_TERMINAL_DATA_TOTAL_ROWS,
+    GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
+    GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
 };
 
 pub fn query_cols(handle: NonNull<GhosttyTerminalImpl>) -> Result<u16, NativeTerminalError> {
@@ -98,6 +99,22 @@ pub fn query_mouse_tracking_enabled(
     };
     NativeTerminalError::from_c_result(result, "ghostty_terminal_get(MouseTracking)")?;
     NativeTerminalError::decode_c_bool(value, "MouseTracking")
+}
+
+pub fn query_is_alternate_screen(
+    handle: NonNull<GhosttyTerminalImpl>,
+) -> Result<bool, NativeTerminalError> {
+    let mut screen: std::ffi::c_int = 0;
+    // SAFETY: Category: Foreign Data Extraction. Output points to stack c_int matching GhosttyTerminalScreen.
+    let result = unsafe {
+        ghostty_terminal_get(
+            handle.as_ptr(),
+            GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
+            &mut screen as *mut std::ffi::c_int as *mut c_void,
+        )
+    };
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_get(ActiveScreen)")?;
+    Ok(screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE)
 }
 
 fn query_color(

@@ -378,7 +378,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_overflow, "3000 unique 16x32 slots must exceed any atlas budget");
+        assert!(
+            saw_overflow,
+            "3000 unique 16x32 slots must exceed any atlas budget"
+        );
         assert_eq!(
             atlas.generation, generation_after_first,
             "overflow must NOT bump generation mid-frame"
@@ -414,14 +417,7 @@ mod tests {
             theme: RendererTheme::default(),
         };
         let before = atlas.stats().entry_count;
-        let result = atlas.get_or_insert(
-            "\u{10FFFD}",
-            false,
-            false,
-            false,
-            &config,
-            &gpu.queue,
-        );
+        let result = atlas.get_or_insert("\u{10FFFD}", false, false, false, &config, &gpu.queue);
         assert!(result.is_none(), "all-zero raster must return None");
         assert_eq!(
             atlas.stats().entry_count,

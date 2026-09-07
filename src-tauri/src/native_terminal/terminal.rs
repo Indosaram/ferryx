@@ -20,8 +20,9 @@ use super::paste::{
 };
 use super::queries::{
     query_cols, query_cursor_position, query_cursor_state, query_default_background,
-    query_default_cursor_color, query_default_foreground, query_mouse_tracking_enabled,
-    query_palette, query_rows, query_scrollback_rows, query_title, query_total_rows,
+    query_default_cursor_color, query_default_foreground, query_is_alternate_screen,
+    query_mouse_tracking_enabled, query_palette, query_rows, query_scrollback_rows,
+    query_title, query_total_rows,
 };
 use super::render_pass::capture_render_snapshot;
 use super::scroll::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
@@ -405,6 +406,10 @@ impl TerminalEngine for NativeTerminal {
         query_mouse_tracking_enabled(self.handle)
     }
 
+    fn is_alternate_screen(&self) -> Result<bool, NativeTerminalError> {
+        query_is_alternate_screen(self.handle)
+    }
+
     fn default_foreground(&self) -> Result<ColorRgb, NativeTerminalError> {
         query_default_foreground(self.handle)
     }
@@ -561,6 +566,33 @@ mod tests {
             terminal.take_bell_count(),
             0,
             "bell observation was not drained"
+        );
+    }
+
+    #[test]
+    fn native_terminal_alternate_screen_detection() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create live native terminal");
+        assert!(
+            !terminal.is_alternate_screen().expect("query alternate screen"),
+            "initial terminal must be primary screen"
+        );
+
+        // Enter alternate screen (\x1b[?1049h)
+        terminal
+            .feed(b"\x1b[?1049h")
+            .expect("enter alternate screen");
+        assert!(
+            terminal.is_alternate_screen().expect("query alternate screen"),
+            "terminal must report alternate screen active after DECSET 1049"
+        );
+
+        // Exit alternate screen (\x1b[?1049l)
+        terminal
+            .feed(b"\x1b[?1049l")
+            .expect("exit alternate screen");
+        assert!(
+            !terminal.is_alternate_screen().expect("query alternate screen"),
+            "terminal must report primary screen active after DECRST 1049"
         );
     }
 

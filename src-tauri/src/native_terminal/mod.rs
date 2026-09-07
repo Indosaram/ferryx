@@ -34,6 +34,7 @@ pub mod surface_host;
 mod surface_snapshot;
 mod sys;
 mod terminal;
+pub mod wheel;
 
 pub use color::ColorRgb;
 pub use composition::{
@@ -57,3 +58,4 @@ pub use scroll::{
 };
 pub use snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 pub use terminal::NativeTerminal;
+pub use wheel::{compute_wheel_outcome, TerminalWheelOutcome};
