@@ -337,6 +337,8 @@ pub struct SpawnTerminalResponse {
 pub struct TerminalSessionSummary {
     pub session_id: String,
     pub worktree_path: Option<PathBuf>,
+    #[serde(default)]
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1031,6 +1033,7 @@ pub async fn cmd_terminal_list(
             summaries.push(TerminalSessionSummary {
                 session_id,
                 worktree_path: details.cwd.map(PathBuf::from),
+                running: details.running,
             });
         }
     }

@@ -151,7 +151,7 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
     let sessions = cmd_terminal_list(client_state.clone()).await.expect("list");
     assert!(sessions
         .iter()
-        .any(|session| session.session_id == spawned.session_id));
+        .any(|session| session.session_id == spawned.session_id && session.running));
 
     cmd_terminal_close(client_state.clone(), spawned.session_id.clone())
         .await

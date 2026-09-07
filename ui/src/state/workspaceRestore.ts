@@ -58,25 +58,26 @@ export type UseWorkspaceRestoreOptions = {
   restoreWorkspace: (state: WorkspaceState) => void;
   loadSessionFn?: () => Promise<unknown>;
   listLiveBackendSessionIdsFn?: () => Promise<
-    | Iterable<string | { sessionId: string; daemonEpoch?: string | null }>
+    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
-        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null }>;
+        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
       }
     | null
   >;
   enabled?: boolean;
 };
 
-export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null }>> {
+export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>> {
   if (isTauriRuntime()) {
     const liveSummaries = await listTerminalSessions();
     return liveSummaries.map((candidate) => ({
       sessionId: candidate.sessionId,
       daemonEpoch: candidate.daemonEpoch ?? null,
       worktreePath: candidate.worktreePath ?? null,
+      running: candidate.running ?? true,
     }));
   }
   const liveSessions = await defaultTauriTransport.listSessions();
@@ -84,6 +85,7 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
     sessionId: candidate.sessionId,
     daemonEpoch: candidate.daemonEpoch ?? null,
     worktreePath: candidate.worktreePath ?? null,
+    running: (candidate as any).running ?? true,
   }));
 }
 

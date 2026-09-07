@@ -15,7 +15,7 @@ export type TerminalAttachment = {
 };
 
 export interface TerminalTransport {
-  listSessions(): Promise<{ sessionId: string; worktreePath?: string | null; daemonEpoch?: string | null }[]>;
+  listSessions(): Promise<{ sessionId: string; worktreePath?: string | null; daemonEpoch?: string | null; running?: boolean }[]>;
   attach(sessionId: string, afterSequence?: string | null): Promise<TerminalAttachment>;
   write(sessionId: string, data: string | Uint8Array): Promise<void> | void;
   resize(sessionId: string, cols: number, rows: number): Promise<void> | void;

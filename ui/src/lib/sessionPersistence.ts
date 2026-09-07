@@ -281,12 +281,12 @@ export function deserializeWorkspaceState(
   workspaceId: string,
   persistedSession: PersistedWorkspaceSession,
   liveBackendSessionIds?:
-    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null }>
+    | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
-        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null }>;
+        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
       }
     | null,
 ): WorkspaceState | null {
@@ -301,7 +301,7 @@ export function deserializeWorkspaceState(
   const fallbackProfileId = resolveSupportedBrowserProfileId(browserSettings.defaultProfileId, browserSettings);
 
   let globalLiveEpoch: string | null = null;
-  const liveSessionMap = new Map<string, { daemonEpoch: string | null }>();
+  const liveSessionMap = new Map<string, { daemonEpoch: string | null; running: boolean }>();
   const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined;
 
   if (hasLiveSessionQuery && liveBackendSessionIds) {
@@ -314,7 +314,7 @@ export function deserializeWorkspaceState(
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
-        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null }>;
+        sessions?: Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>;
       };
       const rawEpoch = container.epoch ?? container.daemonEpoch;
       if (rawEpoch != null) {
@@ -323,22 +323,24 @@ export function deserializeWorkspaceState(
       const sessionList = container.sessions ?? container.sessionIds ?? [];
       for (const item of sessionList) {
         if (typeof item === "string") {
-          liveSessionMap.set(item, { daemonEpoch: globalLiveEpoch });
+          liveSessionMap.set(item, { daemonEpoch: globalLiveEpoch, running: true });
         } else if (item && typeof item === "object" && "sessionId" in item) {
           const itemEpoch = item.daemonEpoch != null ? String(item.daemonEpoch) : globalLiveEpoch;
-          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch });
+          const isRunning = (item as any).running !== false;
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning });
         }
       }
     } else {
       for (const item of liveBackendSessionIds as Iterable<any>) {
         if (typeof item === "string") {
-          liveSessionMap.set(item, { daemonEpoch: null });
+          liveSessionMap.set(item, { daemonEpoch: null, running: true });
         } else if (item && typeof item === "object" && "sessionId" in item) {
           const itemEpoch = item.daemonEpoch != null ? String(item.daemonEpoch) : null;
           if (itemEpoch !== null && globalLiveEpoch === null) {
             globalLiveEpoch = itemEpoch;
           }
-          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch });
+          const isRunning = item.running !== false;
+          liveSessionMap.set(item.sessionId, { daemonEpoch: itemEpoch, running: isRunning });
         }
       }
     }
@@ -384,6 +386,7 @@ export function deserializeWorkspaceState(
       } else {
         const liveInfo = liveSessionMap.get(persistedBackendSessionId);
         const effectiveLiveEpoch = liveInfo?.daemonEpoch ?? globalLiveEpoch;
+        const isProcessRunning = liveInfo ? liveInfo.running !== false : true;
 
         // A hit in liveSessionMap came from listSessions on the daemon running right now, and
         // backend ids do not survive a daemon restart. So a live hit already proves the PTY is
@@ -398,7 +401,7 @@ export function deserializeWorkspaceState(
           epochMatches = false;
         }
 
-        if (epochMatches) {
+        if (epochMatches && isProcessRunning) {
           backendSessionId = persistedBackendSessionId;
           daemonEpoch = persistedEpoch ?? effectiveLiveEpoch ?? null;
           lastOutputSequence = persistedSequence;
@@ -656,12 +659,12 @@ export function deserializeWorkspaceState(
   if (ws.activityBySessionId) {
     for (const [sessionId, activity] of Object.entries(ws.activityBySessionId)) {
       if (activity && referencedSessionIds.has(sessionId)) {
-        // `working` claims a process is running right now; nothing is after a restart, so carrying
-        // it over would spin for an agent that no longer exists. `waiting` is NOT coerced: it renders
-        // the same attention frame as `done`, and rewriting it to `done` manufactured a phantom
-        // done -> waiting transition the moment the reattached screen detector reported the real
-        // state, which `applySessionActivity` then treated as fresh attention on every pane.
-        const isStaleRunClaim = activity.state === "working";
+        const session = sessions[sessionId];
+        const isSessionLive = Boolean(session && session.backendSessionId !== null && session.lifecycle !== "exited");
+        // If the session died or has exited across restart, any in-flight working claim is stale and settles to done.
+        // If the session survived in the daemon and is still running, preserve its working state so
+        // that running indicators (e.g. sidebar running count, tab spinner) reflect reality.
+        const isStaleRunClaim = activity.state === "working" && !isSessionLive;
         restoredActivity[sessionId] = {
           state: isStaleRunClaim ? "done" : activity.state,
           title: activity.title || "",

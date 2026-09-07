@@ -1303,7 +1303,7 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
           : worktree?.branch?.replace(/^refs\/heads\//, "") ?? worktreePath,
         state: activity
           ? activityStateToAgentState(activity.state)
-          : session.lifecycle === "running"
+          : session.lifecycle === "running" || session.lifecycle === "working"
             ? "working"
             : session.lifecycle,
         worktree: session.worktree,

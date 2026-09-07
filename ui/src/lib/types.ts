@@ -51,6 +51,7 @@ export type TerminalSessionSummary = {
   sessionId: string;
   worktreePath: string | null;
   daemonEpoch?: string | null;
+  running?: boolean;
 };
 
 export type AgentProviderSessionKey = "session_id" | "conversation_id";

@@ -910,8 +910,8 @@ describe("sessionPersistence v2 serialization and migration", () => {
 
     expect(restored.activityBySessionId).toEqual({
       "sess-1": {
-        // `working` was an in-flight claim; after a restart nothing is running, so it settles to done.
-        state: "done",
+        // `sess-1` is live and running in the daemon, so working activity is preserved.
+        state: "working",
         title: "omo: refactoring session persistence",
         isAgent: true,
         agentType: "omo",
@@ -942,7 +942,7 @@ describe("sessionPersistence v2 serialization and migration", () => {
     expect(legacyRestored?.activityBySessionId).toEqual({});
   });
 
-  it("drops a restored working claim but keeps waiting, which survives a GUI restart", () => {
+  it("preserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions", () => {
     const state = workspaceState();
     state.activityBySessionId = {
       "sess-1": {
@@ -959,26 +959,63 @@ describe("sessionPersistence v2 serialization and migration", () => {
         agentType: "codex",
         source: "screen",
       },
+      "sess-3": {
+        state: "working",
+        title: "dead agent",
+        isAgent: true,
+        agentType: "claude",
+        source: "screen",
+      },
     };
 
     const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    // backend-1 (sess-1) and backend-2 (sess-2) are live, but backend-3 (sess-3) died
     const restored = deserializeWorkspaceState("default", serialized, [
-      { sessionId: "backend-1" },
-      { sessionId: "backend-2" },
+      { sessionId: "backend-1", running: true },
+      { sessionId: "backend-2", running: true },
     ]);
     expect(restored).not.toBeNull();
     if (!restored) return;
 
-    expect(restored.activityBySessionId?.["sess-1"]?.state).not.toBe("working");
-    // The daemon keeps PTY sessions alive across a GUI restart, so an agent that was waiting for
-    // input still is. Rewriting it to `done` made the reattached screen detector's first real
-    // report look like a done -> waiting transition, which lit every pane's attention frame.
+    // The daemon keeps PTY sessions alive across a GUI restart, so an agent that was working
+    // or waiting still is.
+    expect(restored.activityBySessionId?.["sess-1"]?.state).toBe("working");
     expect(restored.activityBySessionId?.["sess-2"]?.state).toBe("waiting");
-    // The agent identity is still known, so the tab keeps its icon; only the live claim is dropped.
+    // sess-3 was not live in the daemon, so its in-flight working claim settles to done.
+    expect(restored.activityBySessionId?.["sess-3"]?.state).toBe("done");
+
+    expect(restored.sessions["sess-1"].lifecycle).toBe("working");
+    expect(restored.sessions["sess-3"].lifecycle).toBe("exited");
     expect(restored.activityBySessionId?.["sess-1"]?.agentType).toBe("omo");
     expect(restored.activityBySessionId?.["sess-1"]?.isAgent).toBe(true);
     expect(restored.activityBySessionId?.["sess-1"]?.seen).toBe(true);
     expect(restored.activityBySessionId?.["sess-2"]?.seen).toBe(true);
+    expect(restored.activityBySessionId?.["sess-3"]?.seen).toBe(true);
+  });
+
+  it("marks session exited and settles working activity to done when daemon reports running: false", () => {
+    const state = workspaceState();
+    state.activityBySessionId = {
+      "sess-1": {
+        state: "working",
+        title: "exited process agent",
+        isAgent: true,
+        agentType: "omo",
+        source: "screen",
+      },
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    // backend-1 is in the daemon table, but its PTY process exited while GUI was closed
+    const restored = deserializeWorkspaceState("default", serialized, [
+      { sessionId: "backend-1", running: false },
+    ]);
+    expect(restored).not.toBeNull();
+    if (!restored) return;
+
+    expect(restored.sessions["sess-1"].lifecycle).toBe("exited");
+    expect(restored.sessions["sess-1"].backendSessionId).toBeNull();
+    expect(restored.activityBySessionId?.["sess-1"]?.state).toBe("done");
   });
 
   it("restores activities with seen: true so startup does not trigger attention frames on any pane", () => {
