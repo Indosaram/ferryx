@@ -151,18 +151,12 @@ pub async fn cmd_ssh_import_config<R: Runtime>(
 fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<SshHost>, IpcError> {
     let mut store = load_store(path);
     let parsed = parse_ssh_config(config_text);
-    let existing_keys: Vec<String> = store.hosts.iter().map(|host| host.key()).collect();
-    let mut tombstones = store.tombstones.clone();
-    tombstones.extend(existing_keys);
-    let imported = crate::ssh::config::import_aliases(&parsed, &tombstones);
+    let already_stored: Vec<String> = store.hosts.iter().map(|host| host.key()).collect();
+    let imported = crate::ssh::config::import_aliases(&parsed, &already_stored);
     for host in imported {
-        if !store
-            .hosts
-            .iter()
-            .any(|existing| existing.key() == host.key())
-        {
-            store.hosts.push(host);
-        }
+        let key = host.key();
+        store.tombstones.retain(|tombstone| tombstone != &key);
+        store.hosts.push(host);
     }
     save_store(path, &store)?;
     Ok(store.hosts)
