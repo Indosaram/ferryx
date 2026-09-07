@@ -2,7 +2,9 @@
 use crate::daemon::client::DaemonClient;
 use crate::ipc::IpcError;
 use crate::remote::auth::{DeviceInfo, DevicePermission};
-use crate::remote::protocol::{RemoteActiveDesktopSelection, RemoteTerminalTabInfo, RemoteWorktreeAttention};
+use crate::remote::protocol::{
+    RemoteActiveDesktopSelection, RemoteTerminalTabInfo, RemoteWorktreeAttention,
+};
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
@@ -394,12 +396,16 @@ pub async fn cmd_remote_set_active_selection(
         None
     } else {
         Some(RemoteActiveDesktopSelection {
-            attention_inventory: request.attention_inventory.into_iter().map(|entry| RemoteWorktreeAttention {
-                workspace_id: entry.workspace_id,
-                worktree_slug: sanitize_worktree_text(entry.worktree_slug),
-                worktree_label: sanitize_worktree_text(entry.worktree_label),
-                state: sanitize_activity_state(entry.state),
-            }).collect(),
+            attention_inventory: request
+                .attention_inventory
+                .into_iter()
+                .map(|entry| RemoteWorktreeAttention {
+                    workspace_id: entry.workspace_id,
+                    worktree_slug: sanitize_worktree_text(entry.worktree_slug),
+                    worktree_label: sanitize_worktree_text(entry.worktree_label),
+                    state: sanitize_activity_state(entry.state),
+                })
+                .collect(),
             workspace_id: request.workspace_id,
             worktree_slug: request.worktree_slug,
             worktree_label: request.worktree_label,

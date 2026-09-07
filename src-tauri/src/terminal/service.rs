@@ -58,12 +58,28 @@ impl TerminalService {
         cols: u16,
         rows: u16,
     ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
-        let plan = crate::ssh::direct::shell_plan(host, remote_root)
-            .map_err(|e| PtyError::Other(e.to_string()))?;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let agent_sock = crate::daemon::server::agent_state_socket_path();
+        let has_sock = std::path::Path::new(&agent_sock).exists();
+        let plan = crate::ssh::direct::shell_plan_with_session(
+            host,
+            remote_root,
+            Some(&session_id),
+            if has_sock { Some(&agent_sock) } else { None },
+        )
+        .map_err(|e| PtyError::Other(e.to_string()))?;
         let mut cmd = CommandBuilder::new(&plan.program);
         cmd.args(&plan.args);
         // No remote path is ever used as the local SSH process working directory.
-        let (session_id, pty_rx) = self.pty_manager.spawn(cmd, cols, rows)?;
+        let pty_rx = self.pty_manager.spawn_with_id(session_id.clone(), cmd, cols, rows)?;
+
+        let host_for_install = host.clone();
+        tokio::spawn(async move {
+            if let Err(error) = crate::ssh::direct::ensure_remote_extension_installed(&host_for_install).await {
+                tracing::debug!(host = %host_for_install.label, %error, "Failed to ensure remote agent extension");
+            }
+        });
+
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
 

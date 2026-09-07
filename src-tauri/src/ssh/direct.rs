@@ -65,19 +65,22 @@ pub fn ssh_plan(
         args.remove(0);
     }
     // These precede user config and prevent prompts, forwarding, or connection reuse.
-    for option in [
+    let mut options = vec![
         "BatchMode=yes",
         "StrictHostKeyChecking=yes",
         "ConnectTimeout=5",
         "ConnectionAttempts=1",
         "ServerAliveInterval=15",
         "ServerAliveCountMax=2",
-        "ClearAllForwardings=yes",
         "PermitLocalCommand=no",
         "RemoteCommand=none",
         "ControlMaster=no",
         "ControlPath=none",
-    ] {
+    ];
+    if !interactive {
+        options.push("ClearAllForwardings=yes");
+    }
+    for option in options {
         args.splice(0..0, ["-o".to_string(), option.to_string()]);
     }
     args.push(command);
@@ -87,16 +90,81 @@ pub fn ssh_plan(
     })
 }
 
-pub fn shell_plan(host: &SshHost, root: &str) -> Result<ShellCommandPlan, IpcError> {
+pub fn shell_plan_with_session(
+    host: &SshHost,
+    root: &str,
+    session_id: Option<&str>,
+    local_agent_socket: Option<&str>,
+) -> Result<ShellCommandPlan, IpcError> {
     validate_remote_path(root)?;
-    ssh_plan(
-        host,
-        format!(
-            "cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
-            quote_posix(root)
-        ),
-        true,
+    let remote_command = match (session_id, local_agent_socket) {
+        (Some(sid), Some(_)) => {
+            let remote_sock = format!("/tmp/ferryx-agent-{sid}.sock");
+            format!(
+                "export FERRYX_SESSION_ID={} FERRYX_AGENT_STATE_SOCKET={}; cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+                quote_posix(sid),
+                quote_posix(&remote_sock),
+                quote_posix(root)
+            )
+        }
+        (Some(sid), None) => {
+            format!(
+                "export FERRYX_SESSION_ID={}; cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+                quote_posix(sid),
+                quote_posix(root)
+            )
+        }
+        _ => {
+            format!(
+                "cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+                quote_posix(root)
+            )
+        }
+    };
+
+    let mut plan = ssh_plan(host, remote_command, true)?;
+
+    if let (Some(sid), Some(local_sock)) = (session_id, local_agent_socket) {
+        let remote_sock = format!("/tmp/ferryx-agent-{sid}.sock");
+        plan.args.splice(
+            0..0,
+            [
+                "-o".to_string(),
+                "StreamLocalBindUnlink=yes".to_string(),
+                "-R".to_string(),
+                format!("{remote_sock}:{local_sock}"),
+            ],
+        );
+    }
+    Ok(plan)
+}
+
+pub fn shell_plan(host: &SshHost, root: &str) -> Result<ShellCommandPlan, IpcError> {
+    shell_plan_with_session(host, root, None, None)
+}
+
+pub fn install_remote_extension_script() -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let source_b64 = STANDARD.encode(crate::daemon::agent_extension::EXTENSION_SOURCE);
+    format!(
+        "sh -c 'for b in \"$HOME/.omo\" \"$HOME/.pi\" \"$HOME/.omp\"; do \
+            if [ -d \"$b\" ] || [ \"$b\" = \"$HOME/.omo\" ]; then \
+                d=\"$b/agent/extensions\"; \
+                mkdir -p \"$d\" 2>/dev/null; \
+                t=\"$d/ferryx-agent-state.ts\"; \
+                tmp=\"$d/.ferryx-agent-state.ts.tmp\"; \
+                echo \"{source_b64}\" | (base64 -d 2>/dev/null || base64 -D 2>/dev/null || openssl enc -base64 -d 2>/dev/null) > \"$tmp\" 2>/dev/null; \
+                if [ -s \"$tmp\" ]; then mv -f \"$tmp\" \"$t\" 2>/dev/null; else rm -f \"$tmp\" 2>/dev/null; fi; \
+            fi; \
+        done'"
     )
+}
+
+pub async fn ensure_remote_extension_installed(host: &SshHost) -> Result<(), IpcError> {
+    let script = install_remote_extension_script();
+    let plan = ssh_plan(host, script, false)?;
+    let _ = bounded_output(&plan, Duration::from_secs(8)).await?;
+    Ok(())
 }
 
 pub fn probe_command(path: &str) -> Result<String, IpcError> {

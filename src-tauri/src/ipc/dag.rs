@@ -221,8 +221,7 @@ mod tests {
             "bottlenecks": []
         }"#;
 
-        let with_ids =
-            parse_run_checkpoint(with_session_ids).expect("parse checkpoint with ids");
+        let with_ids = parse_run_checkpoint(with_session_ids).expect("parse checkpoint with ids");
         assert_eq!(
             with_ids.root_session_id.as_deref(),
             Some("01a055f9-a8de-7619-a1f5-81ca62e3d3b1")

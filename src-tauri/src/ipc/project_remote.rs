@@ -49,6 +49,10 @@ pub async fn register_remote_project(
     let lookup = host_store.clone();
     let host = run_blocking(move || projects::enabled_host(&lookup, &request.host_id)).await?;
     let (repo_root, git_root, git_remote) = direct::probe(&host, &request.repo_path).await?;
+    let host_for_install = host.clone();
+    tokio::spawn(async move {
+        let _ = direct::ensure_remote_extension_installed(&host_for_install).await;
+    });
     let project = projects::RemoteProject {
         workspace_id: projects::identity(&host.id, &repo_root),
         host_id: host.id.clone(),

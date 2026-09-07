@@ -24,6 +24,13 @@ export interface SshTargetSummary {
   checkedAt: number;
 }
 
+export interface SystemSshConfig {
+  path: string;
+  exists: boolean;
+  rawText: string;
+  hosts: SshHost[];
+}
+
 export function formatSshTarget(host: { username?: string | null; hostname: string }): string {
   if (host.username && host.username.trim() !== "") {
     return `${host.username.trim()}@${host.hostname.trim()}`;
@@ -154,6 +161,13 @@ export async function importSshConfig(configText: string): Promise<SshHost[]> {
   const hosts = await invoke<SshHost[]>("cmd_ssh_import_config", { configText });
   notifyListeners(hosts);
   return hosts;
+}
+
+export async function readSystemSshConfig(): Promise<SystemSshConfig> {
+  if (!isTauri()) {
+    return { path: "~/.ssh/config", exists: false, rawText: "", hosts: [] };
+  }
+  return invoke<SystemSshConfig>("cmd_ssh_read_system_config");
 }
 
 export async function updateSshHost(host: SshHost): Promise<SshHost[]> {

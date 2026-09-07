@@ -163,7 +163,8 @@ fn notification_item(
     platform: &str,
     raw: &crate::notification::NotificationPermissionStatusDto,
 ) -> PermissionItemStatus {
-    const DEFAULT_DESC: &str = "Allows desktop alerts for agent task completions, background builds, and version updates.";
+    const DEFAULT_DESC: &str =
+        "Allows desktop alerts for agent task completions, background builds, and version updates.";
 
     if raw.authoritative {
         return match raw.authorization {
@@ -387,8 +388,7 @@ mod notification_item_tests {
 
     #[test]
     fn authoritative_denied_is_denied() {
-        let item =
-            notification_item("macos", &authoritative(NotificationAuthorization::Denied));
+        let item = notification_item("macos", &authoritative(NotificationAuthorization::Denied));
         assert_eq!(item.status, PermissionStatus::Denied);
         assert!(!item.granted);
         assert!(!item.can_request);
@@ -409,10 +409,8 @@ mod notification_item_tests {
 
     #[test]
     fn non_authoritative_windows_is_unknown_with_settings() {
-        let raw = NotificationPermissionStatusDto::non_authoritative(
-            NotificationPlatform::Windows,
-            true,
-        );
+        let raw =
+            NotificationPermissionStatusDto::non_authoritative(NotificationPlatform::Windows, true);
         let item = notification_item("windows", &raw);
         assert_eq!(item.status, PermissionStatus::Unknown);
         assert!(!item.granted);
@@ -423,10 +421,8 @@ mod notification_item_tests {
 
     #[test]
     fn non_authoritative_linux_is_unknown_no_settings() {
-        let raw = NotificationPermissionStatusDto::non_authoritative(
-            NotificationPlatform::Linux,
-            false,
-        );
+        let raw =
+            NotificationPermissionStatusDto::non_authoritative(NotificationPlatform::Linux, false);
         let item = notification_item("linux", &raw);
         assert_eq!(item.status, PermissionStatus::Unknown);
         assert!(!item.granted);

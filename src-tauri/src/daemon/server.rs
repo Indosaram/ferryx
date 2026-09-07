@@ -918,8 +918,9 @@ impl DaemonServer {
             get_socket_path(),
         ));
 
-        let remote_handle_for_handover: Arc<Mutex<Option<crate::remote::server::RemoteServerHandle>>> =
-            Arc::new(Mutex::new(None));
+        let remote_handle_for_handover: Arc<
+            Mutex<Option<crate::remote::server::RemoteServerHandle>>,
+        > = Arc::new(Mutex::new(None));
         {
             let remote_state_cb = Arc::clone(&remote_state);
             let remote_handle_cb = Arc::clone(&remote_handle_for_handover);
@@ -1820,11 +1821,13 @@ impl DaemonServer {
                 self.handle_close(&session_id)
                     .await
                     .map_err(|e| e.to_string())?;
-            } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id)
+            } else if let Some(peer) = self
+                .session_router
+                .find_legacy_peer_for_session(&session_id)
             {
-                peer.close(&session_id)
-                    .await
-                    .map_err(|message| format!("failed to close peer session '{session_id}': {message}"))?;
+                peer.close(&session_id).await.map_err(|message| {
+                    format!("failed to close peer session '{session_id}': {message}")
+                })?;
             }
             self.release_session_ownership(&session_id);
         }

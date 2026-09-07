@@ -308,10 +308,7 @@ mod tests {
             .register_unique_root("project", dir.path())
             .expect("replaces bogus root registration instead of failing");
         assert_eq!(registered, "project");
-        assert_ne!(
-            registry.repo_root("project").unwrap(),
-            PathBuf::from("/")
-        );
+        assert_ne!(registry.repo_root("project").unwrap(), PathBuf::from("/"));
     }
 
     #[test]
@@ -326,9 +323,6 @@ mod tests {
         }
 
         assert!(registry.register("project", dir.path()).is_ok());
-        assert_ne!(
-            registry.repo_root("project").unwrap(),
-            PathBuf::from("/")
-        );
+        assert_ne!(registry.repo_root("project").unwrap(), PathBuf::from("/"));
     }
 }

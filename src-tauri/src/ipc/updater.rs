@@ -5,7 +5,11 @@ use crate::ipc::error::IpcError;
 #[cfg(windows)]
 pub fn updater_managed_externally() -> bool {
     std::env::current_exe()
-        .map(|exe| exe.to_string_lossy().to_lowercase().contains(r"\windowsapps\"))
+        .map(|exe| {
+            exe.to_string_lossy()
+                .to_lowercase()
+                .contains(r"\windowsapps\")
+        })
         .unwrap_or(false)
 }
 
@@ -24,7 +28,11 @@ pub async fn cmd_updater_managed_externally() -> Result<bool, IpcError> {
 /// always self-update.
 pub fn distribution_channel() -> &'static str {
     if cfg!(windows) {
-        if updater_managed_externally() { "store" } else { "installer" }
+        if updater_managed_externally() {
+            "store"
+        } else {
+            "installer"
+        }
     } else {
         "native"
     }

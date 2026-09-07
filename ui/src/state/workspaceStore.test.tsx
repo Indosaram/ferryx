@@ -236,6 +236,24 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(result.current.worktreeActivity[featureWorktree.path].workingCount).toBe(1);
   });
 
+  it("preserves unseen activities on RESTORE_WORKSPACE during project switch", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    act(() =>
+      result.current.restoreWorkspace({
+        ...restoredSplitState(),
+        unreadTabIds: { "tab-primary": true },
+        activityBySessionId: {
+          "session-1": { state: "done", title: "Task 1", isAgent: true, seen: false },
+          "session-2": { state: "waiting", title: "Task 2", isAgent: true, seen: false },
+        },
+      }),
+    );
+    expect(result.current.state.activityBySessionId?.["session-1"]?.seen).toBe(false);
+    expect(result.current.state.activityBySessionId?.["session-2"]?.seen).toBe(false);
+    expect(selectGlobalUnreadBadgeCount(result.current.state)).toBe(2);
+  });
+
   it("splits a pane by creating an independent backend PTY and local session", async () => {
     const { services } = createServices();
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
@@ -687,6 +705,88 @@ describe("session screen activity", () => {
       agentType: "antigravity",
       isAgent: true,
     });
+  });
+});
+
+describe("session activity attention transitions and seen carry-over", () => {
+  it("does not carry over seen status when transitioning from restored done to waiting via screen activity", () => {
+    const state = restoredTwoTabState("tab-primary");
+    state.activityBySessionId = {
+      "session-2": {
+        state: "done",
+        title: "Agent finished",
+        isAgent: true,
+        seen: true,
+        source: "screen",
+      },
+    };
+
+    const nextState = workspaceReducer(state, {
+      type: "SESSION_SCREEN_ACTIVITY",
+      tabId: "tab-secondary",
+      sessionId: "session-2",
+      state: "blocked",
+      ruleId: "claude_permission",
+      manifestId: "claude",
+    });
+
+    const activity = nextState.activityBySessionId?.["session-2"];
+    expect(activity?.state).toBe("waiting");
+    expect(activity?.seen).toBe(false);
+    expect(nextState.unreadTabIds["tab-secondary"]).toBe(true);
+  });
+
+  it("does not carry over seen status when transitioning from restored done to waiting via title activity", () => {
+    const state = restoredTwoTabState("tab-primary");
+    state.activityBySessionId = {
+      "session-2": {
+        state: "done",
+        title: "Agent",
+        isAgent: true,
+        seen: true,
+        source: "title",
+      },
+    };
+
+    const nextState = workspaceReducer(state, {
+      type: "SESSION_TITLE_ACTIVITY",
+      tabId: "tab-secondary",
+      sessionId: "session-2",
+      title: "✳ Claude needs your permission",
+      observed: false,
+    });
+
+    const activity = nextState.activityBySessionId?.["session-2"];
+    expect(activity?.state).toBe("waiting");
+    expect(activity?.seen).toBe(false);
+    expect(nextState.unreadTabIds["tab-secondary"]).toBe(true);
+  });
+
+  it("preserves seen status when updating title within the same attention state", () => {
+    const state = restoredTwoTabState("tab-primary");
+    state.activityBySessionId = {
+      "session-2": {
+        state: "waiting",
+        title: "Waiting 1",
+        isAgent: true,
+        seen: true,
+        source: "screen",
+        agentSource: "screen",
+      },
+    };
+
+    const nextState = workspaceReducer(state, {
+      type: "SESSION_TITLE_ACTIVITY",
+      tabId: "tab-secondary",
+      sessionId: "session-2",
+      title: "Waiting 2",
+      observed: false,
+    });
+
+    const activity = nextState.activityBySessionId?.["session-2"];
+    expect(activity?.state).toBe("waiting");
+    expect(activity?.seen).toBe(true);
+    expect(nextState.unreadTabIds["tab-secondary"]).toBeUndefined();
   });
 });
 

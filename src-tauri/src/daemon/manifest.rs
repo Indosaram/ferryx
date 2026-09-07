@@ -25,7 +25,14 @@ impl HandoverManifest {
 
     pub fn save_to_path(&self, path: &Path) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(self)?;
-        let tmp_path = path.with_extension(format!("tmp-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
+        let tmp_path = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
         fs::write(&tmp_path, json)?;
         #[cfg(unix)]
         {

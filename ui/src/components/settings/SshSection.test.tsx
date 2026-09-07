@@ -69,8 +69,8 @@ describe("SshSection Settings Component", () => {
 
     expect(screen.getByTestId("ssh-empty-state")).toBeInTheDocument();
     expect(screen.getByText("No SSH machines configured")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Add Machine" })[0]).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Import Config" })[0]).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Add Machine" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Import Config" })).toHaveLength(1);
   });
 
   it("renders mounted inventory with badges, endpoints, and status", async () => {
@@ -553,6 +553,65 @@ describe("SshSection Settings Component", () => {
       const errorAlert = screen.getByTestId("ssh-test-error-host-1");
       expect(errorAlert).toBeInTheDocument();
       expect(errorAlert).toHaveTextContent("Failed: Network unreachable: host is down");
+    });
+  });
+
+  describe("System SSH Config Auto-Discovery and Viewer", () => {
+    it("loads and displays discovered hosts from ~/.ssh/config and allows importing them", async () => {
+      const listDef = deferred<SshHost[]>();
+      const sysDef = deferred<unknown>();
+
+      invokeMock.mockImplementation((cmd) => {
+        if (cmd === "cmd_ssh_list_hosts") return listDef.promise;
+        if (cmd === "cmd_ssh_read_system_config") return sysDef.promise;
+        if (cmd === "cmd_ssh_import_config") return Promise.resolve([]);
+        return Promise.resolve();
+      });
+
+      render(<SshSection />);
+
+      await act(async () => {
+        listDef.resolve([]);
+        sysDef.resolve({
+          path: "/Users/test/.ssh/config",
+          exists: true,
+          rawText: "Host remote-vps\n  HostName 10.20.30.40\n  User debian\n  Port 22\n",
+          hosts: [
+            {
+              id: "ssh-remote-vps",
+              label: "remote-vps",
+              hostname: "10.20.30.40",
+              username: "debian",
+              port: 22,
+              source: "config",
+              authMethod: "agent",
+              disabled: false,
+            },
+          ],
+        });
+      });
+
+      // Shows System SSH Config Card
+      expect(screen.getByText("System SSH Config")).toBeInTheDocument();
+      expect(screen.getByText("1 hosts found")).toBeInTheDocument();
+      expect(screen.getByText("1 new")).toBeInTheDocument();
+      expect(screen.getByText("/Users/test/.ssh/config")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Import All \(1\)/i })).toBeInTheDocument();
+
+      // Toggle Show Hosts
+      fireEvent.click(screen.getByRole("button", { name: /Show Hosts/i }));
+      expect(screen.getByText("remote-vps")).toBeInTheDocument();
+      expect(screen.getByText("debian@10.20.30.40:22")).toBeInTheDocument();
+
+      // Toggle View Raw Config
+      fireEvent.click(screen.getByRole("button", { name: "View Raw Config" }));
+      expect(screen.getByText(/Host remote-vps/)).toBeInTheDocument();
+
+      // Click Import All
+      fireEvent.click(screen.getByRole("button", { name: /Import All \(1\)/i }));
+      expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_import_config", {
+        configText: "Host remote-vps\n  HostName 10.20.30.40\n  User debian\n  Port 22\n",
+      });
     });
   });
 });

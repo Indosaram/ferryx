@@ -916,6 +916,7 @@ describe("sessionPersistence v2 serialization and migration", () => {
         isAgent: true,
         agentType: "omo",
         source: "title",
+        seen: true,
       },
       "sess-2": {
         state: "done",
@@ -923,6 +924,7 @@ describe("sessionPersistence v2 serialization and migration", () => {
         isAgent: true,
         agentType: "claude",
         source: "screen",
+        seen: true,
       },
     });
 
@@ -972,6 +974,39 @@ describe("sessionPersistence v2 serialization and migration", () => {
     // The agent identity is still known, so the tab keeps its icon; only the live claim is dropped.
     expect(restored.activityBySessionId?.["sess-1"]?.agentType).toBe("omo");
     expect(restored.activityBySessionId?.["sess-1"]?.isAgent).toBe(true);
+    expect(restored.activityBySessionId?.["sess-1"]?.seen).toBe(true);
+    expect(restored.activityBySessionId?.["sess-2"]?.seen).toBe(true);
+  });
+
+  it("restores activities with seen: true so startup does not trigger attention frames on any pane", () => {
+    const state = workspaceState();
+    state.activityBySessionId = {
+      "sess-1": {
+        state: "working",
+        title: "in-flight agent",
+        isAgent: true,
+        agentType: "omo",
+        seen: false,
+      },
+      "sess-2": {
+        state: "waiting",
+        title: "waiting agent",
+        isAgent: true,
+        agentType: "claude",
+        seen: false,
+      },
+    };
+
+    const serialized = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", serialized, [
+      { sessionId: "backend-1" },
+      { sessionId: "backend-2" },
+    ]);
+
+    expect(restored).not.toBeNull();
+    for (const activity of Object.values(restored?.activityBySessionId ?? {})) {
+      expect(activity.seen).toBe(true);
+    }
   });
 
   it("persists and restores agentType and agentSessionId across serialization and deserialization", () => {
@@ -1401,12 +1436,14 @@ describe("sessionPersistence v2 serialization and migration", () => {
       title: "Gemini finished",
       isAgent: true,
       agentType: "antigravity",
+      seen: true,
     });
     expect(restored.activityBySessionId?.["sess-2"]).toEqual({
       state: "done",
       title: "Claude finished",
       isAgent: true,
       agentType: "claude",
+      seen: true,
     });
   });
 });

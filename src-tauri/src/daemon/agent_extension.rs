@@ -6,9 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-const EXTENSION_SOURCE: &str =
+pub const EXTENSION_SOURCE: &str =
     include_str!("../../resources/agent-extensions/ferryx-agent-state.ts");
-const EXTENSION_FILE_NAME: &str = "ferryx-agent-state.ts";
+pub const EXTENSION_FILE_NAME: &str = "ferryx-agent-state.ts";
 
 /// Extension directories of agents that share the same lifecycle extension API.
 fn extension_dirs() -> Vec<PathBuf> {

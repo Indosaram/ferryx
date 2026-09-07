@@ -12,9 +12,9 @@ use crate::notification::{
     open_system_notification_settings, picked_audio_file, DispatchNotificationRequest,
     DispatchNotificationResult, NativeNotificationBackend, NotificationActivations,
     NotificationAudioPlayer, NotificationContent, NotificationPermissionRequestDto,
-    NotificationPermissionStatusDto, NotificationProbeResult, NotificationService, NotificationSound,
-    NotificationTarget, OpenSystemSettingsResult, PickedAudioFile, PlaySoundResult,
-    SetBadgeCountResult, SUPPORTED_AUDIO_EXTENSIONS,
+    NotificationPermissionStatusDto, NotificationProbeResult, NotificationService,
+    NotificationSound, NotificationTarget, OpenSystemSettingsResult, PickedAudioFile,
+    PlaySoundResult, SetBadgeCountResult, SUPPORTED_AUDIO_EXTENSIONS,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -140,7 +140,8 @@ pub async fn cmd_notification_probe_delivery<R: Runtime>(
     sound: Option<NotificationSound>,
 ) -> Result<NotificationProbeResult, IpcError> {
     let send_test = send_test.unwrap_or(false);
-    run_blocking(move || Ok(service_for(&app).probe_delivery(send_test, sound.unwrap_or_default()))).await
+    run_blocking(move || Ok(service_for(&app).probe_delivery(send_test, sound.unwrap_or_default())))
+        .await
 }
 
 /// Open the OS notification settings page for rorca.
@@ -253,11 +254,11 @@ pub async fn cmd_notification_set_badge_count<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notification::NotificationTarget;
     use crate::notification::{
         is_supported_audio_extension, NotificationAuthorization, NotificationDispatchReason,
         NotificationPlatform, NotificationProbeOutcome, NotificationSource, PlaySoundReason,
     };
-    use crate::notification::NotificationTarget;
     use serde_json::json;
 
     /// Mock app managing the same audio and activation state `lib.rs` registers.
@@ -286,7 +287,10 @@ mod tests {
             .await
             .expect("drain resolves");
         assert_eq!(
-            drained.iter().map(|t| t.session_id.as_str()).collect::<Vec<_>>(),
+            drained
+                .iter()
+                .map(|t| t.session_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["fe-1", "fe-2"]
         );
 

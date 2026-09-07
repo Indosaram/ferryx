@@ -15,6 +15,15 @@ pub struct SshTargetSummary {
     pub checked_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemSshConfigResult {
+    pub path: String,
+    pub exists: bool,
+    pub raw_text: String,
+    pub hosts: Vec<SshHost>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SshHostStore {
@@ -36,6 +45,56 @@ pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathB
     } else {
         Ok(app_dir.join("ssh_hosts.json"))
     }
+}
+
+pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    app.path()
+        .home_dir()
+        .ok()
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(PathBuf::from)
+        })
+        .map(|home| home.join(".ssh").join("config"))
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_read_system_config<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<SystemSshConfigResult, IpcError> {
+    run_blocking(move || {
+        let Some(path) = system_ssh_config_path(&app) else {
+            return Ok(SystemSshConfigResult {
+                path: String::new(),
+                exists: false,
+                raw_text: String::new(),
+                hosts: Vec::new(),
+            });
+        };
+
+        let path_str = path.to_string_lossy().into_owned();
+        if !path.is_file() {
+            return Ok(SystemSshConfigResult {
+                path: path_str,
+                exists: false,
+                raw_text: String::new(),
+                hosts: Vec::new(),
+            });
+        }
+
+        let raw_text = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed = parse_ssh_config(&raw_text);
+        let hosts = crate::ssh::config::import_aliases(&parsed, &[]);
+
+        Ok(SystemSshConfigResult {
+            path: path_str,
+            exists: true,
+            raw_text,
+            hosts,
+        })
+    })
+    .await
 }
 
 fn load_store(path: &PathBuf) -> SshHostStore {
@@ -158,9 +217,16 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 pub async fn cmd_ssh_test_connection(host: SshHost) -> Result<SshTargetSummary, IpcError> {
     let plan = crate::ssh::direct::ssh_plan(&host, "true".into(), false)?;
     let result = crate::ssh::direct::bounded_output(&plan, std::time::Duration::from_secs(8)).await;
+    let reachable = result.is_ok();
+    if reachable {
+        let host_for_install = host.clone();
+        tokio::spawn(async move {
+            let _ = crate::ssh::direct::ensure_remote_extension_installed(&host_for_install).await;
+        });
+    }
     Ok(SshTargetSummary {
         host,
-        reachable: result.is_ok(),
+        reachable,
         last_error: result.err().map(|e| e.message),
         checked_at: now_millis(),
     })
@@ -225,5 +291,22 @@ mod tests {
         let store: SshHostStore = serde_json::from_str("{}").expect("deserialize");
         assert!(store.hosts.is_empty());
         assert!(store.tombstones.is_empty());
+    }
+
+    #[test]
+    fn system_config_result_parses_sample_content() {
+        let sample = "\
+Host dev-box
+    HostName 10.0.0.1
+    User ubuntu
+    Port 2222
+";
+        let parsed = parse_ssh_config(sample);
+        let hosts = crate::ssh::config::import_aliases(&parsed, &[]);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].label, "dev-box");
+        assert_eq!(hosts[0].hostname, "10.0.0.1");
+        assert_eq!(hosts[0].username, Some("ubuntu".into()));
+        assert_eq!(hosts[0].port, Some(2222));
     }
 }

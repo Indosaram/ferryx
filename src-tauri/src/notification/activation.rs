@@ -127,7 +127,10 @@ mod tests {
 
         let drained = queue.drain();
         assert_eq!(
-            drained.iter().map(|t| t.session_id.as_str()).collect::<Vec<_>>(),
+            drained
+                .iter()
+                .map(|t| t.session_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
 
@@ -178,7 +181,11 @@ mod tests {
     fn route_default_action_with_valid_target_enqueues() {
         let queue = NotificationActivations::new();
         let json = r#"{"workspaceId":"ws-7","sessionId":"fe-3"}"#;
-        assert!(route_activation(&queue, ActivationAction::Default, Some(json)));
+        assert!(route_activation(
+            &queue,
+            ActivationAction::Default,
+            Some(json)
+        ));
         let drained = queue.drain();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].workspace_id, "ws-7");
@@ -189,7 +196,11 @@ mod tests {
     fn route_dismiss_action_never_enqueues() {
         let queue = NotificationActivations::new();
         let json = r#"{"workspaceId":"ws-7","sessionId":"fe-3"}"#;
-        assert!(!route_activation(&queue, ActivationAction::Dismiss, Some(json)));
+        assert!(!route_activation(
+            &queue,
+            ActivationAction::Dismiss,
+            Some(json)
+        ));
         assert_eq!(queue.len(), 0);
     }
 

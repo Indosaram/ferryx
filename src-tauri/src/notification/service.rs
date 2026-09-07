@@ -8,7 +8,7 @@ use super::model::{
     format_notification, DispatchNotificationRequest, DispatchNotificationResult,
     NotificationContent, NotificationDispatchReason, NotificationPermissionRequestDto,
     NotificationPermissionStatusDto, NotificationProbeOutcome, NotificationProbeResult,
-    NotificationSource, NotificationSound,
+    NotificationSound, NotificationSource,
 };
 use super::permission::{platform_permission_provider, NotificationPermissionProvider};
 
@@ -99,7 +99,11 @@ impl NotificationService {
     ///
     /// Reports `submitted`, never `visibly-delivered`: Focus and
     /// Do-Not-Disturb can suppress a banner with no signal back to rorca.
-    pub fn probe_delivery(&self, send_test: bool, sound: NotificationSound) -> NotificationProbeResult {
+    pub fn probe_delivery(
+        &self,
+        send_test: bool,
+        sound: NotificationSound,
+    ) -> NotificationProbeResult {
         let status = self.permissions.status();
 
         let outcome = match preflight(&status) {

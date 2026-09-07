@@ -510,7 +510,10 @@ mod target_tests {
             session_id: "fe-session-7".into(),
         };
         let wire = serde_json::to_value(&target).unwrap();
-        assert_eq!(wire, json!({ "workspaceId": "ws-1", "sessionId": "fe-session-7" }));
+        assert_eq!(
+            wire,
+            json!({ "workspaceId": "ws-1", "sessionId": "fe-session-7" })
+        );
 
         let decoded: NotificationTarget = serde_json::from_value(wire).unwrap();
         assert_eq!(decoded, target);

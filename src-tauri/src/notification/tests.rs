@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 fn notification_wire_preserves_sound_and_attention_reason() {
     let parsed: DispatchNotificationRequest = serde_json::from_value(json!({
         "source": "agent-task-complete", "sound": "silent", "attentionReason": "waiting"
-    })).unwrap();
+    }))
+    .unwrap();
     let wire = serde_json::to_value(&parsed).unwrap();
     assert_eq!(wire["sound"], "silent");
     assert_eq!(wire["attentionReason"], "waiting");

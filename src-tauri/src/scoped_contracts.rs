@@ -15,7 +15,9 @@ impl<'de> Deserialize<'de> for Epoch {
         let text = String::deserialize(deserializer)?;
         let value = text.parse::<u64>().map_err(serde::de::Error::custom)?;
         if value.to_string() != text {
-            return Err(serde::de::Error::custom("epoch must be canonical decimal u64"));
+            return Err(serde::de::Error::custom(
+                "epoch must be canonical decimal u64",
+            ));
         }
         Ok(Self(value))
     }
@@ -35,16 +37,28 @@ pub struct TargetRef {
 pub enum RunTarget {
     #[default]
     Local,
-    Ssh { #[serde(rename = "hostId")] host_id: String },
+    Ssh {
+        #[serde(rename = "hostId")]
+        host_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ScopeCapability { ScopeControlV1, SshHelperV1, ManagedCodexV1, CaptureV1 }
+pub enum ScopeCapability {
+    ScopeControlV1,
+    SshHelperV1,
+    ManagedCodexV1,
+    CaptureV1,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum InventoryCompleteness { Complete, Partial, Unknown }
+pub enum InventoryCompleteness {
+    Complete,
+    Partial,
+    Unknown,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,14 +71,30 @@ pub struct InventorySnapshot<T> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum TransitionKind { Waiting, Working, Idle, TaskComplete, Stopped, Removed }
+pub enum TransitionKind {
+    Waiting,
+    Working,
+    Idle,
+    TaskComplete,
+    Stopped,
+    Removed,
+}
 
 /// Waiting carries provenance; only provider-confirmed completion uses TaskComplete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TransitionSource {
-    Provider { provider: CanonicalProvider, request_id: Option<String> },
-    TerminalDetection { detector: String },
+    Provider {
+        provider: CanonicalProvider,
+        request_id: Option<String>,
+    },
+    TerminalDetection {
+        detector: String,
+    },
     Lifecycle,
 }
 
@@ -79,7 +109,10 @@ pub struct InventoryTransition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum CanonicalProvider { Codex, Claude }
+pub enum CanonicalProvider {
+    Codex,
+    Claude,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,7 +123,11 @@ pub struct ConversationClaimKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ConversationOwner {
     Native { target: TargetRef },
     Managed { target: TargetRef },
@@ -118,9 +155,19 @@ pub struct MutationEnvelope<P> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ScopeErrorCode {
-    InvalidRequest, Unauthorized, Forbidden, NotFound, TargetExpired,
-    ControlConflict, RequestConflict, ProviderOwned, Unsupported, Timeout,
-    InventoryIncomplete, PayloadTooLarge, CaptureUnsupported,
+    InvalidRequest,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    TargetExpired,
+    ControlConflict,
+    RequestConflict,
+    ProviderOwned,
+    Unsupported,
+    Timeout,
+    InventoryIncomplete,
+    PayloadTooLarge,
+    CaptureUnsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,8 +199,18 @@ impl<'de, const VALUE: bool> Deserialize<'de> for WireBool<VALUE> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ScopeResult<T, D = serde_json::Value> {
-    Success { ok: WireBool<true>, data: T, #[serde(rename = "requestId")] request_id: String },
-    Failure { ok: WireBool<false>, error: ScopeError<D>, #[serde(rename = "requestId")] request_id: String },
+    Success {
+        ok: WireBool<true>,
+        data: T,
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    Failure {
+        ok: WireBool<false>,
+        error: ScopeError<D>,
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,10 +226,20 @@ pub struct ScopeEvent<T> {
 
 /// Subscription acquisition must pair this snapshot/cursor atomically.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum EventReplay<T, S> {
-    Events { events: Vec<ScopeEvent<T>>, after_sequence: u64 },
-    Gap { snapshot: InventorySnapshot<S>, after_sequence: u64 },
+    Events {
+        events: Vec<ScopeEvent<T>>,
+        after_sequence: u64,
+    },
+    Gap {
+        snapshot: InventorySnapshot<S>,
+        after_sequence: u64,
+    },
 }
 
 pub const ATTACHMENT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
@@ -182,11 +249,16 @@ pub const ATTACHMENT_UNREFERENCED_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttachmentMediaType {
-    #[serde(rename = "image/png")] Png,
-    #[serde(rename = "image/jpeg")] Jpeg,
-    #[serde(rename = "image/webp")] Webp,
-    #[serde(rename = "text/plain")] Text,
-    #[serde(rename = "application/pdf")] Pdf,
+    #[serde(rename = "image/png")]
+    Png,
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    #[serde(rename = "image/webp")]
+    Webp,
+    #[serde(rename = "text/plain")]
+    Text,
+    #[serde(rename = "application/pdf")]
+    Pdf,
 }
 
 /// Host-private opaque receipt; intentionally contains no filesystem path.
@@ -218,7 +290,11 @@ pub struct ConfirmedDraft {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum DeliveryStage { Staged, Accepted, ProviderRead }
+pub enum DeliveryStage {
+    Staged,
+    Accepted,
+    ProviderRead,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

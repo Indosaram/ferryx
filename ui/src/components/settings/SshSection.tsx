@@ -1,10 +1,15 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  FileCode,
   FileText,
   Loader2,
   Plus,
+  RefreshCw,
   Server,
   Trash2,
 } from "lucide-react";
@@ -14,11 +19,13 @@ import {
   extractIpcErrorMessage,
   formatSshTarget,
   importSshConfig,
+  readSystemSshConfig,
   testSshConnection,
   updateSshHost,
   useSshHosts,
   type SshAuthMethod,
   type SshHost,
+  type SystemSshConfig,
 } from "../../lib/sshHosts";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -71,14 +78,38 @@ export function SshSection() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // Paste / Custom Import State
   const [isImporting, setIsImporting] = useState(false);
   const [configText, setConfigText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
 
+  // System ~/.ssh/config State
+  const [systemConfig, setSystemConfig] = useState<SystemSshConfig | null>(null);
+  const [loadingSystemConfig, setLoadingSystemConfig] = useState(false);
+  const [showSystemConfigView, setShowSystemConfigView] = useState(false);
+  const [showRawConfig, setShowRawConfig] = useState(false);
+  const [importingHostId, setImportingHostId] = useState<string | null>(null);
+
   const [busyHostId, setBusyHostId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestState>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const fetchSystemConfig = async () => {
+    setLoadingSystemConfig(true);
+    try {
+      const res = await readSystemSshConfig();
+      setSystemConfig(res);
+    } catch {
+      // System config read is optional/informational
+    } finally {
+      setLoadingSystemConfig(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchSystemConfig();
+  }, []);
 
   const handleOpenAdd = () => {
     setEditingHost(null);
@@ -198,6 +229,35 @@ export function SshSection() {
     }
   };
 
+  const handleImportSingleSystemHost = async (sysHost: SshHost) => {
+    setImportingHostId(sysHost.id);
+    setActionError(null);
+    try {
+      await updateSshHost({
+        ...sysHost,
+        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `ssh-${Date.now()}`,
+        source: "config",
+      });
+    } catch (err) {
+      setActionError(extractIpcErrorMessage(err, "Failed to import host."));
+    } finally {
+      setImportingHostId(null);
+    }
+  };
+
+  const handleImportAllSystemHosts = async () => {
+    if (!systemConfig?.rawText) return;
+    setImporting(true);
+    setActionError(null);
+    try {
+      await importSshConfig(systemConfig.rawText);
+    } catch (err) {
+      setActionError(extractIpcErrorMessage(err, "Failed to import all system hosts."));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleDeleteHost = async (hostId: string) => {
     if (busyHostId) return;
     setBusyHostId(hostId);
@@ -255,12 +315,24 @@ export function SshSection() {
 
   const isFormOpen = isAdding || editingHost !== null;
 
+  // Compute how many system config hosts are not yet in the configured inventory
+  const unimportedSystemHosts = systemConfig?.hosts.filter(
+    (sys) =>
+      !hosts.some(
+        (configured) =>
+          configured.label === sys.label ||
+          (configured.hostname === sys.hostname &&
+            (configured.port ?? 22) === (sys.port ?? 22) &&
+            (configured.username || "") === (sys.username || "")),
+      ),
+  ) ?? [];
+
   return (
     <section aria-label="SSH Machines">
       <SettingsHeading
         icon={<Server className="size-4" />}
         title="SSH Machines"
-        description="Configure outbound SSH machines and remote worktree targets. SSH hosts defined here are shared with the project location chooser."
+        description="Configure outbound SSH machines and remote worktree targets."
       />
 
       {loadError ? (
@@ -275,6 +347,154 @@ export function SshSection() {
           <AlertCircle className="size-4" />
           <AlertDescription>{actionError}</AlertDescription>
         </Alert>
+      ) : null}
+
+      {/* System ~/.ssh/config Auto-Detector & Viewer Card */}
+      {systemConfig && systemConfig.exists && systemConfig.hosts.length > 0 ? (
+        <Card className="mb-6 border-border/80 bg-card/40 p-3.5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <FileCode className="size-4 text-muted-foreground shrink-0" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-medium text-foreground">
+                    System SSH Config
+                  </span>
+                  <Badge variant="outline" className="text-[11px] py-0 px-1.5 h-4">
+                    {systemConfig.hosts.length} hosts found
+                  </Badge>
+                  {unimportedSystemHosts.length > 0 ? (
+                    <Badge variant="secondary" className="text-[11px] py-0 px-1.5 h-4 bg-primary/10 text-primary">
+                      {unimportedSystemHosts.length} new
+                    </Badge>
+                  ) : null}
+                </div>
+                <div className="font-mono text-[11px] text-muted-foreground truncate">
+                  {systemConfig.path}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {unimportedSystemHosts.length > 0 ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={importing}
+                  onClick={handleImportAllSystemHosts}
+                  className="h-7 text-[12px] px-2.5"
+                >
+                  {importing ? (
+                    <>
+                      <Loader2 className="size-3 mr-1 animate-spin" />
+                      Importing…
+                    </>
+                  ) : (
+                    `Import All (${unimportedSystemHosts.length})`
+                  )}
+                </Button>
+              ) : null}
+
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowSystemConfigView((prev) => !prev)}
+                className="h-7 text-[12px] px-2 text-muted-foreground hover:text-foreground"
+              >
+                {showSystemConfigView ? (
+                  <>
+                    Hide <ChevronUp className="size-3.5 ml-1" />
+                  </>
+                ) : (
+                  <>
+                    Show Hosts <ChevronDown className="size-3.5 ml-1" />
+                  </>
+                )}
+              </Button>
+
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={fetchSystemConfig}
+                disabled={loadingSystemConfig}
+                className="size-7 p-0 text-muted-foreground hover:text-foreground"
+                title="Reload ~/.ssh/config"
+              >
+                <RefreshCw className={`size-3.5 ${loadingSystemConfig ? "animate-spin" : ""}`} />
+              </Button>
+            </div>
+          </div>
+
+          {showSystemConfigView ? (
+            <div className="mt-3 border-t border-border/40 pt-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[12px] text-muted-foreground">
+                  Hosts discovered in <code className="font-mono text-[11px]">{systemConfig.path}</code>:
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowRawConfig((prev) => !prev)}
+                  className="h-6 text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  {showRawConfig ? "Hide Raw Config" : "View Raw Config"}
+                </Button>
+              </div>
+
+              {showRawConfig ? (
+                <pre className="max-h-48 overflow-auto rounded border border-border/60 bg-muted/40 p-2.5 font-mono text-[11px] text-foreground scrollbar-sleek">
+                  {systemConfig.rawText}
+                </pre>
+              ) : null}
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1 scrollbar-sleek">
+                {systemConfig.hosts.map((sysHost) => {
+                  const alreadyAdded = hosts.some(
+                    (h) =>
+                      h.label === sysHost.label ||
+                      (h.hostname === sysHost.hostname &&
+                        (h.port ?? 22) === (sysHost.port ?? 22) &&
+                        (h.username || "") === (sysHost.username || "")),
+                  );
+
+                  return (
+                    <div
+                      key={sysHost.id}
+                      className="flex items-center justify-between rounded border border-border/40 bg-background/60 px-2.5 py-1.5 text-[12px]"
+                    >
+                      <div className="min-w-0 pr-2">
+                        <div className="font-medium text-foreground truncate">{sysHost.label}</div>
+                        <div className="font-mono text-[10px] text-muted-foreground truncate">
+                          {formatSshTarget(sysHost)}:{sysHost.port ?? 22}
+                        </div>
+                      </div>
+
+                      {alreadyAdded ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground shrink-0">
+                          <Check className="size-3 text-emerald-500" /> Added
+                        </span>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={importingHostId === sysHost.id}
+                          onClick={() => handleImportSingleSystemHost(sysHost)}
+                          className="h-6 text-[11px] px-2 shrink-0"
+                        >
+                          {importingHostId === sysHost.id ? (
+                            <Loader2 className="size-3 animate-spin" />
+                          ) : (
+                            "+ Import"
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+        </Card>
       ) : null}
 
       {/* Manual Add / Edit Form Card */}
@@ -502,8 +722,7 @@ export function SshSection() {
 
       {/* Configured Machines Inventory Group */}
       <SettingsGroup
-        title="Configured Machines"
-        description="SSH hosts available for remote development and worktrees."
+        title={`Configured Machines (${hosts.length})`}
         action={
           <div className="flex items-center gap-2">
             <Button
@@ -571,12 +790,6 @@ export function SshSection() {
                       <span className="text-[13px] font-medium text-foreground truncate">
                         {host.label}
                       </span>
-                      <Badge variant="outline" className="text-[11px] font-normal py-0 px-1.5 h-4">
-                        {host.source === "config" ? "Config" : "Manual"}
-                      </Badge>
-                      <Badge variant="outline" className="text-[11px] font-normal py-0 px-1.5 h-4">
-                        {host.authMethod === "agent" ? "Agent" : "Key"}
-                      </Badge>
                       {host.disabled ? (
                         <Badge
                           variant="secondary"
@@ -629,13 +842,7 @@ export function SshSection() {
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
-                    <div className="flex items-center gap-1.5 mr-2">
-                      <Label
-                        htmlFor={`ssh-toggle-${host.id}`}
-                        className="text-[11px] text-muted-foreground cursor-pointer"
-                      >
-                        {host.disabled ? "Disabled" : "Enabled"}
-                      </Label>
+                    <div className="flex items-center mr-1">
                       <Switch
                         id={`ssh-toggle-${host.id}`}
                         checked={!host.disabled}

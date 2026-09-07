@@ -36,9 +36,9 @@ pub fn submit_with_click_routing(
     #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-        let dev_output = exe.parent().is_some_and(|dir| {
-            dir.ends_with("target/debug") || dir.ends_with("target/release")
-        });
+        let dev_output = exe
+            .parent()
+            .is_some_and(|dir| dir.ends_with("target/debug") || dir.ends_with("target/release"));
         if !dev_output {
             builder.app_id(_app_id);
         }
@@ -92,7 +92,8 @@ fn route_response(
     };
     let json = serde_json::json!({
         "workspaceId": target.workspace_id, "sessionId": target.session_id,
-    }).to_string();
+    })
+    .to_string();
     route_activation(activations, action, Some(&json))
 }
 

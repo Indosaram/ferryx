@@ -2283,16 +2283,28 @@ function applySessionActivity(
 
   const isAttentionState = activity.state === "done" || activity.state === "waiting";
   const wasAttentionState = previous?.state === "done" || previous?.state === "waiting";
+  // Acknowledge carry-over only applies within the same attention state (e.g. metadata/title
+  // refresh while already seen). Transitions between distinct attention states (done -> waiting,
+  // waiting -> done) require fresh attention notice.
+  const isSameAttentionState = isAttentionState && wasAttentionState && previous?.state === activity.state;
   // An app-initiated auto-resume fabricates a working->idle->done blip when the agent merely
   // lands back at its prompt; that first attention is noise, not a request for the user.
   const suppression = state.attentionSuppressions?.[sessionId] === true && isAttentionState;
   const acknowledged =
     isAttentionState &&
-    (activity.seen === true || (wasAttentionState && previous?.seen === true) || suppression || (observed && isSessionActivelyObserved(state, tabId, sessionId)));
+    (activity.seen === true ||
+      (isSameAttentionState && previous?.seen === true) ||
+      suppression ||
+      (observed && isSessionActivelyObserved(state, tabId, sessionId)));
   const stored: TerminalActivity = {
     ...activity,
     ...(isAttentionState ? { seen: acknowledged } : {}),
-    ...(isAttentionState ? { notificationSuppressed: suppression || (wasAttentionState && previous?.notificationSuppressed === true) } : {}),
+    ...(isAttentionState
+      ? {
+          notificationSuppressed:
+            suppression || (isSameAttentionState && previous?.notificationSuppressed === true),
+        }
+      : {}),
   };
 
   let nextState: WorkspaceState = {
@@ -2307,7 +2319,10 @@ function applySessionActivity(
       : {}),
   };
 
-  if (isAttentionState && !wasAttentionState && !suppression && (!observed || !isTabVisible(state, tabId))) {
+  const isNewAttentionTransition =
+    isAttentionState && (!wasAttentionState || previous?.state !== activity.state);
+
+  if (isNewAttentionTransition && !suppression && (!observed || !isTabVisible(state, tabId))) {
     const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,

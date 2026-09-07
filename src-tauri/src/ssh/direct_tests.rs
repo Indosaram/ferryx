@@ -187,3 +187,46 @@ async fn deadline_terminates_and_reaps_probe() {
         .unwrap();
     assert!(!output.status.success(), "probe process survived timeout");
 }
+
+#[test]
+fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
+    let plan = shell_plan_with_session(
+        &host(),
+        "/srv/repo",
+        Some("session-123"),
+        Some("/tmp/local-agent.sock"),
+    )
+    .expect("plan");
+
+    assert_eq!(plan.program, "ssh");
+    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "StreamLocalBindUnlink=yes"]));
+    assert!(plan.args.windows(2).any(|pair| pair == ["-R", "/tmp/ferryx-agent-session-123.sock:/tmp/local-agent.sock"]));
+
+    let remote_cmd = plan.args.last().unwrap();
+    assert!(remote_cmd.contains("export FERRYX_SESSION_ID='session-123'"));
+    assert!(remote_cmd.contains("FERRYX_AGENT_STATE_SOCKET='/tmp/ferryx-agent-session-123.sock'"));
+    assert!(remote_cmd.contains("cd '/srv/repo'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn install_remote_extension_script_creates_and_populates_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let omo_dir = home.join(".omo");
+    std::fs::create_dir_all(&omo_dir).unwrap();
+
+    let script = install_remote_extension_script();
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", &script])
+        .env("HOME", home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "script stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let installed_file = home.join(".omo/agent/extensions/ferryx-agent-state.ts");
+    assert!(installed_file.is_file(), "extension file must be installed");
+    let content = std::fs::read_to_string(&installed_file).unwrap();
+    assert_eq!(content, crate::daemon::agent_extension::EXTENSION_SOURCE);
+}

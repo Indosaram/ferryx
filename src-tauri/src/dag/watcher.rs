@@ -258,7 +258,10 @@ mod tests {
             .await
             .expect("snapshot receive must not time out")
             .expect("snapshot must be received");
-        assert_eq!(tagged_project, temp_dir.path().to_string_lossy().to_string());
+        assert_eq!(
+            tagged_project,
+            temp_dir.path().to_string_lossy().to_string()
+        );
         assert_eq!(snapshot.status, DagRunStatus::Running);
     }
 

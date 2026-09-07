@@ -71,7 +71,9 @@ pub fn compute_attention_frame_rects(
 
     let x = viewport.x as f32;
     let y = viewport.y as f32;
-    let halo_t = (thickness * 3.0).min(viewport_w / 2.0).min(viewport_h / 2.0);
+    let halo_t = (thickness * 3.0)
+        .min(viewport_w / 2.0)
+        .min(viewport_h / 2.0);
     let core_t = thickness.min(viewport_w / 2.0).min(viewport_h / 2.0);
 
     if include_bottom_band {

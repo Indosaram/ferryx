@@ -59,8 +59,8 @@ pub mod macos {
     use block2::RcBlock;
     use objc2_foundation::{NSBundle, NSError};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting, UNNotificationSettings,
-        UNUserNotificationCenter,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting,
+        UNNotificationSettings, UNUserNotificationCenter,
     };
     use std::ptr::NonNull;
     use std::sync::mpsc;

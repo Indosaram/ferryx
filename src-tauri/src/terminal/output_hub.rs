@@ -236,13 +236,7 @@ impl BoundedBuffer {
                         });
                     }
                 }
-                (
-                    history,
-                    segments,
-                    Some(first_seq),
-                    Some(last_seq),
-                    None,
-                )
+                (history, segments, Some(first_seq), Some(last_seq), None)
             }
             Some(req_seq) => {
                 if req_seq >= last_seq {
@@ -257,7 +251,9 @@ impl BoundedBuffer {
                     let chunk_refs: Vec<&OutputChunk> = self.chunks.iter().collect();
                     let mut segments = segment_history(&chunk_refs, ledger, after_sequence);
                     let history = self.snapshot();
-                    if self.bracketed_paste_enabled && !self.buffer_contains_active_bracketed_paste() {
+                    if self.bracketed_paste_enabled
+                        && !self.buffer_contains_active_bracketed_paste()
+                    {
                         if let Some(first_seg) = segments.first_mut() {
                             first_seg.bytes.splice(0..0, b"\x1b[?2004h".iter().copied());
                         } else {
@@ -268,13 +264,7 @@ impl BoundedBuffer {
                             });
                         }
                     }
-                    (
-                        history,
-                        segments,
-                        Some(first_seq),
-                        Some(last_seq),
-                        gap,
-                    )
+                    (history, segments, Some(first_seq), Some(last_seq), gap)
                 } else {
                     let mut history = Vec::new();
                     let mut start_seq = None;
@@ -333,8 +323,7 @@ pub fn segment_history(
         li += 1;
     }
 
-    let mut segments: Vec<HistorySegment> =
-        Vec::with_capacity(ledger.len().saturating_sub(li) + 1);
+    let mut segments: Vec<HistorySegment> = Vec::with_capacity(ledger.len().saturating_sub(li) + 1);
     let mut current_bytes: Vec<u8> = Vec::with_capacity(total_bytes);
     current_bytes.extend_from_slice(&first_chunk.bytes);
     remaining -= first_chunk.bytes.len();
@@ -518,10 +507,7 @@ impl TerminalOutputHub {
         Some(sequence)
     }
 
-    pub fn subscribe(
-        &self,
-        session_id: &str,
-    ) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
+    pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()

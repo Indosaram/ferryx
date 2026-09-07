@@ -9,9 +9,9 @@ pub mod audio;
 pub mod badge;
 #[cfg(target_os = "macos")]
 pub mod macos_delegate;
-pub mod model;
 #[cfg(target_os = "macos")]
 mod macos_submission;
+pub mod model;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod notify_rust_adapter;
 pub mod permission;

@@ -793,7 +793,8 @@ pub async fn cmd_terminal_spawn_batch<R: Runtime>(
 ) -> Result<Vec<SpawnTerminalBatchEntry>, IpcError> {
     let mut entries = Vec::with_capacity(request.spawns.len());
     for (index, spawn) in request.spawns.into_iter().enumerate() {
-        match cmd_terminal_spawn(app.clone(), daemon_client.clone(), registry.clone(), spawn).await {
+        match cmd_terminal_spawn(app.clone(), daemon_client.clone(), registry.clone(), spawn).await
+        {
             Ok(response) => entries.push(SpawnTerminalBatchEntry {
                 index,
                 session_id: Some(response.session_id),

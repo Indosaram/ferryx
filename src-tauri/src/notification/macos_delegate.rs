@@ -14,8 +14,9 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNNotificationContent, UNNotificationDefaultActionIdentifier, UNNotificationPresentationOptions,
-    UNNotificationResponse, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    UNNotificationContent, UNNotificationDefaultActionIdentifier,
+    UNNotificationPresentationOptions, UNNotificationResponse, UNUserNotificationCenter,
+    UNUserNotificationCenterDelegate,
 };
 use std::sync::Arc;
 
@@ -148,10 +149,10 @@ pub fn install_delegate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notification::macos_submission::test_support::native_content_for_test;
     use crate::notification::model::{
         format_notification, DispatchNotificationRequest, NotificationSource, NotificationTarget,
     };
-    use crate::notification::macos_submission::test_support::native_content_for_test;
 
     fn content_with_target(target: Option<NotificationTarget>) -> Retained<UNNotificationContent> {
         // Build a real content object through the production encoder so the test
@@ -186,7 +187,11 @@ mod tests {
             session_id: "fe".into(),
         }));
 
-        assert!(route_from_content(&queue, ActivationAction::Default, &content));
+        assert!(route_from_content(
+            &queue,
+            ActivationAction::Default,
+            &content
+        ));
         let drained = queue.drain();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].workspace_id, "ws");
@@ -200,7 +205,11 @@ mod tests {
             workspace_id: "ws".into(),
             session_id: "fe".into(),
         }));
-        assert!(!route_from_content(&queue, ActivationAction::Dismiss, &content));
+        assert!(!route_from_content(
+            &queue,
+            ActivationAction::Dismiss,
+            &content
+        ));
         assert_eq!(queue.len(), 0);
     }
 
@@ -209,7 +218,11 @@ mod tests {
         // Test / id-less notifications carry no userInfo target.
         let queue = NotificationActivations::new();
         let content = content_with_target(None);
-        assert!(!route_from_content(&queue, ActivationAction::Default, &content));
+        assert!(!route_from_content(
+            &queue,
+            ActivationAction::Default,
+            &content
+        ));
         assert_eq!(queue.len(), 0);
     }
 }

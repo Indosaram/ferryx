@@ -1,13 +1,16 @@
 //! Modern macOS notification submission and its completion contract.
 
-use super::model::{NotificationContent, NotificationSound};
 #[cfg(test)]
 use super::model::NotificationTarget;
+use super::model::{NotificationContent, NotificationSound};
 use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSCopying, NSDictionary, NSError, NSString};
-use objc2_user_notifications::{UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound, UNUserNotificationCenter};
+use objc2_user_notifications::{
+    UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound,
+    UNUserNotificationCenter,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -36,7 +39,8 @@ fn native_content(content: &NotificationContent) -> Retained<UNMutableNotificati
     if let Some(target) = &content.target {
         let json = serde_json::json!({
             "workspaceId": target.workspace_id, "sessionId": target.session_id,
-        }).to_string();
+        })
+        .to_string();
         let value = NSString::from_str(&json);
         let key = NSString::from_str(TARGET_USER_INFO_KEY);
         let key_copying = ProtocolObject::<dyn NSCopying>::from_ref(&*key);
@@ -72,15 +76,23 @@ pub fn submit_notification(content: &NotificationContent) -> Result<(), String> 
     if !super::permission::macos::has_bundle_identity() {
         return Err("notifications require a bundled .app".into());
     }
-    let identifier = format!("ferryx-{}-{}", std::process::id(), SUBMISSION_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let identifier = format!(
+        "ferryx-{}-{}",
+        std::process::id(),
+        SUBMISSION_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
     await_submission(|handler| {
         objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
             let native = native_content(content);
             let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-                &NSString::from_str(&identifier), &native, None);
+                &NSString::from_str(&identifier),
+                &native,
+                None,
+            );
             UNUserNotificationCenter::currentNotificationCenter()
                 .addNotificationRequest_withCompletionHandler(&request, Some(handler));
-        })).map_err(|_| "UNUserNotificationCenter submission raised an exception".to_string())
+        }))
+        .map_err(|_| "UNUserNotificationCenter submission raised an exception".to_string())
     })
 }
 
@@ -158,8 +170,14 @@ mod tests {
         for (sound, expected) in [("system", true), ("silent", false)] {
             let request: DispatchNotificationRequest = serde_json::from_value(serde_json::json!({
                 "source": "test", "sound": sound
-            })).unwrap();
-            assert_eq!(native_content(&format_notification(&request)).sound().is_some(), expected);
+            }))
+            .unwrap();
+            assert_eq!(
+                native_content(&format_notification(&request))
+                    .sound()
+                    .is_some(),
+                expected
+            );
         }
     }
 
@@ -168,18 +186,25 @@ mod tests {
         assert!(await_submission(|handler| {
             handler.call((std::ptr::null_mut(),));
             Ok(())
-        }).is_ok());
+        })
+        .is_ok());
     }
 
     #[test]
     fn submission_propagates_native_rejection() {
         // SAFETY: The domain NSString is valid for the call and NSError retains it; no userInfo is supplied.
-        let error = unsafe { objc2_foundation::NSError::errorWithDomain_code_userInfo(
-            &objc2_foundation::NSString::from_str("FerryxNotificationTest"), 17, None) };
+        let error = unsafe {
+            objc2_foundation::NSError::errorWithDomain_code_userInfo(
+                &objc2_foundation::NSString::from_str("FerryxNotificationTest"),
+                17,
+                None,
+            )
+        };
         assert!(await_submission(|handler| {
             handler.call((objc2::rc::Retained::as_ptr(&error).cast_mut(),));
             Ok(())
-        }).is_err());
+        })
+        .is_err());
     }
 
     #[test]

@@ -331,10 +331,13 @@ impl DaemonClient {
     }
 
     pub async fn upgrade_binary(&self) -> Result<DaemonResponse, IpcError> {
-        let own_binary_path = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_string());
+        let own_binary_path = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
         self.send_request(DaemonRequest::UpgradeBinary {
             new_binary_path: own_binary_path,
-        }).await
+        })
+        .await
     }
 
     pub fn epoch(&self) -> Option<u64> {
@@ -605,8 +608,12 @@ impl DaemonClient {
     /// Interactive requests (keystroke writes, resizes) use a dedicated connection so
     /// a long-running request on the shared connection (e.g. a Spawn holding it for
     /// blocking canonicalize + PTY startup) cannot stall queued keystrokes.
-    async fn send_interactive_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
-        self.send_on_connection(&self.interactive_connection, req).await
+    async fn send_interactive_request(
+        &self,
+        req: DaemonRequest,
+    ) -> Result<DaemonResponse, IpcError> {
+        self.send_on_connection(&self.interactive_connection, req)
+            .await
     }
 
     async fn send_on_connection(
@@ -2184,18 +2191,58 @@ mod tests {
     #[test]
     fn test_should_request_upgrade_all_branches() {
         // Version mismatch -> true
-        assert!(should_request_upgrade(Some("2026.831.1"), "2026.902.2", None, None));
-        assert!(should_request_upgrade(Some("2026.902.1"), "2026.902.2", None, None));
+        assert!(should_request_upgrade(
+            Some("2026.831.1"),
+            "2026.902.2",
+            None,
+            None
+        ));
+        assert!(should_request_upgrade(
+            Some("2026.902.1"),
+            "2026.902.2",
+            None,
+            None
+        ));
 
         // Version identical -> false
-        assert!(!should_request_upgrade(Some("2026.902.2"), "2026.902.2", None, None));
+        assert!(!should_request_upgrade(
+            Some("2026.902.2"),
+            "2026.902.2",
+            None,
+            None
+        ));
 
         // Version None (legacy daemon) -> fallback to mtime
-        assert!(should_request_upgrade(None, "2026.902.2", Some(1000), Some(2000)));
-        assert!(!should_request_upgrade(None, "2026.902.2", Some(2000), Some(2000)));
-        assert!(!should_request_upgrade(None, "2026.902.2", Some(3000), Some(2000)));
-        assert!(!should_request_upgrade(None, "2026.902.2", None, Some(2000)));
-        assert!(!should_request_upgrade(None, "2026.902.2", Some(1000), None));
+        assert!(should_request_upgrade(
+            None,
+            "2026.902.2",
+            Some(1000),
+            Some(2000)
+        ));
+        assert!(!should_request_upgrade(
+            None,
+            "2026.902.2",
+            Some(2000),
+            Some(2000)
+        ));
+        assert!(!should_request_upgrade(
+            None,
+            "2026.902.2",
+            Some(3000),
+            Some(2000)
+        ));
+        assert!(!should_request_upgrade(
+            None,
+            "2026.902.2",
+            None,
+            Some(2000)
+        ));
+        assert!(!should_request_upgrade(
+            None,
+            "2026.902.2",
+            Some(1000),
+            None
+        ));
         assert!(!should_request_upgrade(None, "2026.902.2", None, None));
     }
 }

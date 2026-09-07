@@ -20,6 +20,21 @@ Read-only observation of the already-running installed app. No app launch, resta
 
 User launches the debug app with exactly bun tauri dev and confirms it is ready. Collect a fresh baseline tied to its PID and start time before requesting any repeated UI action. Do not compare absolute memory across different app PIDs/builds as a leak slope. User performs desktop actions manually. Keep pane/session count, window size, and display scale stable for tab-switch experiments.
 
+## Live 6GB+ escalation checkpoint (PID 19281)
+
+Collection timestamp: 2026-09-06T02:30:00Z. Process PID: 19281 (/Applications/Ferryx.app/Contents/MacOS/ferryx, started Sep 5 22:43:28 local time).
+
+- Footprint: 5937 MB (~5.9 GB); peak 7494 MB (~7.5 GB).
+- vmmap physical footprint: 5.8 GB; peak 7.3 GB.
+- IOSurface dirty: 5276 MB (~5.28 GB) across 1103 regions (~89% of total footprint).
+- Unmapped graphics footprint: 408 MB.
+- Active FerryxNativeTerminalView instances: exactly 6.
+- WgpuObserverLayer instances: 937.
+- CAImageQueue instances: 937.
+- FPCAMetalLayerState instances: 937.
+- IOSurface heap objects: 1055.
+- Analysis: Native view count remains constant at 6, but 937 WgpuObserverLayer instances and 937 CAImageQueue instances have accumulated in the live process, driving IOSurface to 5.28 GB. This directly matches the causal defect established earlier in wgpu-hal 24.0.4 layer_observer dealloc.
+
 ## Same-process follow-up
 
 Measured at 2026-09-05T04:25:08.680Z; PID 84403, same start time Sep 5 12:33:01. No UI automation or controlled ten-round-trip experiment was performed. Intervening user actions and session count are unverified.
