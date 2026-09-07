@@ -1023,7 +1023,7 @@ impl NativeTerminalSurfaceHostState {
     fn presentation_geometry_for_session(&self, session_id: &str) -> SurfacePresentationGeometry {
         self.hosts.lock().get(session_id).map_or(
             SurfacePresentationGeometry::Default,
-            |host| host.target.presentation_geometry(),
+            |host| host.active_presentation_geometry(),
         )
     }
 
@@ -1799,7 +1799,7 @@ impl NativeTerminalSurfaceHostState {
                 )?)
             }
         };
-        request.bounds = host.target.presentation_geometry().resolve(request.bounds)?;
+        request.bounds = host.active_presentation_geometry().resolve(request.bounds)?;
         let scale_factor = request.bounds.scale_factor;
         let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
         let logical_bounds = request.bounds;
@@ -1980,6 +1980,16 @@ impl NativeTerminalSurfaceHost {
             layout: None,
             logical_bounds: None,
         })
+    }
+
+    /// Presentation geometry of the active frame target; injected test targets use the
+    /// default (identity) presentation so headless harnesses keep raw webview density.
+    fn active_presentation_geometry(&self) -> SurfacePresentationGeometry {
+        match &self.frame_target {
+            HostFrameTarget::Native(native) => native.target.presentation_geometry(),
+            #[cfg(test)]
+            HostFrameTarget::Injected(_) => SurfacePresentationGeometry::Default,
+        }
     }
 
     fn descriptor(&self) -> PlatformCompositorDescriptor {
@@ -2197,7 +2207,7 @@ impl NativeSurfaceFrameTarget {
                 0,
                 0,
                 cell_metrics,
-                self.logical_bounds,
+                logical_bounds,
             ));
         };
         let view = frame
@@ -2225,7 +2235,7 @@ impl NativeSurfaceFrameTarget {
                 rebuilt_rows,
                 reused_rows,
                 cell_metrics,
-                self.logical_bounds,
+                logical_bounds,
             )
         })
     }
@@ -2317,6 +2327,7 @@ mod tests {
                     0,
                     0,
                     self.cell_metrics,
+                    None,
                 )
             })
         }
