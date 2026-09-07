@@ -21,7 +21,9 @@ pub mod fallback;
 use std::sync::Arc;
 use tauri::{Runtime, WebviewWindow};
 
-use crate::native_terminal::composition::{LogicalBounds, PlatformCompositorDescriptor};
+use crate::native_terminal::composition::{
+    LogicalBounds, PlatformCompositorDescriptor, SurfacePresentationGeometry,
+};
 use crate::native_terminal::error::NativeTerminalError;
 
 #[cfg(target_os = "macos")]
@@ -86,6 +88,14 @@ impl PlatformCompositorTarget {
     /// Returns the target descriptor for this platform compositor target.
     pub fn descriptor(&self) -> PlatformCompositorDescriptor {
         self.inner.descriptor()
+    }
+
+    pub fn presentation_geometry(&self) -> SurfacePresentationGeometry {
+        #[cfg(target_os = "linux")]
+        if self.inner.uses_wayland_subsurface() {
+            return SurfacePresentationGeometry::WaylandSubsurface;
+        }
+        SurfacePresentationGeometry::Default
     }
 
     /// Sets the child view frame to match the active terminal viewport in platform coordinates.

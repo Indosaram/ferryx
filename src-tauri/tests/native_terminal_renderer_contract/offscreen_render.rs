@@ -45,6 +45,119 @@ fn test_render_snapshot_offscreen_frame_with_ansi_cjk_cursor_selection() {
     assert_eq!(frame.rendered_row_count, 24);
 }
 
+#[test]
+fn test_dense_scale_2_working_set_pixel_readback_integrity() {
+    fn snapshot(start: usize, count: usize, rows: u16) -> RenderSnapshot {
+        let mut grid = vec![vec![super::snapshot_builder::empty_cell(); 80]; rows as usize];
+        for i in 0..count {
+            grid[i / 40][(i % 40) * 2] = super::snapshot_builder::make_cell(
+                &char::from_u32(0xAC00 + (start + i) as u32)
+                    .unwrap()
+                    .to_string(),
+                CellWide::Wide,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+            );
+            grid[i / 40][(i % 40) * 2 + 1].wide = CellWide::SpacerTail;
+        }
+        RenderSnapshot {
+            cols: 80,
+            rows,
+            grid,
+            cursor: CursorSnapshot {
+                x: 0,
+                y: 0,
+                visible: false,
+                blinking: false,
+                wide_tail: false,
+                visual_style: CursorVisualStyle::Block,
+            },
+        }
+    }
+    fn tile(frame: &OffscreenFrame, index: usize) -> Vec<u8> {
+        let x = (index % 40) * 32;
+        let y = (index / 40) * 32;
+        (y..y + 32)
+            .flat_map(|row| {
+                let start = (row * frame.width_px as usize + x) * 4;
+                frame.pixels[start..start + 128].iter().copied()
+            })
+            .collect()
+    }
+    fn save(name: &str, frame: &OffscreenFrame) {
+        if let Some(dir) = std::env::var_os("ATLAS_EVIDENCE_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            frame.save_png(dir.join(format!("{name}.png"))).unwrap();
+            std::fs::write(dir.join(format!("{name}.rgba")), &frame.pixels).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.txt")),
+                format!("RGBA8 {}x{}\n", frame.width_px, frame.height_px),
+            )
+            .unwrap();
+        }
+    }
+    // Given: a 1000-key 80x25 visible set, with independent fresh 400-key batches.
+    let config = RendererConfig {
+        cell_width_px: 16,
+        cell_height_px: 32,
+        device_scale_factor: 2.0,
+        theme: RendererTheme {
+            background: [0.0, 0.0, 0.0, 1.0],
+            foreground: [1.0; 4],
+            ..Default::default()
+        },
+    };
+    let mut renderer = NativeTerminalRenderer::new(config).expect("real GPU");
+    let dense = snapshot(0, 1000, 25);
+    // When: draw the growth frame and its unchanged repeat through the public entry.
+    let first = renderer.render_snapshot(&dense, None).unwrap();
+    let second = renderer.render_snapshot(&dense, None).unwrap();
+    save("integrity-f0", &first);
+    save("integrity-f1", &second);
+    // Then: EVERY RGBA byte of EVERY full wide cell equals its independent reference.
+    for start in (0..1000).step_by(400) {
+        let count = (1000 - start).min(400);
+        let mut reference = NativeTerminalRenderer::new(config).expect("fresh batch GPU");
+        let batch = reference
+            .render_snapshot(&snapshot(start, count, 10), None)
+            .unwrap();
+        save(&format!("integrity-reference-{start}"), &batch);
+        assert_eq!(reference.glyph_atlas_stats().entry_count, count);
+        for i in 0..count {
+            let expected = tile(&batch, i);
+            assert!(
+                expected.chunks_exact(4).any(|p| p[0] != 0),
+                "reference ink {}",
+                start + i
+            );
+            assert_eq!(
+                tile(&first, start + i),
+                expected,
+                "F0 full tile {}",
+                start + i
+            );
+            assert_eq!(
+                tile(&second, start + i),
+                expected,
+                "F1 full tile {}",
+                start + i
+            );
+        }
+    }
+    assert_eq!((second.rebuilt_row_count, second.reused_row_count), (0, 25));
+    assert_eq!(renderer.glyph_atlas_stats().entry_count, 1000);
+    println!(
+        "exact full tiles F0=1000 F1=1000; adapter={:?}; stats={:?}",
+        renderer.adapter_info(),
+        renderer.glyph_atlas_stats()
+    );
+}
+
 /// Matches the coverage exponent applied by the glyph fragment shader.
 const TEXT_COVERAGE_EXPONENT: f32 = 0.7142857;
 
@@ -131,7 +244,10 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
             }
         }
     }
-    assert!(covered > 0, "the host font must provide covered glyph pixels");
+    assert!(
+        covered > 0,
+        "the host font must provide covered glyph pixels"
+    );
     assert!(
         uncovered > 0,
         "the glyph cell must retain uncovered background pixels"

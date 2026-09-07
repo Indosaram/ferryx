@@ -276,14 +276,19 @@ impl SelectionSnapshot {
     }
 }
 
-/// Bounded glyph atlas memory and entry cache statistics.
+/// Bounded glyph atlas tracked payload, not total heap or GPU/driver residency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GlyphAtlasStats {
     /// Number of distinct glyph entries currently cached in the atlas.
     pub entry_count: usize,
-    /// Allocated byte size of the glyph atlas texture and metadata.
+    /// Two current RGBA8 texture payloads (8 bytes/texel) plus resident
+    /// `size_of::<(GlyphKey, AtlasEntry)>()` key/value payloads. Excludes String
+    /// heaps, HashMap spare buckets/allocator overhead, transient prepared rasters,
+    /// staging buffers, driver overhead and replaced textures still in flight.
     pub allocated_bytes: usize,
-    /// Configured maximum capacity in bytes before bounded eviction occurs.
+    /// Upper bound of that same payload model at the negotiated device extent,
+    /// derived from current cell dimensions and the atlas's shelf packing.
+    /// Saturates at usize::MAX if the theoretical bound exceeds the address space.
     pub max_capacity_bytes: usize,
 }
 

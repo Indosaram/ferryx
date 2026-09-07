@@ -26,7 +26,8 @@ const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest
 await import("../test/setup");
 
 const { NativeTerminalVisibilityProvider } = await import("../lib/nativeTerminalVisibility");
-const { NativeTerminalPane } = await import("./NativeTerminalPane");
+const { NativeTerminalPane, resetNativeTerminalPaneForTest } = await import("./NativeTerminalPane");
+const { resetNativeTerminalLifecycleForTest } = await import("../lib/nativeTerminalLifecycle");
 import type { TerminalSession } from "../lib/types";
 
 const tauriInvoke = vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined);
@@ -89,11 +90,72 @@ const PANE_RECT = {
   toJSON: () => ({}),
 } as DOMRect;
 
+function deferred<T = void>() {
+  let resolve = (_value: T) => {};
+  let reject = (_error: Error) => {};
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+const PRESENTED = {
+  presented: true, cursorCol: 2, cursorRow: 3, cellWidthPx: 10, cellHeightPx: 20,
+};
+
+function inputRecoveryBoundary() {
+  const inputStarted = deferred();
+  const input = deferred<typeof PRESENTED>();
+  const boundsStarted = deferred();
+  const bounds = deferred<typeof PRESENTED>();
+  const detached = deferred();
+  const recoveryStarted = deferred();
+  const recovery = deferred();
+  let holdRecovery = false;
+  let attaches = 0;
+  let inputs = 0;
+  tauriInvoke.mockImplementation(async (command, args) => {
+    if (command === "cmd_native_terminal_set_bounds") {
+      if (args.sessionId === "owner-b") {
+        boundsStarted.resolve();
+        return bounds.promise;
+      }
+      return PRESENTED;
+    }
+    if (command === "cmd_native_terminal_attach" && args.sessionId === "owner-a") {
+      if (++attaches > 1) {
+        recoveryStarted.resolve();
+        if (holdRecovery) return recovery.promise;
+      }
+    }
+    if (command === "cmd_native_terminal_send_input" && args.sessionId === "owner-a") {
+      if (++inputs === 1) {
+        inputStarted.resolve();
+        return input.promise;
+      }
+      return { ...PRESENTED, cursorCol: 99 };
+    }
+    if (command === "cmd_native_terminal_detach" && args.sessionId === "owner-a") detached.resolve();
+    return undefined;
+  });
+  return {
+    inputStarted, input, boundsStarted, bounds, detached, recoveryStarted, recovery,
+    holdRecovery: () => { holdRecovery = true; },
+  };
+}
+
+async function startPendingInput(view: ReturnType<typeof render>, boundary: ReturnType<typeof inputRecoveryBoundary>) {
+  await act(async () => {
+    fireEvent.input(view.getByTestId("native-terminal-focus-sink"), { target: { value: "x" } });
+    await boundary.inputStarted.promise;
+  });
+}
+
 describe("NativeTerminalPane compositor ownership lifecycle", () => {
   let restorePaneRect: () => void;
   const originalResizeObserver = globalThis.ResizeObserver;
 
   beforeEach(() => {
+    resetNativeTerminalLifecycleForTest();
+    resetNativeTerminalPaneForTest();
     const originalRect = HTMLElement.prototype.getBoundingClientRect;
     HTMLElement.prototype.getBoundingClientRect = function () {
       return PANE_RECT;
@@ -115,8 +177,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
 
   afterEach(async () => {
     restorePaneRect();
-    cleanup();
-    await Promise.resolve();
+    await act(async () => { cleanup(); });
     Object.defineProperty(globalThis, "ResizeObserver", {
       configurable: true,
       writable: true,
@@ -125,6 +186,207 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     if (typeof vi.unstubAllGlobals === "function") {
       vi.unstubAllGlobals();
     }
+  });
+
+  it.each([
+    ["uses effective native scale for IME anchor at fractional webview density", 1.5, 2, 16, 48, 8, 16],
+    ["keeps ordinary equal-scale IME anchors", 2, 2, 16, 48, 8, 16],
+    ["falls back to raw density for legacy IME receipts", 1.5, undefined, 32 / 1.5, 64, 16 / 1.5, 32 / 1.5],
+    ["falls back to raw density when native geometry is absent", 1.5, null, 32 / 1.5, 64, 16 / 1.5, 32 / 1.5],
+  ])("%s", async (_name, dpr, effectiveScaleFactor, left, top, width, height) => {
+    const originalDpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: dpr });
+    const boundsStarted = deferred();
+    const bounds = deferred();
+    tauriInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_set_bounds") {
+        boundsStarted.resolve();
+        await bounds.promise;
+        return { presented: true, cursorCol: 2, cursorRow: 3, cellWidthPx: 16, cellHeightPx: 32, effectiveScaleFactor };
+      }
+      return undefined;
+    });
+    try {
+      const view = render(<NativeTerminalPane session={session("ime-scale")} />);
+      await act(async () => { await boundsStarted.promise; bounds.resolve(); });
+      const sink = view.getByTestId("native-terminal-focus-sink");
+      expect(sink.style.left).toBe(`${left}px`);
+      expect(sink.style.top).toBe(`${top}px`);
+      expect(sink.style.width).toBe(`${width}px`);
+      expect(sink.style.height).toBe(`${height}px`);
+      for (const cmd of ["cmd_native_terminal_attach", "cmd_native_terminal_set_bounds"]) {
+        expect(tauriInvoke).toHaveBeenCalledWith(cmd, expect.objectContaining({ scaleFactor: dpr }));
+      }
+    } finally {
+      if (originalDpr) Object.defineProperty(window, "devicePixelRatio", originalDpr);
+    }
+  });
+
+  it("does not reclaim the outgoing surface when input fails after tab replacement", async () => {
+    const boundary = inputRecoveryBoundary();
+    const view = render(<NativeTerminalPane session={session("owner-a")} />);
+    await act(async () => {});
+    await startPendingInput(view, boundary);
+
+    HTMLElement.prototype.getBoundingClientRect = () => ({ ...PANE_RECT, x: 90, y: 100, width: 400, height: 300 });
+    await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-b")} />); });
+    await boundary.boundsStarted.promise;
+    expect(lifecycleCalls()).not.toContainEqual(["cmd_native_terminal_detach", "owner-a"]);
+    await act(async () => { boundary.input.reject(new Error("departed input")); });
+
+    expect(lifecycleCalls().filter(([cmd, id]) => cmd === "cmd_native_terminal_attach" && id === "owner-a")).toHaveLength(1);
+    expect(tauriInvoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toHaveLength(1);
+    expect(tauriInvoke).toHaveBeenCalledWith("cmd_native_terminal_attach", expect.objectContaining({ sessionId: "owner-b", bounds: { x: 90, y: 100, width: 400, height: 300 } }));
+    await act(async () => { boundary.bounds.resolve(PRESENTED); await boundary.detached.promise; });
+    expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_detach")).toEqual([["cmd_native_terminal_detach", "owner-a"]]);
+    expect(view.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not recover input when its owner becomes hidden", async () => {
+    const boundary = inputRecoveryBoundary();
+    const pane = (visible: boolean) => <NativeTerminalVisibilityProvider visible={visible}><NativeTerminalPane session={session("owner-a")} /></NativeTerminalVisibilityProvider>;
+    const view = render(pane(true));
+    await act(async () => {});
+    await startPendingInput(view, boundary);
+
+    await act(async () => { view.rerender(pane(false)); });
+    await boundary.detached.promise;
+    await act(async () => { boundary.input.reject(new Error("hidden input")); });
+
+    expect(lifecycleCalls()).toEqual([["cmd_native_terminal_attach", "owner-a"], ["cmd_native_terminal_detach", "owner-a"]]);
+    expect(tauriInvoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toHaveLength(1);
+    expect(view.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not retry input after its owner leaves during recovery", async () => {
+    const boundary = inputRecoveryBoundary();
+    boundary.holdRecovery();
+    const view = render(<NativeTerminalPane session={session("owner-a")} />);
+    await act(async () => {});
+    await startPendingInput(view, boundary);
+    await act(async () => { boundary.input.reject(new Error("recoverable input")); await boundary.recoveryStarted.promise; });
+
+    HTMLElement.prototype.getBoundingClientRect = () => ({ ...PANE_RECT, x: 90, y: 100, width: 400, height: 300 });
+    await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-b")} />); });
+    await boundary.boundsStarted.promise;
+    await act(async () => { boundary.bounds.resolve(PRESENTED); });
+    const anchor = view.getByTestId("native-terminal-focus-sink").getAttribute("style");
+    await act(async () => { boundary.recovery.resolve(); await boundary.detached.promise; });
+
+    expect(tauriInvoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toHaveLength(1);
+    expect(view.getByTestId("native-terminal-focus-sink").getAttribute("style")).toBe(anchor);
+    expect(view.queryByRole("alert")).toBeNull();
+    expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_detach")).toEqual([["cmd_native_terminal_detach", "owner-a"]]);
+  });
+
+  it.each([false, true])("guards queued recovery attachment while preserving a returning owner (returns=%s)", async (returns) => {
+    const boundary = inputRecoveryBoundary();
+    const initialAttach = deferred();
+    const invokeBoundary = tauriInvoke.getMockImplementation();
+    let initial = true;
+    tauriInvoke.mockImplementation(async (cmd, args) => {
+      const result = invokeBoundary?.(cmd, args);
+      if (cmd === "cmd_native_terminal_attach" && args.sessionId === "owner-a" && initial) {
+        initial = false;
+        await initialAttach.promise;
+      }
+      return result;
+    });
+    const view = render(<NativeTerminalPane session={session("owner-a")} />);
+    await startPendingInput(view, boundary);
+    await act(async () => { boundary.input.reject(new Error("queue recovery behind initial attach")); });
+    expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(1);
+
+    if (returns) {
+      await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-b")} />); });
+      await boundary.boundsStarted.promise;
+      HTMLElement.prototype.getBoundingClientRect = () => ({ ...PANE_RECT, x: 150, width: 500 });
+      await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-a")} />); });
+    } else {
+      await act(async () => { view.unmount(); });
+    }
+    await act(async () => { initialAttach.resolve(); boundary.bounds.resolve(PRESENTED); });
+
+    expect(tauriInvoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toHaveLength(1);
+    const attaches = tauriInvoke.mock.calls.filter(([cmd, args]) => cmd === "cmd_native_terminal_attach" && args.sessionId === "owner-a");
+    expect(attaches).toHaveLength(returns ? 2 : 1);
+    if (returns) {
+      expect(attaches[1]?.[1].bounds).toEqual({ x: 150, y: 20, width: 500, height: 600 });
+      expect(lifecycleCalls()).not.toContainEqual(["cmd_native_terminal_detach", "owner-a"]);
+      expect(tauriInvoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.objectContaining({ sessionId: "owner-a" }));
+    } else {
+      await boundary.detached.promise;
+    }
+  });
+
+  it.each(["input receipt", "recovery error", "retry receipt", "retry error"])("does not publish a stale %s after replacement", async (outcome) => {
+    const boundary = inputRecoveryBoundary();
+    boundary.holdRecovery();
+    const retry = deferred<typeof PRESENTED>();
+    const retryStarted = deferred();
+    const invokeBoundary = tauriInvoke.getMockImplementation();
+    let inputs = 0;
+    tauriInvoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "cmd_native_terminal_send_input" && ++inputs === 2) {
+        retryStarted.resolve();
+        return retry.promise;
+      }
+      return invokeBoundary?.(cmd, args);
+    });
+    const view = render(<NativeTerminalPane session={session("owner-a")} />);
+    await act(async () => {});
+    await startPendingInput(view, boundary);
+    if (outcome !== "input receipt") {
+      await act(async () => { boundary.input.reject(new Error("recover input")); await boundary.recoveryStarted.promise; });
+      if (outcome !== "recovery error") {
+        await act(async () => { boundary.recovery.resolve(); await retryStarted.promise; });
+      }
+    }
+    await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-b")} />); });
+    await boundary.boundsStarted.promise;
+    await act(async () => { boundary.bounds.resolve(PRESENTED); });
+    const anchor = view.getByTestId("native-terminal-focus-sink").getAttribute("style");
+
+    await act(async () => {
+      switch (outcome) {
+        case "input receipt": boundary.input.resolve({ ...PRESENTED, cursorCol: 99 }); break;
+        case "recovery error": boundary.recovery.reject(new Error("obsolete recovery failed")); break;
+        case "retry receipt": retry.resolve({ ...PRESENTED, cursorCol: 99 }); break;
+        case "retry error": retry.reject(new Error("obsolete retry failed")); break;
+      }
+    });
+    expect(view.getByTestId("native-terminal-focus-sink").getAttribute("style")).toBe(anchor);
+    expect(view.queryByRole("alert")).toBeNull();
+  });
+
+  it("shares one recovery for concurrent inputs from a live owner", async () => {
+    const boundary = inputRecoveryBoundary();
+    boundary.holdRecovery();
+    const secondInput = deferred<typeof PRESENTED>();
+    const secondStarted = deferred();
+    const invokeBoundary = tauriInvoke.getMockImplementation();
+    let inputs = 0;
+    tauriInvoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "cmd_native_terminal_send_input" && ++inputs === 2) {
+        secondStarted.resolve();
+        return secondInput.promise;
+      }
+      return invokeBoundary?.(cmd, args);
+    });
+    const view = render(<NativeTerminalPane session={session("owner-a")} />);
+    await act(async () => {});
+    await startPendingInput(view, boundary);
+    await act(async () => {
+      fireEvent.input(view.getByTestId("native-terminal-focus-sink"), { target: { value: "y" } });
+      await secondStarted.promise;
+      boundary.input.reject(new Error("first input failure"));
+      secondInput.reject(new Error("second input failure"));
+      await boundary.recoveryStarted.promise;
+    });
+    expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(2);
+    await act(async () => { boundary.recovery.resolve(); });
+    expect(inputs).toBe(4);
+    expect(view.queryByRole("alert")).toBeNull();
   });
 
   it("retains the outgoing pane until a dropped frame is retried and presented", async () => {

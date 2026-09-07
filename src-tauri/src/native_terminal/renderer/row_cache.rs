@@ -1,9 +1,10 @@
 //! Row-level dirty cache tracking and incremental instance reuse.
 
-use super::atlas::GlyphAtlas;
+use super::atlas::{GlyphAtlas, PreparedGlyphs};
 use super::instances::{build_row_instances, compute_row_hash, RowCacheEntry};
 use super::pipeline::{GlyphInstance, RectInstance};
 use super::types::{RendererConfig, SelectionSnapshot};
+use crate::native_terminal::error::NativeTerminalError;
 use crate::native_terminal::snapshot::RenderSnapshot;
 
 pub struct RowCacheManager {
@@ -26,11 +27,8 @@ impl RowCacheManager {
         config: &RendererConfig,
         atlas: &mut GlyphAtlas,
         queue: &wgpu::Queue,
-    ) -> (Vec<RectInstance>, Vec<GlyphInstance>, u16, u16) {
-        if atlas.take_overflow_pending() {
-            atlas.clear();
-        }
-
+        prepared: Option<&PreparedGlyphs>,
+    ) -> Result<(Vec<RectInstance>, Vec<GlyphInstance>, u16, u16), NativeTerminalError> {
         if atlas.generation != self.last_atlas_generation {
             self.entries.clear();
             self.last_atlas_generation = atlas.generation;
@@ -50,8 +48,16 @@ impl RowCacheManager {
             if cached.hash == row_hash && !cached.bg_instances.is_empty() {
                 reused += 1;
             } else {
-                let (bg, glyph) =
-                    build_row_instances(row, snapshot, selection, config, atlas, queue);
+                let (bg, glyph) = match build_row_instances(
+                    row, snapshot, selection, config, atlas, queue, prepared,
+                ) {
+                    Ok(instances) => instances,
+                    Err(error) => {
+                        // Earlier rows in this attempt may already have been cached.
+                        self.entries.clear();
+                        return Err(error);
+                    }
+                };
                 self.entries[row as usize] = RowCacheEntry {
                     hash: row_hash,
                     bg_instances: bg,
@@ -69,6 +75,6 @@ impl RowCacheManager {
             all_glyph.extend_from_slice(&entry.glyph_instances);
         }
 
-        (all_bg, all_glyph, rebuilt, reused)
+        Ok((all_bg, all_glyph, rebuilt, reused))
     }
 }

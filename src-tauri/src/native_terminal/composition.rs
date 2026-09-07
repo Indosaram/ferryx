@@ -1,6 +1,37 @@
 //! Pure-Rust surface composition layout module for native terminal embedding.
 
+use super::child_surface::WaylandSubsurfaceGeometry;
 use super::error::NativeTerminalError;
+
+/// Geometry policy selected by the actual native child, not merely the operating system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfacePresentationGeometry {
+    Default,
+    WaylandSubsurface,
+}
+
+impl SurfacePresentationGeometry {
+    /// Resolve once before deriving cell metrics and layout; retain these bounds for every
+    /// subsequent child update and render, including scheduled frames and warm reattachments.
+    pub fn resolve(self, bounds: LogicalBounds) -> Result<LogicalBounds, NativeTerminalError> {
+        match self {
+            Self::Default => Ok(bounds),
+            Self::WaylandSubsurface => {
+                let geometry = WaylandSubsurfaceGeometry::from_logical_bounds(&bounds)
+                    .ok_or_else(|| {
+                        NativeTerminalError::InvalidValue("Invalid Wayland presentation bounds".into())
+                    })?;
+                Ok(LogicalBounds {
+                    x: geometry.position_x as f64,
+                    y: geometry.position_y as f64,
+                    width: (geometry.physical_width / geometry.buffer_scale as u32) as f64,
+                    height: (geometry.physical_height / geometry.buffer_scale as u32) as f64,
+                    scale_factor: geometry.buffer_scale as f64,
+                })
+            }
+        }
+    }
+}
 
 /// Logical rectangle and display scale for terminal surface placement.
 #[derive(Debug, Clone, Copy, PartialEq)]

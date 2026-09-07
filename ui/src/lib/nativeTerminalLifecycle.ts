@@ -5,6 +5,7 @@ type NativeTerminalLifecycleOperation<T> = () => Promise<T>;
 const lifecycleTails = new Map<string, Promise<void>>();
 const attachedSessionIds = new Set<string>();
 const attachments = new Map<string, Promise<void>>();
+const queuedAttachments = new Map<string, { operation: NativeTerminalLifecycleOperation<void> }>();
 const sessionGenerations = new Map<string, number>();
 
 type PendingDetachment = {
@@ -216,6 +217,10 @@ export function attachNativeTerminalLifecycle(
     });
   }
   if (attachedSessionIds.has(sessionId)) {
+    // A returning owner shares readiness, but a not-yet-started operation must
+    // use its live lifetime/geometry rather than the departed owner's closure.
+    const queued = queuedAttachments.get(sessionId);
+    if (queued) queued.operation = operation;
     const generation = bumpSessionGeneration(sessionId);
     switchDebug("terminal.lifecycle.attach.reused", {
       backendSessionId: sessionId,
@@ -230,7 +235,12 @@ export function attachNativeTerminalLifecycle(
     backendSessionId: sessionId,
     generation,
   });
-  const attachment = enqueueNativeTerminalLifecycle(sessionId, operation).catch((error: unknown) => {
+  const queued = { operation };
+  queuedAttachments.set(sessionId, queued);
+  const attachment = enqueueNativeTerminalLifecycle(sessionId, () => {
+    if (queuedAttachments.get(sessionId) === queued) queuedAttachments.delete(sessionId);
+    return queued.operation();
+  }).catch((error: unknown) => {
     if (attachments.get(sessionId) === attachment) {
       attachedSessionIds.delete(sessionId);
       attachments.delete(sessionId);
@@ -333,6 +343,7 @@ export function resetNativeTerminalLifecycleForTest(): void {
   lifecycleTails.clear();
   attachedSessionIds.clear();
   attachments.clear();
+  queuedAttachments.clear();
   sessionGenerations.clear();
   pendingDetachments.clear();
   detachmentsWaitingForPresentation.clear();
