@@ -78,7 +78,7 @@ export function TerminalPane({
   const titleId = useId();
   const descId = useId();
 
-  const isExited = session.backendSessionId === null;
+  const isExited = session.backendSessionId === null || session.lifecycle === "exited";
   const affordance = getAgentReconnectAffordance(session, sessions);
   const isAgentSession = Boolean(
     (session.agentType && session.agentType.trim().length > 0) ||

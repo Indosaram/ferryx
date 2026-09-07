@@ -320,6 +320,34 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     }
   });
 
+  it("does not attempt attach or show error banner when session lifecycle is exited", async () => {
+    const session = {
+      ...createSession("term-session-exited"),
+      lifecycle: "exited" as const,
+      backendSessionId: "backend-session-dead",
+    };
+
+    let attachCalled = false;
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_attach") {
+        attachCalled = true;
+        throw new Error("Session 'backend-session-dead' not found");
+      }
+      return undefined;
+    });
+
+    const { queryByRole } = render(
+      <NativeTerminalPane sessionId="term-session-exited" session={session} />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(attachCalled).toBe(false);
+    expect(queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("displays an accessible error banner when bounds IPC fails and does not show detach errors on unmount", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const session = createSession("term-session-1");

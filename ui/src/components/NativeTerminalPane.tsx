@@ -535,7 +535,13 @@ export function NativeTerminalPane({
   // Native Tauri commands identify the PTY/surface by `backendSessionId`. When callers only
   // supply `sessionId` without a `session` object, fall back safely to `sessionId``.
   // When a `session` object is provided, require `backendSessionId` so we never attach with local frontend ID.
-  const targetSessionId = session ? (session.backendSessionId ?? null) : (sessionId ?? null);
+  // Exited sessions have already reaped their daemon PTY and stream tasks; attaching would trigger SESSION_NOT_FOUND.
+  const isExited = session ? session.backendSessionId === null || session.lifecycle === "exited" : false;
+  const targetSessionId = isExited
+    ? null
+    : session
+      ? (session.backendSessionId ?? null)
+      : (sessionId ?? null);
   const surfaceOwnerRef = useRef<{ readonly sessionId: string } | null>(null);
   // Commit-scoped identity: A -> B -> A and hide/show must not revive old input.
   // Layout cleanup invalidates it before passive surface teardown or queued IPC.
@@ -545,6 +551,12 @@ export function NativeTerminalPane({
   }, [targetSessionId, visible]);
   const previousTargetSessionIdRef = useRef(targetSessionId);
   const isBackendRebind = previousTargetSessionIdRef.current === null && targetSessionId !== null;
+
+  useEffect(() => {
+    if (isExited) {
+      setError(null);
+    }
+  }, [isExited]);
 
   useEffect(() => {
     previousTargetSessionIdRef.current = targetSessionId;

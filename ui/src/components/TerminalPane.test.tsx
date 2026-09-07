@@ -407,4 +407,19 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
     expect(screen.queryByText("Shell exited")).toBeNull();
   });
+
+  it("renders the exited shell overlay when lifecycle is exited even if backendSessionId is not null", () => {
+    render(
+      <TerminalPane
+        session={{
+          ...createSession("session-live-to-exited"),
+          backendSessionId: "backend-still-set-after-kill",
+          lifecycle: "exited",
+        }}
+        active={true}
+      />,
+    );
+
+    expect(screen.getByText("Shell exited")).toBeInTheDocument();
+  });
 });
