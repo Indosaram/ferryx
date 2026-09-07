@@ -199,18 +199,23 @@ async fn health_check() -> Json<HealthResponse> {
 async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
     Json(payload): Json<PairExchangeRequest>,
-) -> Result<Json<PairExchangeResponse>, (StatusCode, String)> {
+) -> Result<Json<PairExchangeResponse>, Response> {
     let (token, device) = state
         .auth_manager
         .exchange_pairing_code(&payload.code, &payload.device_name)
         .map_err(|e| match e {
             AuthError::InvalidPairingCode => {
-                (StatusCode::BAD_REQUEST, "Invalid pairing code".into())
+                (StatusCode::BAD_REQUEST, "Invalid pairing code").into_response()
             }
             AuthError::ExpiredPairingCode => {
-                (StatusCode::UNAUTHORIZED, "Pairing code expired".into())
+                (StatusCode::UNAUTHORIZED, "Pairing code expired").into_response()
             }
-            _ => (StatusCode::UNAUTHORIZED, "Unauthorized".into()),
+            AuthError::PairingRateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"code": "pairing_rate_limited"})),
+            )
+                .into_response(),
+            AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
         })?;
 
     Ok(Json(PairExchangeResponse { token, device }))
@@ -351,8 +356,14 @@ mod attention_inventory_tests {
                 { "workspaceId": "parked", "worktreeSlug": null, "worktreeLabel": "main", "state": "done" }
             ]
         })).unwrap();
-        assert_eq!(compute_worktree_attention("parked", None, Some("main"), Some(&selection)).as_deref(), Some("done"));
-        assert_eq!(compute_attention_rollup(["working", "done"]).as_deref(), Some("done"));
+        assert_eq!(
+            compute_worktree_attention("parked", None, Some("main"), Some(&selection)).as_deref(),
+            Some("done")
+        );
+        assert_eq!(
+            compute_attention_rollup(["working", "done"]).as_deref(),
+            Some("done")
+        );
     }
 }
 
@@ -791,10 +802,17 @@ async fn revoke_device(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let token = extract_token(&headers, Some(&query))
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
+    let device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    if device.permission != DevicePermission::Control && device.id != device_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "View-only device cannot revoke another device".into(),
+        ));
+    }
 
     if state.auth_manager.revoke_device(&device_id) {
         Ok(StatusCode::NO_CONTENT)
@@ -811,16 +829,40 @@ async fn ws_events_handler(
 ) -> Result<Response, (StatusCode, String)> {
     let token = extract_token(&headers, Some(&query))
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
+    let device = state
         .auth_manager
         .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    let mut revocation = state
+        .auth_manager
+        .device_revocation(&device.id)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
     // Subscribe before reading the snapshot: a desktop focus change in between
     // is then queued as a follow-up event, never missed by this client.
     let rx = state.event_tx.subscribe();
     let active_selection = state.active_selection();
-    Ok(ws.on_upgrade(move |socket| handle_events_socket(socket, rx, active_selection)))
+    Ok(ws.on_upgrade(move |socket| async move {
+        let _ = while_device_authorized(
+            &mut revocation,
+            handle_events_socket(socket, rx, active_selection),
+        )
+        .await;
+    }))
+}
+
+/// Biased cancellation also checks the retained watch value before the first
+/// poll of work. The work future owns all socket pumps, so dropping it cancels
+/// pending sends/input/attachments, rather than detaching spawned tasks.
+async fn while_device_authorized<T>(
+    revocation: &mut tokio::sync::watch::Receiver<bool>,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = revocation.wait_for(|revoked| *revoked) => None,
+        result = work => Some(result),
+    }
 }
 
 async fn handle_events_socket(
@@ -858,6 +900,10 @@ async fn ws_terminal_handler(
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    let mut revocation = state
+        .auth_manager
+        .device_revocation(&device.id)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
     let render_grid = query.render.as_deref() == Some("grid");
     let requested_geometry = render_grid
         .then(|| requested_grid_geometry(&query))
@@ -879,22 +925,25 @@ async fn ws_terminal_handler(
         ));
     }
 
-    if let Some((cols, rows)) = requested_geometry {
+    let attachment = while_device_authorized(&mut revocation, async {
+        if let Some((cols, rows)) = requested_geometry {
+            state.session_backend.resize(&session_id, cols, rows).await?;
+        }
         state
             .session_backend
-            .resize(&session_id, cols, rows)
+            .attach_with_sequence(&session_id, None)
             .await
-            .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
-    }
+    })
+    .await
+    .ok_or((StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?
+    .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
-    let attachment = state
-        .session_backend
-        .attach_with_sequence(&session_id, None)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
-
-    Ok(ws.on_upgrade(move |socket| {
-        handle_terminal_socket(socket, session_id, attachment, device, state, render_grid)
+    Ok(ws.on_upgrade(move |socket| async move {
+        let _ = while_device_authorized(
+            &mut revocation,
+            handle_terminal_socket(socket, session_id, attachment, device, state, render_grid),
+        )
+        .await;
     }))
 }
 
@@ -936,7 +985,7 @@ async fn handle_terminal_socket(
 
     let session_backend = Arc::clone(&state.session_backend);
     let send_session_id = session_id.clone();
-    let mut send_task = tokio::spawn(async move {
+    let mut send_task = std::pin::pin!(async move {
         loop {
             match output_rx.recv().await {
                 Ok(chunk) => {
@@ -979,7 +1028,7 @@ async fn handle_terminal_socket(
     let session_id_clone = session_id.clone();
     let can_control = device.permission == DevicePermission::Control;
 
-    let mut recv_task = tokio::spawn(async move {
+    let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Binary(bytes) => {
@@ -1016,7 +1065,7 @@ async fn handle_terminal_socket(
 
     let mut active_session_rx = state.active_session_watch_rx();
     let target_session_id = session_id.clone();
-    let mut focus_watcher = tokio::spawn(async move {
+    let mut focus_watcher = std::pin::pin!(async move {
         if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
             return;
         }
@@ -1029,18 +1078,9 @@ async fn handle_terminal_socket(
     });
 
     tokio::select! {
-        _ = (&mut send_task) => {
-            recv_task.abort();
-            focus_watcher.abort();
-        }
-        _ = (&mut recv_task) => {
-            send_task.abort();
-            focus_watcher.abort();
-        }
-        _ = (&mut focus_watcher) => {
-            send_task.abort();
-            recv_task.abort();
-        }
+        _ = &mut focus_watcher => {},
+        _ = &mut send_task => {},
+        _ = &mut recv_task => {},
     };
 }
 
@@ -1114,7 +1154,7 @@ async fn handle_terminal_grid_socket(
     let mut last_emitted_sequence = snapshot.history_end_sequence;
 
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
-    let mut writer_task = tokio::spawn(async move {
+    let mut writer_task = std::pin::pin!(async move {
         while let Some(message) = outbound_rx.recv().await {
             if sender.send(message).await.is_err() {
                 break;
@@ -1126,7 +1166,7 @@ async fn handle_terminal_grid_socket(
     let send_session_id = session_id.clone();
     let send_mirror = Arc::clone(&mirror);
     let send_tx = outbound_tx.clone();
-    let mut send_task = tokio::spawn(async move {
+    let mut send_task = std::pin::pin!(async move {
         let frame_interval = Duration::from_millis(33);
         let mut pending_bytes = Vec::new();
         let mut pending_end_sequence = None;
@@ -1258,7 +1298,7 @@ async fn handle_terminal_grid_socket(
     let recv_mirror = Arc::clone(&mirror);
     let recv_tx = outbound_tx.clone();
 
-    let mut recv_task = tokio::spawn(async move {
+    let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Binary(bytes) => {
@@ -1311,7 +1351,7 @@ async fn handle_terminal_grid_socket(
 
     let mut active_session_rx = state.active_session_watch_rx();
     let target_session_id = session_id.clone();
-    let mut focus_watcher = tokio::spawn(async move {
+    let mut focus_watcher = std::pin::pin!(async move {
         if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
             return;
         }
@@ -1325,26 +1365,10 @@ async fn handle_terminal_grid_socket(
 
     drop(outbound_tx);
     tokio::select! {
-        _ = (&mut send_task) => {
-            recv_task.abort();
-            writer_task.abort();
-            focus_watcher.abort();
-        }
-        _ = (&mut recv_task) => {
-            send_task.abort();
-            writer_task.abort();
-            focus_watcher.abort();
-        }
-        _ = (&mut writer_task) => {
-            send_task.abort();
-            recv_task.abort();
-            focus_watcher.abort();
-        }
-        _ = (&mut focus_watcher) => {
-            send_task.abort();
-            recv_task.abort();
-            writer_task.abort();
-        }
+        _ = &mut focus_watcher => {},
+        _ = &mut send_task => {},
+        _ = &mut recv_task => {},
+        _ = &mut writer_task => {},
     };
 }
 
@@ -1401,26 +1425,66 @@ pub(crate) fn resolve_dist_dir() -> PathBuf {
     PathBuf::from("ui/dist")
 }
 
+/// Parse once, before joining to a filesystem root. Reject Windows separators,
+/// prefixes and alternate data streams on every host, not just on Windows.
+fn static_relative_path(raw: &str) -> Option<PathBuf> {
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut bytes = raw.bytes();
+    while let Some(byte) = bytes.next() {
+        decoded.push(if byte == b'%' {
+            let high = char::from(bytes.next()?).to_digit(16)?;
+            let low = char::from(bytes.next()?).to_digit(16)?;
+            u8::try_from(high * 16 + low).ok()?
+        } else {
+            byte
+        });
+    }
+    let decoded = std::str::from_utf8(&decoded).ok()?;
+    let relative = decoded.strip_prefix('/')?;
+    // Residual escapes are not decoded again by us or interpreted as filenames.
+    if relative.contains(['\\', ':', '%', '\0']) || relative.starts_with('/') {
+        return None;
+    }
+    let mut path = PathBuf::new();
+    for component in relative.split('/') {
+        if component == "." || component == ".." {
+            return None;
+        }
+        if !component.is_empty() {
+            path.push(component);
+        }
+    }
+    Some(path)
+}
+
 async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
-    let dist_dir = resolve_dist_dir();
-    let path = uri.path().trim_start_matches('/');
-    let file_path = dist_dir.join(path);
-
-    if !path.is_empty() && file_path.exists() && file_path.is_file() {
-        if let Ok(bytes) = tokio::fs::read(&file_path).await {
-            let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
-            return ([(header::CONTENT_TYPE, mime.as_ref())], bytes).into_response();
+    let Some(path) = static_relative_path(uri.path()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    // Discovery uses synchronous filesystem metadata, so keep it off the reactor.
+    let dist_dir = match crate::ipc::run_blocking(|| Ok(resolve_dist_dir())).await {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(%error, "remote asset root discovery failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let Ok(root) = tokio::fs::canonicalize(dist_dir).await else {
+        return Html(EMBEDDED_FALLBACK_HTML).into_response();
+    };
+    // Check the fallback too: index.html itself may be a symlink. Read the
+    // canonical target, never the unchecked request path after validation.
+    for candidate in [root.join(&path), root.join("index.html")] {
+        if let Ok(canonical) = tokio::fs::canonicalize(candidate).await {
+            if !canonical.starts_with(&root) {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            if let Ok(bytes) = tokio::fs::read(&canonical).await {
+                let mime = mime_guess::from_path(&canonical).first_or_octet_stream();
+                return ([(header::CONTENT_TYPE, mime.as_ref())], bytes).into_response();
+            }
         }
     }
-
-    // SPA fallback: serve index.html from dist_dir
-    let index_file = dist_dir.join("index.html");
-    if index_file.exists() && index_file.is_file() {
-        if let Ok(html) = tokio::fs::read_to_string(&index_file).await {
-            return Html(html).into_response();
-        }
-    }
-
     Html(EMBEDDED_FALLBACK_HTML).into_response()
 }
 

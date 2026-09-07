@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const PAIRING_EXPIRY: Duration = Duration::from_secs(60);
+const PAIRING_FAILURE_BUDGET: u8 = 5;
 const LAST_SEEN_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +38,27 @@ struct PairingCode {
     default_permission: DevicePermission,
 }
 
+#[derive(Default)]
+struct PairingWindow {
+    codes: HashMap<String, PairingCode>,
+    started_at: Option<Instant>,
+    failures: u8,
+}
+
+impl PairingWindow {
+    fn refresh(&mut self, now: Instant) {
+        if self
+            .started_at
+            .is_none_or(|start| now.duration_since(start) >= PAIRING_EXPIRY)
+        {
+            self.codes
+                .retain(|_, pairing| now.duration_since(pairing.created_at) < PAIRING_EXPIRY);
+            self.started_at = Some(now);
+            self.failures = 0;
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedAuthState {
@@ -46,9 +68,10 @@ struct PersistedAuthState {
 
 #[derive(Clone)]
 pub struct AuthManager {
-    pairing_codes: Arc<RwLock<HashMap<String, PairingCode>>>,
+    pairing_window: Arc<RwLock<PairingWindow>>,
     devices: Arc<RwLock<HashMap<String, DeviceInfo>>>,
     tokens: Arc<RwLock<HashMap<String, String>>>,
+    revocations: Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
     persistence_path: Option<PathBuf>,
     last_persisted_at: Arc<RwLock<Instant>>,
 }
@@ -71,9 +94,10 @@ impl AuthManager {
             .unwrap_or_default();
         prune_revoked_devices(&mut persisted);
         Self {
-            pairing_codes: Arc::new(RwLock::new(HashMap::new())),
+            pairing_window: Arc::new(RwLock::new(PairingWindow::default())),
             devices: Arc::new(RwLock::new(persisted.devices)),
             tokens: Arc::new(RwLock::new(persisted.tokens)),
+            revocations: Arc::new(RwLock::new(HashMap::new())),
             persistence_path,
             last_persisted_at: Arc::new(RwLock::new(Instant::now())),
         }
@@ -83,7 +107,9 @@ impl AuthManager {
         let pin: u32 = rand::thread_rng().gen_range(100_000..=999_999);
         let code = format!("{pin:06}");
 
-        self.pairing_codes.write().insert(
+        let mut window = self.pairing_window.write();
+        window.refresh(Instant::now());
+        window.codes.insert(
             code.clone(),
             PairingCode {
                 _code: code.clone(),
@@ -99,13 +125,24 @@ impl AuthManager {
         code: &str,
         device_name: &str,
     ) -> Result<(String, DeviceInfo), AuthError> {
-        let mut codes = self.pairing_codes.write();
-        let pairing = codes.remove(code).ok_or(AuthError::InvalidPairingCode)?;
-        drop(codes);
-
-        if pairing.created_at.elapsed() > PAIRING_EXPIRY {
-            return Err(AuthError::ExpiredPairingCode);
-        }
+        let pairing = {
+            // Lookup, failure accounting and single-use consumption share one
+            // lock. No concurrent request can spend the same budget slot/code.
+            let mut window = self.pairing_window.write();
+            window.refresh(Instant::now());
+            if window.failures >= PAIRING_FAILURE_BUDGET {
+                return Err(AuthError::PairingRateLimited);
+            }
+            let Some(pairing) = window.codes.remove(code) else {
+                window.failures += 1;
+                return Err(AuthError::InvalidPairingCode);
+            };
+            if pairing.created_at.elapsed() >= PAIRING_EXPIRY {
+                window.failures += 1;
+                return Err(AuthError::ExpiredPairingCode);
+            }
+            pairing
+        };
 
         let device_id = uuid::Uuid::new_v4().to_string();
         let token: String = rand::thread_rng()
@@ -156,6 +193,24 @@ impl AuthManager {
         self.devices.read().values().cloned().collect()
     }
 
+    /// Registration and revocation both hold the devices lock before the
+    /// signal registry lock. A caller validated just before revocation either
+    /// gets its latched signal or is rejected here; there is no subscribe gap.
+    pub(crate) fn device_revocation(
+        &self,
+        device_id: &str,
+    ) -> Result<tokio::sync::watch::Receiver<bool>, AuthError> {
+        let devices = self.devices.read();
+        if !devices.contains_key(device_id) {
+            return Err(AuthError::Unauthorized);
+        }
+        let mut revocations = self.revocations.write();
+        Ok(revocations
+            .entry(device_id.to_owned())
+            .or_insert_with(|| tokio::sync::watch::channel(false).0)
+            .subscribe())
+    }
+
     /// Deletes the device and every token issued to it. The device disappears
     /// from [`Self::list_devices`] immediately instead of lingering as a
     /// revoked entry.
@@ -164,6 +219,10 @@ impl AuthManager {
             let mut devices = self.devices.write();
             if devices.remove(device_id).is_some() {
                 self.tokens.write().retain(|_, owner| owner != device_id);
+                if let Some(signal) = self.revocations.write().remove(device_id) {
+                    // Retain cancellation even if on_upgrade has not started.
+                    signal.send_replace(true);
+                }
                 true
             } else {
                 false
@@ -250,9 +309,15 @@ pub enum AuthError {
     InvalidPairingCode,
     #[error("Pairing code has expired")]
     ExpiredPairingCode,
+    #[error("Pairing attempt limit reached; wait for a new pairing window")]
+    PairingRateLimited,
     #[error("Unauthorized access")]
     Unauthorized,
 }
+
+#[cfg(test)]
+#[path = "auth_security_tests.rs"]
+mod security_tests;
 
 #[cfg(test)]
 mod persistence_tests {

@@ -6,6 +6,9 @@ use crate::worktree::WorktreeIdentity;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "security_tests.rs"]
+mod security;
+
 #[test]
 fn test_auth_manager_pairing_and_revocation() {
     let auth = AuthManager::new();
