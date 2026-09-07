@@ -1,7 +1,7 @@
 # Ferryx 크로스플랫폼 잠재 문제 감사 (Cross-Platform Issue Audit)
 
 **감사일**: 2026-09-08
-**대상 커밋**: `c4fb2f1` (branch `main`)
+**대상 커밋**: `8d6bd2d` (branch `main`)
 **범위**: `src-tauri/` (Rust, 189 files), `ui/` (React + TypeScript, 335 files), `scripts/`, `.github/workflows/`, Tauri 번들 설정
 **검증**: 아래 모든 인용은 `scripts/verify-audit-citations.mjs`가 작업 트리에서 다시 읽어 확인했습니다 — 146/146 인용 해석 성공, 실패 0건.
 
@@ -1049,10 +1049,10 @@ _11 findings — BLOCKER 0, HIGH 1, MEDIUM 4, LOW 6_
 - **ID**: L7-DAEMON-IPC-2
 - **Severity**: MEDIUM
 - **Platforms affected**: Windows
-- **Evidence**: `src-tauri/src/daemon/server.rs:461` — `validate_safe_ownership_and_type_for_uid(runtime_dir, RuntimeNodeKind::Directory, 0)?;`
-- **Why it breaks**: `validate_runtime_socket_path_for_uid` for `not(unix)` (`server.rs:456-465`) hard-codes UID `0` and the underlying `validate_safe_ownership_and_type_for_uid` `not(unix)` branch (`server.rs:139-161`, confirmed by reading the function body) never compares an owner at all — it only rejects symlinks and wrong node types. The Unix path performs a real UID-equality check (`meta.uid() != expected_uid`) before ever trusting the socket. On Windows there is no equivalent check against the Windows SID/owner of the runtime directory or port file, so the "port file trust" story relies entirely on default NTFS ACLs of `LOCALAPPDATA`/`%TEMP%` never having been loosened (e.g. by a misconfigured multi-user machine or roaming profile share).
+- **Evidence**: `src-tauri/src/daemon/server.rs:462` — `validate_safe_ownership_and_type_for_uid(runtime_dir, RuntimeNodeKind::Directory, 0)?;`
+- **Why it breaks**: `validate_runtime_socket_path_for_uid` for `not(unix)` (`server.rs:456-465`) hard-codes UID `0` and the underlying `validate_safe_ownership_and_type_for_uid` `not(unix)` branch (`server.rs:371-398`, confirmed by reading the function body) never compares an owner at all — it only rejects symlinks and wrong node types. The Unix path performs a real UID-equality check (`meta.uid() != expected_uid`) before ever trusting the socket. On Windows there is no equivalent check against the Windows SID/owner of the runtime directory or port file, so the "port file trust" story relies entirely on default NTFS ACLs of `LOCALAPPDATA`/`%TEMP%` never having been loosened (e.g. by a misconfigured multi-user machine or roaming profile share).
 - **Fix**: On Windows, use `GetNamedSecurityInfoW`/`GetFileSecurityW` (via `windows-sys`, already a dependency for `LockFileEx`) to read the file/directory owner SID and compare it against the current process token's SID in `validate_safe_ownership_and_type_for_uid`'s `not(unix)` branch, mirroring the Unix UID check instead of accepting any owner.
-- **Fix**: OPEN
+- **Status**: OPEN
 
 ### Agent-state extension socket is never bound on Windows
 - **ID**: L7-DAEMON-IPC-3
@@ -1076,7 +1076,7 @@ _11 findings — BLOCKER 0, HIGH 1, MEDIUM 4, LOW 6_
 - **ID**: L7-DAEMON-IPC-7
 - **Severity**: MEDIUM
 - **Platforms affected**: Windows
-- **Evidence**: `src-tauri/src/daemon/handover.rs:129` — `Err("Handover unsupported on Windows".to_string())`
+- **Evidence**: `src-tauri/src/daemon/handover.rs:131` — `Err("Handover unsupported on Windows".to_string())`
 - **Why it breaks**: `prepare_handover` is `#[cfg(unix)]` for the real implementation and has a `#[cfg(not(unix))]` stub that always errors (`handover.rs:126-131`); `server.rs`'s `PrepareHandover` request arm additionally returns `DaemonResponse::HandoverRejected` on `#[cfg(not(unix))]` (`server.rs:1613-1617`), and `handle_upgrade_binary` on `#[cfg(not(unix))]` always returns `DaemonResponse::UpgradeUnsupported` (`server.rs:1766-1772`) without ever attempting a session-preserving restart. This is a graceful degradation, not a crash, but it means on Windows every daemon binary upgrade (auto-update) either leaves the old daemon binary running until the user fully quits the app, or (if forced) drops every live PTY session — the rolling-handover UX that Unix users get is a hard feature gap on Windows.
 - **Fix**: Implement a Windows-native handover using a second named pipe (or ephemeral TCP listener, matching L7-DAEMON-IPC-3's fix) for the legacy peer, since `windows-sys`'s `LockFileEx`/`UnlockFileEx` already provide the byte-range lock primitive needed to hand off `DaemonLockFiles`; wire `HandoverManager::prepare_handover`'s `#[cfg(not(unix))]` arm to bind that listener and return it the same way the Unix arm returns a `UnixListener`, instead of an unconditional `Err`.
 - **Status**: OPEN
@@ -1094,8 +1094,8 @@ _11 findings — BLOCKER 0, HIGH 1, MEDIUM 4, LOW 6_
 - **ID**: L7-DAEMON-IPC-11
 - **Severity**: LOW
 - **Platforms affected**: Windows
-- **Evidence**: `src-tauri/src/daemon/client.rs:378` — `DaemonStream::connect(format!("127.0.0.1:{port}")).await`
-- **Why it breaks**: Both the server bind (`server.rs:1102`, `"127.0.0.1:0"`) and the client connect (`client.rs:378`) hard-code IPv4 loopback. On a Windows machine where IPv4 loopback is disabled or filtered by endpoint security software (uncommon but seen in locked-down enterprise images that only permit `::1`), the daemon would fail to bind or the client would fail to connect with no automatic IPv6 retry, whereas the Unix Domain Socket path has no such address-family dependency at all.
+- **Evidence**: `src-tauri/src/daemon/client.rs:379` — `DaemonStream::connect(format!("127.0.0.1:{port}")).await`
+- **Why it breaks**: Both the server bind (`server.rs:1102`, `"127.0.0.1:0"`) and the client connect (`client.rs:379`) hard-code IPv4 loopback. On a Windows machine where IPv4 loopback is disabled or filtered by endpoint security software (uncommon but seen in locked-down enterprise images that only permit `::1`), the daemon would fail to bind or the client would fail to connect with no automatic IPv6 retry, whereas the Unix Domain Socket path has no such address-family dependency at all.
 - **Fix**: If Windows enterprise-image compatibility matters, add an IPv6 loopback (`[::1]:0`) fallback in both `server.rs`'s `#[cfg(not(unix))]` bind and `client.rs`'s `#[cfg(not(unix))]` `connect_socket`, storing the resolved `SocketAddr` (not just a bare port number) in `daemon.port` so the client does not have to guess the address family.
 - **Status**: OPEN
 
@@ -1103,8 +1103,8 @@ _11 findings — BLOCKER 0, HIGH 1, MEDIUM 4, LOW 6_
 - **ID**: L7-DAEMON-IPC-4
 - **Severity**: LOW
 - **Platforms affected**: Windows
-- **Evidence**: `src-tauri/src/daemon/agent_extension.rs:23` — `fn home_dir() -> Option<PathBuf> {`
-- **Why it breaks**: The body of `home_dir()` reads only `std::env::var_os("HOME")` with no Windows fallback. `HOME` is typically unset for native Windows processes (the per-user equivalent is `USERPROFILE`/`%APPDATA%`). `extension_dirs()` calls `home_dir()` and returns an empty `Vec` when it is `None`, so `install_agent_state_extension()` (invoked unconditionally at `server.rs:1131` right after the `#[cfg(unix)]`-gated agent-state listener) silently installs nothing on Windows — compounding L7-DAEMON-IPC-3, since even if the transport were fixed, the extension file that talks to it would never be deployed into `~/.omo`, `~/.pi`, `~/.omp` equivalents.
+- **Evidence**: `src-tauri/src/daemon/agent_extension.rs:25` — `std::env::var_os("HOME").map(PathBuf::from)`
+- **Why it breaks**: The body of `home_dir()` reads only `std::env::var_os("HOME")` with no Windows fallback. `HOME` is typically unset for native Windows processes (the per-user equivalent is `USERPROFILE`/`%APPDATA%`). `extension_dirs()` calls `home_dir()` and returns an empty `Vec` when it is `None`, so `install_agent_state_extension()` (invoked unconditionally at `server.rs:1132` right after the `#[cfg(unix)]`-gated agent-state listener) silently installs nothing on Windows — compounding L7-DAEMON-IPC-3, since even if the transport were fixed, the extension file that talks to it would never be deployed into `~/.omo`, `~/.pi`, `~/.omp` equivalents.
 - **Fix**: In `home_dir()`, add `.or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))` (matching the pattern already used correctly in `src-tauri/src/remote/state.rs`'s `DATA_DIR_SOURCES` for Windows) so `extension_dirs()` resolves a real per-user directory on Windows.
 - **Status**: OPEN
 

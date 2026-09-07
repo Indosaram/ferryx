@@ -29,7 +29,7 @@ functionality on Windows.
 - **Evidence**: `src-tauri/src/daemon/server.rs:462` — `validate_safe_ownership_and_type_for_uid(runtime_dir, RuntimeNodeKind::Directory, 0)?;`
 - **Why it breaks**: `validate_runtime_socket_path_for_uid` for `not(unix)` (`server.rs:456-465`) hard-codes UID `0` and the underlying `validate_safe_ownership_and_type_for_uid` `not(unix)` branch (`server.rs:371-398`, confirmed by reading the function body) never compares an owner at all — it only rejects symlinks and wrong node types. The Unix path performs a real UID-equality check (`meta.uid() != expected_uid`) before ever trusting the socket. On Windows there is no equivalent check against the Windows SID/owner of the runtime directory or port file, so the "port file trust" story relies entirely on default NTFS ACLs of `LOCALAPPDATA`/`%TEMP%` never having been loosened (e.g. by a misconfigured multi-user machine or roaming profile share).
 - **Fix**: On Windows, use `GetNamedSecurityInfoW`/`GetFileSecurityW` (via `windows-sys`, already a dependency for `LockFileEx`) to read the file/directory owner SID and compare it against the current process token's SID in `validate_safe_ownership_and_type_for_uid`'s `not(unix)` branch, mirroring the Unix UID check instead of accepting any owner.
-- **Fix**: OPEN
+- **Status**: OPEN
 
 ### Agent-state extension socket is never bound on Windows
 - **ID**: L7-DAEMON-IPC-3
@@ -108,6 +108,6 @@ functionality on Windows.
 - **Severity**: LOW
 - **Platforms affected**: Windows
 - **Evidence**: `src-tauri/src/daemon/client.rs:379` — `DaemonStream::connect(format!("127.0.0.1:{port}")).await`
-- **Why it breaks**: Both the server bind (`server.rs:1102`, `"127.0.0.1:0"`) and the client connect (`client.rs:378`) hard-code IPv4 loopback. On a Windows machine where IPv4 loopback is disabled or filtered by endpoint security software (uncommon but seen in locked-down enterprise images that only permit `::1`), the daemon would fail to bind or the client would fail to connect with no automatic IPv6 retry, whereas the Unix Domain Socket path has no such address-family dependency at all.
+- **Why it breaks**: Both the server bind (`server.rs:1102`, `"127.0.0.1:0"`) and the client connect (`client.rs:379`) hard-code IPv4 loopback. On a Windows machine where IPv4 loopback is disabled or filtered by endpoint security software (uncommon but seen in locked-down enterprise images that only permit `::1`), the daemon would fail to bind or the client would fail to connect with no automatic IPv6 retry, whereas the Unix Domain Socket path has no such address-family dependency at all.
 - **Fix**: If Windows enterprise-image compatibility matters, add an IPv6 loopback (`[::1]:0`) fallback in both `server.rs`'s `#[cfg(not(unix))]` bind and `client.rs`'s `#[cfg(not(unix))]` `connect_socket`, storing the resolved `SocketAddr` (not just a bare port number) in `daemon.port` so the client does not have to guess the address family.
 - **Status**: OPEN
