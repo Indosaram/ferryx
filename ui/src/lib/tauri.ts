@@ -3,6 +3,7 @@ export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospa
 import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { switchDebug } from "./switchDebug";
 
 export type {
   AttachTerminalRequest,
@@ -288,6 +289,92 @@ export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) 
   });
 }
 
+function describeNonSerializablePaths(
+  value: unknown,
+  path: string,
+  out: string[],
+  depth = 0,
+): void {
+  if (depth > 6 || out.length >= 12) return;
+  if (
+    value === null
+    || typeof value === "string"
+    || typeof value === "number"
+    || typeof value === "boolean"
+    || typeof value === "undefined"
+  ) {
+    return;
+  }
+  if (typeof value !== "object" && typeof value !== "function") return;
+  const ctor = (value as { constructor?: { name?: string } }).constructor?.name ?? typeof value;
+  try {
+    JSON.stringify(value);
+  } catch (error) {
+    out.push(`${path}: ${ctor} (${(error as Error).message.slice(0, 80)})`);
+    return;
+  }
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (key.startsWith("__reactFiber") || key.startsWith("__reactProps")) {
+      out.push(`${path}.${key}: ${ctor} (react internal)`);
+      continue;
+    }
+    describeNonSerializablePaths(entry, `${path}.${key}`, out, depth + 1);
+  }
+}
+
+function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTerminalRequest["startup"] {
+  if (!startup || startup.kind !== "agentResume") return null;
+  const providerSession = startup.providerSession as
+    | { key?: unknown; id?: unknown; transcriptPath?: unknown }
+    | null
+    | undefined;
+  if (!providerSession || typeof providerSession.id !== "string") return null;
+  const key = providerSession.key === "conversation_id" ? "conversation_id" : "session_id";
+  const transcriptPath = typeof providerSession.transcriptPath === "string" ? providerSession.transcriptPath : undefined;
+  return {
+    kind: "agentResume",
+    agentType: String(startup.agentType ?? ""),
+    providerSession: {
+      key,
+      id: providerSession.id,
+      ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+    },
+  };
+}
+
+function sanitizeSpawnRequest(request: SpawnTerminalRequest) {
+  return {
+    workspaceId: String(request.workspaceId ?? ""),
+    worktree: request.worktree
+      ? {
+          wsId: String(request.worktree.wsId ?? ""),
+          slug: String(request.worktree.slug ?? ""),
+        }
+      : null,
+    cwd: typeof request.cwd === "string" ? request.cwd : null,
+    clientRequestId:
+      typeof request.clientRequestId === "string" ? request.clientRequestId : null,
+    shell: typeof request.shell === "string" ? request.shell : null,
+    startup: sanitizeSpawnStartup(request.startup),
+    inheritFromSessionId:
+      typeof request.inheritFromSessionId === "string" ? request.inheritFromSessionId : null,
+  };
+}
+
+function reportUnserializableSpawnRequest(request: SpawnTerminalRequest): void {
+  try {
+    JSON.stringify({ request });
+  } catch (error) {
+    const paths: string[] = [];
+    describeNonSerializablePaths({ request }, "", paths);
+    switchDebug("ipc.spawn.requestSerialization.warning", {
+      command: "cmd_terminal_spawn",
+      reason: (error as Error).message.slice(0, 120),
+      paths,
+    });
+  }
+}
+
 export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Promise<SpawnTerminalResult> {
   if (!isTauri()) {
     throw {
@@ -296,15 +383,9 @@ export async function spawnTerminalDetailed(request: SpawnTerminalRequest): Prom
       details: { runtime: "web" },
     } satisfies StructuredIpcError;
   }
+  reportUnserializableSpawnRequest(request);
   return invokeCommand<SpawnTerminalResult>("cmd_terminal_spawn", {
-    request: {
-      ...request,
-      cwd: request.cwd ?? null,
-      clientRequestId: request.clientRequestId ?? null,
-      shell: request.shell ?? null,
-      startup: request.startup ?? null,
-      inheritFromSessionId: request.inheritFromSessionId ?? null,
-    },
+    request: sanitizeSpawnRequest(request),
   });
 }
 
@@ -326,14 +407,7 @@ export async function spawnTerminalsBatch(
   }
   return invokeCommand<SpawnTerminalBatchEntry[]>("cmd_terminal_spawn_batch", {
     request: {
-      spawns: spawns.map((request) => ({
-        ...request,
-        cwd: request.cwd ?? null,
-        clientRequestId: request.clientRequestId ?? null,
-        shell: request.shell ?? null,
-        startup: request.startup ?? null,
-        inheritFromSessionId: request.inheritFromSessionId ?? null,
-      })),
+      spawns: spawns.map((request) => sanitizeSpawnRequest(request)),
     },
   });
 }

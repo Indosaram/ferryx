@@ -35,6 +35,7 @@ import {
   registerProject,
   signalTerminal,
   spawnTerminal,
+  spawnTerminalDetailed,
   publishFocusedTerminal,
   onRemoteSelectionRequested,
   normalizeBadgeCount,
@@ -191,6 +192,40 @@ describe("Tauri IPC wrapper contract", () => {
         },
         inheritFromSessionId: null,
       },
+    });
+  });
+
+  it("strips non-serializable values from the spawn request instead of failing IPC", async () => {
+    core.invoke.mockResolvedValue({ sessionId: "backend-rescue-1" });
+
+    const polluted = { label: "span" };
+    const pollutedRecord = polluted as { __reactFiber$abc?: unknown; constructor?: unknown };
+    pollutedRecord.__reactFiber$abc = polluted;
+    pollutedRecord.constructor = { name: "HTMLSpanElement" };
+
+    await expect(
+      spawnTerminalDetailed({
+        workspaceId: "workspace-main",
+        worktree: null,
+        clientRequestId: "rescue-1",
+        shell: polluted as unknown as string,
+        startup: {
+          kind: "agentResume",
+          agentType: "claude",
+          providerSession: { key: "session_id", id: "provider-1" },
+        },
+      }),
+    ).resolves.toMatchObject({ sessionId: "backend-rescue-1" });
+
+    const call = core.invoke.mock.calls.at(-1)?.[1] as {
+      request: { shell: unknown; startup: unknown };
+    };
+    expect(() => JSON.stringify(call)).not.toThrow();
+    expect(call.request.shell).toBeNull();
+    expect(call.request.startup).toEqual({
+      kind: "agentResume",
+      agentType: "claude",
+      providerSession: { key: "session_id", id: "provider-1" },
     });
   });
 
