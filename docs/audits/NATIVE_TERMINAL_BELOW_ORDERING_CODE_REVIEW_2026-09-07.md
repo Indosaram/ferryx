@@ -1,49 +1,64 @@
-# Code Review: Native Terminal Below Ordering (`NSWindowOrderingMode::Below`)
+# Code Review: Native Terminal Below Ordering & DOM Transparency Layering
 
-- **Date**: 2026-09-07
-- **Target**: `src-tauri/src/native_terminal/platform/macos.rs`
-- **Scope**: Reordering macOS native child NSView relative to WKWebView to resolve DOM overlay occlusion (update notification clipping).
+- **Date**: 2026-09-07 (Re-review after transparency remediation)
+- **Commits**: `1e97568` + `dc9e8e0` + `0d102da`
+- **Scope**:
+  - `src-tauri/src/native_terminal/platform/macos.rs` (NSView Z-ordering)
+  - `ui/src/index.css` (macOS DOM transparency rules)
+  - `ui/src/components/tab-dnd/TabGroupDropSurface.tsx` (Drop surface identifier)
+  - `ui/src/nativeTerminalPlatformTransparency.test.ts` (Transparency regression contract)
 - **Reviewer**: Senior Engineering Review
 
 ---
 
 ## 1. Executive Summary
 
-- **Verdict**: APPROVED with architectural notes
+- **Verdict**: APPROVED
 - **Confidence**: HIGH
-- **Assessment**: The one-line change in `src-tauri/src/native_terminal/platform/macos.rs` changing `NSWindowOrderingMode::Above` to `NSWindowOrderingMode::Below` directly resolves the fundamental AppKit "airspace" problem on macOS. By placing the native terminal child NSView behind `WKWebView`, DOM overlays with opaque backgrounds (such as the update notification Sonner toast at `bottom-right`) naturally render on the topmost visual layer without being clipped by the terminal canvas. Existing transparency CSS rules (`html.platform-macos:has([data-testid="native-terminal-pane"]) ... transparent !important`) and `"transparent": true` window configuration support this layer inversion seamlessly.
+- **Assessment**: The initial change to `NSWindowOrderingMode::Below` placed `FerryxNativeTerminalView` underneath `WKWebView`, which successfully solved the airspace clipping for DOM overlays (toasts). However, because `TabGroupDropSurface` (`ui/src/components/tab-dnd/TabGroupDropSurface.tsx`) possessed an opaque `bg-terminal` (`#282c34`) and was missing from the `html.platform-macos` transparency list in `ui/src/index.css`, WebKit painted an opaque `#282c34` rectangle over the terminal area, obscuring the underlying terminal text. Commit `dc9e8e0` added `data-testid="tab-group-body"` and matching selectors (`[data-testid="tab-group-body"]`, `[data-tab-group-body-id]`, `[data-dnd-type="group-body"]`) to the `index.css` transparency rules. This completes the transparent pipeline from `#root` down to `native-terminal-pane`, allowing the native terminal text and cursor to show through completely, while DOM overlays (such as the Sonner update toast with `bg-popover`) render cleanly on top without clipping.
 
 ---
 
-## 2. Detailed Technical Audit
+## 2. Layer-by-Layer Architectural Audit
 
-### 2.1 View Hierarchy & Airspace (Z-Ordering)
-- **Previous State**:
-  - `content_view.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, None)`
-  - `FerryxNativeTerminalView` was parented on top of `WKWebView`.
-  - Result: Any DOM element in `WKWebView` (including `<Toaster />`) was drawn underneath the opaque terminal NSView. The update toast at `bottom-right` had ~80% of its body occluded, showing only the ~74px slice containing the "Update" action button extending outside the terminal surface.
-- **Current State**:
-  - `content_view.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, None)`
-  - `FerryxNativeTerminalView` is parented underneath `WKWebView`.
-  - Result: `WKWebView` is on top. Over terminal panes, DOM background is transparent (`index.css`), allowing the Metal/WGPU terminal frame to show through with full fidelity. Overlays with opaque backgrounds (`var(--popover)` `#171717`) render cleanly on top.
+### 2.1 Complete Transparency Hierarchy (`html` to `native-terminal-pane`)
+Every DOM node in the ancestor chain between the root and the native terminal pane must be transparent for the native terminal to show through:
 
-### 2.2 Event Routing & First Responder
-- **Hit Testing**:
-  - When `view` was `Above`, `hit_test` returning `nil` was mandatory so mouse clicks fell through to `WKWebView`.
-  - With `view` placed `Below`, `WKWebView` is the topmost subview and naturally intercepts all pointer events first. Clicks on DOM buttons (e.g. "Update", drag handles, close buttons) trigger without interference. Clicks on the terminal canvas hit the transparent DOM textarea/input-sink, preserving terminal focus routing.
-- **First Responder**:
-  - Previously, child view presentation could steal first responder from `WKWebView`, requiring defensive recovery via `restore_webview_first_responder`.
-  - Under `Below` ordering, `WKWebView` is frontmost in the responder chain, reducing first-responder churn.
+1. `html.platform-macos:has([data-testid="native-terminal-pane"])` -> `transparent !important` (in `index.css`)
+2. `body:has(...)` -> `transparent !important` (in `index.css`)
+3. `#root:has(...)` -> `transparent !important` (in `index.css`)
+4. `#root > div:has(...)` -> `transparent !important` (in `index.css`)
+5. `div:has(> main ...)` -> `transparent !important` (in `index.css`)
+6. `main:has(...)` -> `transparent !important` (in `index.css`)
+7. `[data-testid="terminal-layout"]:has(...)` -> `transparent !important` (in `index.css`)
+8. `[data-testid="tab-group-split"]:has(...)` -> `transparent !important` (in `index.css`)
+9. `[data-testid="tab-group-panel"]:has(...)` -> `transparent !important` (in `index.css`)
+10. `[data-testid="tab-group-body"]:has(...)` / `[data-tab-group-body-id]` / `[data-dnd-type="group-body"]` -> **`transparent !important` (Added in `dc9e8e0`)**
+11. `[data-testid="pane-split"]:has(...)` -> `transparent !important` (in `index.css`)
+12. `[data-testid="pane-leaf"]:has(...)` -> `transparent !important` (in `index.css`)
+13. `div.h-full.w-full.min-h-0.flex-1.overflow-hidden` -> No background class (inherits transparency)
+14. `[data-testid="terminal-pane-surface"]:has(...)` -> `transparent !important` (in `index.css`)
+15. `[data-testid="native-terminal-pane"]` -> `transparent !important` (in `index.css`)
 
-### 2.3 Cross-Platform Isolation
-- The change is strictly isolated to `src-tauri/src/native_terminal/platform/macos.rs`, compiled only under `#[cfg(target_os = "macos")]`.
-- Windows (`platform/windows.rs`) and Linux (`platform/linux.rs`) are completely unaffected.
-- Note for Windows: WebView2 uses child HWNDs where transparency behind the HWND is not supported by default. Future cross-platform overlay parity on Windows requires DirectComposition (`ICoreWebView2CompositionController`), as previously documented in `docs/native-terminal-overlay-occlusion-solutions.md`.
+**Audit Finding**: With `tab-group-body` now included, there are no remaining opaque nodes in the chain. The terminal canvas renders without obstruction.
 
-### 2.4 Rendering & Visual Quality
-- `layer.setOpaque: true` and `CompositeAlphaMode::Opaque` remain intact on the Metal layer.
-- CoreAnimation composites the opaque Metal layer beneath the transparent parts of `WKWebView`.
-- No font smoothing, subpixel AA, or gamma discrepancies were introduced.
+### 2.2 Overlay Rendering & Z-Ordering
+- **Sonner Toaster (`<Toaster />`)**:
+  - Mounted directly under `#root > div`.
+  - Uses fixed positioning (`bottom-right`, `bottom: 24px; right: 24px;`).
+  - Has explicit opaque background (`--normal-bg: var(--popover)`, `#171717`).
+  - Since `WKWebView` is parented above `FerryxNativeTerminalView`, the toast is painted on top of the native terminal surface.
+  - No clipping occurs on either axis.
+
+### 2.3 Event Routing & Pointer Transparency
+- **DOM Overlay Interaction**: Clicks on toast buttons ("Update", "Dismiss") are intercepted by `WKWebView` DOM elements immediately.
+- **Terminal Input Interaction**: Clicks on the terminal canvas pass through the transparent DOM elements into `NativeTerminalPane`'s focus sink (`textarea`), which receives focus and dispatches input to the PTY via IPC.
+- **AppKit Level**: `FerryxNativeTerminalView` overrides `hitTest:` returning `nil`, ensuring fallback transparency.
+
+### 2.4 Cross-Platform Safety
+- Windows (`platform/windows.rs`) and Linux (`platform/linux.rs`) remain completely untouched.
+- `index.css` transparency rules remain strictly scoped to `html.platform-macos`, ensuring Windows WebView2 does not encounter black screen regressions (guarding commit `75c4d36` / `43071bc`).
+- Unit test `ui/src/nativeTerminalPlatformTransparency.test.ts` enforces the platform scoping contract.
 
 ---
 
@@ -51,15 +66,6 @@
 
 - `cargo check --manifest-path src-tauri/Cargo.toml`: 0 errors
 - `cargo test --manifest-path src-tauri/Cargo.toml --test native_terminal_surface_host_contract`: 18/18 PASS
-- `node node_modules/vitest/vitest.mjs run src/components/ui/sonner.test.tsx src/lib/updateToast.test.ts`: 12/12 PASS
-- `node node_modules/vitest/vitest.mjs run src/components/NativeTerminalPane.test.tsx`: 142/142 PASS
-- `bun run --cwd ui build`: Clean build (2.65s)
-
----
-
-## 4. Risks & Mitigations
-
-- **Risk**: A parent DOM element accidentally regaining an opaque background could obscure the terminal underneath.
-  - **Mitigation**: Scoped CSS in `ui/src/index.css` (`html.platform-macos:has([data-testid="native-terminal-pane"])`) comprehensively marks every ancestor container down to `native-terminal-pane` as `background: transparent !important`.
-- **Risk**: Multi-pane split terminals creating multiple child views.
-  - **Mitigation**: Each pane targets `NSWindowOrderingMode::Below`, so all child terminal NSViews remain underneath the single `WKWebView`. Verified by `native_terminal_hit_test_maps_exact_split_coordinates_with_half_open_boundaries` test.
+- `cd ui && node node_modules/vitest/vitest.mjs run src/nativeTerminalPlatformTransparency.test.ts src/components/ui/sonner.test.tsx src/lib/updateToast.test.ts`: 13/13 PASS
+- `cd ui && node node_modules/vitest/vitest.mjs run src/components/NativeTerminalPane.test.tsx`: 142/142 PASS
+- `bun run --cwd ui build`: Clean build (`tsc && vite build`) in 3.18s
