@@ -8,12 +8,10 @@ import {
   CARD_HEIGHT,
   CARD_WIDTH,
   calculateNodePosition,
-  deriveActiveWaveIndex,
   GAP_X,
   GAP_Y,
   PAD_X,
   PAD_Y,
-  WAVE_LABEL_HEIGHT,
 } from "./dagViewUtils";
 
 export type DagGraphViewProps = {
@@ -86,9 +84,6 @@ export function DagGraphView({
   }
 
   const counts = activeRun.counts || deriveDagRunCounts(nodes);
-  const activeWaveIdx = deriveActiveWaveIndex(activeRun);
-  const totalWaves = waves.length;
-  const activeWaveNumber = totalWaves > 0 ? activeWaveIdx + 1 : 0;
 
   const nodeMap = new Map<string, DagNodeSnapshot>(nodes.map((n) => [n.id, n]));
   const bottleneckMap = new Map<string, number>(
@@ -111,7 +106,6 @@ export function DagGraphView({
 
   const contentWidth = PAD_X * 2 + (maxCol + 1) * CARD_WIDTH + maxCol * GAP_X;
   const contentHeight = PAD_Y * 2 + (maxRow + 1) * CARD_HEIGHT + maxRow * GAP_Y;
-  const waveLabelTop = PAD_Y - WAVE_LABEL_HEIGHT;
 
   return (
     <div
@@ -131,10 +125,6 @@ export function DagGraphView({
             </>
           )}
           <span className="shrink-0 text-muted-foreground font-mono">
-            wave {activeWaveNumber}/{totalWaves}
-          </span>
-          <span className="text-muted-foreground/60">&mdash;</span>
-          <span className="shrink-0 text-muted-foreground">
             {counts.completed}/{counts.total} done, {counts.running} running
           </span>
         </div>
@@ -164,12 +154,7 @@ export function DagGraphView({
               <div
                 data-testid="dag-wave-column"
                 data-wave-index={wave.index}
-                className="absolute font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
-                style={{
-                  left: calculateNodePosition(colIndex, 0).x,
-                  top: waveLabelTop,
-                  width: CARD_WIDTH,
-                }}
+                className="sr-only"
               >
                 wave {colIndex + 1}
               </div>

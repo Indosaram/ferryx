@@ -10,6 +10,7 @@ describe("native terminal platform transparency", () => {
   it("keeps root application surfaces opaque outside macOS", () => {
     expect(css).not.toMatch(/(?:^|\n)html:has\(\[data-testid="native-terminal-pane"\]\)/);
     expect(css).toContain('html.platform-macos:has([data-testid="native-terminal-pane"])');
+    expect(css).toContain('html.platform-macos [data-testid="tab-group-body"]:has([data-testid="native-terminal-pane"])');
     expect(main).toContain('document.documentElement.classList.toggle("platform-macos", isMacShortcutPlatform())');
   });
 });

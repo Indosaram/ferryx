@@ -18,6 +18,7 @@ export function TabGroupDropSurface({ groupId, children }: TabGroupDropSurfacePr
   return (
     <div
       ref={body.setNodeRef}
+      data-testid="tab-group-body"
       data-tab-group-body-id={groupId}
       data-dnd-type="group-body"
       className="relative min-h-0 flex-1 overflow-hidden bg-terminal"
