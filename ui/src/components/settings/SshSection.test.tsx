@@ -557,6 +557,33 @@ describe("SshSection Settings Component", () => {
   });
 
   describe("System SSH Config Auto-Discovery and Viewer", () => {
+    it("surfaces system config read failures and allows retrying", async () => {
+      const systemRead = deferred<never>();
+      invokeMock.mockImplementation((command) => {
+        if (command === "cmd_ssh_list_hosts") return Promise.resolve([]);
+        if (command === "cmd_ssh_read_system_config") return systemRead.promise;
+        return Promise.resolve();
+      });
+      render(<SshSection />);
+
+      await act(async () => {
+        systemRead.reject({ code: "IO_ERROR", message: "fixture-config-read-error" });
+      });
+
+      expect(screen.getByRole("alert")).toHaveTextContent("fixture-config-read-error");
+      invokeMock.mockResolvedValueOnce({
+        path: "/fixture/.ssh/config",
+        exists: true,
+        rawText: "Host dev\n  HostName dev.example\n",
+        hosts: [mockHost1],
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      });
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByRole("button", { name: /Import All \(1\)/i })).toBeEnabled();
+    });
+
     it("loads and displays discovered hosts from ~/.ssh/config and allows importing them", async () => {
       const listDef = deferred<SshHost[]>();
       const sysDef = deferred<unknown>();

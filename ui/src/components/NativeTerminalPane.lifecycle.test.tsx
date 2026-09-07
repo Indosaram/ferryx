@@ -188,6 +188,51 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     }
   });
 
+  it("retries failed bounds with a fresh attachment and waits for presentation", async () => {
+    // Given: attach succeeded, but the native surface cannot accept bounds until reattached.
+    const failure = { code: "INTERNAL_ERROR", message: "native surface unavailable" };
+    const recoveredBounds = deferred<typeof PRESENTED>();
+    let attachments = 0;
+    tauriInvoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_attach") attachments += 1;
+      if (command === "cmd_native_terminal_set_bounds") {
+        if (attachments < 2) throw failure;
+        return recoveredBounds.promise;
+      }
+      return undefined;
+    });
+    const view = render(<NativeTerminalPane session={session("bounds-retry")} />);
+    await act(async () => {});
+
+    // When: the user requests recovery without changing the pane geometry.
+    await act(async () => { fireEvent.click(view.getByRole("alert")); });
+
+    // Then: the cache cannot suppress reattachment, and the backing stays until presentation.
+    expect(attachments).toBe(2);
+    expect(view.getByTestId("native-terminal-error-backing")).toBeInTheDocument();
+    await act(async () => { recoveredBounds.resolve(PRESENTED); });
+    expect(view.queryByRole("alert")).toBeNull();
+    expect(view.queryByTestId("native-terminal-error-backing")).toBeNull();
+    expect(lifecycleCalls()).not.toContainEqual(["cmd_native_terminal_detach", "bounds-retry"]);
+  });
+
+  it("preserves the structured cause of a bounds failure in the visible error", async () => {
+    // Given: the backend supplies a typed render failure.
+    const failure = { code: "INVALID_ARGUMENT", message: "Native terminal viewport is outside the configured surface" };
+    tauriInvoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_set_bounds") throw failure;
+      return undefined;
+    });
+
+    // When: a visible pane reports its bounds.
+    const view = render(<NativeTerminalPane session={session("bounds-cause")} />);
+    await act(async () => {});
+
+    // Then: both backend fields survive the UI boundary instead of becoming a generic banner.
+    expect(view.getByRole("alert")).toHaveTextContent(failure.code);
+    expect(view.getByRole("alert")).toHaveTextContent(failure.message);
+  });
+
   it.each([
     ["uses effective native scale for IME anchor at fractional webview density", 1.5, 2, 16, 48, 8, 16],
     ["keeps ordinary equal-scale IME anchors", 2, 2, 16, 48, 8, 16],

@@ -656,12 +656,14 @@ export function deserializeWorkspaceState(
   if (ws.activityBySessionId) {
     for (const [sessionId, activity] of Object.entries(ws.activityBySessionId)) {
       if (activity && referencedSessionIds.has(sessionId)) {
-        // `working` and `waiting` are claims about a process that is alive right now. Nothing is
-        // running yet after a restart, so carrying them over would show a spinner for an agent that
-        // no longer exists. The agent identity is kept, so the tab still renders its icon.
-        const isInFlightClaim = activity.state === "working" || activity.state === "waiting";
+        // `working` claims a process is running right now; nothing is after a restart, so carrying
+        // it over would spin for an agent that no longer exists. `waiting` is NOT coerced: it renders
+        // the same attention frame as `done`, and rewriting it to `done` manufactured a phantom
+        // done -> waiting transition the moment the reattached screen detector reported the real
+        // state, which `applySessionActivity` then treated as fresh attention on every pane.
+        const isStaleRunClaim = activity.state === "working";
         restoredActivity[sessionId] = {
-          state: isInFlightClaim ? "done" : activity.state,
+          state: isStaleRunClaim ? "done" : activity.state,
           title: activity.title || "",
           isAgent: Boolean(activity.isAgent),
           ...(activity.agentType ? { agentType: migrateLegacyAgentType(activity.agentType) ?? activity.agentType } : {}),

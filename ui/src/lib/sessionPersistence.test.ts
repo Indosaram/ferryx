@@ -942,7 +942,7 @@ describe("sessionPersistence v2 serialization and migration", () => {
     expect(legacyRestored?.activityBySessionId).toEqual({});
   });
 
-  it("does not restore an in-flight working state, because no agent is running after a restart", () => {
+  it("drops a restored working claim but keeps waiting, which survives a GUI restart", () => {
     const state = workspaceState();
     state.activityBySessionId = {
       "sess-1": {
@@ -970,7 +970,10 @@ describe("sessionPersistence v2 serialization and migration", () => {
     if (!restored) return;
 
     expect(restored.activityBySessionId?.["sess-1"]?.state).not.toBe("working");
-    expect(restored.activityBySessionId?.["sess-2"]?.state).not.toBe("waiting");
+    // The daemon keeps PTY sessions alive across a GUI restart, so an agent that was waiting for
+    // input still is. Rewriting it to `done` made the reattached screen detector's first real
+    // report look like a done -> waiting transition, which lit every pane's attention frame.
+    expect(restored.activityBySessionId?.["sess-2"]?.state).toBe("waiting");
     // The agent identity is still known, so the tab keeps its icon; only the live claim is dropped.
     expect(restored.activityBySessionId?.["sess-1"]?.agentType).toBe("omo");
     expect(restored.activityBySessionId?.["sess-1"]?.isAgent).toBe(true);

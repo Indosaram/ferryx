@@ -86,6 +86,7 @@ export function SshSection() {
 
   // System ~/.ssh/config State
   const [systemConfig, setSystemConfig] = useState<SystemSshConfig | null>(null);
+  const [systemConfigError, setSystemConfigError] = useState<string | null>(null);
   const [loadingSystemConfig, setLoadingSystemConfig] = useState(false);
   const [showSystemConfigView, setShowSystemConfigView] = useState(false);
   const [showRawConfig, setShowRawConfig] = useState(false);
@@ -97,11 +98,12 @@ export function SshSection() {
 
   const fetchSystemConfig = async () => {
     setLoadingSystemConfig(true);
+    setSystemConfigError(null);
     try {
       const res = await readSystemSshConfig();
       setSystemConfig(res);
-    } catch {
-      // System config read is optional/informational
+    } catch (err) {
+      setSystemConfigError(extractIpcErrorMessage(err, "Failed to read system SSH configuration."));
     } finally {
       setLoadingSystemConfig(false);
     }
@@ -346,6 +348,18 @@ export function SshSection() {
         <Alert variant="destructive" className="mb-6">
           <AlertCircle className="size-4" />
           <AlertDescription>{actionError}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {systemConfigError ? (
+        <Alert variant="destructive" className="mb-6">
+          <AlertCircle className="size-4" />
+          <AlertDescription>
+            {systemConfigError}
+            <Button size="sm" variant="outline" onClick={fetchSystemConfig} className="ml-2">
+              Retry
+            </Button>
+          </AlertDescription>
         </Alert>
       ) : null}
 
@@ -764,14 +778,6 @@ export function SshSection() {
             <p className="mt-1 text-[11px] text-muted-foreground max-w-sm mx-auto">
               Add an SSH machine to connect to remote workspaces or run remote worktrees.
             </p>
-            <div className="mt-4 flex items-center justify-center gap-2">
-              <Button size="sm" onClick={handleOpenAdd}>
-                Add Machine
-              </Button>
-              <Button size="sm" variant="outline" onClick={handleOpenImport}>
-                Import Config
-              </Button>
-            </div>
           </div>
         ) : (
           <div className="divide-y divide-border/40">

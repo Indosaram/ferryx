@@ -1738,11 +1738,14 @@ export function NativeTerminalPane({
           switchDebug("terminal.surface.bounds.error", {
             localSessionId: sessionId,
             backendSessionId: targetSessionId,
-            error: String(error),
+            error: isStructuredIpcError(error) ? error : String(error),
           });
           reportNativeTerminalIpcFailure("cmd_native_terminal_set_bounds", error);
           if (isSubscribed) {
-            setError("Failed to update native terminal bounds");
+            const cause = isStructuredIpcError(error)
+              ? `${error.code}: ${error.message}`
+              : error instanceof Error ? error.message : String(error);
+            setError(`Failed to update native terminal bounds: ${cause}`);
           }
         })
         .finally(() => {
@@ -1802,9 +1805,9 @@ export function NativeTerminalPane({
     const bannerRetryThreshold = 2;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const attemptAttach = async (retryCount = 0): Promise<void> => {
+    const attemptAttach = async (retryCount = 0, force = false): Promise<void> => {
       try {
-        await performAttach(targetSessionId, retryCount > 0);
+        await performAttach(targetSessionId, force || retryCount > 0);
         if (!isSubscribed) return;
         isAttached = true;
         switchDebug("terminal.surface.attach.complete", {
@@ -1813,7 +1816,6 @@ export function NativeTerminalPane({
           subscribed: isSubscribed,
           retryCount,
         });
-        setError(null);
         refreshScrollbar();
         reportBounds();
         if (isBackendRebind) {
@@ -1852,7 +1854,8 @@ export function NativeTerminalPane({
         clearTimeout(retryTimer);
         retryTimer = null;
       }
-      void attemptAttach(0);
+      lastGeometry = null;
+      void attemptAttach(0, true);
     };
 
     if (typeof ResizeObserver !== "undefined" && !observer) {
@@ -2305,6 +2308,12 @@ export function NativeTerminalPane({
         ) : null}
       </div>
       {error ? (
+        <>
+        <div
+          data-testid="native-terminal-error-backing"
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-terminal"
+        />
         <button
           type="button"
           role="alert"
@@ -2317,6 +2326,7 @@ export function NativeTerminalPane({
         >
           {error}
         </button>
+        </>
       ) : null}
     </div>
   );

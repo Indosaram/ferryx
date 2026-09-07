@@ -145,26 +145,27 @@ pub async fn cmd_ssh_import_config<R: Runtime>(
     config_text: String,
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
-    run_blocking(move || {
-        let mut store = load_store(&path);
-        let parsed = parse_ssh_config(&config_text);
-        let existing_keys: Vec<String> = store.hosts.iter().map(|host| host.key()).collect();
-        let mut tombstones = store.tombstones.clone();
-        tombstones.extend(existing_keys);
-        let imported = crate::ssh::config::import_aliases(&parsed, &tombstones);
-        for host in imported {
-            if !store
-                .hosts
-                .iter()
-                .any(|existing| existing.key() == host.key())
-            {
-                store.hosts.push(host);
-            }
+    run_blocking(move || import_config_into_store(&path, &config_text)).await
+}
+
+fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<SshHost>, IpcError> {
+    let mut store = load_store(path);
+    let parsed = parse_ssh_config(config_text);
+    let existing_keys: Vec<String> = store.hosts.iter().map(|host| host.key()).collect();
+    let mut tombstones = store.tombstones.clone();
+    tombstones.extend(existing_keys);
+    let imported = crate::ssh::config::import_aliases(&parsed, &tombstones);
+    for host in imported {
+        if !store
+            .hosts
+            .iter()
+            .any(|existing| existing.key() == host.key())
+        {
+            store.hosts.push(host);
         }
-        save_store(&path, &store)?;
-        Ok(store.hosts)
-    })
-    .await
+    }
+    save_store(path, &store)?;
+    Ok(store.hosts)
 }
 
 #[tauri::command]
@@ -291,6 +292,60 @@ mod tests {
         let store: SshHostStore = serde_json::from_str("{}").expect("deserialize");
         assert!(store.hosts.is_empty());
         assert!(store.tombstones.is_empty());
+    }
+
+    #[test]
+    fn explicit_import_restores_a_previously_deleted_config_host() {
+        // Given a deleted config host and an unrelated deletion.
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("ssh_hosts.json");
+        save_store(
+            &path,
+            &SshHostStore {
+                hosts: Vec::new(),
+                tombstones: vec!["dev@dev.example:22".into(), "other.example:22".into()],
+            },
+        )
+        .expect("seed store");
+
+        // When the user explicitly imports that host again.
+        let hosts = import_config_into_store(
+            &path,
+            "Host dev-box\n  HostName dev.example\n  User dev\n",
+        )
+        .expect("import config");
+
+        // Then it is returned and persisted, without clearing unrelated deletions.
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].label, "dev-box");
+        let saved = load_store(&path);
+        assert_eq!(saved.hosts, hosts);
+        assert_eq!(saved.tombstones, vec!["other.example:22"]);
+    }
+
+    #[test]
+    fn repeated_import_preserves_existing_hosts_without_duplicates() {
+        // Given a host already saved with user edits.
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("ssh_hosts.json");
+        let config = "Host dev-box\n  HostName dev.example\n  User dev\n";
+        let mut hosts = crate::ssh::config::import_aliases(&parse_ssh_config(config), &[]);
+        hosts[0].label = "My development machine".into();
+        save_store(
+            &path,
+            &SshHostStore {
+                hosts: hosts.clone(),
+                tombstones: Vec::new(),
+            },
+        )
+        .expect("seed store");
+
+        // When the same config is explicitly imported.
+        let imported = import_config_into_store(&path, config).expect("import config");
+
+        // Then the existing record is neither duplicated nor overwritten.
+        assert_eq!(imported, hosts);
+        assert_eq!(load_store(&path).hosts, hosts);
     }
 
     #[test]
