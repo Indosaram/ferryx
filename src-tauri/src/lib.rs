@@ -504,9 +504,10 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
 #[cfg(all(target_os = "macos", feature = "native-terminal"))]
 fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
     app: &tauri::App<R>,
+    daemon_client: Arc<DaemonClient>,
 ) -> tauri::Result<()> {
     use block2::RcBlock;
-    use objc2_app_kit::{NSEvent, NSEventMask, NSWindow};
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSWindow};
     use std::ptr::{self, NonNull};
 
     let app_handle = app.handle().clone();
@@ -536,39 +537,73 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                     has_precise,
                                 );
                                 if rows != 0 {
-                                    if ipc::native_terminal::scroll_attached_native_terminal(
-                                        &surface_host,
-                                        &session_id,
-                                        crate::native_terminal::ScrollViewport::Delta(
-                                            rows as isize,
-                                        ),
-                                    )
-                                    .is_ok()
-                                    {
-                                        let surface_window = window.clone();
-                                        let state_inner = surface_host.clone();
-                                        let session_id_clone = session_id.clone();
-                                        let bounds =
-                                            surface_host.session_logical_bounds(&session_id);
-                                        let _ = window.run_on_main_thread(move || {
-                                            match bounds {
-                                                Some(logical_bounds) => {
-                                                    let _ = state_inner.render(
-                                                        &surface_window,
-                                                        crate::native_terminal::surface_host::NativeTerminalBoundsRequest {
-                                                            session_id: session_id_clone,
-                                                            bounds: logical_bounds,
-                                                        },
-                                                    );
-                                                }
-                                                None => {
-                                                    let _ = state_inner.get_receipt(
-                                                        &surface_window,
-                                                        &session_id_clone,
-                                                    );
-                                                }
+                                    let flags = event.modifierFlags();
+                                    let modifiers = crate::native_terminal::KeyModifiers {
+                                        shift: flags.contains(NSEventModifierFlags::Shift),
+                                        ctrl: flags.contains(NSEventModifierFlags::Control),
+                                        alt: flags.contains(NSEventModifierFlags::Option),
+                                        super_key: flags.contains(NSEventModifierFlags::Command),
+                                        caps_lock: flags.contains(NSEventModifierFlags::CapsLock),
+                                        num_lock: false,
+                                    };
+                                    let bounds = surface_host.session_logical_bounds(&session_id);
+                                    let cell_metrics = surface_host.session_cell_metrics(&session_id);
+
+                                    let outcome = surface_host.with_session_terminal(&session_id, |term| {
+                                        crate::native_terminal::compute_wheel_outcome(
+                                            term,
+                                            bounds.as_ref(),
+                                            cell_metrics.as_ref(),
+                                            logical_x,
+                                            logical_y,
+                                            rows,
+                                            modifiers,
+                                        )
+                                    });
+
+                                    match outcome {
+                                        Ok(crate::native_terminal::TerminalWheelOutcome::WritePty(bytes)) => {
+                                            let daemon = daemon_client.clone();
+                                            let sid = session_id.clone();
+                                            tauri::async_runtime::spawn(async move {
+                                                let _ = daemon.write_terminal(&sid, bytes).await;
+                                            });
+                                        }
+                                        Ok(crate::native_terminal::TerminalWheelOutcome::ScrollViewport(behavior)) => {
+                                            if ipc::native_terminal::scroll_attached_native_terminal(
+                                                &surface_host,
+                                                &session_id,
+                                                behavior,
+                                            )
+                                            .is_ok()
+                                            {
+                                                let surface_window = window.clone();
+                                                let state_inner = surface_host.clone();
+                                                let session_id_clone = session_id.clone();
+                                                let bounds =
+                                                    surface_host.session_logical_bounds(&session_id);
+                                                let _ = window.run_on_main_thread(move || {
+                                                    match bounds {
+                                                        Some(logical_bounds) => {
+                                                            let _ = state_inner.render(
+                                                                &surface_window,
+                                                                crate::native_terminal::surface_host::NativeTerminalBoundsRequest {
+                                                                    session_id: session_id_clone,
+                                                                    bounds: logical_bounds,
+                                                                },
+                                                            );
+                                                        }
+                                                        None => {
+                                                            let _ = state_inner.get_receipt(
+                                                                &surface_window,
+                                                                &session_id_clone,
+                                                            );
+                                                        }
+                                                    }
+                                                });
                                             }
-                                        });
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 return ptr::null_mut();
@@ -684,6 +719,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
+    let scroll_daemon_client = Arc::clone(&daemon_client);
 
     // Exactly one canonical workspace is registered for the startup root; the
     // legacy `default` alias is intentionally not registered, and persisted
@@ -763,7 +799,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
             install_macos_terminal_focus_monitor(app)?;
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
-            install_macos_terminal_scroll_monitor(app)?;
+            install_macos_terminal_scroll_monitor(app, Arc::clone(&scroll_daemon_client))?;
             #[cfg(all(target_os = "windows", feature = "native-terminal"))]
             install_windows_terminal_focus_monitor(app)?;
             ipc::browser_cli::start_browser_cli_server(

@@ -10,8 +10,8 @@ use crate::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState, NativeTerminalSurfaceReceipt,
 };
 use crate::native_terminal::{
-    MouseAction, MouseEvent, MousePosition, MouseRendererSize, NativeTerminalError,
-    NativeTerminalInput, ScrollViewport, TerminalEngine,
+    KeyModifiers, MouseAction, MouseEvent, MousePosition, MouseRendererSize, NativeTerminalError,
+    NativeTerminalInput, ScrollViewport, TerminalEngine, TerminalWheelOutcome,
 };
 
 #[derive(Debug, Deserialize)]
@@ -856,13 +856,50 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
 pub async fn cmd_native_terminal_scroll<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
     behavior: NativeTerminalScrollBehavior,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    if let Err(err) =
-        scroll_attached_native_terminal(state.inner(), &session_id, behavior.to_scroll_viewport())
-    {
-        return Err(IpcError::internal(err.to_string()));
+    require_attached_surface(state.inner(), &session_id)
+        .map_err(|err| IpcError::internal(err.to_string()))?;
+
+    let outcome = match &behavior {
+        NativeTerminalScrollBehavior::Delta { rows } => {
+            let bounds = state.session_logical_bounds(&session_id);
+            let cell_metrics = state.session_cell_metrics(&session_id);
+            let (lx, ly) = bounds
+                .as_ref()
+                .map(|b| (b.x + b.width / 2.0, b.y + b.height / 2.0))
+                .unwrap_or((0.0, 0.0));
+            state
+                .with_session_terminal(&session_id, |term| {
+                    crate::native_terminal::compute_wheel_outcome(
+                        term,
+                        bounds.as_ref(),
+                        cell_metrics.as_ref(),
+                        lx,
+                        ly,
+                        *rows as i16,
+                        KeyModifiers::default(),
+                    )
+                })
+                .map_err(|err| IpcError::internal(err.to_string()))?
+        }
+        _ => TerminalWheelOutcome::ScrollViewport(behavior.to_scroll_viewport()),
+    };
+
+    match outcome {
+        TerminalWheelOutcome::WritePty(bytes) => {
+            daemon_client.write_terminal(&session_id, bytes).await?;
+        }
+        TerminalWheelOutcome::ScrollViewport(v_behavior) => {
+            if let Err(err) =
+                scroll_attached_native_terminal(state.inner(), &session_id, v_behavior)
+            {
+                return Err(IpcError::internal(err.to_string()));
+            }
+        }
+        TerminalWheelOutcome::None => {}
     }
 
     let window = match app.get_webview_window("main") {
