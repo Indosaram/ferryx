@@ -47,27 +47,30 @@ pub struct GpuContext {
 impl GpuContext {
     /// Initializes a real wgpu device and queue, selecting the primary native backend.
     pub fn new() -> Result<Self, NativeTerminalError> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         }))
-        .or_else(|| {
+        .or_else(|_| {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
                 compatible_surface: None,
                 force_fallback_adapter: true,
+                ..Default::default()
             }))
         })
-        .ok_or_else(|| {
+        .map_err(|e| {
             NativeTerminalError::GpuAdapterUnavailable(
-                "No compatible GPU adapter found for native terminal renderer".to_string(),
+                format!("No compatible GPU adapter found for native terminal renderer: {e}"),
             )
         })?;
 
@@ -75,18 +78,16 @@ impl GpuContext {
         let uncaptured_error = Arc::new(Mutex::new(None));
         let err_slot = Arc::clone(&uncaptured_error);
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("Ferryx Native Terminal Device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Ferryx Native Terminal Device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            ..Default::default()
+        }))
         .map_err(|e| NativeTerminalError::GpuDeviceUnavailable(e.to_string()))?;
 
-        device.on_uncaptured_error(Box::new(move |err| {
+        device.on_uncaptured_error(Arc::new(move |err| {
             let mut slot = err_slot.lock();
             *slot = Some(err.to_string());
         }));
@@ -134,6 +135,7 @@ impl GpuContext {
             desired_maximum_frame_latency: 2,
             alpha_mode: opaque_composite_alpha_mode(&cap.alpha_modes),
             view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&self.device, &config);
         Ok(format)

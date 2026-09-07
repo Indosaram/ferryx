@@ -94,7 +94,7 @@ impl RenderTarget {
             let _ = tx.send(res);
         });
 
-        device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
         rx.recv()
             .map_err(|e| NativeTerminalError::GpuBufferError(e.to_string()))?
@@ -102,7 +102,9 @@ impl RenderTarget {
 
         let mut pixels = Vec::with_capacity((self.width * self.height * 4) as usize);
         {
-            let mapped = slice.get_mapped_range();
+            let mapped = slice
+                .get_mapped_range()
+                .map_err(|e| NativeTerminalError::GpuBufferError(e.to_string()))?;
             for row in 0..self.height {
                 let start = (row * self.padded_bytes_per_row) as usize;
                 let end = start + (self.width * 4) as usize;

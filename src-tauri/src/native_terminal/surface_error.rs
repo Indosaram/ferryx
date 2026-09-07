@@ -6,15 +6,21 @@ pub(crate) enum SurfaceFrameAction {
 }
 
 pub(crate) fn classify_surface_error(
-    error: wgpu::SurfaceError,
+    status: &wgpu::CurrentSurfaceTexture,
 ) -> Result<SurfaceFrameAction, NativeTerminalError> {
-    match error {
-        wgpu::SurfaceError::Timeout => Ok(SurfaceFrameAction::Drop),
-        wgpu::SurfaceError::OutOfMemory => Err(NativeTerminalError::OutOfMemory),
-        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => Err(
+    match status {
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            Ok(SurfaceFrameAction::Drop)
+        }
+        wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => Err(
             NativeTerminalError::GpuPipelineError("Native terminal surface recovery failed".into()),
         ),
-        other => Err(NativeTerminalError::GpuPipelineError(other.to_string())),
+        wgpu::CurrentSurfaceTexture::Validation => {
+            Err(NativeTerminalError::GpuPipelineError("Surface validation error".into()))
+        }
+        wgpu::CurrentSurfaceTexture::Success(_) | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+            Ok(SurfaceFrameAction::Drop)
+        }
     }
 }
 
@@ -25,7 +31,15 @@ mod tests {
     #[test]
     fn native_surface_timeout_drops_frame_without_terminal_failure() {
         assert_eq!(
-            classify_surface_error(wgpu::SurfaceError::Timeout),
+            classify_surface_error(&wgpu::CurrentSurfaceTexture::Timeout),
+            Ok(SurfaceFrameAction::Drop)
+        );
+    }
+
+    #[test]
+    fn native_surface_occluded_drops_frame_without_terminal_failure() {
+        assert_eq!(
+            classify_surface_error(&wgpu::CurrentSurfaceTexture::Occluded),
             Ok(SurfaceFrameAction::Drop)
         );
     }

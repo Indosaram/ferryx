@@ -226,8 +226,9 @@ impl ApplicationHandler for WindowApp {
                     return;
                 };
                 let output = match surf.get_current_texture() {
-                    Ok(o) => o,
-                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    wgpu::CurrentSurfaceTexture::Success(o)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(o) => o,
+                    wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                         let sz = w.inner_size();
                         match rend.configure_surface(surf, sz.width.max(1), sz.height.max(1)) {
                             Ok(f) => {
@@ -241,13 +242,12 @@ impl ApplicationHandler for WindowApp {
                         }
                         return;
                     }
-                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                        eprintln!("Surface OutOfMemory");
-                        el.exit();
+                    wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                         return;
                     }
-                    Err(e) => {
-                        eprintln!("Surface error: {e}");
+                    wgpu::CurrentSurfaceTexture::Validation => {
+                        eprintln!("Surface validation error");
+                        el.exit();
                         return;
                     }
                 };
@@ -263,7 +263,7 @@ impl ApplicationHandler for WindowApp {
                     el.exit();
                     return;
                 }
-                output.present();
+                rend.present(output);
             }
             _ => {}
         }

@@ -128,6 +128,11 @@ impl NativeTerminalRenderer {
         self.gpu.configure_surface(surface, width, height)
     }
 
+    /// Presents a surface texture using the GPU queue.
+    pub fn present(&self, frame: wgpu::SurfaceTexture) {
+        self.gpu.queue.present(frame);
+    }
+
     pub fn render_snapshot(
         &mut self,
         snapshot: &RenderSnapshot,

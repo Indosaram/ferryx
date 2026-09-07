@@ -104,6 +104,7 @@ pub fn encode_terminal_passes_with_surface_options(
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view,
             resolve_target: None,
+            depth_slice: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(clear_color),
                 store: wgpu::StoreOp::Store,
@@ -112,6 +113,7 @@ pub fn encode_terminal_passes_with_surface_options(
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     if let Some(bounds) = scissor {
         rpass.set_scissor_rect(bounds.x, bounds.y, bounds.width, bounds.height);

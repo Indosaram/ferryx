@@ -68,7 +68,7 @@ sha2 = "0.10"
 futures-util = "0.3"
 cookie = "0.18"
 time = "0.3"
-wgpu = { version = "24", optional = true }
+wgpu = { version = "30", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 winit = { version = "0.30", optional = true }
 png = { version = "0.17", optional = true }
@@ -158,3 +158,4 @@ tokio-test = "0.4"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+

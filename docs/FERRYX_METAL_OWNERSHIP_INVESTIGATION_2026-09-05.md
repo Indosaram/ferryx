@@ -185,3 +185,26 @@ Footprint Output Summary:
 
 ```
 
+## Upstream Contribution & Resolution (Steps 1–3 Complete)
+
+1. **Local Vendor Patch (Active in Ferryx)**:
+   - Location: `src-tauri/vendor/wgpu-hal`
+   - Configured via `src-tauri/Cargo.toml`: `[patch.crates-io] wgpu-hal = { path = "vendor/wgpu-hal" }`
+   - Verified: 596 library unit tests pass cleanly.
+
+2. **Upstream PR Created**:
+   - Upstream Repo: `gfx-rs/wgpu`
+   - PR Link: **https://github.com/gfx-rs/wgpu/pull/10271**
+   - Base branch: `v24`
+   - Fork: `https://github.com/Indosaram/wgpu` (branch: `fix/metal-observer-layer-super-dealloc`)
+
+3. **Future Reversion Strategy**:
+   - When upstream releases an official patch version or Ferryx upgrades to a newer wgpu version where this cleanup is included, remove the `[patch.crates-io]` section from `src-tauri/Cargo.toml` and delete `src-tauri/vendor/wgpu-hal`.
+
+4. **Upgrade to wgpu v30 & Patch Removal (2026-09-06)**:
+   - Upgraded `wgpu` from version 24 to `30.0.1` (latest crates.io release).
+   - Upstream wgpu v30 migrated Metal layer creation to `raw-window-metal`, completely replacing `WgpuObserverLayer` and resolving the layer leak upstream.
+   - Removed `[patch.crates-io]` from `src-tauri/Cargo.toml` and deleted `src-tauri/vendor/wgpu-hal`.
+   - Updated renderer/surface code for wgpu 30 API changes (`CurrentSurfaceTexture`, `queue.present()`, `PollType::wait_indefinitely()`, and pipeline/render pass descriptors).
+
+
