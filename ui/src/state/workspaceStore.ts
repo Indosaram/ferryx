@@ -1122,7 +1122,11 @@ export function useWorkspaceStore({
         worktreePath: targetWorktree?.path,
         url,
         profile: options?.profileId,
-        visible: true,
+        // Created hidden on purpose. The backend has no pane geometry yet, so a visible child
+        // webview would be shown at the creation default rect (0,0 800x600) and cover app
+        // chrome plus any native terminal underneath until BrowserPane reports real bounds.
+        // BrowserPane reveals it once the bounds update is acknowledged.
+        visible: false,
       });
       // Landing this tab after a project switch would attach one project's
       // browser to another's layout, and dropping it silently would orphan the

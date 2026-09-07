@@ -1,4 +1,4 @@
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab } from "../lib/types";
@@ -53,10 +53,12 @@ beforeEach(() => {
 });
 
 describe("BrowserPane global surface masking", () => {
+  // The reveal now waits for the bounds acknowledgement, so every "visible" expectation is
+  // asynchronous; "hidden" stays synchronous because hiding must never wait on geometry.
   it("hides the child webview while a role=dialog surface is mounted and restores it on dismissal", async () => {
     render(<BrowserPane tab={tab} onNavigate={() => undefined} onReload={() => undefined} />);
 
-    expect(lastVisibleCall()).toBe(true);
+    await waitFor(() => expect(lastVisibleCall()).toBe(true));
 
     const dialog = document.createElement("div");
     dialog.setAttribute("role", "dialog");
@@ -70,12 +72,12 @@ describe("BrowserPane global surface masking", () => {
       dialog.remove();
     });
 
-    expect(lastVisibleCall()).toBe(true);
+    await waitFor(() => expect(lastVisibleCall()).toBe(true));
   });
 
   it("keeps a role=search surface masking the child webview", async () => {
     render(<BrowserPane tab={tab} onNavigate={() => undefined} onReload={() => undefined} />);
-    expect(lastVisibleCall()).toBe(true);
+    await waitFor(() => expect(lastVisibleCall()).toBe(true));
 
     const search = document.createElement("div");
     search.setAttribute("role", "search");
@@ -101,5 +103,43 @@ describe("BrowserPane global surface masking", () => {
       dialog.remove();
     });
     expect(lastVisibleCall()).toBe(false);
+  });
+});
+
+describe("BrowserPane reveal ordering", () => {
+  it("does not show the child webview until its bounds update is acknowledged", async () => {
+    let releaseBounds: (() => void) | undefined;
+    browserMocks.setBrowserBounds.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseBounds = () => resolve(undefined);
+        }),
+    );
+
+    render(<BrowserPane tab={tab} onNavigate={() => undefined} onReload={() => undefined} />);
+
+    await waitFor(() => expect(browserMocks.setBrowserBounds).toHaveBeenCalled());
+    // The opaque child webview sits above the app webview and the native terminal surface, so a
+    // show issued before the backend applied the new frame would paint over unrelated panes.
+    expect(browserMocks.setBrowserVisible).not.toHaveBeenCalledWith("browser-1", true);
+
+    await act(async () => {
+      releaseBounds?.();
+    });
+
+    await waitFor(() => expect(lastVisibleCall()).toBe(true));
+  });
+
+  it("never shows a webview whose bounds update failed", async () => {
+    browserMocks.setBrowserBounds.mockImplementationOnce(async () => {
+      throw new Error("WEBVIEW_NOT_FOUND");
+    });
+
+    render(<BrowserPane tab={tab} onNavigate={() => undefined} onReload={() => undefined} />);
+
+    await waitFor(() => expect(browserMocks.setBrowserBounds).toHaveBeenCalled());
+    await act(async () => undefined);
+
+    expect(browserMocks.setBrowserVisible).not.toHaveBeenCalledWith("browser-1", true);
   });
 });

@@ -1122,26 +1122,29 @@ pub async fn cmd_browser_navigate<R: tauri::Runtime>(
     let valid_url = manager.update_url(&browser_id, &url)?;
     let state = manager.get_state(&browser_id)?;
 
-    if let Some(webview) = app.get_webview(&state.webview_label) {
-        emit_browser_state(&webview, &state);
-        let parsed = valid_url.parse().map_err(|error| {
-            BrowserError::NavigationFailed(format!("invalid target URL: {error}"))
-        })?;
-        if let Err(error) = webview.navigate(parsed) {
-            let message = error.to_string();
-            if let Ok(error_state) = manager.update_navigation_state(
-                &browser_id,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                Some(message.clone()),
-            ) {
-                emit_browser_state(&webview, &error_state);
-            }
-            return Err(BrowserError::NavigationFailed(message).into());
+    // A missing webview is a real defect, not a no-op: swallowing it leaves a browser tab that
+    // never loads and reports no error, which is indistinguishable from a rendering failure.
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    emit_browser_state(&webview, &state);
+    let parsed = valid_url
+        .parse()
+        .map_err(|error| BrowserError::NavigationFailed(format!("invalid target URL: {error}")))?;
+    if let Err(error) = webview.navigate(parsed) {
+        let message = error.to_string();
+        if let Ok(error_state) = manager.update_navigation_state(
+            &browser_id,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            Some(message.clone()),
+        ) {
+            emit_browser_state(&webview, &error_state);
         }
+        return Err(BrowserError::NavigationFailed(message).into());
     }
     Ok(())
 }
@@ -1297,23 +1300,24 @@ pub async fn cmd_browser_reload<R: tauri::Runtime>(
     browser_id: String,
 ) -> Result<(), IpcError> {
     let state = manager.begin_reload(&browser_id)?;
-    if let Some(webview) = app.get_webview(&state.webview_label) {
-        emit_browser_state(&webview, &state);
-        if let Err(error) = webview.reload() {
-            let message = error.to_string();
-            if let Ok(error_state) = manager.update_navigation_state(
-                &browser_id,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                Some(message.clone()),
-            ) {
-                emit_browser_state(&webview, &error_state);
-            }
-            return Err(BrowserError::NavigationFailed(message).into());
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    emit_browser_state(&webview, &state);
+    if let Err(error) = webview.reload() {
+        let message = error.to_string();
+        if let Ok(error_state) = manager.update_navigation_state(
+            &browser_id,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            Some(message.clone()),
+        ) {
+            emit_browser_state(&webview, &error_state);
         }
+        return Err(BrowserError::NavigationFailed(message).into());
     }
     Ok(())
 }
@@ -1330,16 +1334,22 @@ pub async fn cmd_browser_set_bounds<R: tauri::Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    let _ = webview.set_bounds(tauri::Rect {
-        position: tauri::Position::Logical(tauri::LogicalPosition {
-            x: bounds.x,
-            y: bounds.y,
-        }),
-        size: tauri::Size::Logical(tauri::LogicalSize {
-            width: bounds.width,
-            height: bounds.height,
-        }),
-    });
+    // The frontend reveals the webview only after this call resolves, so a discarded failure
+    // here would show an opaque child at its previous frame over unrelated panes.
+    webview
+        .set_bounds(tauri::Rect {
+            position: tauri::Position::Logical(tauri::LogicalPosition {
+                x: bounds.x,
+                y: bounds.y,
+            }),
+            size: tauri::Size::Logical(tauri::LogicalSize {
+                width: bounds.width,
+                height: bounds.height,
+            }),
+        })
+        .map_err(|error| {
+            BrowserError::Internal(format!("failed to set browser webview bounds: {error}"))
+        })?;
     Ok(())
 }
 
@@ -1352,13 +1362,20 @@ pub async fn cmd_browser_set_visible<R: tauri::Runtime>(
 ) -> Result<(), IpcError> {
     manager.set_visible(&browser_id, visible)?;
     let state = manager.get_state(&browser_id)?;
-    if let Some(webview) = app.get_webview(&state.webview_label) {
-        if visible {
-            let _ = webview.show();
-        } else {
-            let _ = webview.hide();
-        }
-    }
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let outcome = if visible {
+        webview.show()
+    } else {
+        webview.hide()
+    };
+    // A dropped hide is what strands an opaque child webview over the pane that replaced it.
+    outcome.map_err(|error| {
+        BrowserError::Internal(format!(
+            "failed to set browser webview visibility: {error}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -1371,9 +1388,12 @@ pub async fn cmd_browser_set_zoom<R: tauri::Runtime>(
 ) -> Result<f64, IpcError> {
     let clamped = manager.set_zoom(&browser_id, zoom_factor)?;
     let state = manager.get_state(&browser_id)?;
-    if let Some(webview) = app.get_webview(&state.webview_label) {
-        let _ = webview.set_zoom(clamped);
-    }
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    webview.set_zoom(clamped).map_err(|error| {
+        BrowserError::Internal(format!("failed to set browser webview zoom: {error}"))
+    })?;
     Ok(clamped)
 }
 
@@ -1384,9 +1404,12 @@ pub async fn cmd_browser_focus<R: tauri::Runtime>(
     browser_id: String,
 ) -> Result<(), IpcError> {
     let state = manager.get_state(&browser_id)?;
-    if let Some(webview) = app.get_webview(&state.webview_label) {
-        let _ = webview.set_focus();
-    }
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    webview.set_focus().map_err(|error| {
+        BrowserError::Internal(format!("failed to focus browser webview: {error}"))
+    })?;
     Ok(())
 }
 

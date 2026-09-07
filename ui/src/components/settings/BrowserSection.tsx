@@ -395,7 +395,11 @@ export function BrowserSection() {
                   variant="outline"
                   size="sm"
                   aria-label={`Focus browser tab ${browser.title || browser.browserId}`}
-                  onClick={() => void focusBrowser(browser.browserId)}
+                  onClick={() => {
+                    // cmd_browser_focus now reports a missing webview instead of succeeding
+                    // silently, and this list can outlive a browser that is closing.
+                    void focusBrowser(browser.browserId).catch(() => undefined);
+                  }}
                   className="h-7 px-2 text-[11px]"
                 >
                   Focus

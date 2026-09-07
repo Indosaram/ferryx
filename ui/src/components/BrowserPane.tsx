@@ -191,12 +191,19 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
     const el = containerRef.current;
     if (!el) return;
 
+    // A show that races its own bounds update is what makes the child webview cover the
+    // wrong region: `boundsSeq` marks the newest geometry request, so only the reveal that
+    // belongs to the latest acknowledged frame is allowed to run.
+    let disposed = false;
+    let boundsSeq = 0;
+
     const updateVisibility = (nextVisible: boolean) => {
       void setBrowserVisible(tab.browserId, nextVisible).catch(() => undefined);
     };
 
     const updateBounds = () => {
       if (!maskAwareVisible || liveTab.loadError) {
+        boundsSeq += 1;
         updateVisibility(false);
         return;
       }
@@ -208,13 +215,23 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
       const heightReduction = clampedY - rect.y;
       const clampedHeight = Math.max(0, rect.height - heightReduction);
 
+      // On macOS the child webview is a sibling NSView stacked above the app WKWebView, and
+      // the native terminal surface sits below that webview. An opaque child shown before its
+      // frame matches this pane therefore paints over app chrome and blanks whatever terminal
+      // occupies the stale rect, which no DOM z-index can undo. Reveal only after the backend
+      // has acknowledged the geometry.
+      const seq = ++boundsSeq;
       void setBrowserBounds(tab.browserId, {
         x: rect.x,
         y: clampedY,
         width: rect.width,
         height: clampedHeight,
-      }).catch(() => undefined);
-      updateVisibility(true);
+      })
+        .then(() => {
+          if (disposed || seq !== boundsSeq) return;
+          updateVisibility(true);
+        })
+        .catch(() => undefined);
     };
 
     updateBounds();
@@ -224,6 +241,8 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
     window.addEventListener("resize", updateBounds);
 
     return () => {
+      disposed = true;
+      boundsSeq += 1;
       resizeObserver.disconnect();
       window.removeEventListener("resize", updateBounds);
       // Native child webviews outlive React DOM nodes; cleanup also covers Fast Refresh remounts.
