@@ -730,5 +730,26 @@ describe("SshSection Settings Component", () => {
       expect(screen.getByText("/Users/test/.ssh/config")).toBeInTheDocument();
       expect(localStorage.getItem("ferryx.ssh.configPath")).toBeNull();
     });
+
+    it("does not render the Choose File button when running outside Tauri desktop (web/remote mode)", async () => {
+      isTauriMock.mockReturnValue(false);
+      invokeMock.mockImplementation((cmd) => {
+        if (cmd === "cmd_ssh_list_hosts") return Promise.resolve([]);
+        if (cmd === "cmd_ssh_read_system_config") {
+          return Promise.resolve({
+            path: "~/.ssh/config",
+            exists: true,
+            rawText: "",
+            hosts: [],
+          });
+        }
+        return Promise.resolve();
+      });
+
+      render(<SshSection />);
+      await act(async () => {});
+
+      expect(screen.queryByRole("button", { name: /Choose File/i })).not.toBeInTheDocument();
+    });
   });
 });

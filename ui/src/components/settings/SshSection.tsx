@@ -15,6 +15,7 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
@@ -122,6 +123,7 @@ export function SshSection() {
   }, []);
 
   const handleChooseConfigFile = async () => {
+    if (!isTauri()) return;
     let selected: string | string[] | null;
     try {
       selected = await open({
@@ -440,15 +442,17 @@ export function SshSection() {
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={handleChooseConfigFile}
-                className="h-7 text-[12px] px-2 text-muted-foreground hover:text-foreground"
-              >
-                <FolderOpen className="size-3.5 mr-1" />
-                Choose File…
-              </Button>
+              {isTauri() ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleChooseConfigFile}
+                  className="h-7 text-[12px] px-2 text-muted-foreground hover:text-foreground"
+                >
+                  <FolderOpen className="size-3.5 mr-1" />
+                  Choose File…
+                </Button>
+              ) : null}
 
               {configPathOverride ? (
                 <Button

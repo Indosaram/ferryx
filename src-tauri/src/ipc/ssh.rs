@@ -47,7 +47,7 @@ pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathB
     }
 }
 
-pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+pub fn resolve_home_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     app.path()
         .home_dir()
         .ok()
@@ -56,7 +56,31 @@ pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(PathBuf::from)
         })
-        .map(|home| home.join(".ssh").join("config"))
+}
+
+pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    resolve_home_dir(app).map(|home| home.join(".ssh").join("config"))
+}
+
+pub(crate) fn expand_tilde_path(raw: &str, home: Option<&Path>) -> PathBuf {
+    if raw == "~" {
+        home.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(raw))
+    } else if let Some(stripped) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        match home {
+            Some(h) => {
+                let mut path = h.to_path_buf();
+                for component in stripped.split(['/', '\\']) {
+                    if !component.is_empty() {
+                        path.push(component);
+                    }
+                }
+                path
+            }
+            None => PathBuf::from(raw),
+        }
+    } else {
+        PathBuf::from(raw)
+    }
 }
 
 fn read_ssh_config_file(path: &Path) -> Result<SystemSshConfigResult, IpcError> {
@@ -93,11 +117,12 @@ pub async fn cmd_ssh_read_system_config<R: Runtime>(
     config_path: Option<String>,
 ) -> Result<SystemSshConfigResult, IpcError> {
     run_blocking(move || {
+        let home = resolve_home_dir(&app);
         let selected = config_path
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
+            .map(|raw| expand_tilde_path(raw, home.as_deref()));
 
         let Some(path) = selected.or_else(|| system_ssh_config_path(&app)) else {
             return Ok(SystemSshConfigResult {
@@ -391,6 +416,31 @@ mod tests {
         assert!(!result.exists);
         assert!(result.hosts.is_empty());
         assert!(result.raw_text.is_empty());
+    }
+
+    #[test]
+    fn expand_tilde_path_resolves_home_and_subpaths() {
+        let home = Path::new("/Users/testuser");
+        assert_eq!(
+            expand_tilde_path("~", Some(home)),
+            PathBuf::from("/Users/testuser")
+        );
+        assert_eq!(
+            expand_tilde_path("~/work/ssh-config", Some(home)),
+            PathBuf::from("/Users/testuser/work/ssh-config")
+        );
+        assert_eq!(
+            expand_tilde_path("~\\work\\ssh-config", Some(home)),
+            PathBuf::from("/Users/testuser/work/ssh-config")
+        );
+        assert_eq!(
+            expand_tilde_path("/var/ssh/config", Some(home)),
+            PathBuf::from("/var/ssh/config")
+        );
+        assert_eq!(
+            expand_tilde_path("~/work/ssh-config", None),
+            PathBuf::from("~/work/ssh-config")
+        );
     }
 
     #[test]
