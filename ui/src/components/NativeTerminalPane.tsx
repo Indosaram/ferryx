@@ -518,10 +518,11 @@ export function NativeTerminalPane({
   const visible = contextVisible;
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const retryBoundsRef = useRef<(() => void) | null>(null);
   const retryAttachRef = useRef<(() => void) | null>(null);
 
   const retryAttach = useCallback(() => {
-    retryAttachRef.current?.();
+    (retryBoundsRef.current ?? retryAttachRef.current)?.();
   }, []);
   const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
   const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
@@ -1706,6 +1707,7 @@ export function NativeTerminalPane({
             }
             lastGeometry = nextGeometry;
             setError(null);
+            retryBoundsRef.current = null;
             updateImeAnchor(receipt);
             presentNativeTerminalLifecycle(targetSessionId);
             refreshScrollbar();
@@ -1742,10 +1744,20 @@ export function NativeTerminalPane({
           });
           reportNativeTerminalIpcFailure("cmd_native_terminal_set_bounds", error);
           if (isSubscribed) {
-            const cause = isStructuredIpcError(error)
-              ? `${error.code}: ${error.message}`
-              : error instanceof Error ? error.message : String(error);
-            setError(`Failed to update native terminal bounds: ${cause}`);
+            // Only a structured backend error is safe to show: a raw Error carries
+            // host filesystem paths that must not reach the pane.
+            setError(
+              isStructuredIpcError(error)
+                ? `Failed to update native terminal bounds: ${error.code}: ${error.message}`
+                : "Failed to update native terminal bounds",
+            );
+            // A surface that refuses geometry stays refusing it, so recovery has to
+            // rebuild the attachment rather than resend the same measurement.
+            retryBoundsRef.current = () => {
+              if (!isSubscribed) return;
+              lastGeometry = null;
+              void attemptAttach(0, true);
+            };
           }
         })
         .finally(() => {
@@ -1887,6 +1899,7 @@ export function NativeTerminalPane({
 
     return () => {
       retryAttachRef.current = null;
+      retryBoundsRef.current = null;
       resolutionQuery?.removeEventListener("change", updateDeviceScale);
       window.removeEventListener("resize", updateDeviceScale);
       if (retryTimer) {
