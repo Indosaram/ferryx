@@ -226,6 +226,78 @@ fn test_imported_cookie_converts_to_tauri_cookie() {
 }
 
 #[test]
+fn engine_history_flags_win_over_the_shadow_vector() {
+    let mgr = BrowserManager::new();
+    let state = mgr
+        .register_session(CreateBrowserRequest {
+            browser_id: None,
+            workspace_id: Some("default".into()),
+            worktree_path: None,
+            url: "https://example.com/only".into(),
+            profile: Some(BrowserProfileId::Default),
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .expect("register browser");
+
+    // A single recorded entry means the shadow vector believes there is nowhere
+    // to go back to, which is what fragment navigations and pushState look like.
+    let shadow_only = mgr.get_state(&state.browser_id).expect("state");
+    assert!(!shadow_only.can_go_back);
+
+    let reported = mgr
+        .update_navigation_state(
+            &state.browser_id,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(false),
+            None,
+        )
+        .expect("report engine flags");
+    assert!(
+        reported.can_go_back,
+        "the engine's canGoBack must not be discarded"
+    );
+
+    // Any later state update must not let the shadow vector overwrite it.
+    let after_title = mgr
+        .update_navigation_state(
+            &state.browser_id,
+            None,
+            Some("Title".into()),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .expect("update title");
+    assert!(
+        after_title.can_go_back,
+        "shadow history must not overwrite engine-owned flags"
+    );
+
+    // The back navigation has to start even though the shadow vector has no
+    // earlier index; aborting here is what previously stranded those entries.
+    let started = mgr
+        .begin_history_navigation(&state.browser_id, false)
+        .expect("begin history navigation");
+    assert!(
+        started.loading,
+        "engine-owned history must still dispatch the back navigation"
+    );
+
+    // Cancelling leaves the engine flags untouched and only clears the load.
+    let cancelled = mgr
+        .cancel_history_navigation(&state.browser_id, false)
+        .expect("cancel history navigation");
+    assert!(!cancelled.loading);
+    assert!(cancelled.can_go_back);
+}
+
+#[test]
 fn test_history_navigation_marks_loading_without_overwriting_url() {
     let mgr = BrowserManager::new();
     let state = mgr
@@ -486,6 +558,78 @@ async fn test_cmd_browser_set_bounds_returns_webview_not_found_when_webview_miss
 
     assert!(result.is_err());
     let err = result.unwrap_err();
+    assert_eq!(err.code, IpcErrorCode::WebviewNotFound);
+    assert!(err.message.contains(&state.webview_label));
+}
+
+/// A `set_visible` that reports success without a webview leaves the frontend believing an
+/// opaque child was hidden while it is still painted over whatever pane replaced it, which no
+/// DOM z-index can correct. The command must fail loudly instead.
+#[tokio::test]
+async fn test_cmd_browser_set_visible_returns_webview_not_found_when_webview_missing() {
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let manager = std::sync::Arc::new(BrowserManager::new());
+    let state = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: None,
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(false),
+        })
+        .expect("register");
+    app.manage(std::sync::Arc::clone(&manager));
+
+    for visible in [true, false] {
+        let result = crate::ipc::browser::cmd_browser_set_visible(
+            app.handle().clone(),
+            app.state::<std::sync::Arc<BrowserManager>>(),
+            state.browser_id.clone(),
+            visible,
+        )
+        .await;
+
+        let err = result.expect_err("missing webview must not report success");
+        assert_eq!(err.code, IpcErrorCode::WebviewNotFound);
+        assert!(err.message.contains(&state.webview_label));
+    }
+}
+
+/// Same contract for navigation: a browser tab that silently never loads is indistinguishable
+/// from a broken render, so the missing webview has to surface as an error.
+#[tokio::test]
+async fn test_cmd_browser_navigate_returns_webview_not_found_when_webview_missing() {
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let manager = std::sync::Arc::new(BrowserManager::new());
+    let state = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: None,
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .expect("register");
+    app.manage(std::sync::Arc::clone(&manager));
+
+    let err = crate::ipc::browser::cmd_browser_navigate(
+        app.handle().clone(),
+        app.state::<std::sync::Arc<BrowserManager>>(),
+        state.browser_id.clone(),
+        "https://example.org".into(),
+    )
+    .await
+    .expect_err("missing webview must not report success");
     assert_eq!(err.code, IpcErrorCode::WebviewNotFound);
     assert!(err.message.contains(&state.webview_label));
 }

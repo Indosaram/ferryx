@@ -52,6 +52,17 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   if (window.__ferryxBrowserBridgeInstalled) return;
   Object.defineProperty(window, '__ferryxBrowserBridgeInstalled', { value: true });
 
+  // This script runs at document start, before any page script, so these
+  // references are still pristine. `route` below builds a URL containing the
+  // bridge nonce and hands it to `assign`; resolving either function at call
+  // time instead would let a page install its own `location.assign` or
+  // `encodeURIComponent` and capture the nonce, which is exactly the credential
+  // that stops it from forging control messages.
+  const assign = location.assign.bind(location);
+  const enc = encodeURIComponent;
+  const closestOf = Element.prototype.closest;
+  const addDocumentListener = document.addEventListener.bind(document);
+
   const resolveHttpUrl = (raw) => {
     if (!raw) return null;
     try {
@@ -63,8 +74,8 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   };
 
   const route = (host, key, value) => {
-    const target = `https://${host}/?${key}=${encodeURIComponent(value)}&nonce=${__FERRYX_BROWSER_BRIDGE_NONCE__}`;
-    location.assign(target);
+    const target = `https://${host}/?${key}=${enc(value)}&nonce=${__FERRYX_BROWSER_BRIDGE_NONCE__}`;
+    assign(target);
   };
 
   const originalOpen = window.open.bind(window);
@@ -77,10 +88,10 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
     return originalOpen(url, ...rest);
   };
 
-  document.addEventListener('click', (event) => {
+  addDocumentListener('click', (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
-    const anchor = target.closest('a[href]');
+    const anchor = closestOf.call(target, 'a[href]');
     if (!(anchor instanceof HTMLAnchorElement)) return;
     const url = resolveHttpUrl(anchor.href);
     if (!url) return;
@@ -95,7 +106,7 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
     }
   }, true);
 
-  document.addEventListener('keydown', (event) => {
+  addDocumentListener('keydown', (event) => {
     const mod = event.metaKey || event.ctrlKey;
     let action = null;
     if (mod && event.key.toLowerCase() === 'l') action = 'focus-address';
@@ -110,12 +121,12 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
     route('shortcut.ferryx.invalid', 'action', action);
   }, true);
 
-  document.addEventListener('drop', (event) => {
+  addDocumentListener('drop', (event) => {
     const uri = event.dataTransfer?.getData('text/uri-list') || event.dataTransfer?.getData('text/plain') || '';
     const target = resolveHttpUrl(uri.split(/\r?\n/).find((line) => line && !line.startsWith('#')) || uri);
     if (!target) return;
     event.preventDefault();
-    location.assign(target);
+    assign(target);
   }, true);
 })();
 "#;
@@ -125,6 +136,27 @@ mod tests {
     use super::*;
 
     const TEST_NONCE: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn bridge_script_captures_nonce_carrying_builtins_at_document_start() {
+        let script = browser_guest_bridge_script(TEST_NONCE);
+
+        assert!(script.contains("const assign = location.assign.bind(location);"));
+        assert!(script.contains("const enc = encodeURIComponent;"));
+
+        // The routed URL carries the nonce, so it must be built and dispatched
+        // through the captured references: resolving them at call time lets a
+        // page swap either one in and read the nonce out of the target URL.
+        assert!(script.contains("&nonce="));
+        assert!(
+            !script.contains("encodeURIComponent(value)"),
+            "route must encode through the captured reference"
+        );
+        assert!(
+            !script.contains("location.assign(target)"),
+            "route must navigate through the captured reference"
+        );
+    }
 
     #[test]
     fn parses_bridge_actions_and_ignores_normal_navigation() {

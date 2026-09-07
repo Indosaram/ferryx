@@ -25,6 +25,12 @@ pub struct ManagedBrowserSession {
     pub automation_targets: HashMap<String, String>,
     history: Vec<String>,
     history_index: usize,
+    /// Set once the platform reports real engine history flags. The shadow
+    /// vector below cannot represent fragment navigations or `pushState`
+    /// entries the engine recorded, so once the engine has spoken it owns
+    /// `can_go_back`/`can_go_forward` and the vector is only a fallback for
+    /// platforms that expose no native flags.
+    native_history_flags: bool,
 }
 
 fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
@@ -47,6 +53,9 @@ fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
 }
 
 fn sync_history_flags(session: &mut ManagedBrowserSession) {
+    if session.native_history_flags {
+        return;
+    }
     session.can_go_back = session.history_index > 0;
     session.can_go_forward = session.history_index + 1 < session.history.len();
 }
@@ -145,6 +154,7 @@ impl BrowserManager {
             automation_targets: HashMap::new(),
             history: vec![valid_url],
             history_index: 0,
+            native_history_flags: false,
         };
 
         let state = browser_state(&session);
@@ -234,6 +244,22 @@ impl BrowserManager {
             .get_mut(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
 
+        if s.native_history_flags {
+            // The engine already decided whether this move is possible. Guessing
+            // from the shadow vector here used to abort the navigation before the
+            // platform code could run `goBack()`, which stranded every entry the
+            // vector never saw. The real URL arrives with the load callback, so
+            // nothing is updated optimistically.
+            let can_navigate = if forward { s.can_go_forward } else { s.can_go_back };
+            if !can_navigate {
+                s.loading = false;
+                return Ok(browser_state(s));
+            }
+            s.loading = true;
+            s.load_error = None;
+            return Ok(browser_state(s));
+        }
+
         let next_index = if forward {
             (s.history_index + 1 < s.history.len()).then_some(s.history_index + 1)
         } else {
@@ -265,6 +291,13 @@ impl BrowserManager {
         let s = guard
             .get_mut(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        if s.native_history_flags {
+            // Nothing was moved optimistically under engine-owned history, so the
+            // cancel path only has to clear the pending load.
+            s.loading = false;
+            return Ok(browser_state(s));
+        }
+
         let restored_index = if forward {
             s.history_index.checked_sub(1)
         } else {
@@ -369,8 +402,8 @@ impl BrowserManager {
         url: Option<String>,
         title: Option<String>,
         loading: Option<bool>,
-        _can_go_back: Option<bool>,
-        _can_go_forward: Option<bool>,
+        can_go_back: Option<bool>,
+        can_go_forward: Option<bool>,
         error: Option<String>,
     ) -> Result<BrowserState, BrowserError> {
         let mut guard = self.sessions.write();
@@ -397,6 +430,14 @@ impl BrowserManager {
             s.load_error = Some(error);
         } else if loading == Some(false) {
             s.load_error = None;
+        }
+        if let Some(value) = can_go_back {
+            s.can_go_back = value;
+            s.native_history_flags = true;
+        }
+        if let Some(value) = can_go_forward {
+            s.can_go_forward = value;
+            s.native_history_flags = true;
         }
         sync_history_flags(s);
 
