@@ -101,6 +101,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
           workspaceId: "workspace-1",
           backendSessionId: "backend-session-target",
           lifecycle: "working",
+          worktree: null,
         },
       },
       layout: {
@@ -168,6 +169,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
           workspaceId: "workspace-1",
           backendSessionId: "backend-session-target",
           lifecycle: "working",
+          worktree: null,
         },
       },
       layout: {
@@ -262,6 +264,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
           workspaceId: "workspace-1",
           backendSessionId: "backend-session-target",
           lifecycle: "working",
+          worktree: null,
         },
       },
       layout: {
@@ -324,6 +327,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
           workspaceId: "workspace-1",
           backendSessionId: "backend-session-target",
           lifecycle: "working",
+          worktree: null,
         },
       },
       layout: {
@@ -387,6 +391,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
           workspaceId: "workspace-1",
           backendSessionId: "backend-session-target",
           lifecycle: "working",
+          worktree: null,
         },
       },
       layout: {
