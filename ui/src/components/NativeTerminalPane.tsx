@@ -1,6 +1,7 @@
 import type { CSSProperties, KeyboardEvent, ReactElement } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { cn } from "../lib/cn";
@@ -380,6 +381,11 @@ function quoteShellPath(path: string): string {
  * payloads by `devicePixelRatio` halves the coordinate and breaks the pane
  * hit test on Retina, so macOS must divide by 1 and other platforms by DPR.
  */
+type NativeFileDropPayload = {
+  paths: string[];
+  position: { x: number; y: number };
+};
+
 export function dragDropPositionToLogical(
   position: { x: number; y: number },
   devicePixelRatio: number,
@@ -1584,7 +1590,25 @@ export function NativeTerminalPane({
     }
 
     let disposed = false;
-    let unlisten: (() => void) | undefined;
+    const unlistenFns: Array<() => void> = [];
+
+    const insertPathsIfInsidePane = (paths: string[], logicalX: number, logicalY: number) => {
+      const container = containerRef.current;
+      if (!container || paths.length === 0) return;
+
+      const rect = container.getBoundingClientRect();
+      if (
+        logicalX >= rect.left &&
+        logicalX < rect.right &&
+        logicalY >= rect.top &&
+        logicalY < rect.bottom
+      ) {
+        lastFocusedNativeTerminalSessionId = targetSessionId;
+        inputRef.current?.focus();
+        sendFocus(true);
+        sendPaste(paths.map(quoteShellPath).join(" ") + " ");
+      }
+    };
 
     const setupListener = async () => {
       try {
@@ -1593,51 +1617,50 @@ export function NativeTerminalPane({
           if (disposed) return;
           const payload = event.payload;
           if (payload && payload.type === "drop") {
-            const container = containerRef.current;
             switchDebug("terminal.surface.drop.event", {
               backendSessionId: targetSessionId,
-              hasContainer: Boolean(container),
+              hasContainer: Boolean(containerRef.current),
               position: payload.position,
               pathCount: payload.paths?.length ?? 0,
             });
-            if (!container) return;
 
-            const rect = container.getBoundingClientRect();
             const scaleFactor =
               typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
                 ? window.devicePixelRatio
                 : 1;
-
             const logicalPosition = dragDropPositionToLogical(
               payload.position,
               scaleFactor,
               isMacShortcutPlatform(),
             );
-            const logicalX = logicalPosition.x;
-            const logicalY = logicalPosition.y;
-
-            if (
-              logicalX >= rect.left &&
-              logicalX < rect.right &&
-              logicalY >= rect.top &&
-              logicalY < rect.bottom
-            ) {
-              if (payload.paths && payload.paths.length > 0) {
-                const quotedPayload = payload.paths.map(quoteShellPath).join(" ") + " ";
-                lastFocusedNativeTerminalSessionId = targetSessionId;
-                inputRef.current?.focus();
-                sendFocus(true);
-                sendPaste(quotedPayload);
-              }
-            }
+            insertPathsIfInsidePane(payload.paths ?? [], logicalPosition.x, logicalPosition.y);
           }
         });
 
-        if (disposed) {
-          unlistenFn();
-        } else {
-          unlisten = unlistenFn;
-        }
+        if (disposed) unlistenFn();
+        else unlistenFns.push(unlistenFn);
+
+        // Neither tao nor wry delivers a Finder drop to the webview on macOS, so the backend
+        // owns a drag destination of its own and forwards it here. Its position is already in
+        // logical viewport coordinates, so it needs no device-pixel conversion.
+        const unlistenNative = await listen<NativeFileDropPayload>(
+          "ferryx://file-drop",
+          (event) => {
+            if (disposed) return;
+            const { paths, position } = event.payload;
+            switchDebug("terminal.surface.drop.event", {
+              backendSessionId: targetSessionId,
+              hasContainer: Boolean(containerRef.current),
+              position,
+              pathCount: paths?.length ?? 0,
+              source: "native",
+            });
+            insertPathsIfInsidePane(paths ?? [], position.x, position.y);
+          },
+        );
+
+        if (disposed) unlistenNative();
+        else unlistenFns.push(unlistenNative);
       } catch (error: unknown) {
         switchDebug("terminal.surface.drop.listener.error", {
           backendSessionId: targetSessionId,
@@ -1650,7 +1673,7 @@ export function NativeTerminalPane({
 
     return () => {
       disposed = true;
-      unlisten?.();
+      for (const dispose of unlistenFns) dispose();
     };
   }, [sendFocus, sendPaste, targetSessionId, visible]);
 

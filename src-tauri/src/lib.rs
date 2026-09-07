@@ -3,6 +3,8 @@ pub mod browser;
 pub mod daemon;
 pub mod dag;
 pub mod ipc;
+#[cfg(target_os = "macos")]
+pub mod macos_file_drop;
 #[cfg(feature = "native-terminal")]
 pub mod native_terminal;
 pub mod notification;
@@ -453,6 +455,60 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn install_macos_file_drop_destination<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!("main window is missing during setup; file drops will not be delivered");
+        return Ok(());
+    };
+    let raw_window = window.ns_window()?;
+    let app_handle = app.handle().clone();
+
+    if let Err(error) = crate::macos_file_drop::install(raw_window, move |paths, x, y| {
+        let payload = serde_json::json!({ "paths": paths, "position": { "x": x, "y": y } });
+        if let Err(error) = app_handle.emit("ferryx://file-drop", payload) {
+            tracing::warn!("failed to forward file drop to the frontend: {error}");
+        }
+    }) {
+        tracing::warn!("failed to install the macOS file drop destination: {error}");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn release_macos_window_drag_destination<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+) -> tauri::Result<()> {
+    use objc2_app_kit::NSWindow;
+
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!(
+            "main window is missing during setup; file drops stay owned by the tao window delegate"
+        );
+        return Ok(());
+    };
+    let raw_window = window.ns_window()?;
+    if raw_window.is_null() {
+        return Ok(());
+    }
+
+    // tao registers the NSWindow itself for `NSFilenamesPboardType` and its window delegate
+    // answers every dragging message with YES, so AppKit hands a Finder file drag to the
+    // window and never searches the view hierarchy. tao then reports it as
+    // `WindowEvent::DroppedFile`, which tauri-runtime-wry does not translate into any Tauri
+    // event, so the drop is silently discarded and wry's webview drag handler never runs.
+    // Dropping the window-level registration lets the WKWebView be the dragging destination
+    // again, which is what emits `tauri://drag-drop` for the frontend. Without this call the
+    // whole file-drop pipeline is unreachable, so it must not be removed as a no-op.
+    let ns_window = unsafe { &*(raw_window as *const NSWindow) };
+    ns_window.unregisterDraggedTypes();
+
+    Ok(())
+}
+
 #[cfg(all(target_os = "macos", feature = "native-terminal"))]
 fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     app: &tauri::App<R>,
@@ -796,6 +852,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             install_app_menu(app)?;
             #[cfg(target_os = "macos")]
             install_macos_key_monitor(app)?;
+            #[cfg(target_os = "macos")]
+            release_macos_window_drag_destination(app)?;
+            #[cfg(target_os = "macos")]
+            install_macos_file_drop_destination(app)?;
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
             install_macos_terminal_focus_monitor(app)?;
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
