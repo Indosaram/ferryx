@@ -1,0 +1,159 @@
+   Compiling ferryx v2026.902.2 (/Users/indo/code/project/ferryx-web-remote-security-20260907/src-tauri)
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 7 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.09s
+     Running unittests src/lib.rs (src-tauri/target-security/debug/deps/ferryx_lib-c20491cebbac898a)
+
+running 85 tests
+test ipc::project_remote::tests::remote_startup_cannot_use_local_shell_resolver ... ok
+test ipc::project_remote::tests::remote_registration_wire_request_rejects_extra_execution_fields ... ok
+test remote::auth::security_tests::new_window_discards_rotated_codes_and_restores_pairing ... ok
+test remote::auth::security_tests::expired_pin_is_consumed_and_never_issues_a_token ... ok
+test remote::auth::security_tests::concurrent_guesses_spend_exactly_five_failure_slots ... ok
+test remote::auth::security_tests::valid_pairing_is_single_use_under_concurrent_exchange ... ok
+test remote::mirror::tests::plain_ascii_line_produces_one_run ... ok
+test remote::mirror::tests::clear_and_home_places_cursor_at_origin ... ok
+test remote::mirror::tests::cjk_line_skips_wide_spacer_tails ... ok
+test remote::mirror::tests::feed_segments_replays_at_recorded_geometry_then_resizes ... ok
+test remote::mirror::tests::resize_returns_full_frame_with_new_dimensions ... ok
+test remote::auth::security_tests::revocation_is_latched_and_registration_after_validation_cannot_miss_it ... ok
+test remote::mirror::tests::second_feed_only_emits_changed_line ... ok
+test remote::mirror::tests::flat_history_replay_corrupts_relative_to_segmented_replay ... ok
+test remote::mirror::tests::sgr_bold_red_maps_attrs_and_foreground ... ok
+test remote::state::tests::credentials_are_never_placed_in_a_shared_scratch_directory ... ok
+test remote::mirror::tests::scroll_negative_reveals_older_content_and_positive_returns_toward_newest ... ok
+test remote::state::tests::explicit_data_dir_override_wins_over_platform_home ... ok
+test remote::auth::persistence_tests::legacy_revoked_tombstones_are_pruned_when_the_store_is_loaded ... ok
+test remote::auth::security_tests::successful_pairing_does_not_reset_the_global_failure_budget ... ok
+test remote::state::tests::unix_resolves_under_home_and_ignores_windows_variables ... ok
+test remote::server::attention_inventory_tests::remote_attention_inventory_keeps_other_projects_and_unseen_done ... ok
+test remote::protocol::tests::test_client_control_message_scroll_serde_roundtrip ... ok
+test remote::state::tests::daemon_default_state_is_off_and_uses_supplied_terminal_service ... ok
+test remote::auth::persistence_tests::revoked_devices_are_deleted_outright_and_never_reappear ... ok
+test remote::auth::persistence_tests::validate_token_throttles_disk_persistence ... ok
+test remote::state::tests::persisted_enabled_config_file_loads_enabled_mode_with_unbound_initial_state ... ok
+test remote::state::tests::enabled_gateway_persists_config_and_restores_on_reopen ... ok
+test remote::tests::security::sockets::revoke_during_raw_attachment_prevents_upgrade ... ok
+test remote::tests::security::sockets::revoke_during_grid_attachment_prevents_upgrade ... ok
+test remote::tests::security::revoke_self_and_control_management_keep_status_contract ... ok
+test remote::tests::security::sockets::revoke_before_raw_upgrade_is_not_lost ... ok
+test remote::tests::security::sockets::revoke_before_grid_upgrade_is_not_lost ... ok
+test ipc::project_remote::tests::all_local_git_boundaries_reject_remote_namespace_even_without_loaded_metadata ... ok
+test remote::tests::security::sockets::revoke_before_event_upgrade_is_not_lost ... ok
+test remote::tests::security::static_raw_traversal_is_rejected ... ok
+test remote::tests::security::sockets::revoke_cancels_pending_raw_input ... ok
+test remote::tests::test_active_selection_is_visible_to_a_receiver_that_subscribes_afterwards ... ok
+test remote::tests::test_auth_manager_pairing_and_revocation ... ok
+test remote::tests::security::view_cannot_revoke_another_device ... ok
+test remote::tests::security::sockets::revoke_cancels_pending_grid_input ... ok
+test remote::tests::test_active_selection_change_is_broadcast_to_authenticated_event_clients ... ok
+test remote::tests::test_authenticated_event_clients_receive_selection_changes_after_the_snapshot ... ok
+test remote::tests::security::static_symlinks_cannot_escape_dist ... ok
+test remote::tests::test_authenticated_event_clients_receive_the_current_active_selection_on_connect ... ok
+test remote::tests::test_concurrent_cold_snapshot_requests_coalesce_to_one_git_discovery ... ok
+test remote::tests::test_desktop_ipc_active_selection_lifecycle ... ok
+test remote::tests::security::pairing_budget_is_global_atomic_and_rotation_cannot_reset_it ... ok
+test remote::tests::security::sockets::revoke_closes_all_event_sockets_only_for_that_device ... ok
+test remote::tests::security::sockets::revoke_closes_all_raw_sockets_only_for_that_device ... ok
+test remote::tests::security::static_portable_paths_and_assets ... ok
+test remote::tests::test_daemon_pairing_and_revocation_authority ... ok
+test remote::tests::test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage ... ok
+test remote::tests::test_occupied_port_enable_does_not_persist_enabled_intent ... ok
+test remote::tests::test_gui_remote_forwarding_and_no_gui_gateway_ownership ... ok
+test remote::tests::test_remote_listener_persistence_and_startup_restoration_lifecycle ... ok
+test ipc::project_remote::tests::local_registration_never_canonicalizes_a_remote_id_into_a_local_project ... ok
+test remote::tests::test_remote_server_rejects_off_mode_without_binding ... ok
+test remote::tests::test_remote_server_health_and_lifecycle ... ok
+test remote::tests::test_remote_server_serves_spa_index_html ... ok
+test remote::tests::test_remote_terminal_tab_info_serializes_and_deserializes_session_id ... ok
+test remote::tests::security::sockets::revoke_closes_all_grid_sockets_only_for_that_device ... ok
+test remote::tests::test_resolve_dist_dir_isolated_runtime_debug_fallback ... ok
+test remote::tests::test_resolve_dist_dir_packaged_macos_bundle_layout ... ok
+test remote::tests::test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout ... ok
+test remote::tests::test_successful_enable_restores_and_disable_remains_off ... ok
+test remote::tests::test_terminal_preferences_requires_a_valid_unrevoked_remote_token ... ok
+test remote::tests::test_derive_session_metadata_matches_workspace ... ok
+test remote::tests::test_workspace_snapshot_started_before_revision_change_is_not_marked_current ... ok
+test remote::tests::test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing ... ok
+test remote::tests::test_workspace_snapshot_refreshes_external_git_worktree_changes_after_interval ... ok
+test remote::tests::test_repeated_workspace_state_reads_do_not_rerun_git_discovery_and_refresh_on_change ... ok
+test remote::tests::test_remote_select_workspace_with_tab_selector_and_primary_worktree ... ok
+test remote::tests::test_workspace_state_agent_activity_and_worktree_attention_rollup ... ok
+test remote::tests::test_legacy_terminal_socket_emits_binary_snapshot_without_grid_text_frames ... ok
+test remote::tests::test_remote_terminal_forced_lag_replays_with_explicit_gap_and_sequence_metadata ... ok
+test remote::tests::test_grid_render_resize_returns_full_frame_with_requested_geometry ... ok
+test remote::tests::test_grid_render_live_pty_output_emits_grid_frame_after_attach ... ok
+test remote::tests::test_grid_render_initial_frame_uses_requested_viewport_dimensions ... ok
+test remote::tests::test_grid_render_attach_sends_full_frame_with_session_dimensions ... ok
+test remote::tests::test_connected_terminal_websocket_closed_when_active_selection_changes ... ok
+test remote::tests::test_daemon_remote_worktree_selection_then_grid_terminal_control ... ok
+test remote::tests::test_daemon_owned_remote_chain_end_to_end ... ok
+test remote::tests::test_active_desktop_terminal_contract_and_safe_selection_bridge ... ok
+test remote::tests::scoped_remote_inventory_lists_registered_projects_without_desktop ... ok
+
+test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 569 filtered out; finished in 3.18s

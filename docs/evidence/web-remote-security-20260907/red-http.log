@@ -1,0 +1,142 @@
+    Blocking waiting for file lock on package cache
+    Updating crates.io index
+     Locking 751 packages to latest compatible versions
+      Adding base64 v0.22.1 (available: v0.23.1)
+      Adding generic-array v0.14.7 (available: v0.14.9)
+      Adding matchit v0.8.4 (available: v0.8.6)
+      Adding notify v7.0.0 (available: v8.2.0)
+      Adding png v0.17.16 (available: v0.18.1)
+      Adding pollster v0.4.0 (available: v1.0.1)
+      Adding portable-pty v0.8.1 (available: v0.9.0)
+      Adding rand v0.8.8 (available: v0.10.2)
+      Adding reqwest v0.12.28 (available: v0.13.4)
+      Adding sha2 v0.10.9 (available: v0.11.0)
+      Adding toml v0.8.2 (available: v0.8.23)
+      Adding toml_datetime v0.6.3 (available: v0.6.11)
+      Adding toml_edit v0.20.2 (available: v0.20.7)
+      Adding tower-http v0.6.11 (available: v0.7.1)
+      Adding wgpu v24.0.5 (available: v30.0.1)
+      Adding windows-sys v0.59.0 (available: v0.61.2)
+   Compiling ferryx v2026.902.2 (/Users/indo/code/project/ferryx-web-remote-security-20260907/src-tauri)
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 7 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 43s
+     Running unittests src/lib.rs (src-tauri/target-security/debug/deps/ferryx_lib-c20491cebbac898a)
+
+running 6 tests
+
+thread 'remote::tests::security::static_portable_paths_and_assets' (10645933) panicked at src/remote/security_tests.rs:83:9:
+assertion `left == right` failed: unsafe portable path /%2e%2e/secret
+  left: 200
+ right: 400
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'remote::tests::security::revoke_self_and_control_management_keep_status_contract' (10645932) panicked at src/remote/security_tests.rs:112:5:
+assertion `left == right` failed
+  left: 404
+ right: 403
+
+thread 'remote::tests::security::view_cannot_revoke_another_device' (10645936) panicked at src/remote/security_tests.rs:102:5:
+assertion `left == right` failed
+  left: 204
+ right: 403
+
+thread 'remote::tests::security::static_symlinks_cannot_escape_dist' (10645935) panicked at src/remote/security_tests.rs:71:5:
+assertion `left == right` failed: symlink escape returned SYMLINK_SENTINEL
+  left: 200
+ right: 404
+
+thread 'remote::tests::security::static_raw_traversal_is_rejected' (10645934) panicked at src/remote/security_tests.rs:55:5:
+assertion `left == right` failed: traversal returned PRIVATE_SENTINEL
+  left: 200
+ right: 400
+
+thread 'remote::tests::security::pairing_budget_is_global_atomic_and_rotation_cannot_reset_it' (10645931) panicked at src/remote/security_tests.rs:130:5:
+assertion `left == right` failed
+  left: 20
+ right: 5
+test remote::tests::security::view_cannot_revoke_another_device ... FAILED
+test remote::tests::security::revoke_self_and_control_management_keep_status_contract ... FAILED
+test remote::tests::security::pairing_budget_is_global_atomic_and_rotation_cannot_reset_it ... FAILED
+test remote::tests::security::static_portable_paths_and_assets ... FAILED
+test remote::tests::security::static_raw_traversal_is_rejected ... FAILED
+test remote::tests::security::static_symlinks_cannot_escape_dist ... FAILED
+
+failures:
+
+failures:
+    remote::tests::security::pairing_budget_is_global_atomic_and_rotation_cannot_reset_it
+    remote::tests::security::revoke_self_and_control_management_keep_status_contract
+    remote::tests::security::static_portable_paths_and_assets
+    remote::tests::security::static_raw_traversal_is_rejected
+    remote::tests::security::static_symlinks_cannot_escape_dist
+    remote::tests::security::view_cannot_revoke_another_device
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 632 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
