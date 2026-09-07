@@ -72,11 +72,10 @@ describe("DagGraphView", () => {
     expect(screen.getByText("blocks 3")).toBeInTheDocument();
   });
 
-  it("header shows derived counts and wave information", () => {
+  it("header shows derived counts and status summary", () => {
     render(<DagGraphView snapshot={sampleSnapshot} />);
     const header = screen.getByTestId("dag-header");
     expect(header).toHaveTextContent("Ferryx native terminal rendering fixes");
-    expect(header).toHaveTextContent("wave 4/4");
     expect(header).toHaveTextContent("1/6 done, 0 running");
   });
 

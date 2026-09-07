@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  calculateEdgePath,
   deriveActiveWaveIndex,
   formatRouteText,
   getNodeStateGlyph,
@@ -140,6 +141,43 @@ describe("dagViewUtils", () => {
       };
 
       expect(deriveActiveWaveIndex(run)).toBe(0);
+    });
+  });
+
+  describe("calculateEdgePath", () => {
+    it("draws direct horizontal S-curve for adjacent columns", () => {
+      const fromPos = { x: 32, y: 44 };
+      const toPos = { x: 324, y: 44 };
+      const path = calculateEdgePath(fromPos, toPos);
+      expect(path).toMatch(/^M 252 72 C \d+(\.\d+)? 72, \d+(\.\d+)? 72, 324 72$/);
+    });
+
+    it("draws an upward arc for multi-hop edges that skip columns", () => {
+      const fromPos = { x: 32, y: 44 };
+      const toPos = { x: 908, y: 44 }; // skips 2 intermediate columns (colSpan 3)
+      const path = calculateEdgePath(fromPos, toPos);
+      // y1 is 72, control point cy should be significantly above 72 (e.g. <= 20)
+      const match = path.match(/^M 252 72 C [0-9.]+ (-?[0-9.]+), [0-9.]+ (-?[0-9.]+), 908 72$/);
+      expect(match).not.toBeNull();
+      const cy1 = Number(match![1]);
+      const cy2 = Number(match![2]);
+      expect(cy1).toBeLessThan(44); // strictly above intermediate card top (y=44)
+      expect(cy2).toBeLessThan(44);
+    });
+
+    it("distributes target ports when multiple edges enter the same node", () => {
+      const target = { x: 908, y: 44 };
+      const p1 = calculateEdgePath({ x: 32, y: 44 }, target, { targetIndex: 0, totalTargets: 3 });
+      const p2 = calculateEdgePath({ x: 324, y: 44 }, target, { targetIndex: 1, totalTargets: 3 });
+      const p3 = calculateEdgePath({ x: 616, y: 44 }, target, { targetIndex: 2, totalTargets: 3 });
+
+      // Each path must end at a different target Y
+      const endY1 = Number(p1.split(" ").slice(-1)[0]);
+      const endY2 = Number(p2.split(" ").slice(-1)[0]);
+      const endY3 = Number(p3.split(" ").slice(-1)[0]);
+
+      expect(endY1).toBeLessThan(endY2);
+      expect(endY2).toBeLessThan(endY3);
     });
   });
 });

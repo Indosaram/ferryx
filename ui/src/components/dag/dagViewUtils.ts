@@ -63,6 +63,63 @@ export function deriveActiveWaveIndex(run: DagRunSnapshot): number {
   return sortedWaves.length - 1;
 }
 
-export function formatHeaderSummary(name: string, activeWave: number, totalWaves: number, counts: DagRunCounts): string {
-  return `${name} \u2014 wave ${activeWave}/${totalWaves} \u2014 ${counts.completed}/${counts.total} done, ${counts.running} running`;
+export function formatHeaderSummary(name: string, counts: DagRunCounts): string {
+  return `${name} \u2014 ${counts.completed}/${counts.total} done, ${counts.running} running`;
 }
+
+export type EdgePathOptions = {
+  readonly sourceIndex?: number;
+  readonly totalSources?: number;
+  readonly targetIndex?: number;
+  readonly totalTargets?: number;
+};
+
+/**
+ * Calculates a smooth bezier curve between two nodes in the DAG layout.
+ *
+ * For adjacent columns (colSpan <= 1), draws a direct S-curve.
+ * For multi-hop edges (colSpan > 1), routes an upward arc above intermediate cards
+ * to avoid occluding intermediate nodes or overlapping straight edges.
+ * Also distributes source and target port anchor Y positions to prevent arrow
+ * marker collisions when multiple edges attach to the same node.
+ */
+export function calculateEdgePath(
+  fromPos: { readonly x: number; readonly y: number },
+  toPos: { readonly x: number; readonly y: number },
+  options?: EdgePathOptions,
+): string {
+  const totalSources = options?.totalSources ?? 1;
+  const sourceIndex = options?.sourceIndex ?? 0;
+  const totalTargets = options?.totalTargets ?? 1;
+  const targetIndex = options?.targetIndex ?? 0;
+
+  const sourcePortOffset = totalSources > 1
+    ? (sourceIndex + 1) * (28 / (totalSources + 1)) - 14
+    : 0;
+  const targetPortOffset = totalTargets > 1
+    ? (targetIndex + 1) * (28 / (totalTargets + 1)) - 14
+    : 0;
+
+  const x1 = fromPos.x + CARD_WIDTH;
+  const y1 = fromPos.y + CARD_HEIGHT / 2 + sourcePortOffset;
+  const x2 = toPos.x;
+  const y2 = toPos.y + CARD_HEIGHT / 2 + targetPortOffset;
+
+  const colStep = CARD_WIDTH + GAP_X;
+  const colSpan = Math.round(Math.abs(toPos.x - fromPos.x) / colStep);
+
+  if (colSpan <= 1) {
+    const dx = Math.max(20, Math.abs(x2 - x1) * 0.5);
+    return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  }
+
+  const dx = Math.max(24, Math.abs(x2 - x1) * 0.35);
+  // Cap the upward arc offset to ensure high colSpan curves stay within the canvas (y >= 10)
+  // while still clearing the top edge of intermediate cards (card top is at PAD_Y = 44).
+  const arcOffset = Math.min(52, 26 + (colSpan - 1) * 10);
+  const cy1 = y1 - arcOffset;
+  const cy2 = y2 - arcOffset;
+
+  return `M ${x1} ${y1} C ${x1 + dx} ${cy1}, ${x2 - dx} ${cy2}, ${x2} ${y2}`;
+}
+

@@ -462,6 +462,41 @@ describe("DagPaneBadge", () => {
     expect(screen.getByTestId("dag-pane-modal-title")).toHaveTextContent("Run Second");
   });
 
+  it("allows switching between multiple running runs via modal tabs", () => {
+    const run1: DagRunSnapshot = {
+      ...baseSnapshot,
+      runId: "run-1",
+      name: "Run First",
+      status: "running",
+      updatedAt: "2026-08-29T12:00:00.000Z",
+    };
+    const run2: DagRunSnapshot = {
+      ...baseSnapshot,
+      runId: "run-2",
+      name: "Run Second",
+      status: "running",
+      updatedAt: "2026-08-29T12:01:00.000Z",
+    };
+    dagStore.applySnapshot("/repo/my-project", run1);
+    dagStore.applySnapshot("/repo/my-project", run2);
+
+    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+
+    fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
+
+    // Modal tabs exist
+    expect(screen.getByTestId("dag-pane-modal-tabs")).toBeInTheDocument();
+    expect(screen.getByTestId("dag-pane-modal-tab-run-1")).toBeInTheDocument();
+    expect(screen.getByTestId("dag-pane-modal-tab-run-2")).toBeInTheDocument();
+
+    // Click tab 1 to switch active run
+    fireEvent.click(screen.getByTestId("dag-pane-modal-tab-run-1"));
+
+    expect(screen.getByTestId("dag-pane-run-run-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("dag-pane-run-run-2")).not.toBeInTheDocument();
+    expect(screen.getByTestId("dag-graph-view")).toHaveAttribute("data-run-id", "run-1");
+  });
+
   it("matches runs across macOS /private prefix differences", () => {
     const run1: DagRunSnapshot = {
       ...baseSnapshot,

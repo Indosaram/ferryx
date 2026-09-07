@@ -1,6 +1,6 @@
 import React from "react";
 import type { DagEdge } from "../../lib/dagTypes";
-import { CARD_HEIGHT, CARD_WIDTH } from "./dagViewUtils";
+import { calculateEdgePath } from "./dagViewUtils";
 
 export type DagEdgeLayerProps = {
   readonly edges: readonly DagEdge[];
@@ -27,6 +27,42 @@ export function DagEdgeLayer({
     }
     return set;
   }, [criticalPath]);
+
+  // Group edges by source and target to calculate distinct anchor port offsets.
+  // This prevents multiple incoming/outgoing arrows from overlapping exactly on top of each other.
+  const outgoingMap = React.useMemo(() => {
+    const map = new Map<string, DagEdge[]>();
+    for (const edge of edges) {
+      const list = map.get(edge.from) ?? [];
+      list.push(edge);
+      map.set(edge.from, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        const ax = nodePositions.get(a.to)?.x ?? 0;
+        const bx = nodePositions.get(b.to)?.x ?? 0;
+        return bx - ax;
+      });
+    }
+    return map;
+  }, [edges, nodePositions]);
+
+  const incomingMap = React.useMemo(() => {
+    const map = new Map<string, DagEdge[]>();
+    for (const edge of edges) {
+      const list = map.get(edge.to) ?? [];
+      list.push(edge);
+      map.set(edge.to, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        const ax = nodePositions.get(a.from)?.x ?? 0;
+        const bx = nodePositions.get(b.from)?.x ?? 0;
+        return ax - bx;
+      });
+    }
+    return map;
+  }, [edges, nodePositions]);
 
   return (
     <svg
@@ -66,13 +102,20 @@ export function DagEdgeLayer({
         const toPos = nodePositions.get(edge.to);
         if (!fromPos || !toPos) return null;
 
-        const x1 = fromPos.x + CARD_WIDTH;
-        const y1 = fromPos.y + CARD_HEIGHT / 2;
-        const x2 = toPos.x;
-        const y2 = toPos.y + CARD_HEIGHT / 2;
-        const dx = Math.max(20, Math.abs(x2 - x1) * 0.5);
+        const outList = outgoingMap.get(edge.from) ?? [];
+        const sourceIndex = outList.indexOf(edge);
+        const totalSources = outList.length;
 
-        const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+        const inList = incomingMap.get(edge.to) ?? [];
+        const targetIndex = inList.indexOf(edge);
+        const totalTargets = inList.length;
+
+        const d = calculateEdgePath(fromPos, toPos, {
+          sourceIndex: sourceIndex >= 0 ? sourceIndex : 0,
+          totalSources,
+          targetIndex: targetIndex >= 0 ? targetIndex : 0,
+          totalTargets,
+        });
         const isCritical = criticalEdgesSet.has(`${edge.from}->${edge.to}`);
 
         return (

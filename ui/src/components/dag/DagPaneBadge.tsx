@@ -94,6 +94,7 @@ export function DagPaneBadge({
     () => dagRunOwnership.getState(),
   );
   const [open, setOpen] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   const runs = useMemo(
     () => resolveProjectRuns(storeState, projectPath),
@@ -148,24 +149,37 @@ export function DagPaneBadge({
     return matchedRunIds;
   }, [runningRuns, sessions, paneId]);
 
-  const run = useMemo(() => {
-    const exact = runningRuns.find(
-      (candidate) =>
+  const paneRuns = useMemo(() => {
+    const matching = runningRuns.filter((candidate) => {
+      const exact =
         typeof candidate.rootSessionId === "string" &&
         candidate.rootSessionId.trim() !== "" &&
-        candidate.rootSessionId === providerSessionId,
-    );
-    if (exact) return exact;
-    const owned = runningRuns.find((candidate) =>
-      ownersByRunId[candidate.runId] === paneId && !exactlyMatchedByAnotherPane.has(candidate.runId));
-    if (owned) return owned;
-    if (!agentPresent) return null;
-    return runningRuns.find(
-      (candidate) =>
-        ownersByRunId[candidate.runId] === undefined &&
-        !exactlyMatchedByAnotherPane.has(candidate.runId),
-    ) ?? null;
-  }, [runningRuns, ownersByRunId, paneId, providerSessionId, agentPresent, exactlyMatchedByAnotherPane]);
+        candidate.rootSessionId === providerSessionId;
+      if (exact) return true;
+      if (ownersByRunId[candidate.runId] === paneId && !exactlyMatchedByAnotherPane.has(candidate.runId)) {
+        return true;
+      }
+      if (agentPresent && ownersByRunId[candidate.runId] === undefined && !exactlyMatchedByAnotherPane.has(candidate.runId)) {
+        return true;
+      }
+      return false;
+    });
+
+    return matching.sort((a, b) => {
+      const aExact = a.rootSessionId === providerSessionId ? 1 : 0;
+      const bExact = b.rootSessionId === providerSessionId ? 1 : 0;
+      if (aExact !== bExact) return bExact - aExact;
+
+      const aOwned = ownersByRunId[a.runId] === paneId ? 1 : 0;
+      const bOwned = ownersByRunId[b.runId] === paneId ? 1 : 0;
+      if (aOwned !== bOwned) return bOwned - aOwned;
+
+      return runUpdatedAt(b) - runUpdatedAt(a);
+    });
+  }, [runningRuns, providerSessionId, ownersByRunId, paneId, exactlyMatchedByAnotherPane, agentPresent]);
+
+  const run = paneRuns.length > 0 ? paneRuns[0] : null;
+  const activeRun = (selectedRunId ? paneRuns.find((r) => r.runId === selectedRunId) : null) ?? run;
 
   const visible = run !== null;
   const modalRef = useRef<HTMLDivElement>(null);
@@ -255,14 +269,48 @@ export function DagPaneBadge({
                   className="pointer-events-auto flex h-[min(820px,86vh)] w-[min(1280px,92vw)] flex-col overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-2xl outline-none"
                 >
                   <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-                    <span className="flex min-w-0 items-center gap-2 text-xs text-foreground">
+                    <div className="flex min-w-0 items-center gap-2 text-xs text-foreground">
                       <span className="shrink-0 text-indigo-500">
                         <GraphGlyph />
                       </span>
-                      <span className="truncate font-medium" data-testid="dag-pane-modal-title">
-                        {run.name}
-                      </span>
-                    </span>
+                      {paneRuns.length > 1 ? (
+                        <div
+                          className="flex items-center gap-1.5 overflow-x-auto py-0.5 no-scrollbar"
+                          role="tablist"
+                          data-testid="dag-pane-modal-tabs"
+                        >
+                          {paneRuns.map((r) => {
+                            const isSelected = r.runId === activeRun?.runId;
+                            return (
+                              <button
+                                key={r.runId}
+                                type="button"
+                                role="tab"
+                                aria-selected={isSelected}
+                                data-testid={`dag-pane-modal-tab-${r.runId}`}
+                                onClick={() => setSelectedRunId(r.runId)}
+                                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs transition-colors ${
+                                  isSelected
+                                    ? "bg-accent font-medium text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                                }`}
+                              >
+                                <span
+                                  className="truncate max-w-[240px]"
+                                  data-testid={isSelected ? "dag-pane-modal-title" : undefined}
+                                >
+                                  {r.name}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <span className="truncate font-medium" data-testid="dag-pane-modal-title">
+                          {activeRun?.name}
+                        </span>
+                      )}
+                    </div>
                     <button
                       ref={closeButtonRef}
                       type="button"
@@ -276,9 +324,9 @@ export function DagPaneBadge({
                   </div>
                   <div
                     className="min-h-0 flex-1 overflow-hidden"
-                    data-testid={`dag-pane-run-${run.runId}`}
+                    data-testid={`dag-pane-run-${activeRun?.runId}`}
                   >
-                    <DagGraphView snapshot={run} showRunName={false} />
+                    {activeRun && <DagGraphView snapshot={activeRun} showRunName={false} />}
                   </div>
                 </div>
               </div>
