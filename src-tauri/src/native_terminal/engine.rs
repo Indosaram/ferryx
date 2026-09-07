@@ -119,6 +119,9 @@ pub trait TerminalEngine {
     /// Whether any terminal mouse-tracking mode is active.
     fn mouse_tracking_enabled(&self) -> Result<bool, NativeTerminalError>;
 
+    /// Whether the alternate screen buffer is currently active.
+    fn is_alternate_screen(&self) -> Result<bool, NativeTerminalError>;
+
     /// Query the effective configured foreground color.
     fn default_foreground(&self) -> Result<ColorRgb, NativeTerminalError>;
 

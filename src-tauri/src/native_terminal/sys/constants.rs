@@ -18,6 +18,7 @@ pub const GHOSTTY_TERMINAL_DATA_ROWS: c_int = 2;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_X: c_int = 3;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_Y: c_int = 4;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP: c_int = 5;
+pub const GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN: c_int = 6;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE: c_int = 7;
 pub const GHOSTTY_TERMINAL_DATA_SCROLLBAR: c_int = 9;
 pub const GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING: c_int = 11;
@@ -47,6 +48,10 @@ pub const GHOSTTY_SCROLL_VIEWPORT_TOP: c_int = 0;
 pub const GHOSTTY_SCROLL_VIEWPORT_BOTTOM: c_int = 1;
 pub const GHOSTTY_SCROLL_VIEWPORT_DELTA: c_int = 2;
 pub const GHOSTTY_SCROLL_VIEWPORT_ROW: c_int = 3;
+
+// GhosttyTerminalScreen matching `ghostty/vt/terminal.h`.
+pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+pub const GHOSTTY_TERMINAL_SCREEN_ALTERNATE: c_int = 1;
 
 // GhosttyPointTag matching `ghostty/vt/point.h`.
 pub const GHOSTTY_POINT_TAG_VIEWPORT: c_int = 1;

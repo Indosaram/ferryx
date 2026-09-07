@@ -2011,24 +2011,36 @@ impl NativeTerminalSurfaceHost {
     }
 }
 
-// The same acquisition/reconfigure sequence is used by native and injected frame targets.
-fn acquire_surface_frame<F>(
-    mut acquire: impl FnMut() -> Result<F, wgpu::SurfaceError>,
+// v30 test seam: mirrors the native acquisition/reconfigure/drop sequence for injected frame
+// targets; the production path classifies the real `wgpu::CurrentSurfaceTexture` inline.
+#[cfg(test)]
+enum SimulatedAcquisition {
+    Frame,
+    NeedsReconfigure,
+    Dropped,
+    Fatal,
+}
+
+#[cfg(test)]
+fn acquire_surface_frame(
+    mut acquire: impl FnMut() -> SimulatedAcquisition,
     reconfigure: impl FnOnce() -> Result<(), NativeTerminalError>,
-) -> Result<Option<F>, NativeTerminalError> {
-    let result = match acquire() {
-        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+) -> Result<Option<()>, NativeTerminalError> {
+    let outcome = match acquire() {
+        SimulatedAcquisition::NeedsReconfigure => {
             reconfigure()?;
             acquire()
         }
-        result => result,
+        outcome => outcome,
     };
-    match result {
-        Ok(frame) => Ok(Some(frame)),
-        Err(error) => match classify_surface_error(error)? {
-            SurfaceFrameAction::Drop => Ok(None),
-        },
-    }
+    Ok(match outcome {
+        SimulatedAcquisition::Frame => Some(()),
+        SimulatedAcquisition::Dropped => None,
+        SimulatedAcquisition::Fatal => return Err(NativeTerminalError::OutOfMemory),
+        SimulatedAcquisition::NeedsReconfigure => {
+            unreachable!("reconfigure already applied before final acquisition")
+        }
+    })
 }
 
 /// Native WGPU surface, platform compositor child view, and renderer.
@@ -2147,7 +2159,7 @@ impl NativeSurfaceFrameTarget {
             ref other => match classify_surface_error(other)? {
                 SurfaceFrameAction::Drop => None,
             },
-        )?;
+        };
         let cell_metrics = CellMetrics {
             width_px: self.renderer.config().cell_width_px,
             height_px: self.renderer.config().cell_height_px,
@@ -2238,7 +2250,7 @@ mod tests {
     }
 
     pub(super) struct InjectedFrameTarget {
-        acquisitions: std::collections::VecDeque<Result<(), wgpu::SurfaceError>>,
+        acquisitions: std::collections::VecDeque<SimulatedAcquisition>,
         pub cell_metrics: CellMetrics,
         events: Arc<Mutex<Vec<FrameEvent>>>,
         assert_host_locked: Box<dyn Fn() + Send>,
@@ -2299,7 +2311,7 @@ mod tests {
     }
 
     impl DirectRenderHarness {
-        fn new(acquisitions: Vec<Result<(), wgpu::SurfaceError>>) -> Self {
+        fn new(acquisitions: Vec<SimulatedAcquisition>) -> Self {
             // Subscribe before attaching/triggering any direct operation.
             let (dispatch, dispatched) = tokio::sync::mpsc::unbounded_channel();
             let app = tauri::test::mock_builder()
@@ -2443,7 +2455,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_execution_characterization() {
-        let harness = DirectRenderHarness::new(vec![Ok(()), Ok(())]);
+        let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame, SimulatedAcquisition::Frame]);
         let receipt = harness.scroll_once().unwrap();
         assert!(receipt.presented);
         assert!(receipt.cols > 0 && receipt.rows > 0);
@@ -2476,7 +2488,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_render_requeues_when_frame_is_dropped() {
-        let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
         let receipt = harness.scroll_once().unwrap();
         assert!(
             !receipt.presented,
@@ -2512,9 +2524,9 @@ mod tests {
     #[tokio::test]
     async fn direct_retry_recovers_lost_then_timeout() {
         let mut harness = DirectRenderHarness::new(vec![
-            Err(wgpu::SurfaceError::Lost),
-            Err(wgpu::SurfaceError::Timeout),
-            Ok(()),
+            SimulatedAcquisition::NeedsReconfigure,
+            SimulatedAcquisition::Dropped,
+            SimulatedAcquisition::Frame,
         ]);
         assert!(!harness.scroll_once().unwrap().presented);
         harness.execute_dispatched().await;
@@ -2538,9 +2550,9 @@ mod tests {
     #[tokio::test]
     async fn direct_retry_scheduled_timeout_rearms_without_inline_recursion() {
         let mut harness = DirectRenderHarness::new(vec![
-            Err(wgpu::SurfaceError::Timeout),
-            Err(wgpu::SurfaceError::Timeout),
-            Ok(()),
+            SimulatedAcquisition::Dropped,
+            SimulatedAcquisition::Dropped,
+            SimulatedAcquisition::Frame,
         ]);
         assert!(!harness.scroll_once().unwrap().presented);
         harness.execute_dispatched().await;
@@ -2567,7 +2579,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_retry_focus_preserves_dropped_receipt() {
-        let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
         let receipt = harness
             .state
             .set_focus(&harness.window, &harness.request.session_id, true)
@@ -2593,7 +2605,7 @@ mod tests {
     async fn direct_retry_detach_or_close_before_dispatch_cannot_reveal_or_resurrect() {
         for close in [false, true] {
             let mut harness =
-                DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+                DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
             let coordinator = harness
                 .state
                 .session_render_coordinator(&harness.request.session_id)
@@ -2628,7 +2640,7 @@ mod tests {
     #[tokio::test]
     async fn direct_retry_fatal_errors_do_not_loop() {
         for focus in [false, true] {
-            let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::OutOfMemory)]);
+            let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Fatal]);
             let result = if focus {
                 harness
                     .state
@@ -2644,8 +2656,8 @@ mod tests {
             assert!(harness.dispatched.try_recv().is_err());
         }
         let mut harness = DirectRenderHarness::new(vec![
-            Err(wgpu::SurfaceError::Timeout),
-            Err(wgpu::SurfaceError::OutOfMemory),
+            SimulatedAcquisition::Dropped,
+            SimulatedAcquisition::Fatal,
         ]);
         assert!(!harness.scroll_once().unwrap().presented);
         harness.execute_dispatched().await;
@@ -2665,7 +2677,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_retry_coalesces_with_existing_pending_render() {
-        let mut harness = DirectRenderHarness::new(vec![Err(wgpu::SurfaceError::Timeout), Ok(())]);
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
         // A real independent preedit request supplies the already-pending frame, not the missing retry.
         harness
             .window
