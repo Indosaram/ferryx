@@ -7,6 +7,7 @@ import {
   ChevronUp,
   FileCode,
   FileText,
+  FolderOpen,
   Loader2,
   Plus,
   RefreshCw,
@@ -14,12 +15,16 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { open } from "@tauri-apps/plugin-dialog";
+
 import {
   deleteSshHost,
   extractIpcErrorMessage,
   formatSshTarget,
+  getSshConfigPathOverride,
   importSshConfig,
   readSystemSshConfig,
+  setSshConfigPathOverride,
   testSshConnection,
   updateSshHost,
   useSshHosts,
@@ -87,6 +92,9 @@ export function SshSection() {
   // System ~/.ssh/config State
   const [systemConfig, setSystemConfig] = useState<SystemSshConfig | null>(null);
   const [systemConfigError, setSystemConfigError] = useState<string | null>(null);
+  const [configPathOverride, setConfigPathOverride] = useState<string | null>(() =>
+    getSshConfigPathOverride(),
+  );
   const [loadingSystemConfig, setLoadingSystemConfig] = useState(false);
   const [showSystemConfigView, setShowSystemConfigView] = useState(false);
   const [showRawConfig, setShowRawConfig] = useState(false);
@@ -96,11 +104,11 @@ export function SshSection() {
   const [testResults, setTestResults] = useState<Record<string, TestState>>({});
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const fetchSystemConfig = async () => {
+  const fetchSystemConfig = async (configPath: string | null = configPathOverride) => {
     setLoadingSystemConfig(true);
     setSystemConfigError(null);
     try {
-      const res = await readSystemSshConfig();
+      const res = await readSystemSshConfig(configPath);
       setSystemConfig(res);
     } catch (err) {
       setSystemConfigError(extractIpcErrorMessage(err, "Failed to read system SSH configuration."));
@@ -112,6 +120,37 @@ export function SshSection() {
   useEffect(() => {
     void fetchSystemConfig();
   }, []);
+
+  const handleChooseConfigFile = async () => {
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        multiple: false,
+        directory: false,
+        title: "Select an SSH config file",
+      });
+    } catch (err) {
+      setSystemConfigError(extractIpcErrorMessage(err, "Failed to open the file picker."));
+      return;
+    }
+
+    const chosen = Array.isArray(selected) ? selected[0] : selected;
+    if (!chosen) return;
+
+    setConfigPathOverride(chosen);
+    setSshConfigPathOverride(chosen);
+    setShowSystemConfigView(false);
+    setShowRawConfig(false);
+    await fetchSystemConfig(chosen);
+  };
+
+  const handleUseDefaultConfigFile = async () => {
+    setConfigPathOverride(null);
+    setSshConfigPathOverride(null);
+    setShowSystemConfigView(false);
+    setShowRawConfig(false);
+    await fetchSystemConfig(null);
+  };
 
   const handleOpenAdd = () => {
     setEditingHost(null);
@@ -356,15 +395,20 @@ export function SshSection() {
           <AlertCircle className="size-4" />
           <AlertDescription>
             {systemConfigError}
-            <Button size="sm" variant="outline" onClick={fetchSystemConfig} className="ml-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void fetchSystemConfig()}
+              className="ml-2"
+            >
               Retry
             </Button>
           </AlertDescription>
         </Alert>
       ) : null}
 
-      {/* System ~/.ssh/config Auto-Detector & Viewer Card */}
-      {systemConfig && systemConfig.exists && systemConfig.hosts.length > 0 ? (
+      {/* SSH config file source: default ~/.ssh/config or a user-selected file */}
+      {systemConfig ? (
         <Card className="mb-6 border-border/80 bg-card/40 p-3.5">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2 min-w-0">
@@ -372,11 +416,17 @@ export function SshSection() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-[13px] font-medium text-foreground">
-                    System SSH Config
+                    {configPathOverride ? "SSH Config File" : "System SSH Config"}
                   </span>
-                  <Badge variant="outline" className="text-[11px] py-0 px-1.5 h-4">
-                    {systemConfig.hosts.length} hosts found
-                  </Badge>
+                  {systemConfig.exists ? (
+                    <Badge variant="outline" className="text-[11px] py-0 px-1.5 h-4">
+                      {systemConfig.hosts.length} hosts found
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-[11px] py-0 px-1.5 h-4">
+                      Not found
+                    </Badge>
+                  )}
                   {unimportedSystemHosts.length > 0 ? (
                     <Badge variant="secondary" className="text-[11px] py-0 px-1.5 h-4 bg-primary/10 text-primary">
                       {unimportedSystemHosts.length} new
@@ -390,6 +440,27 @@ export function SshSection() {
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={handleChooseConfigFile}
+                className="h-7 text-[12px] px-2 text-muted-foreground hover:text-foreground"
+              >
+                <FolderOpen className="size-3.5 mr-1" />
+                Choose File…
+              </Button>
+
+              {configPathOverride ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleUseDefaultConfigFile}
+                  className="h-7 text-[12px] px-2 text-muted-foreground hover:text-foreground"
+                >
+                  Use Default
+                </Button>
+              ) : null}
+
               {unimportedSystemHosts.length > 0 ? (
                 <Button
                   size="sm"
@@ -409,30 +480,32 @@ export function SshSection() {
                 </Button>
               ) : null}
 
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setShowSystemConfigView((prev) => !prev)}
-                className="h-7 text-[12px] px-2 text-muted-foreground hover:text-foreground"
-              >
-                {showSystemConfigView ? (
-                  <>
-                    Hide <ChevronUp className="size-3.5 ml-1" />
-                  </>
-                ) : (
-                  <>
-                    Show Hosts <ChevronDown className="size-3.5 ml-1" />
-                  </>
-                )}
-              </Button>
+              {systemConfig.hosts.length > 0 ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowSystemConfigView((prev) => !prev)}
+                  className="h-7 text-[12px] px-2 text-muted-foreground hover:text-foreground"
+                >
+                  {showSystemConfigView ? (
+                    <>
+                      Hide <ChevronUp className="size-3.5 ml-1" />
+                    </>
+                  ) : (
+                    <>
+                      Show Hosts <ChevronDown className="size-3.5 ml-1" />
+                    </>
+                  )}
+                </Button>
+              ) : null}
 
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={fetchSystemConfig}
+                onClick={() => void fetchSystemConfig()}
                 disabled={loadingSystemConfig}
                 className="size-7 p-0 text-muted-foreground hover:text-foreground"
-                title="Reload ~/.ssh/config"
+                title={`Reload ${systemConfig.path}`}
               >
                 <RefreshCw className={`size-3.5 ${loadingSystemConfig ? "animate-spin" : ""}`} />
               </Button>

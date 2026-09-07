@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
+import { SSH_CONFIG_PATH_STORAGE_KEY } from "./storageKeys";
+
 export type SshHostSource = "config" | "manual";
 export type SshAuthMethod = "agent" | "key";
 
@@ -163,11 +165,38 @@ export async function importSshConfig(configText: string): Promise<SshHost[]> {
   return hosts;
 }
 
-export async function readSystemSshConfig(): Promise<SystemSshConfig> {
+export async function readSystemSshConfig(
+  configPath: string | null = null,
+): Promise<SystemSshConfig> {
   if (!isTauri()) {
-    return { path: "~/.ssh/config", exists: false, rawText: "", hosts: [] };
+    return { path: configPath ?? "~/.ssh/config", exists: false, rawText: "", hosts: [] };
   }
-  return invoke<SystemSshConfig>("cmd_ssh_read_system_config");
+  return invoke<SystemSshConfig>("cmd_ssh_read_system_config", { configPath });
+}
+
+type ConfigPathStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+function defaultConfigPathStorage(): ConfigPathStorage | null {
+  return typeof window !== "undefined" && window.localStorage ? window.localStorage : null;
+}
+
+export function getSshConfigPathOverride(
+  storage: ConfigPathStorage | null = defaultConfigPathStorage(),
+): string | null {
+  const value = storage?.getItem(SSH_CONFIG_PATH_STORAGE_KEY) ?? null;
+  return value && value.trim() !== "" ? value : null;
+}
+
+export function setSshConfigPathOverride(
+  configPath: string | null,
+  storage: ConfigPathStorage | null = defaultConfigPathStorage(),
+): void {
+  if (!storage) return;
+  if (configPath && configPath.trim() !== "") {
+    storage.setItem(SSH_CONFIG_PATH_STORAGE_KEY, configPath.trim());
+  } else {
+    storage.removeItem(SSH_CONFIG_PATH_STORAGE_KEY);
+  }
 }
 
 export async function updateSshHost(host: SshHost): Promise<SshHost[]> {

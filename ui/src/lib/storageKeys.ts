@@ -13,6 +13,7 @@ export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabl
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "ferryx.update.dismissedVersion";
 export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.onboarding-dismissed";
+export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],

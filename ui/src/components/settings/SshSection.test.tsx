@@ -6,10 +6,15 @@ import { SshSection } from "./SshSection";
 
 const invokeMock = vi.fn();
 const isTauriMock = vi.fn(() => true);
+const openDialogMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
   isTauri: () => isTauriMock(),
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (...args: unknown[]) => openDialogMock(...args),
 }));
 
 function deferred<T>() {
@@ -50,6 +55,7 @@ describe("SshSection Settings Component", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetSshHostsCache();
+    localStorage.clear();
     isTauriMock.mockReturnValue(true);
   });
 
@@ -639,6 +645,90 @@ describe("SshSection Settings Component", () => {
       expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_import_config", {
         configText: "Host remote-vps\n  HostName 10.20.30.40\n  User debian\n  Port 22\n",
       });
+    });
+
+    it("reads hosts from a user-selected config file instead of the default path", async () => {
+      const workHost: SshHost = {
+        id: "ssh-work-box",
+        label: "work-box",
+        hostname: "work.example",
+        username: "dev",
+        port: 22,
+        source: "config",
+        authMethod: "agent",
+      };
+
+      openDialogMock.mockResolvedValue("/tmp/work-ssh-config");
+      invokeMock.mockImplementation((cmd, args) => {
+        if (cmd === "cmd_ssh_list_hosts") return Promise.resolve([]);
+        if (cmd === "cmd_ssh_read_system_config") {
+          const configPath = (args as { configPath?: string | null } | undefined)?.configPath ?? null;
+          if (configPath === "/tmp/work-ssh-config") {
+            return Promise.resolve({
+              path: configPath,
+              exists: true,
+              rawText: "Host work-box\n  HostName work.example\n  User dev\n",
+              hosts: [workHost],
+            });
+          }
+          return Promise.resolve({
+            path: "/Users/test/.ssh/config",
+            exists: true,
+            rawText: "",
+            hosts: [],
+          });
+        }
+        return Promise.resolve();
+      });
+
+      render(<SshSection />);
+      await act(async () => {});
+
+      expect(screen.getByText("/Users/test/.ssh/config")).toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Choose File/i }));
+      });
+
+      expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_read_system_config", {
+        configPath: "/tmp/work-ssh-config",
+      });
+      expect(screen.getByText("/tmp/work-ssh-config")).toBeInTheDocument();
+      expect(screen.getByText("1 hosts found")).toBeInTheDocument();
+    });
+
+    it("restores the previously selected config file on remount and can revert to the default", async () => {
+      localStorage.setItem("ferryx.ssh.configPath", "/tmp/work-ssh-config");
+
+      invokeMock.mockImplementation((cmd, args) => {
+        if (cmd === "cmd_ssh_list_hosts") return Promise.resolve([]);
+        if (cmd === "cmd_ssh_read_system_config") {
+          const configPath = (args as { configPath?: string | null } | undefined)?.configPath ?? null;
+          return Promise.resolve({
+            path: configPath ?? "/Users/test/.ssh/config",
+            exists: true,
+            rawText: "",
+            hosts: [],
+          });
+        }
+        return Promise.resolve();
+      });
+
+      render(<SshSection />);
+      await act(async () => {});
+
+      expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_read_system_config", {
+        configPath: "/tmp/work-ssh-config",
+      });
+      expect(screen.getByText("/tmp/work-ssh-config")).toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /Use Default/i }));
+      });
+
+      expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_read_system_config", { configPath: null });
+      expect(screen.getByText("/Users/test/.ssh/config")).toBeInTheDocument();
+      expect(localStorage.getItem("ferryx.ssh.configPath")).toBeNull();
     });
   });
 });

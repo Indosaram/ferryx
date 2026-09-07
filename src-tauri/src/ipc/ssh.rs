@@ -2,7 +2,7 @@ use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::ssh::config::parse_ssh_config;
 use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,12 +59,47 @@ pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
         .map(|home| home.join(".ssh").join("config"))
 }
 
+fn read_ssh_config_file(path: &Path) -> Result<SystemSshConfigResult, IpcError> {
+    let path_str = path.to_string_lossy().into_owned();
+    if !path.is_file() {
+        return Ok(SystemSshConfigResult {
+            path: path_str,
+            exists: false,
+            raw_text: String::new(),
+            hosts: Vec::new(),
+        });
+    }
+
+    let raw_text = std::fs::read_to_string(path).map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::IoError,
+            format!("Failed to read SSH config at {}: {}", path_str, e),
+        )
+    })?;
+    let parsed = parse_ssh_config(&raw_text);
+    let hosts = crate::ssh::config::import_aliases(&parsed, &[]);
+
+    Ok(SystemSshConfigResult {
+        path: path_str,
+        exists: true,
+        raw_text,
+        hosts,
+    })
+}
+
 #[tauri::command]
 pub async fn cmd_ssh_read_system_config<R: Runtime>(
     app: AppHandle<R>,
+    config_path: Option<String>,
 ) -> Result<SystemSshConfigResult, IpcError> {
     run_blocking(move || {
-        let Some(path) = system_ssh_config_path(&app) else {
+        let selected = config_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+
+        let Some(path) = selected.or_else(|| system_ssh_config_path(&app)) else {
             return Ok(SystemSshConfigResult {
                 path: String::new(),
                 exists: false,
@@ -73,26 +108,7 @@ pub async fn cmd_ssh_read_system_config<R: Runtime>(
             });
         };
 
-        let path_str = path.to_string_lossy().into_owned();
-        if !path.is_file() {
-            return Ok(SystemSshConfigResult {
-                path: path_str,
-                exists: false,
-                raw_text: String::new(),
-                hosts: Vec::new(),
-            });
-        }
-
-        let raw_text = std::fs::read_to_string(&path).unwrap_or_default();
-        let parsed = parse_ssh_config(&raw_text);
-        let hosts = crate::ssh::config::import_aliases(&parsed, &[]);
-
-        Ok(SystemSshConfigResult {
-            path: path_str,
-            exists: true,
-            raw_text,
-            hosts,
-        })
+        read_ssh_config_file(&path)
     })
     .await
 }
@@ -340,6 +356,41 @@ mod tests {
         // Then the existing record is neither duplicated nor overwritten.
         assert_eq!(imported, hosts);
         assert_eq!(load_store(&path).hosts, hosts);
+    }
+
+    #[test]
+    fn explicit_config_file_is_read_and_parsed_from_its_own_path() {
+        // Given an SSH config kept outside the default ~/.ssh/config location.
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let path = dir.path().join("work-ssh-config");
+        std::fs::write(&path, "Host work-box\n  HostName work.example\n  User dev\n")
+            .expect("write config");
+
+        // When that file is read.
+        let result = read_ssh_config_file(&path).expect("read config");
+
+        // Then its hosts are returned and the reported path is that file.
+        assert!(result.exists);
+        assert_eq!(result.path, path.to_string_lossy());
+        assert_eq!(result.hosts.len(), 1);
+        assert_eq!(result.hosts[0].label, "work-box");
+        assert_eq!(result.hosts[0].hostname, "work.example");
+        assert_eq!(result.hosts[0].username, Some("dev".into()));
+    }
+
+    #[test]
+    fn missing_config_file_reports_absence_instead_of_failing() {
+        // Given a path that holds no file.
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let path = dir.path().join("absent-config");
+
+        // When it is read.
+        let result = read_ssh_config_file(&path).expect("read config");
+
+        // Then absence is reported without hosts.
+        assert!(!result.exists);
+        assert!(result.hosts.is_empty());
+        assert!(result.raw_text.is_empty());
     }
 
     #[test]
