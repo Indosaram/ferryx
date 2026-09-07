@@ -425,12 +425,9 @@ export function snapBoundsToDevicePixels(
  * Height in CSS pixels reserved at the top of every terminal pane for the DOM
  * pane-drag handle.
  *
- * The native compositor view is parented ABOVE the WKWebView on macOS
- * (`src-tauri/src/native_terminal/platform/macos.rs`), so a DOM overlay drawn
- * inside the surface bounds is painted over and invisible even though it still
- * receives pointer events (the native view returns nil from `hitTest:`). The
- * xterm-era handle worked because the terminal was itself DOM. Keeping this
- * strip outside the reported bounds is what makes the handle visible again.
+ * The native compositor view is coordinated with the WKWebView on macOS
+ * (`src-tauri/src/native_terminal/platform/macos.rs`). Keeping this strip
+ * outside the reported bounds preserves the DOM drag handle area.
  *
  * This is a fixed reservation rather than a hover-time inset on purpose: the
  * compositor derives rows from the surface height, so resizing on hover would

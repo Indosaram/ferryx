@@ -240,7 +240,7 @@ fn native_terminal_host_composition_target_must_be_platform_child_view_not_root_
         assert_eq!(
             descriptor.target_kind,
             CompositorTargetKind::NativeChildView,
-            "Native terminal host target must be a dedicated platform child compositor view above WKWebView, not the occluded root WebviewWindow"
+            "Native terminal host target must be a dedicated platform child compositor view, not the occluded root WebviewWindow"
         );
         assert!(
             descriptor.target_kind.is_child_compositor(),

@@ -203,7 +203,7 @@ pub enum CompositorTargetKind {
     /// Host target is the whole Tauri WebviewWindow.
     /// Occluded on macOS because WKWebView sits in front of the window-level layer.
     RootWebviewWindow,
-    /// Dedicated platform layer-backed child view positioned above the webview (macOS NSView).
+    /// Dedicated platform layer-backed child view positioned relative to the webview (macOS NSView).
     NativeChildView,
     /// Dedicated Windows child composition target / window (DirectComposition / Win32 HWND).
     WindowsChildWindow,

@@ -1,7 +1,8 @@
 //! macOS Platform Child View Compositor Target for Native Terminal.
 //!
-//! Provides a dedicated, layer-backed child NSView sibling placed directly above
-//! the Tauri WKWebView inside the main NSWindow contentView.
+//! Provides a dedicated, layer-backed child NSView sibling placed directly below
+//! the Tauri WKWebView inside the main NSWindow contentView so that DOM overlays
+//! (toasts, modals, popovers) render naturally on top.
 //!
 //! # Safety Invariants
 //!
@@ -268,8 +269,10 @@ impl MacosCompositorTarget {
         // Initially hidden until an active terminal layout is positioned
         view.setHidden(true);
 
-        // Add child view positioned above all other subviews (such as WKWebView)
-        content_view.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, None);
+        // Add child view positioned below the WKWebView so that DOM overlays (toasts,
+        // modals, popovers) with opaque backgrounds render naturally on top of the
+        // native terminal surface.
+        content_view.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, None);
 
         let raw_view_ptr =
             NonNull::new(Retained::into_raw(view) as *mut c_void).ok_or_else(|| {

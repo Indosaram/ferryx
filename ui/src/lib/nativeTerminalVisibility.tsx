@@ -39,11 +39,12 @@ export function NativeTerminalVisibilityProvider({
 }
 
 /**
- * Native compositor child views live above WKWebView on macOS, so DOM z-index cannot
- * cover them. The active terminal therefore has to relinquish its native surface while
- * any modal/dialog or overlay surface (Settings, New Tab menu, Search overlay, etc.)
- * is mounted. The semantic selector keeps this independent from dialog implementation
- * classes while the context supplies an explicit visibility override for other owners/tests.
+ * Native compositor child views are rendered in coordination with WKWebView on macOS
+ * and child HWNDs on Windows. For modal dialogs and search surfaces that cover the workspace,
+ * the active terminal relinquishes its native surface while any modal/dialog surface
+ * (Settings, Search overlay, etc.) is mounted. The semantic selector keeps this independent
+ * from dialog implementation classes while the context supplies an explicit visibility
+ * override for other owners/tests.
  */
 export function useNativeTerminalVisibility(): boolean {
   const ownerVisible = useContext(NativeTerminalVisibilityContext);
