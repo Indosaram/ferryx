@@ -69,6 +69,22 @@ fn push_history_url(session: &mut ManagedBrowserSession, url: &str) {
     sync_history_flags(session);
 }
 
+// Same strict charset as `is_valid_named_profile_id` in model.rs (ASCII
+// alphanumeric first byte, then alphanumeric / `.` / `_` / `-`), plus `:` —
+// frontend ids are colon-separated (`tab:<uuid>`, `restored-browser:<id>`) and
+// `browser_id` never reaches a filesystem path or a webview label (that is
+// `browser-{fresh-uuid}`) — with a 256-byte cap instead of 64. Invalid ids
+// fall back to the generated UUID.
+fn is_valid_browser_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 256 || !bytes[0].is_ascii_alphanumeric() {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'.' | b'_' | b'-'))
+}
+
 #[derive(Default, Clone)]
 pub struct BrowserManager {
     sessions: Arc<RwLock<HashMap<String, ManagedBrowserSession>>>,
@@ -97,7 +113,7 @@ impl BrowserManager {
             .browser_id
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .filter(|value| is_valid_browser_id(value))
             .map(str::to_string);
         let browser_id = requested_browser_id.unwrap_or_else(|| uuid.clone());
         if self.sessions.read().contains_key(&browser_id) {

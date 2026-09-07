@@ -19,6 +19,7 @@ import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots } from "./lib/dagWatchRoots";
 import { newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, type BrowserShortcutAction } from "./lib/browserTauri";
+import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
@@ -1825,6 +1826,15 @@ function WorkspaceApp({
       disposed = true;
       unlisten?.();
     };
+  }, [createBrowserTab, reportRuntimeError]);
+
+  // Terminal links and markdown editors route through routeHttpLink, which needs a live
+  // opener to reach the built-in browser; without this registration every link silently
+  // falls back to the system browser.
+  useEffect(() => {
+    return registerBuiltInBrowserLinkOpener((url) => {
+      void createBrowserTab(url).catch(reportRuntimeError);
+    });
   }, [createBrowserTab, reportRuntimeError]);
 
   useEffect(() => {

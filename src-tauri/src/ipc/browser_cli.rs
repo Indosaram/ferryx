@@ -3,12 +3,14 @@ use crate::browser::{
     BrowserSessionSummary,
 };
 use crate::ipc::browser::{browser_automation_act, browser_automation_snapshot};
+use crate::ipc::error::IpcErrorCode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::AppHandle;
+use tokio::io::BufReader;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "camelCase")]
@@ -237,6 +239,63 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Upper bound for a single CLI request line (1 MiB). A connection whose line
+/// exceeds this is rejected with `BROWSER_CLI_REQUEST_TOO_LARGE` instead of
+/// being buffered without bound.
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+enum RequestLine {
+    Eof,
+    Line(String),
+    TooLarge,
+}
+
+async fn read_limited_line<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    max_bytes: usize,
+) -> Result<RequestLine, std::io::Error> {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(if line.is_empty() {
+                RequestLine::Eof
+            } else {
+                RequestLine::Line(String::from_utf8_lossy(&line).into_owned())
+            });
+        }
+        match available.iter().position(|&byte| byte == b'\n') {
+            Some(newline_index) => {
+                if line.len() + newline_index + 1 > max_bytes {
+                    return Ok(RequestLine::TooLarge);
+                }
+                line.extend_from_slice(&available[..=newline_index]);
+                reader.consume(newline_index + 1);
+                return Ok(RequestLine::Line(
+                    String::from_utf8_lossy(&line).into_owned(),
+                ));
+            }
+            None => {
+                if line.len() + available.len() > max_bytes {
+                    return Ok(RequestLine::TooLarge);
+                }
+                let chunk_len = available.len();
+                line.extend_from_slice(available);
+                reader.consume(chunk_len);
+            }
+        }
+    }
+}
+
+fn ipc_error_code_string(code: IpcErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{code:?}"))
+}
+
 async fn handle_connection<S, R: tauri::Runtime>(
     stream: S,
     app: AppHandle<R>,
@@ -245,20 +304,27 @@ async fn handle_connection<S, R: tauri::Runtime>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::AsyncWriteExt;
 
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    let response = match reader.read_line(&mut line).await {
-        Ok(0) => return Ok(()),
-        Ok(_) => match serde_json::from_str::<BrowserCliRequest>(line.trim()) {
-            Ok(request) => execute_request(&app, &manager, request).await,
-            Err(error) => BrowserCliResponse::Error {
-                code: "BROWSER_CLI_REQUEST_INVALID".into(),
-                message: error.to_string(),
-            },
+    let response = match read_limited_line(&mut reader, MAX_REQUEST_BYTES).await {
+        Ok(RequestLine::Eof) => return Ok(()),
+        Ok(RequestLine::TooLarge) => BrowserCliResponse::Error {
+            code: "BROWSER_CLI_REQUEST_TOO_LARGE".into(),
+            message: format!(
+                "request exceeds the maximum of {MAX_REQUEST_BYTES} bytes per connection"
+            ),
         },
+        Ok(RequestLine::Line(line)) => {
+            match serde_json::from_str::<BrowserCliRequest>(line.trim()) {
+                Ok(request) => execute_request(&app, &manager, request).await,
+                Err(error) => BrowserCliResponse::Error {
+                    code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                    message: error.to_string(),
+                },
+            }
+        }
         Err(error) => return Err(BrowserError::Internal(error.to_string())),
     };
     let mut response = serde_json::to_string(&response)
@@ -287,7 +353,7 @@ async fn execute_request<R: tauri::Runtime>(
             match browser_automation_snapshot(app.clone(), manager, browser_id).await {
                 Ok(snapshot) => BrowserCliResponse::Snapshot { snapshot },
                 Err(error) => BrowserCliResponse::Error {
-                    code: format!("{:?}", error.code),
+                    code: ipc_error_code_string(error.code),
                     message: error.message,
                 },
             }
@@ -296,7 +362,7 @@ async fn execute_request<R: tauri::Runtime>(
             match browser_automation_act(app.clone(), manager, request).await {
                 Ok(()) => BrowserCliResponse::Acted,
                 Err(error) => BrowserCliResponse::Error {
-                    code: format!("{:?}", error.code),
+                    code: ipc_error_code_string(error.code),
                     message: error.message,
                 },
             }
@@ -520,6 +586,100 @@ mod tests {
                 sessions: vec![expected_summary],
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_limited_line_rejects_oversized_request_line() {
+        let mut oversized = vec![b'a'; MAX_REQUEST_BYTES];
+        oversized.push(b'!');
+        oversized.push(b'\n');
+        let mut reader = BufReader::new(&oversized[..]);
+        let result = read_limited_line(&mut reader, MAX_REQUEST_BYTES).await;
+        assert!(matches!(result, Ok(RequestLine::TooLarge)));
+
+        // A line exactly at the cap is still accepted.
+        let mut exact = vec![b'a'; MAX_REQUEST_BYTES - 1];
+        exact.push(b'\n');
+        let mut reader = BufReader::new(&exact[..]);
+        let result = read_limited_line(&mut reader, MAX_REQUEST_BYTES).await;
+        assert!(matches!(result, Ok(RequestLine::Line(_))));
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_oversized_request_gets_too_large_error() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let app_handle = app.handle().clone();
+        let server_task =
+            tokio::spawn(
+                async move { handle_connection(server_stream, app_handle, manager).await },
+            );
+
+        let (client_reader, mut client_writer) = tokio::io::split(client_stream);
+        let mut oversized_line = vec![b'a'; MAX_REQUEST_BYTES + 16];
+        oversized_line.push(b'\n');
+        // The server stops reading once the cap is exceeded and closes its half,
+        // so the tail of this write may surface as a broken pipe; either way the
+        // oversized line must never be accepted.
+        let _ = client_writer.write_all(&oversized_line).await;
+        let _ = client_writer.flush().await;
+
+        let mut response_line = String::new();
+        BufReader::new(client_reader)
+            .read_line(&mut response_line)
+            .await
+            .expect("read too-large response line");
+        let response: BrowserCliResponse =
+            serde_json::from_str(response_line.trim()).expect("deserialize response");
+        assert_eq!(
+            response,
+            BrowserCliResponse::Error {
+                code: "BROWSER_CLI_REQUEST_TOO_LARGE".into(),
+                message: format!(
+                    "request exceeds the maximum of {MAX_REQUEST_BYTES} bytes per connection"
+                ),
+            }
+        );
+
+        let server_result = server_task.await.expect("server task completed");
+        assert!(server_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_error_code_matches_ipc_wire_format() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+
+        let response = execute_request(
+            app.handle(),
+            &manager,
+            BrowserCliRequest::Snapshot {
+                browser_id: "missing-browser".into(),
+            },
+        )
+        .await;
+
+        let wire_code =
+            serde_json::to_value(IpcErrorCode::BrowserNotFound).expect("serialize IPC error code");
+        let wire_code = wire_code.as_str().expect("IPC code serializes to string");
+        assert_eq!(wire_code, "BROWSER_NOT_FOUND");
+
+        match response {
+            BrowserCliResponse::Error { code, message } => {
+                assert_eq!(code, wire_code);
+                assert_ne!(code, "BrowserNotFound");
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected error response, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]

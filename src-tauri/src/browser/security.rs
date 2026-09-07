@@ -62,6 +62,8 @@ pub fn default_desktop_user_agent() -> &'static str {
     }
 }
 
+const MAX_URL_LENGTH_BYTES: usize = 8192;
+
 pub fn validate_url(url_str: &str) -> Result<String, BrowserError> {
     let trimmed = url_str.trim();
     if trimmed.is_empty() {
@@ -70,8 +72,18 @@ pub fn validate_url(url_str: &str) -> Result<String, BrowserError> {
     if trimmed == "about:blank" {
         return Ok(trimmed.to_string());
     }
+    if trimmed.len() > MAX_URL_LENGTH_BYTES {
+        return Err(BrowserError::InvalidUrl(format!(
+            "URL exceeds the maximum length of {MAX_URL_LENGTH_BYTES} bytes"
+        )));
+    }
 
     let parsed = Url::parse(trimmed).map_err(|e| BrowserError::InvalidUrl(e.to_string()))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(BrowserError::InvalidUrl(
+            "URLs with embedded credentials (user:password@host) are not allowed".to_string(),
+        ));
+    }
     match parsed.scheme() {
         "http" | "https" => Ok(parsed.to_string()),
         "about" if parsed.path() == "blank" => Ok("about:blank".to_string()),

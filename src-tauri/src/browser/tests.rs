@@ -47,6 +47,26 @@ fn test_validate_url() {
 }
 
 #[test]
+fn test_validate_url_rejects_embedded_credentials_and_overlong_urls() {
+    let credentialed = validate_url("https://user:password@github.com/repo");
+    assert!(matches!(credentialed, Err(BrowserError::InvalidUrl(_))));
+    let username_only = validate_url("https://user@github.com");
+    assert!(matches!(username_only, Err(BrowserError::InvalidUrl(_))));
+
+    let overlong = format!("https://example.com/{}", "a".repeat(9000));
+    assert!(matches!(
+        validate_url(&overlong),
+        Err(BrowserError::InvalidUrl(_))
+    ));
+
+    // Normal URLs still validate.
+    assert_eq!(
+        validate_url("https://example.com/path").unwrap(),
+        "https://example.com/path"
+    );
+}
+
+#[test]
 fn test_browser_manager_lifecycle() {
     let mgr = BrowserManager::new();
     assert!(!mgr.has_sessions());
@@ -119,6 +139,64 @@ fn test_browser_manager_lifecycle() {
     assert!(removed.is_some());
     assert!(mgr.get_state(&state.browser_id).is_err());
     assert!(!mgr.has_sessions());
+}
+
+#[test]
+fn test_register_session_falls_back_to_generated_id_for_unsafe_browser_ids() {
+    let manager = BrowserManager::new();
+    let mut overlong_id = String::from("a");
+    overlong_id.push_str(&"b".repeat(256));
+    for requested in [
+        "bad\nid",
+        "bad/id",
+        "bad\\id",
+        "bad id",
+        ".leading-dot",
+        "",
+        overlong_id.as_str(),
+    ] {
+        let state = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some(requested.to_string()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("unsafe browser id falls back to generated id");
+        assert_ne!(state.browser_id, requested);
+        assert!(state
+            .browser_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-')));
+    }
+
+    // Ids matching the strict charset are still preserved, including the
+    // colon-separated shapes the frontend actually generates for tabs and
+    // sessions (`tab:<uuid>` / `session:<uuid>` / `restored-browser:<id>`).
+    for requested in [
+        "ok.id_1",
+        "restored-browser:tab:9f1c-uuid",
+        "session:9f1c-uuid",
+        "restored-browser:tab:a:leaf-browser:tab:a",
+    ] {
+        let preserved = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some(requested.to_string()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register browser with strict id");
+        assert_eq!(preserved.browser_id, requested);
+    }
 }
 
 #[test]

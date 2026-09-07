@@ -917,17 +917,34 @@ export function useWorkspaceStore({
         return;
       }
 
+      // A browser can live as pane content inside a terminal-kind tab (e.g. after a
+      // browser tab was dragged into this tab's split); collect its ids so the native
+      // child webviews are torn down with the tab instead of leaking.
+      const closingBrowserIds = new Set<string>();
+      for (const content of Object.values(snapshot.layout.layoutsByTabId?.[tabId]?.contentsByLeafId ?? {})) {
+        if (content.kind !== "browser") continue;
+        const browserId = content.browser?.browserId ?? content.browserId ?? "";
+        if (browserId) closingBrowserIds.add(browserId);
+      }
+
       const disposableSessions = getDisposableSessionsForTab(snapshot, tabId);
       if (snapshot.layout.tabs.length === 1) {
         await Promise.all(
           disposableSessions.map((session) => closeBackendSessionAndWait(session, services)),
         );
         dispatch({ type: "CLOSE_TAB", tabId });
-        return;
+      } else {
+        dispatch({ type: "CLOSE_TAB", tabId });
+        await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services)));
       }
 
-      dispatch({ type: "CLOSE_TAB", tabId });
-      await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services)));
+      // Only after CLOSE_TAB removes the layout references, tear down any collected
+      // browser whose id is no longer referenced anywhere.
+      await Promise.allSettled(
+        [...closingBrowserIds]
+          .filter((browserId) => !isBrowserIdReferenced(stateRef.current, browserId))
+          .map((browserId) => closeBrowser(browserId)),
+      );
     },
     [dispatch, services],
   );
@@ -944,9 +961,18 @@ export function useWorkspaceStore({
 
       const closingSessionId = tabLayout.sessionIdsByLeafId[leafId];
       const closingSession = closingSessionId ? snapshot.sessions[closingSessionId] : undefined;
+      const closingContent = tabLayout.contentsByLeafId?.[leafId];
+      const closingBrowserId = closingContent?.kind === "browser"
+        ? (closingContent.browser?.browserId ?? closingContent.browserId ?? "")
+        : "";
       dispatch({ type: "CLOSE_PANE", tabId, leafId });
       if (closingSessionId && !isSessionReferenced(stateRef.current, closingSessionId)) {
         await closeBackendSession(closingSession, services);
+      }
+      // Browser pane leaves carry no session; their native child webview must be torn
+      // down here once the last layout reference to the browser id is gone.
+      if (closingBrowserId && !isBrowserIdReferenced(stateRef.current, closingBrowserId)) {
+        await closeBrowser(closingBrowserId);
       }
     },
     [closeTab, dispatch, services],
@@ -2325,6 +2351,21 @@ function isSessionReferencedOutsideTab(state: WorkspaceState, sessionId: string,
 
 function isSessionReferenced(state: WorkspaceState, sessionId: string): boolean {
   return getAllTabs(state).some((tab) => getTabSessionIds(state, tab.id).has(sessionId));
+}
+
+function isBrowserIdReferenced(state: WorkspaceState, browserId: string): boolean {
+  if (!browserId) return false;
+  const layouts = [state.layout, ...Object.values(state.worktreeLayouts ?? {})];
+  return layouts.some((layout) => {
+    if (layout.tabs.some((tab) => tab.kind === "browser" && tab.browserId === browserId)) return true;
+    return Object.values(layout.layoutsByTabId ?? {}).some((tabLayout) =>
+      Object.values(tabLayout.contentsByLeafId ?? {}).some(
+        (content) =>
+          content.kind === "browser" &&
+          (content.browser?.browserId ?? content.browserId ?? "") === browserId,
+      ),
+    );
+  });
 }
 
 function getDisposableSessionsForTab(state: WorkspaceState, tabId: string): TerminalSession[] {

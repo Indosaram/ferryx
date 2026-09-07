@@ -603,6 +603,26 @@ describe("App project workspace flow", () => {
     }
   });
 
+  it("routes http links to a built-in browser tab through the app-registered opener", async () => {
+    const browserTauriModule = await import("./lib/browserTauri");
+    const openExternalUrlSpy = vi.spyOn(browserTauriModule, "openExternalUrl").mockResolvedValue();
+    try {
+      render(<App />);
+
+      await waitFor(() => expect(native.onNewTerminalTabMenu).toHaveBeenCalledOnce());
+
+      // No test-side registerBuiltInBrowserLinkOpener call: the opener must come from App.
+      const { routeHttpLink } = await import("./lib/linkRouting");
+      await expect(
+        routeHttpLink("https://example.com/from-terminal", { source: "terminal" }),
+      ).resolves.toBe("builtin");
+      expect(workspace.createBrowserTab).toHaveBeenCalledWith("https://example.com/from-terminal");
+      expect(openExternalUrlSpy).not.toHaveBeenCalled();
+    } finally {
+      openExternalUrlSpy.mockRestore();
+    }
+  });
+
   it("shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm", async () => {
     localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: true }));
     render(<App />);

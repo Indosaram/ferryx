@@ -1,13 +1,13 @@
 use crate::browser::{
-    browser_find_script, cookie_from_imported, download_url_to_path, parse_browser_find_callback,
-    parse_browser_guest_action, parse_cookie_file, BrowserAutomationAction,
-    BrowserAutomationElement, BrowserAutomationRequest, BrowserAutomationSnapshot,
-    BrowserAutomationTarget, BrowserDownloadRequestedPayload, BrowserError, BrowserFindResult,
-    BrowserGuestAction, BrowserManager, BrowserOpenRequestedPayload, BrowserProfileId,
-    BrowserSessionSummary, BrowserShortcutRequestedPayload, BrowserState,
-    BrowserStateChangedPayload, CreateBrowserRequest, ImportBrowserCookiesRequest,
-    ImportBrowserCookiesResult, LogicalRect, BROWSER_CLEAR_FIND_SCRIPT,
-    BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_GUEST_BRIDGE_SCRIPT, BROWSER_OPEN_REQUESTED_EVENT,
+    browser_find_script, browser_guest_bridge_script, cookie_from_imported, download_url_to_path,
+    parse_browser_find_callback, parse_browser_guest_action, parse_cookie_file,
+    BrowserAutomationAction, BrowserAutomationElement, BrowserAutomationRequest,
+    BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserDownloadRequestedPayload,
+    BrowserError, BrowserFindResult, BrowserGuestAction, BrowserManager,
+    BrowserOpenRequestedPayload, BrowserProfileId, BrowserSessionSummary,
+    BrowserShortcutRequestedPayload, BrowserState, BrowserStateChangedPayload,
+    CreateBrowserRequest, ImportBrowserCookiesRequest, ImportBrowserCookiesResult, LogicalRect,
+    BROWSER_CLEAR_FIND_SCRIPT, BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_OPEN_REQUESTED_EVENT,
     BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
 use crate::ipc::error::IpcError;
@@ -836,6 +836,23 @@ fn update_webview_state<R: tauri::Runtime>(
     }
 }
 
+/// Decides whether a freshly created browser child webview should be kept or
+/// discarded. `session_exists` reflects whether the manager still holds the
+/// browser session: when the async side of `cmd_browser_create` gives up
+/// (timeout or dispatch failure) it removes the session and reports an error,
+/// but the queued main-thread closure still runs afterwards — in that case it
+/// must close the webview instead of leaving it shown and unmanageable.
+fn keep_or_discard_fresh_webview(session_exists: bool) -> Result<(), String> {
+    if session_exists {
+        Ok(())
+    } else {
+        Err(
+            "browser webview was created after its session was abandoned; closing the orphaned webview"
+                .to_string(),
+        )
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_browser_create<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -897,8 +914,13 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
         let page_browser_id = browser_id.clone();
         let title_browser_id = browser_id.clone();
 
+        let guest_bridge_nonce = uuid::Uuid::new_v4().to_string();
+        let nonce = guest_bridge_nonce.clone();
+        let (creation_sender, creation_receiver) =
+            tokio::sync::oneshot::channel::<Result<(), String>>();
+
         let window_clone = main_window.clone();
-        let _ = main_window.run_on_main_thread(move || {
+        let run_result = main_window.run_on_main_thread(move || {
             let parsed_url: tauri::WebviewUrl = if let Ok(u) = target_url.parse() {
                 tauri::WebviewUrl::External(u)
             } else {
@@ -908,42 +930,44 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
             let builder = tauri::WebviewBuilder::new(label, parsed_url)
                 .user_agent(crate::browser::default_desktop_user_agent())
                 .incognito(incognito)
-                .initialization_script(BROWSER_GUEST_BRIDGE_SCRIPT)
-                .on_navigation(move |target| match parse_browser_guest_action(target) {
-                    Some(BrowserGuestAction::Open(target_url)) => {
-                        let _ = bridge_app.emit(
-                            BROWSER_OPEN_REQUESTED_EVENT,
-                            BrowserOpenRequestedPayload {
-                                browser_id: bridge_browser_id.clone(),
-                                target_url,
-                                profile_id: bridge_profile_id.clone(),
-                                worktree_path: bridge_worktree_path.clone(),
-                            },
-                        );
-                        false
-                    }
-                    Some(BrowserGuestAction::Download(target_url)) => {
-                        let _ = bridge_app.emit(
-                            BROWSER_DOWNLOAD_REQUESTED_EVENT,
-                            BrowserDownloadRequestedPayload {
-                                browser_id: bridge_browser_id.clone(),
-                                target_url,
-                            },
-                        );
-                        false
-                    }
-                    Some(BrowserGuestAction::Shortcut(action)) => {
-                        let _ = bridge_app.emit(
-                            BROWSER_SHORTCUT_REQUESTED_EVENT,
-                            BrowserShortcutRequestedPayload {
-                                browser_id: bridge_browser_id.clone(),
-                                action,
-                            },
-                        );
-                        false
-                    }
-                    None => true,
-                })
+                .initialization_script(browser_guest_bridge_script(&guest_bridge_nonce))
+                .on_navigation(
+                    move |target| match parse_browser_guest_action(target, &nonce) {
+                        Some(BrowserGuestAction::Open(target_url)) => {
+                            let _ = bridge_app.emit(
+                                BROWSER_OPEN_REQUESTED_EVENT,
+                                BrowserOpenRequestedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                    target_url,
+                                    profile_id: bridge_profile_id.clone(),
+                                    worktree_path: bridge_worktree_path.clone(),
+                                },
+                            );
+                            false
+                        }
+                        Some(BrowserGuestAction::Download(target_url)) => {
+                            let _ = bridge_app.emit(
+                                BROWSER_DOWNLOAD_REQUESTED_EVENT,
+                                BrowserDownloadRequestedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                    target_url,
+                                },
+                            );
+                            false
+                        }
+                        Some(BrowserGuestAction::Shortcut(action)) => {
+                            let _ = bridge_app.emit(
+                                BROWSER_SHORTCUT_REQUESTED_EVENT,
+                                BrowserShortcutRequestedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                    action,
+                                },
+                            );
+                            false
+                        }
+                        None => true,
+                    },
+                )
                 .on_page_load(move |webview, payload| {
                     let loading = matches!(payload.event(), PageLoadEvent::Started);
                     let page_url = payload.url().to_string();
@@ -1008,7 +1032,7 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                 }
             };
 
-            if let Ok(child) = window_clone.add_child(
+            let creation_outcome = match window_clone.add_child(
                 builder,
                 tauri::LogicalPosition { x: pos.x, y: pos.y },
                 tauri::LogicalSize {
@@ -1016,27 +1040,73 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                     height: size.height,
                 },
             ) {
-                let _ = child.set_zoom(zoom_factor);
-                if let Ok(Some(current_bounds)) = creation_manager.get_bounds(&browser_id) {
-                    let _ = child.set_bounds(tauri::Rect {
-                        position: tauri::Position::Logical(tauri::LogicalPosition {
-                            x: current_bounds.x,
-                            y: current_bounds.y,
-                        }),
-                        size: tauri::Size::Logical(tauri::LogicalSize {
-                            width: current_bounds.width,
-                            height: current_bounds.height,
-                        }),
-                    });
+                Ok(child) => {
+                    match keep_or_discard_fresh_webview(
+                        creation_manager.get_state(&browser_id).is_ok(),
+                    ) {
+                        Ok(()) => {
+                            let _ = child.set_zoom(zoom_factor);
+                            if let Ok(Some(current_bounds)) =
+                                creation_manager.get_bounds(&browser_id)
+                            {
+                                let _ = child.set_bounds(tauri::Rect {
+                                    position: tauri::Position::Logical(tauri::LogicalPosition {
+                                        x: current_bounds.x,
+                                        y: current_bounds.y,
+                                    }),
+                                    size: tauri::Size::Logical(tauri::LogicalSize {
+                                        width: current_bounds.width,
+                                        height: current_bounds.height,
+                                    }),
+                                });
+                            }
+                            let is_visible =
+                                creation_manager.is_visible(&browser_id).unwrap_or(visible);
+                            if !is_visible {
+                                let _ = child.hide();
+                            } else {
+                                let _ = child.show();
+                            }
+                            Ok(())
+                        }
+                        Err(message) => {
+                            // The async side already gave up and removed the
+                            // session; never leave a shown webview behind.
+                            let _ = child.close();
+                            Err(message)
+                        }
+                    }
                 }
-                let is_visible = creation_manager.is_visible(&browser_id).unwrap_or(visible);
-                if !is_visible {
-                    let _ = child.hide();
-                } else {
-                    let _ = child.show();
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = creation_sender.send(creation_outcome);
+        });
+
+        match run_result {
+            Ok(()) => {
+                let creation_result =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), creation_receiver)
+                        .await;
+                match creation_result {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => {
+                        manager.remove_session(&state.browser_id);
+                        return Err(BrowserError::CreateFailed(error).into());
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        manager.remove_session(&state.browser_id);
+                        return Err(BrowserError::CreateFailed(
+                            "browser webview creation did not complete on the main thread".into(),
+                        )
+                        .into());
+                    }
                 }
             }
-        });
+            Err(error) => {
+                manager.remove_session(&state.browser_id);
+                return Err(BrowserError::CreateFailed(error.to_string()).into());
+            }
+        }
     }
 
     Ok(state)
@@ -1574,6 +1644,20 @@ pub async fn cmd_open_file_path(
 #[cfg(test)]
 mod tests {
     use super::cmd_open_file_path;
+
+    #[test]
+    fn keep_or_discard_fresh_webview_covers_both_branches() {
+        use super::keep_or_discard_fresh_webview;
+
+        // Session still present: keep the webview, no error.
+        assert!(keep_or_discard_fresh_webview(true).is_ok());
+
+        // Session removed by the timed-out async side: discard, with an
+        // error describing the abandoned creation.
+        let discarded = keep_or_discard_fresh_webview(false);
+        assert!(discarded.is_err());
+        assert!(discarded.unwrap_err().contains("session was abandoned"));
+    }
 
     #[tokio::test]
     async fn test_cmd_open_file_path_rejects_nonexistent_file() {

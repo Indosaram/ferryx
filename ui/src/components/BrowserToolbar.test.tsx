@@ -182,6 +182,36 @@ describe("BrowserToolbar", () => {
     });
   });
 
+  it("clamps zoom to the Settings-exposed range derived from BROWSER_ZOOM_LEVELS", async () => {
+    render(
+      <BrowserToolbar
+        tab={{ ...mockTab, zoomFactor: 0.8 }}
+        onNavigate={vi.fn()}
+        onReload={vi.fn()}
+      />
+    );
+
+    // 0.7 is below the Settings minimum (75%), so the toolbar must clamp to 0.75.
+    fireEvent.click(screen.getByLabelText("Zoom out"));
+    await waitFor(() => {
+      expect(browserNative.setBrowserZoom).toHaveBeenCalledWith("b-1", 0.75);
+    });
+
+    // A restored 250% zoom sits above the Settings maximum (200%), so zoom in clamps to 2.0.
+    cleanup();
+    render(
+      <BrowserToolbar
+        tab={{ ...mockTab, zoomFactor: 2.5 }}
+        onNavigate={vi.fn()}
+        onReload={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByLabelText("Zoom in"));
+    await waitFor(() => {
+      expect(browserNative.setBrowserZoom).toHaveBeenLastCalledWith("b-1", 2.0);
+    });
+  });
+
   it("calls focusBrowser on focus button click", async () => {
     render(
       <BrowserToolbar

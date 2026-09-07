@@ -27,8 +27,13 @@ import {
   loadBrowserHistory,
   type BrowserHistoryEntry,
 } from "../lib/browserHistory";
-import { normalizeBrowserAddress, useBrowserSettings } from "../lib/browserSettings";
+import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, useBrowserSettings } from "../lib/browserSettings";
 import type { BrowserTab } from "../lib/types";
+
+// Keep the toolbar's zoom clamps in lockstep with the Settings-exposed zoom levels
+// (BROWSER_ZOOM_LEVELS percentages), so a zoom restored by the backend stays reachable.
+const BROWSER_ZOOM_MIN = Math.min(...BROWSER_ZOOM_LEVELS) / 100;
+const BROWSER_ZOOM_MAX = Math.max(...BROWSER_ZOOM_LEVELS) / 100;
 
 interface BrowserToolbarProps {
   tab: BrowserTab;
@@ -203,7 +208,7 @@ export function BrowserToolbar({
   };
 
   const handleZoomIn = async () => {
-    const nextZoom = Math.min(2.0, Math.round((zoomFactor + 0.1) * 10) / 10);
+    const nextZoom = Math.min(BROWSER_ZOOM_MAX, Math.round((zoomFactor + 0.1) * 10) / 10);
     setZoomFactor(nextZoom);
     try {
       await setBrowserZoom(tab.browserId, nextZoom);
@@ -213,7 +218,7 @@ export function BrowserToolbar({
   };
 
   const handleZoomOut = async () => {
-    const nextZoom = Math.max(0.5, Math.round((zoomFactor - 0.1) * 10) / 10);
+    const nextZoom = Math.max(BROWSER_ZOOM_MIN, Math.round((zoomFactor - 0.1) * 10) / 10);
     setZoomFactor(nextZoom);
     try {
       await setBrowserZoom(tab.browserId, nextZoom);

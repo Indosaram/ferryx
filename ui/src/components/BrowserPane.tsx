@@ -17,6 +17,7 @@ import {
   type BrowserShortcutAction,
 } from "../lib/browserTauri";
 import { recordBrowserHistory } from "../lib/browserHistory";
+import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
 import type { BrowserTab } from "../lib/types";
@@ -119,7 +120,14 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
         zoomFactor: payload.zoomFactor,
         loadError: payload.loadError ?? null,
       }));
-      if (!payload.loading && !payload.loadError && payload.url) {
+      // Private-profile tabs are incognito: never persist their URLs or titles,
+      // even when the global "remember browsing history" setting is on.
+      if (
+        tab.profileId !== PRIVATE_BROWSER_PROFILE.id &&
+        !payload.loading &&
+        !payload.loadError &&
+        payload.url
+      ) {
         recordBrowserHistory({
           browserId: payload.browserId,
           url: payload.url,
