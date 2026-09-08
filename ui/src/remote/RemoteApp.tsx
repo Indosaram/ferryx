@@ -326,8 +326,11 @@ export const RemoteApp: React.FC = () => {
 
   useEffect(() => {
     if (!token || typeof WebSocket === "undefined") return;
-    const socket = new WebSocket(eventsSocketUrl(token));
-    socket.onmessage = (event) => {
+    let socket: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    let disposed = false;
+    const onMessage = (event: MessageEvent) => {
       const change = parseActiveSelectionEvent(event.data);
       if (!change) return;
       workspaceRefreshVersionRef.current += 1;
@@ -345,8 +348,49 @@ export const RemoteApp: React.FC = () => {
       selectionEventReceivedRef.current = true;
       if (selectionRequestAcceptedRef.current) void confirmSelection(pendingSelection);
     };
-    return () => socket.close();
-  }, [confirmSelection, token]);
+    const connect = () => {
+      if (disposed) return;
+      retry = null;
+      const current = new WebSocket(eventsSocketUrl(token));
+      socket = current;
+      current.onmessage = (event) => {
+        if (!disposed && socket === current) onMessage(event);
+      };
+      current.onopen = () => {
+        if (disposed || socket !== current) return;
+        attempt = 0;
+        workspaceRefreshVersionRef.current += 1;
+        const pendingSelection = pendingSelectionRef.current;
+        if (pendingSelection) void confirmSelection(pendingSelection);
+        else void refreshWorkspace();
+      };
+      current.onclose = () => {
+        if (disposed || socket !== current) return;
+        socket = null;
+        retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt));
+        attempt = Math.min(attempt + 1, 4);
+      };
+    };
+    const recover = () => {
+      if (document.visibilityState === "hidden") return;
+      if (!socket) {
+        if (retry !== null) clearTimeout(retry);
+        connect();
+      } else {
+        void refreshWorkspace();
+      }
+    };
+    connect();
+    window.addEventListener("online", recover);
+    document.addEventListener("visibilitychange", recover);
+    return () => {
+      disposed = true;
+      if (retry !== null) clearTimeout(retry);
+      socket?.close();
+      window.removeEventListener("online", recover);
+      document.removeEventListener("visibilitychange", recover);
+    };
+  }, [clearPendingSelection, confirmSelection, refreshWorkspace, token]);
 
   // A desktop that never republishes a matching selection (stale listener,
   // closed window) must not strand the picker: every chip is disabled while a
