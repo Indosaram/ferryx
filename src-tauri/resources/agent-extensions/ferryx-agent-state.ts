@@ -9,10 +9,13 @@ import net from "node:net";
 const AGENT_ID = "omo";
 
 const socketPath = process.env.FERRYX_AGENT_STATE_SOCKET;
+const statePort = Number(process.env.FERRYX_AGENT_STATE_PORT);
+const stateToken = process.env.FERRYX_AGENT_STATE_TOKEN;
+const tcpEnabled = Number.isInteger(statePort) && statePort > 0 && statePort <= 65535 && !!stateToken;
 const sessionId = process.env.FERRYX_SESSION_ID;
 
 function enabled() {
-  return !!socketPath && !!sessionId;
+  return (!!socketPath || tcpEnabled) && !!sessionId;
 }
 
 type AgentState = "idle" | "working" | "blocked";
@@ -35,7 +38,7 @@ function providerSessionFromContext(ctx): unknown {
 
 function send(state: AgentState, providerSession?: unknown): void {
   if (!enabled()) return;
-  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: AGENT_ID, providerSession })}\n`;
+  const payload = `${JSON.stringify({ type: "agentState", sessionId, state, agent: AGENT_ID, providerSession, token: tcpEnabled ? stateToken : undefined })}\n`;
   sendChain = sendChain.then(
     () =>
       new Promise<void>((resolve) => {
@@ -46,7 +49,9 @@ function send(state: AgentState, providerSession?: unknown): void {
           socket.destroy();
           resolve();
         };
-        const socket = net.createConnection(socketPath as string);
+        const socket = tcpEnabled
+          ? net.createConnection({ host: "127.0.0.1", port: statePort })
+          : net.createConnection(socketPath as string);
         socket.setTimeout(1000);
         socket.on("connect", () => socket.write(payload, () => done()));
         socket.on("timeout", done);

@@ -62,7 +62,7 @@ pub fn ssh_plan(
     let mut args = super::exec::interactive_argv(host);
     args.remove(0);
     if !interactive {
-        args.remove(0);
+        args[0] = "-T".into();
     }
     // These precede user config and prevent prompts, forwarding, or connection reuse.
     let mut options = vec![
@@ -161,10 +161,8 @@ pub fn install_remote_extension_script() -> String {
 }
 
 pub async fn ensure_remote_extension_installed(host: &SshHost) -> Result<(), IpcError> {
-    let script = install_remote_extension_script();
-    let plan = ssh_plan(host, script, false)?;
-    let _ = bounded_output(&plan, Duration::from_secs(8)).await?;
-    Ok(())
+    let environment = super::runtime::detect(host).await?;
+    super::operations::prepare_integration(host, &environment).await
 }
 
 pub fn upload_temp_command(file_name: &str) -> Result<String, IpcError> {
@@ -192,14 +190,8 @@ pub async fn upload_temp_file(
     file_name: &str,
     bytes: Vec<u8>,
 ) -> Result<String, IpcError> {
-    let plan = ssh_plan(host, upload_temp_command(file_name)?, false)?;
-    let stdout = bounded_output_with_stdin(&plan, Duration::from_secs(60), bytes).await?;
-    let path = String::from_utf8(stdout)
-        .map_err(|_| invalid("Remote attachment path is not UTF-8"))?
-        .trim()
-        .to_string();
-    validate_remote_path(&path)?;
-    Ok(path)
+    let environment = super::runtime::detect(host).await?;
+    super::operations::upload(host, &environment, file_name, bytes).await
 }
 
 pub fn probe_command(path: &str) -> Result<String, IpcError> {
@@ -238,9 +230,8 @@ pub fn parse_probe(bytes: &[u8]) -> Result<(String, Option<String>, Option<Strin
 }
 
 pub async fn probe(host: &SshHost, path: &str) -> Result<(String, Option<String>, Option<String>), IpcError> {
-    let plan = ssh_plan(host, probe_command(path)?, false)?;
-    let output = bounded_output(&plan, Duration::from_secs(8)).await?;
-    parse_probe(&output)
+    let environment = super::runtime::detect(host).await?;
+    super::operations::probe(host, &environment, path).await
 }
 
 fn spawn_child(
@@ -314,13 +305,23 @@ async fn collect_output(
             return if status.success() {
                 Ok(stdout)
             } else {
-                Err(invalid(&format!(
-                    "SSH validation failed: {}",
-                    String::from_utf8_lossy(&stderr).trim()
-                )))
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                let text = std::str::from_utf8(&stderr).ok();
+                Err(IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("SSH command failed (exit {}): {}",
+                        status.code().map_or_else(|| "signal".into(), |code| code.to_string()),
+                        text.map(str::trim).unwrap_or("Remote diagnostic is not UTF-8; raw bytes are available in details")),
+                ).with_details(serde_json::json!({
+                    "stage": "execution",
+                    "exitCode": status.code(),
+                    "stderr": text,
+                    "stderrBase64": STANDARD.encode(&stderr),
+                    "encoding": if text.is_some() { "utf-8" } else { "unknown" }
+                })))
             };
         }
-        Err(_) => invalid("SSH directory probe timed out after its bounded deadline"),
+        Err(_) => super::runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out"),
         Ok(Err(error)) => IpcError::new(
             IpcErrorCode::IoError,
             format!("SSH probe output failed: {error}"),

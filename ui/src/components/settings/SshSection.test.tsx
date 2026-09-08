@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resetSshHostsCache, type SshHost, type SshTargetSummary } from "../../lib/sshHosts";
+import { resetSshHostsCache, updateSshHost, type SshHost, type SshTargetSummary } from "../../lib/sshHosts";
 import { SshSection } from "./SshSection";
 
 const invokeMock = vi.fn();
@@ -61,6 +61,27 @@ describe("SshSection Settings Component", () => {
 
   afterEach(cleanup);
 
+
+  it("shows the detected runtime and prepares integration only on explicit action", async () => {
+    const environment = { platform: "windows", executor: "powershell", version: "5.1", home: "C:\\Users\\qa", temp: "C:\\Temp", git: false };
+    invokeMock.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "cmd_ssh_list_hosts": return [mockHost1];
+        case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
+        case "cmd_ssh_test_connection": return { host: mockHost1, reachable: true, checkedAt: 1, environment };
+        case "cmd_ssh_prepare_integration": return undefined;
+        default: throw new Error(`Unexpected command ${command}`);
+      }
+    });
+    await act(async () => { render(<SshSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
+    expect(screen.getByTestId("ssh-runtime-host-1")).toHaveAttribute("data-platform", "windows");
+    expect(screen.getByTestId("ssh-runtime-host-1")).toHaveAttribute("data-git", "false");
+    expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_prepare_integration", expect.anything());
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Prepare agent integration on Dev Server" })); });
+    expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_prepare_integration", { host: mockHost1 });
+  });
+
   it("renders empty state when no SSH machines are configured", async () => {
     const listDef = deferred<SshHost[]>();
     invokeMock.mockReturnValueOnce(listDef.promise);
@@ -77,6 +98,72 @@ describe("SshSection Settings Component", () => {
     expect(screen.getByText("No SSH machines configured")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Add Machine" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Import Config" })).toHaveLength(1);
+  });
+
+  it("disables connection tests and integration preparation while editing", async () => {
+    const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_list_hosts") return [mockHost1];
+      if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment };
+      if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+      throw new Error(`Unexpected command ${command}`);
+    });
+    await act(async () => { render(<SshSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
+    fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+    expect(screen.getByRole("button", { name: "Test connection to Dev Server" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Prepare agent integration on Dev Server" })).toBeDisabled();
+  });
+
+  it.each(["success", "failure"] as const)("ignores a late connection %s after the host configuration changes", async (outcome) => {
+    const pending = deferred<SshTargetSummary>();
+    let current = mockHost1;
+    invokeMock.mockImplementation(async (command: string, args?: { host?: SshHost }) => {
+      if (command === "cmd_ssh_list_hosts") return [current];
+      if (command === "cmd_ssh_test_connection") return pending.promise;
+      if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+      if (command === "cmd_ssh_update_host" && args?.host) {
+        current = args.host;
+        return [current];
+      }
+      throw new Error(`Unexpected command ${command}`);
+    });
+    await act(async () => { render(<SshSection />); });
+    fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" }));
+    await act(async () => { await updateSshHost({ ...mockHost1, hostname: "replacement.internal" }); });
+    await act(async () => {
+      if (outcome === "success") pending.resolve({ host: mockHost1, reachable: true, checkedAt: 1 });
+      else pending.reject({ code: "IO_ERROR", message: "Old host unreachable" });
+    });
+    expect(current.hostname).toBe("replacement.internal");
+    expect(screen.queryByTestId("ssh-test-success-host-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ssh-test-error-host-1")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test connection to Dev Server" })).toBeEnabled();
+  });
+
+  it.each(["success", "failure"] as const)("ignores a late integration %s after the host configuration changes", async (outcome) => {
+    const pending = deferred<void>();
+    const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+    let current = mockHost1;
+    invokeMock.mockImplementation(async (command: string, args?: { host?: SshHost }) => {
+      if (command === "cmd_ssh_list_hosts") return [current];
+      if (command === "cmd_ssh_test_connection") return { host: current, reachable: true, checkedAt: 1, environment };
+      if (command === "cmd_ssh_prepare_integration") return pending.promise;
+      if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+      if (command === "cmd_ssh_update_host" && args?.host) { current = args.host; return [current]; }
+      throw new Error(`Unexpected command ${command}`);
+    });
+    await act(async () => { render(<SshSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
+    fireEvent.click(screen.getByRole("button", { name: "Prepare agent integration on Dev Server" }));
+    await act(async () => { await updateSshHost({ ...mockHost1, hostname: "replacement.internal" }); });
+    await act(async () => {
+      if (outcome === "success") pending.resolve();
+      else pending.reject({ code: "IO_ERROR", message: "Old integration failed" });
+    });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" })); });
+    expect(screen.getByRole("button", { name: "Prepare agent integration on Dev Server" })).toHaveTextContent("Prepare agent integration");
+    expect(screen.queryByText("Old integration failed")).not.toBeInTheDocument();
   });
 
   it("renders mounted inventory with badges, endpoints, and status", async () => {

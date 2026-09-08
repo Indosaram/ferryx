@@ -17,6 +17,13 @@ fn host() -> SshHost {
 }
 
 #[test]
+fn automated_commands_disable_tty_even_when_ssh_config_requests_one() {
+    let plan = ssh_plan(&host(), "echo probe".into(), false).unwrap();
+    assert!(plan.args.iter().any(|arg| arg == "-T"));
+    assert!(!plan.args.iter().any(|arg| arg == "-tt"));
+}
+
+#[test]
 fn startup_plan_honors_saved_options_and_quotes_remote_root() {
     let plan = shell_plan(&host(), "/srv/project's space").expect("plan");
     assert_eq!(plan.program, "ssh");
@@ -197,7 +204,7 @@ async fn failed_probe_reports_exit_and_caps_output() {
             .await
             .unwrap_err()
             .code,
-        IpcErrorCode::InvalidPath
+        IpcErrorCode::IoError
     );
     let plan = ShellCommandPlan {
         program: "/usr/bin/yes".into(),
@@ -240,7 +247,7 @@ async fn deadline_terminates_and_reaps_probe() {
             .await
             .unwrap_err()
             .code,
-        IpcErrorCode::InvalidPath
+        IpcErrorCode::IoError
     );
     let output = std::process::Command::new("ps")
         .args(["-p", &pid, "-o", "pid="])

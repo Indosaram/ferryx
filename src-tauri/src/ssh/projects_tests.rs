@@ -40,6 +40,7 @@ pub(crate) fn project(host: &SshHost, root: &str) -> RemoteProject {
         repo_root: root.into(),
         git_root: None,
         git_remote: None,
+        platform: None,
     }
 }
 
@@ -188,7 +189,7 @@ async fn connection_failure_does_not_register_or_fall_back_to_existing_local_dir
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, IpcErrorCode::InvalidPath);
+    assert_eq!(error.code, IpcErrorCode::IoError);
     assert!(!store_path(&path).exists());
 }
 

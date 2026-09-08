@@ -1,7 +1,10 @@
 pub mod config;
 pub mod direct;
 pub mod exec;
+pub mod operations;
 pub mod projects;
+pub mod runtime;
+pub mod state_bridge;
 pub mod worktree;
 
 use serde::{Deserialize, Serialize};

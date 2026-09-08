@@ -12,6 +12,8 @@ pub struct SshTargetSummary {
     pub reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    pub environment: Option<crate::ssh::runtime::RemoteEnvironment>,
+    pub diagnostic: Option<IpcError>,
     pub checked_at: u64,
 }
 
@@ -251,21 +253,25 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_ssh_test_connection(host: SshHost) -> Result<SshTargetSummary, IpcError> {
-    let plan = crate::ssh::direct::ssh_plan(&host, "true".into(), false)?;
-    let result = crate::ssh::direct::bounded_output(&plan, std::time::Duration::from_secs(8)).await;
+    let result = crate::ssh::runtime::detect(&host).await;
     let reachable = result.is_ok();
-    if reachable {
-        let host_for_install = host.clone();
-        tokio::spawn(async move {
-            let _ = crate::ssh::direct::ensure_remote_extension_installed(&host_for_install).await;
-        });
-    }
+    let (environment, diagnostic) = match result {
+        Ok(environment) => (Some(environment), None),
+        Err(error) => (None, Some(error)),
+    };
     Ok(SshTargetSummary {
         host,
         reachable,
-        last_error: result.err().map(|e| e.message),
+        last_error: diagnostic.as_ref().map(|e| e.message.clone()),
+        environment,
+        diagnostic,
         checked_at: now_millis(),
     })
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_prepare_integration(host: SshHost) -> Result<(), IpcError> {
+    crate::ssh::direct::ensure_remote_extension_installed(&host).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

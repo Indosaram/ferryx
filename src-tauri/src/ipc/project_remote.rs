@@ -1,6 +1,6 @@
 use crate::daemon::DaemonClient;
 use crate::ipc::{run_blocking, IpcError};
-use crate::ssh::{direct, projects};
+use crate::ssh::projects;
 use crate::worktree::WorkspaceRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -45,20 +45,18 @@ pub async fn register_remote_project(
     if !projects::is_remote(&request.workspace_id) {
         WorkspaceRegistry::validate_workspace_id(&request.workspace_id).map_err(IpcError::from)?;
     }
-    direct::validate_remote_path(&request.repo_path)?;
     let lookup = host_store.clone();
     let host = run_blocking(move || projects::enabled_host(&lookup, &request.host_id)).await?;
-    let (repo_root, git_root, git_remote) = direct::probe(&host, &request.repo_path).await?;
-    let host_for_install = host.clone();
-    tokio::spawn(async move {
-        let _ = direct::ensure_remote_extension_installed(&host_for_install).await;
-    });
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    let (repo_root, git_root, git_remote) =
+        crate::ssh::operations::probe(&host, &environment, &request.repo_path).await?;
     let project = projects::RemoteProject {
         workspace_id: projects::identity(&host.id, &repo_root),
         host_id: host.id.clone(),
         repo_root,
         git_root,
         git_remote,
+        platform: Some(environment.platform),
     };
     let probed_host = host.clone();
     let project = run_blocking(move || {

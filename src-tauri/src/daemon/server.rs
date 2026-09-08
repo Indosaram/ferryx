@@ -971,7 +971,6 @@ impl DaemonServer {
         &self.remote_state
     }
 
-    #[cfg(unix)]
     /// Parses one newline-delimited extension report, rejecting states the UI cannot render.
     fn parse_agent_state_report(
         line: &str,
@@ -1989,15 +1988,43 @@ impl DaemonServer {
         }
 
         let (session_id, mut lifecycle_rx, resolved_cwd) = if let Some((project, host)) = remote {
+            let environment = crate::ssh::runtime::detect(&host).await
+                .map_err(|e| SpawnError::Other(e.to_string()))?;
+            if project.platform.unwrap_or(crate::ssh::runtime::RemotePlatform::Posix) != environment.platform {
+                return Err(SpawnError::Other("Remote platform changed; register the project again".into()));
+            }
+            let bridge = match environment.platform {
+                crate::ssh::runtime::RemotePlatform::Posix => None,
+                crate::ssh::runtime::RemotePlatform::Windows => {
+                    match crate::ssh::state_bridge::StateBridge::start(&host, &environment).await {
+                        Ok(bridge) => Some(bridge),
+                        Err(error) => {
+                            tracing::warn!(%error, "SSH terminal will run without agent state integration");
+                            None
+                        }
+                    }
+                }
+            };
+            let endpoint = bridge.as_ref().map(|bridge| bridge.endpoint.clone());
             let service = self.terminal_service.clone();
             let root = project.repo_root.clone();
             let (id, rx) = crate::ipc::run_blocking(move || {
                 service
-                    .spawn_ssh(&host, &root, cols, rows)
+                    .spawn_ssh(&host, &environment, &root, cols, rows, endpoint.as_ref())
                     .map_err(crate::ipc::IpcError::from)
             })
             .await
             .map_err(|e| SpawnError::Other(e.to_string()))?;
+            if let Some(bridge) = bridge {
+                let lifecycle = rx.resubscribe();
+                let session_id = id.clone();
+                let tx = self.agent_state_tx.clone();
+                tokio::spawn(bridge.follow(session_id, lifecycle, move |line| {
+                    if let Some(report) = Self::parse_agent_state_report(line) {
+                        let _ = tx.send(report);
+                    }
+                }));
+            }
             (id, rx, PathBuf::from(project.repo_root))
         } else {
             // Resolve manager from workspace registry; workspace MUST be registered.

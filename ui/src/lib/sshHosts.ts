@@ -19,11 +19,22 @@ export interface SshHost {
   disabled?: boolean | null;
 }
 
+export interface SshRemoteEnvironment {
+  platform: "posix" | "windows";
+  executor: "sh" | "powershell" | "pwsh";
+  version: string;
+  home: string;
+  temp: string;
+  git: boolean;
+}
+
 export interface SshTargetSummary {
   host: SshHost;
   reachable: boolean;
   lastError?: string | null;
   checkedAt: number;
+  environment?: SshRemoteEnvironment | null;
+  diagnostic?: { code: string; message: string; details?: { stage?: string } } | null;
 }
 
 export interface SystemSshConfig {
@@ -221,6 +232,10 @@ export async function deleteSshHost(id: string): Promise<SshHost[]> {
 export async function testSshConnection(host: SshHost): Promise<SshTargetSummary> {
   const cleaned = cleanHostForIpc(host);
   return invoke<SshTargetSummary>("cmd_ssh_test_connection", { host: cleaned });
+}
+
+export async function prepareSshIntegration(host: SshHost): Promise<void> {
+  return invoke<void>("cmd_ssh_prepare_integration", { host: cleanHostForIpc(host) });
 }
 
 export interface UseSshHostsResult {

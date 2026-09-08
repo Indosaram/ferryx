@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   AlertCircle,
   Check,
@@ -24,6 +24,7 @@ import {
   formatSshTarget,
   getSshConfigPathOverride,
   importSshConfig,
+  prepareSshIntegration,
   readSystemSshConfig,
   setSshConfigPathOverride,
   testSshConnection,
@@ -31,6 +32,7 @@ import {
   useSshHosts,
   type SshAuthMethod,
   type SshHost,
+  type SshRemoteEnvironment,
   type SystemSshConfig,
 } from "../../lib/sshHosts";
 import { Alert, AlertDescription } from "../ui/alert";
@@ -73,10 +75,20 @@ interface TestState {
   testing: boolean;
   reachable?: boolean;
   error?: string | null;
+  environment?: SshRemoteEnvironment | null;
+  stage?: string;
+}
+
+function sameConnection(left: SshHost, right: SshHost): boolean {
+  return left.id === right.id && left.hostname === right.hostname &&
+    left.username === right.username && left.port === right.port &&
+    left.identityFile === right.identityFile && left.jumpHost === right.jumpHost &&
+    left.authMethod === right.authMethod && left.disabled === right.disabled;
 }
 
 export function SshSection() {
   const { hosts, loading, error: loadError } = useSshHosts();
+  const hostsRef = useRef(hosts);
 
   const [isAdding, setIsAdding] = useState(false);
   const [editingHost, setEditingHost] = useState<SshHost | null>(null);
@@ -103,7 +115,26 @@ export function SshSection() {
 
   const [busyHostId, setBusyHostId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestState>>({});
+  const [preparedHosts, setPreparedHosts] = useState<Record<string, boolean>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stale = hostsRef.current.filter((previous) => !hosts.some((host) => sameConnection(previous, host)));
+    hostsRef.current = hosts;
+    if (stale.length === 0) return;
+    setTestResults((previous) => {
+      const next = { ...previous };
+      for (const host of stale) delete next[host.id];
+      return next;
+    });
+    setPreparedHosts((previous) => {
+      const next = { ...previous };
+      for (const host of stale) delete next[host.id];
+      return next;
+    });
+  }, [hosts]);
+
+  const isCurrentHost = (host: SshHost) => hostsRef.current.some((current) => sameConnection(current, host));
 
   const fetchSystemConfig = async (configPath: string | null = configPathOverride) => {
     setLoadingSystemConfig(true);
@@ -244,6 +275,12 @@ export function SshSection() {
 
     try {
       await updateSshHost(newHost);
+      setTestResults((previous) => {
+        const next = { ...previous };
+        delete next[newHost.id];
+        return next;
+      });
+      setPreparedHosts((previous) => ({ ...previous, [newHost.id]: false }));
       handleCancelForm();
     } catch (err) {
       setFormError(extractIpcErrorMessage(err, "Failed to save SSH machine."));
@@ -328,7 +365,7 @@ export function SshSection() {
   };
 
   const handleTestHost = async (host: SshHost) => {
-    if (testResults[host.id]?.testing) return;
+    if (isFormOpen || testResults[host.id]?.testing) return;
     setTestResults((prev) => ({
       ...prev,
       [host.id]: { testing: true },
@@ -336,15 +373,19 @@ export function SshSection() {
 
     try {
       const summary = await testSshConnection(host);
+      if (!isCurrentHost(host)) return;
       setTestResults((prev) => ({
         ...prev,
         [host.id]: {
           testing: false,
           reachable: summary.reachable,
           error: summary.lastError,
+          environment: summary.environment,
+          stage: summary.diagnostic?.details?.stage,
         },
       }));
     } catch (err) {
+      if (!isCurrentHost(host)) return;
       setTestResults((prev) => ({
         ...prev,
         [host.id]: {
@@ -353,6 +394,22 @@ export function SshSection() {
           error: extractIpcErrorMessage(err, "Connection test failed."),
         },
       }));
+    }
+  };
+
+  const handlePrepareIntegration = async (host: SshHost) => {
+    if (isFormOpen || busyHostId) return;
+    setBusyHostId(host.id);
+    setActionError(null);
+    try {
+      await prepareSshIntegration(host);
+      if (!isCurrentHost(host)) return;
+      setPreparedHosts((previous) => ({ ...previous, [host.id]: true }));
+    } catch (error) {
+      if (!isCurrentHost(host)) return;
+      setActionError(extractIpcErrorMessage(error, "Agent integration preparation failed."));
+    } finally {
+      setBusyHostId(null);
     }
   };
 
@@ -917,9 +974,30 @@ export function SshSection() {
                             className="text-[11px] text-destructive flex items-center gap-1"
                           >
                             <AlertCircle className="size-3 shrink-0" />
-                            <span>Failed: {test.error ?? "Connection failed"}</span>
+                            <span>Failed{test.stage ? ` (${test.stage})` : ""}: {test.error ?? "Connection failed"}</span>
                           </div>
                         )}
+                      </div>
+                    ) : null}
+                    {test?.environment ? (
+                      <div
+                        data-testid={`ssh-runtime-${host.id}`}
+                        data-platform={test.environment.platform}
+                        data-git={String(test.environment.git)}
+                        className="text-[11px] text-muted-foreground space-y-1"
+                      >
+                        <div>{test.environment.platform === "windows" ? "Windows" : "POSIX"} · {test.environment.executor} {test.environment.version} · {test.environment.git ? "Git available" : "Git not installed"}</div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={isBusy || test.testing || !!host.disabled || isFormOpen}
+                          onClick={() => handlePrepareIntegration(host)}
+                          aria-label={`Prepare agent integration on ${host.label}`}
+                        >
+                          {isBusy ? "Preparing…" : preparedHosts[host.id] ? "Reinstall agent integration" : "Prepare agent integration"}
+                        </Button>
+                        <div>{preparedHosts[host.id] ? "Extension installed. Open a new remote agent session to use it." : "Optional: installs the Ferryx state extension in remote agent folders."}</div>
                       </div>
                     ) : null}
                   </div>
@@ -930,7 +1008,7 @@ export function SshSection() {
                         id={`ssh-toggle-${host.id}`}
                         checked={!host.disabled}
                         onCheckedChange={(checked) => handleToggleDisabled(host, !checked)}
-                        disabled={isBusy}
+                        disabled={isBusy || test?.testing}
                         aria-label={`Enable ${host.label}`}
                       />
                     </div>
@@ -939,7 +1017,7 @@ export function SshSection() {
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={test?.testing || isBusy}
+                      disabled={test?.testing || isBusy || isFormOpen}
                       onClick={() => handleTestHost(host)}
                       aria-label={`Test connection to ${host.label}`}
                     >
@@ -950,7 +1028,7 @@ export function SshSection() {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      disabled={isBusy || isFormOpen}
+                      disabled={isBusy || test?.testing || isFormOpen}
                       onClick={() => handleStartEdit(host)}
                       aria-label={`Edit ${host.label}`}
                     >
@@ -961,7 +1039,7 @@ export function SshSection() {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      disabled={isBusy}
+                      disabled={isBusy || test?.testing}
                       onClick={() => handleDeleteHost(host.id)}
                       className="text-destructive hover:text-destructive hover:bg-destructive/10"
                       aria-label={`Delete ${host.label}`}

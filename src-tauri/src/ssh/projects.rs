@@ -19,6 +19,8 @@ pub struct RemoteProject {
     pub git_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<super::runtime::RemotePlatform>,
 }
 
 pub fn is_remote(id: &str) -> bool {
@@ -105,7 +107,8 @@ pub fn resolve(
             "Remote project identity does not match its stored location",
         ));
     }
-    direct::validate_remote_path(&project.repo_root)?;
+    project.platform.unwrap_or(super::runtime::RemotePlatform::Posix)
+        .validate_path(&project.repo_root)?;
     let host = enabled_host(host_store, &project.host_id)?;
     Ok((project.clone(), host))
 }
