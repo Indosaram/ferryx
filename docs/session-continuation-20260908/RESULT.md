@@ -2,6 +2,8 @@
 
 The three requested implementations are committed. Browser component behavior, frontend compilation and real Windows/Linux SSH browsing were verified. Native desktop compositor pixels were not verified, and the final related test union retains two failures caused by unrelated, concurrently changed project-grouping fixtures.
 
+Other sessions have not been confirmed stopped. These results describe the recorded verification runs and the scoped commits below, not a permanently green gate for the entire shared worktree. The requested source/test/evidence files had no additional uncommitted changes at the final ownership audit; mixed files still contain the explicitly excluded foreign hunks.
+
 ## Delivered behavior
 
 - **Empty sidebar worktrees:** closing the final terminal or browser tab collapses the group. Clicking the empty title or chevron cannot expand it or toggle hidden collapse state. Adding a tab clears the stale empty-group collapse and restores normal expansion, including parked workspaces.
