@@ -2308,12 +2308,6 @@ export function NativeTerminalPane({
         ) : null}
       </div>
       {error ? (
-        <>
-        <div
-          data-testid="native-terminal-error-backing"
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 bg-terminal"
-        />
         <button
           type="button"
           role="alert"

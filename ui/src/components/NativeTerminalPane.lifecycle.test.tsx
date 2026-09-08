@@ -215,9 +215,10 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     // When: the user requests recovery without changing the pane geometry.
     await act(async () => { fireEvent.click(view.getByRole("alert")); });
 
-    // Then: the cache cannot suppress reattachment, and the backing stays until presentation.
+    // Then: recovery stays actionable without covering the last terminal frame.
     expect(attachments).toBe(2);
-    expect(view.getByTestId("native-terminal-error-backing")).toBeInTheDocument();
+    expect(view.getByRole("alert")).toBeInTheDocument();
+    expect(view.queryByTestId("native-terminal-error-backing")).toBeNull();
     await act(async () => { recoveredBounds.resolve(PRESENTED); });
     expect(view.queryByRole("alert")).toBeNull();
     expect(view.queryByTestId("native-terminal-error-backing")).toBeNull();
