@@ -566,16 +566,19 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
     let mut updates = state.subscribe_session_update(&session_id).map_err(IpcError::from)?;
     let mut detached = state.subscribe_session_detach(&session_id).map_err(IpcError::from)?;
+    let mut initial_request = Some(request);
     loop {
         let state_inner = state.inner().clone();
         let surface_window = window.clone();
         let (sender, receiver) = oneshot::channel();
         let session_id_clone = session_id.clone();
-        let request = request.clone();
+        let request = initial_request.take();
         window
             .run_on_main_thread(move || {
-                let result = state_inner
-                    .render(&surface_window, request)
+                let result = match request {
+                    Some(request) => state_inner.render(&surface_window, request),
+                    None => state_inner.render_current(&surface_window, &session_id_clone),
+                }
                     .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
                     .map_err(IpcError::from);
                 let _ = sender.send(result);

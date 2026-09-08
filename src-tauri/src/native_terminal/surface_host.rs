@@ -1899,13 +1899,32 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
         focused: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        self.render_current_with_focus(window, session_id, Some(focused))
+    }
+
+    pub fn render_current<R: Runtime>(
+        &self,
+        window: &WebviewWindow<R>,
+        session_id: &str,
+    ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        self.render_current_with_focus(window, session_id, None)
+    }
+
+    fn render_current_with_focus<R: Runtime>(
+        &self,
+        window: &WebviewWindow<R>,
+        session_id: &str,
+        focused: Option<bool>,
+    ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         let mut hosts = self.lock_attached_hosts(session_id)?;
         let (layout, logical_bounds, cell_metrics, render_input) = {
             let mut sessions = self.sessions.lock();
             let session = sessions
                 .get_mut(session_id)
                 .ok_or(NativeTerminalError::NoValue)?;
-            session.focused = focused;
+            if let Some(focused) = focused {
+                session.focused = focused;
+            }
             let layout = session.layout.ok_or(NativeTerminalError::NoValue)?;
             let logical_bounds = session.logical_bounds.ok_or(NativeTerminalError::NoValue)?;
             let cell_metrics = session.cell_metrics.ok_or(NativeTerminalError::NoValue)?;
@@ -2603,6 +2622,67 @@ mod tests {
         assert!(receipt.presented);
         assert!(!receipt.render_deferred);
         assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+    }
+
+    #[tokio::test]
+    async fn deferred_bounds_retry_does_not_restore_obsolete_width() {
+        let harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Frame,
+            SimulatedAcquisition::Frame,
+            SimulatedAcquisition::Frame,
+        ]);
+        harness._app.manage(harness.state.clone());
+        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
+        harness.state.render(&harness.window, harness.request.clone()).unwrap();
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&resizes);
+        assert!(harness.state.set_pty_resize_sink_if_absent(Arc::new(move |_, cols, rows| {
+            recorded.lock().push((cols, rows));
+        })));
+        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
+            terminal.feed_str("\x1b[?2026hpartial")
+        }).unwrap();
+        let mut old_command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            harness._app.handle().clone(),
+            harness._app.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: 0.0, y: 0.0, width: 640.0, height: 480.0,
+            },
+            1.0,
+        ));
+        assert!(futures_util::poll!(old_command.as_mut()).is_pending());
+
+        let mut updates = harness.state.subscribe_session_update(&harness.request.session_id).unwrap();
+        harness._output.send(DaemonStreamMessage::Output {
+            session_id: harness.request.session_id.clone().into(),
+            sequence: 2,
+            data: b"\rcomplete\x1b[?2026l".to_vec().into(),
+            metrics_read_unix_micros: None,
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed())
+            .await.unwrap().unwrap();
+        let latest = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            harness._app.handle().clone(),
+            harness._app.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: 0.0, y: 0.0, width: 900.0, height: 480.0,
+            },
+            1.0,
+        ).await.unwrap();
+        assert!(latest.presented);
+        let old_receipt = tokio::time::timeout(std::time::Duration::from_secs(5), old_command)
+            .await.unwrap().unwrap();
+
+        assert!(old_receipt.presented);
+        assert_eq!(harness.state.session_logical_bounds(&harness.request.session_id).unwrap().width, 900.0);
+        assert_eq!(harness.state.hosts.lock().get(&harness.request.session_id)
+            .unwrap().logical_bounds.unwrap().width, 900.0);
+        assert_eq!(harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
+            terminal.dimensions()
+        }).unwrap(), (latest.cols, latest.rows));
+        assert_eq!(resizes.lock().last().copied(), Some((latest.cols, latest.rows)));
     }
 
     #[tokio::test]
