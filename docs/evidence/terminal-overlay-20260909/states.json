@@ -1,0 +1,171 @@
+{
+  "surface": "Real React components and CSS, simulated native frames, isolated WebKit",
+  "viewport": {
+    "width": 1280,
+    "height": 850
+  },
+  "states": [
+    {
+      "name": "01-live-and-cold",
+      "panes": [
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "false",
+          "input": "false",
+          "background": "rgb(40, 44, 52)"
+        }
+      ],
+      "frames": [
+        "backend-a",
+        "backend-b"
+      ],
+      "detaches": 0,
+      "dialogs": 0,
+      "errors": []
+    },
+    {
+      "name": "02-dag-open",
+      "panes": [
+        {
+          "presented": "true",
+          "input": "false",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "true",
+          "input": "false",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "false",
+          "input": "false",
+          "background": "rgb(40, 44, 52)"
+        }
+      ],
+      "frames": [
+        "backend-a",
+        "backend-b"
+      ],
+      "detaches": 0,
+      "dialogs": 1,
+      "errors": []
+    },
+    {
+      "name": "03-dag-closed",
+      "panes": [
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "false",
+          "input": "false",
+          "background": "rgb(40, 44, 52)"
+        }
+      ],
+      "frames": [
+        "backend-a",
+        "backend-b"
+      ],
+      "detaches": 0,
+      "dialogs": 0,
+      "errors": []
+    },
+    {
+      "name": "04-disconnected",
+      "panes": [
+        {
+          "presented": "true",
+          "input": "false",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "false",
+          "input": "false",
+          "background": "rgb(40, 44, 52)"
+        }
+      ],
+      "frames": [
+        "backend-a",
+        "backend-b"
+      ],
+      "detaches": 0,
+      "dialogs": 0,
+      "errors": []
+    },
+    {
+      "name": "05-reconnected",
+      "panes": [
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "false",
+          "input": "false",
+          "background": "rgb(40, 44, 52)"
+        }
+      ],
+      "frames": [
+        "backend-b",
+        "backend-reconnected"
+      ],
+      "detaches": 1,
+      "dialogs": 0,
+      "errors": []
+    },
+    {
+      "name": "06-moved",
+      "panes": [
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "true",
+          "input": "true",
+          "background": "rgba(0, 0, 0, 0)"
+        },
+        {
+          "presented": "false",
+          "input": "false",
+          "background": "rgb(40, 44, 52)"
+        }
+      ],
+      "frames": [
+        "backend-b",
+        "backend-reconnected"
+      ],
+      "detaches": 1,
+      "dialogs": 0,
+      "errors": []
+    }
+  ]
+}

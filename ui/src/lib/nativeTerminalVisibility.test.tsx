@@ -1,5 +1,10 @@
 import { act, renderHook } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isMacShortcutPlatform } from "./shortcuts";
+
+vi.mock("./shortcuts", () => ({
+  isMacShortcutPlatform: vi.fn(() => false),
+}));
 
 import {
   NativeTerminalVisibilityProvider,
@@ -15,6 +20,10 @@ import {
  * renderHook, so the subscription exists before any mutation is emitted.
  */
 describe("useNativeTerminalVisibility", () => {
+  beforeEach(() => {
+    vi.mocked(isMacShortcutPlatform).mockReturnValue(false);
+  });
+
   afterEach(() => {
     document.body.innerHTML = "";
   });
@@ -22,6 +31,30 @@ describe("useNativeTerminalVisibility", () => {
   it("returns true when no dialog is mounted", () => {
     const { result } = renderHook(() => useNativeTerminalVisibility());
     expect(result.current).toBe(true);
+  });
+
+  it.each(["dialog", "search"])("keeps macOS terminal visible behind a %s overlay", async (role) => {
+    vi.mocked(isMacShortcutPlatform).mockReturnValue(true);
+    const { result } = renderHook(() => useNativeTerminalVisibility());
+    const overlay = document.createElement("div");
+    overlay.setAttribute("role", role);
+
+    await act(async () => {
+      document.body.appendChild(overlay);
+    });
+
+    expect(result.current).toBe(true);
+  });
+
+  it("still hides an explicitly hidden macOS owner", () => {
+    vi.mocked(isMacShortcutPlatform).mockReturnValue(true);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <NativeTerminalVisibilityProvider visible={false}>
+        {children}
+      </NativeTerminalVisibilityProvider>
+    );
+    const { result } = renderHook(() => useNativeTerminalVisibility(), { wrapper });
+    expect(result.current).toBe(false);
   });
 
   it("yields surface (returns false) when a standard modal dialog mounts", async () => {

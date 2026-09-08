@@ -25,7 +25,7 @@ import {
   setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame,
 } from "../lib/tauri";
-import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
+import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { isRemoteWorkspaceId, pasteClipboardImageToRemote } from "../lib/remoteProject";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
@@ -517,8 +517,7 @@ export function NativeTerminalPane({
   const motionFrameRef = useRef<number | null>(null);
   const scaleFactorRef = useRef(1);
   const cellSizeRef = useRef<NativeCellSize | null>(null);
-  const contextVisible = useNativeTerminalVisibility();
-  const visible = contextVisible;
+  const { visible: surfaceVisible, interactive } = useNativeTerminalVisibilityState();
   const [imeAnchor, setImeAnchor] = useState<ImeAnchor | null>(null);
   const [error, setError] = useState<string | null>(null);
   const retryBoundsRef = useRef<(() => void) | null>(null);
@@ -539,11 +538,26 @@ export function NativeTerminalPane({
   // When a `session` object is provided, require `backendSessionId` so we never attach with local frontend ID.
   // Exited sessions have already reaped their daemon PTY and stream tasks; attaching would trigger SESSION_NOT_FOUND.
   const isExited = session ? session.backendSessionId === null || session.lifecycle === "exited" : false;
+  const visible = interactive && !isExited;
   const targetSessionId = isExited
     ? null
     : session
       ? (session.backendSessionId ?? null)
       : (sessionId ?? null);
+  const paneIdentity = session?.id ?? sessionId;
+  const [presentation, setPresentation] = useState<{
+    readonly paneIdentity: string | undefined;
+    readonly backendSessionId: string;
+  } | null>(null);
+  const retainedPresentation = presentation?.paneIdentity === paneIdentity ? presentation : null;
+  const surfaceSessionId = targetSessionId ?? (isExited && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
+  const attachmentOwnerRef = useRef<{ readonly sessionId: string; readonly live: boolean } | null>(null);
+  useLayoutEffect(() => {
+    attachmentOwnerRef.current = surfaceVisible && surfaceSessionId
+      ? { sessionId: surfaceSessionId, live: targetSessionId !== null }
+      : null;
+    return () => { attachmentOwnerRef.current = null; };
+  }, [surfaceSessionId, surfaceVisible, targetSessionId]);
   const surfaceOwnerRef = useRef<{ readonly sessionId: string } | null>(null);
   // Commit-scoped identity: A -> B -> A and hide/show must not revive old input.
   // Layout cleanup invalidates it before passive surface teardown or queued IPC.
@@ -740,8 +754,8 @@ export function NativeTerminalPane({
   }, []);
 
   const performAttach = useCallback((targetId: string, force = false): Promise<void> => {
-    const owner = surfaceOwnerRef.current;
-    if (!owner || owner.sessionId !== targetId) return Promise.resolve();
+    const owner = attachmentOwnerRef.current;
+    if (!owner?.live || owner.sessionId !== targetId) return Promise.resolve();
     const initialGeometry = measureGeometry();
     if (initialGeometry) {
       scaleFactorRef.current = initialGeometry.scaleFactor;
@@ -756,7 +770,7 @@ export function NativeTerminalPane({
     });
     const attachOp = force ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
-      if (surfaceOwnerRef.current !== owner) return;
+      if (attachmentOwnerRef.current !== owner) return;
       await invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
         ...(initialGeometry
@@ -1636,7 +1650,8 @@ export function NativeTerminalPane({
 
   useEffect(() => {
     const element = viewportRef.current;
-    if (!visible || !element || !isTauri() || !targetSessionId) {
+    const targetSessionId = surfaceSessionId;
+    if (!surfaceVisible || !element || !isTauri() || !targetSessionId) {
       switchDebug("terminal.surface.skipped", {
         localSessionId: sessionId,
         backendSessionId: targetSessionId,
@@ -1690,6 +1705,13 @@ export function NativeTerminalPane({
             setError(null);
             retryBoundsRef.current = null;
             updateImeAnchor(receipt);
+            if (receipt?.presented) {
+              setPresentation((current) =>
+                current?.backendSessionId === targetSessionId && current.paneIdentity === paneIdentity
+                  ? current
+                  : { paneIdentity, backendSessionId: targetSessionId },
+              );
+            }
             presentNativeTerminalLifecycle(targetSessionId);
             refreshScrollbar();
             if (receipt) {
@@ -1799,6 +1821,7 @@ export function NativeTerminalPane({
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     const attemptAttach = async (retryCount = 0, force = false): Promise<void> => {
+      if (!attachmentOwnerRef.current?.live) return;
       try {
         await performAttach(targetSessionId, force || retryCount > 0);
         if (!isSubscribed) return;
@@ -1811,10 +1834,12 @@ export function NativeTerminalPane({
         });
         refreshScrollbar();
         reportBounds();
-        if (isBackendRebind) {
-          inputRef.current?.focus();
-        } else {
-          restoreFocusIfLost();
+        if (surfaceOwnerRef.current?.sessionId === targetSessionId) {
+          if (isBackendRebind) {
+            inputRef.current?.focus();
+          } else {
+            restoreFocusIfLost();
+          }
         }
       } catch (error: unknown) {
         if (!isSubscribed) return;
@@ -1906,6 +1931,9 @@ export function NativeTerminalPane({
       )
         .then((detached) => {
           if (detached) {
+            setPresentation((current) =>
+              current?.backendSessionId === targetSessionId ? null : current,
+            );
             switchDebug("terminal.surface.detach.complete", {
               localSessionId: sessionId,
               backendSessionId: targetSessionId,
@@ -1921,7 +1949,7 @@ export function NativeTerminalPane({
           reportNativeTerminalIpcFailure("cmd_native_terminal_detach", error);
         });
     };
-  }, [isBackendRebind, measureGeometry, performAttach, refreshScrollbar, sessionId, targetSessionId, visible]);
+  }, [measureGeometry, performAttach, sessionId, paneIdentity, surfaceSessionId, surfaceVisible]);
 
   const thumb = nativeScrollbarThumb(scrollbar);
   const overlayVisible = Boolean(visible && isScrollbarRevealed && thumb.visible);
@@ -1962,7 +1990,9 @@ export function NativeTerminalPane({
     <div
       ref={containerRef}
       data-testid="native-terminal-pane"
-      data-native-terminal-visible={visible ? "true" : "false"}
+      data-native-terminal-visible={surfaceVisible ? "true" : "false"}
+      data-native-terminal-presented={surfaceVisible && retainedPresentation !== null ? "true" : "false"}
+      data-native-terminal-input-enabled={visible ? "true" : "false"}
       className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", isCmdHeld && "cursor-pointer", className)}
       style={{
         marginTop: `${NATIVE_TERMINAL_HANDLE_INSET_PX}px`,

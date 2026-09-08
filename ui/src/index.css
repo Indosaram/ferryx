@@ -198,3 +198,8 @@ html.platform-macos [data-testid="native-terminal-pane"] {
   background-color: transparent !important;
   background: transparent !important;
 }
+
+html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-presented="false"] {
+  background: var(--terminal) !important;
+  background-color: var(--terminal) !important;
+}

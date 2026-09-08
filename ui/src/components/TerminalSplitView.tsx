@@ -1007,9 +1007,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
     }, 40);
   }, [leafId, onFocusPane, tab.id]);
 
-  // Native compositor child views paint above WKWebView on macOS, so DOM drop feedback
-  // cannot cover a live terminal surface. Only the targeted pane paints feedback, so only
-  // it yields its surface -- every other terminal keeps rendering during the drag.
+  // Drop feedback blocks interaction only in the targeted pane. The visibility
+  // policy keeps macOS surfaces below the DOM feedback and yields on other platforms.
   const showsDropFeedback = dropFeedbackLeafId === leafId;
   const attentionFrameEnabled = useAttentionFrameEnabled();
   const needsAttention = attentionFrameEnabled && Boolean(
@@ -1017,7 +1016,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   );
 
   return (
-    <NativeTerminalVisibilityProvider visible={!showsDropFeedback}>
+    <NativeTerminalVisibilityProvider visible occluded={showsDropFeedback}>
     <div
       ref={(node) => {
         droppable.setNodeRef(node);

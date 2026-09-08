@@ -1,8 +1,19 @@
 import type { ReactNode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
+
+const platform = vi.hoisted(() => ({ isMac: false }));
+vi.mock("../lib/shortcuts", async (original) => ({
+  ...await original<typeof import("../lib/shortcuts")>(),
+  isMacShortcutPlatform: () => platform.isMac,
+}));
+
+beforeEach(() => {
+  platform.isMac = false;
+  vi.stubGlobal("navigator", { platform: "Win32", userAgent: "Windows" });
+});
 
 const dndHarness = vi.hoisted(() => ({
   props: null as null | {
@@ -159,8 +170,18 @@ function renderSplit() {
 }
 
 describe("drop feedback visibility over native terminal surfaces", () => {
+  it("keeps both macOS panes visible while the targeted pane paints drop feedback", () => {
+    platform.isMac = true;
+    vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Macintosh" });
+    renderSplit();
+    act(() => {
+      dndHarness.props?.onDragStart?.(paneDragStart());
+      dndHarness.props?.onDragOver?.(overPaneEdge("leaf-b"));
+    });
+    expect(visibilityByLeafId()).toEqual({ "leaf-a": "true", "leaf-b": "true" });
+  });
+
   it("suppresses only the targeted pane so other terminals stay visible during a drag", () => {
-    // macOS native compositor child views paint above WKWebView, so DOM drop feedback cannot cover a live terminal surface.
     renderSplit();
 
     expect(visibilityByLeafId()).toEqual({ "leaf-a": "true", "leaf-b": "true" });

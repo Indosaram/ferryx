@@ -6,8 +6,9 @@ import {
   type PropsWithChildren,
   type ReactElement,
 } from "react";
+import { isMacShortcutPlatform } from "./shortcuts";
 
-const NativeTerminalVisibilityContext = createContext(true);
+const NativeTerminalVisibilityContext = createContext({ visible: true, occluded: false });
 const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"]';
 const OPT_OUT_SELECTOR = '[data-native-terminal-yield="off"]';
 
@@ -29,25 +30,23 @@ function isYieldingSurfaceVisible(): boolean {
 
 export function NativeTerminalVisibilityProvider({
   visible,
+  occluded = false,
   children,
-}: PropsWithChildren<{ visible: boolean }>): ReactElement {
+}: PropsWithChildren<{ visible: boolean; occluded?: boolean }>): ReactElement {
   return (
-    <NativeTerminalVisibilityContext.Provider value={visible}>
+    <NativeTerminalVisibilityContext.Provider value={{ visible, occluded }}>
       {children}
     </NativeTerminalVisibilityContext.Provider>
   );
 }
 
 /**
- * Native compositor child views are rendered in coordination with WKWebView on macOS
- * and child HWNDs on Windows. For modal dialogs and search surfaces that cover the workspace,
- * the active terminal relinquishes its native surface while any modal/dialog surface
- * (Settings, Search overlay, etc.) is mounted. The semantic selector keeps this independent
- * from dialog implementation classes while the context supplies an explicit visibility
- * override for other owners/tests.
+ * macOS surfaces are below WebKit, so overlays block input without hiding the
+ * terminal. Other platforms still yield their native surfaces to DOM overlays.
+ * Explicit owner hiding applies on every platform.
  */
-export function useNativeTerminalVisibility(): boolean {
-  const ownerVisible = useContext(NativeTerminalVisibilityContext);
+export function useNativeTerminalVisibilityState(): { readonly visible: boolean; readonly interactive: boolean } {
+  const owner = useContext(NativeTerminalVisibilityContext);
   const [surfaceOpen, setSurfaceOpen] = useState(isYieldingSurfaceVisible);
 
   useEffect(() => {
@@ -66,5 +65,13 @@ export function useNativeTerminalVisibility(): boolean {
     return () => observer.disconnect();
   }, []);
 
-  return ownerVisible && !surfaceOpen;
+  const occluded = owner.occluded || surfaceOpen;
+  return {
+    visible: owner.visible && (isMacShortcutPlatform() || !occluded),
+    interactive: owner.visible && !occluded,
+  };
+}
+
+export function useNativeTerminalVisibility(): boolean {
+  return useNativeTerminalVisibilityState().visible;
 }

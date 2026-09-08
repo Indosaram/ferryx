@@ -28,6 +28,7 @@ await import("../test/setup");
 const { NativeTerminalVisibilityProvider } = await import("../lib/nativeTerminalVisibility");
 const { NativeTerminalPane, resetNativeTerminalPaneForTest } = await import("./NativeTerminalPane");
 const { resetNativeTerminalLifecycleForTest } = await import("../lib/nativeTerminalLifecycle");
+const shortcuts = await import("../lib/shortcuts");
 import type { TerminalSession } from "../lib/types";
 
 const tauriInvoke = vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined);
@@ -192,6 +193,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     if (typeof vi.unstubAllGlobals === "function") {
       vi.unstubAllGlobals();
     }
+    vi.restoreAllMocks();
   });
 
   it("retries failed bounds with a fresh attachment and waits for presentation", async () => {
@@ -585,7 +587,8 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     expect(lifecycleCalls()).toEqual([["cmd_native_terminal_attach", "backend-reparented"]]);
   });
 
-  it("detaches and blocks input while the full-screen Settings surface covers the active pane", async () => {
+  it("detaches and blocks input outside macOS while the full-screen Settings surface covers the active pane", async () => {
+    vi.spyOn(shortcuts, "isMacShortcutPlatform").mockReturnValue(false);
     const view = render(<NativeTerminalPane session={session("backend-settings")} />);
 
     await waitFor(() => {
@@ -630,7 +633,8 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     });
   });
 
-  it("detaches and blocks input while a mounted role=dialog New Tab menu covers the active pane", async () => {
+  it("detaches and blocks input outside macOS while a mounted role=dialog New Tab menu covers the active pane", async () => {
+    vi.spyOn(shortcuts, "isMacShortcutPlatform").mockReturnValue(false);
     const view = render(<NativeTerminalPane session={session("backend-newtab")} />);
 
     await waitFor(() => {
@@ -675,7 +679,8 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     });
   });
 
-  it("detaches and blocks input while a mounted role=search Terminal search overlay covers the active pane", async () => {
+  it("detaches and blocks input outside macOS while a mounted role=search Terminal search overlay covers the active pane", async () => {
+    vi.spyOn(shortcuts, "isMacShortcutPlatform").mockReturnValue(false);
     const view = render(<NativeTerminalPane session={session("backend-search")} />);
 
     await waitFor(() => {

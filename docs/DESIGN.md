@@ -96,6 +96,17 @@ behavior, native-surface masking during overlays/drag, and stable terminal sessi
 across pane movement. Subscribe to exact async state changes before actions in QA;
 do not use fixed sleeps to make assertions pass.
 
+### Terminal overlay and disconnected presentation
+
+On macOS, native terminal surfaces sit below WebKit. Keep their last complete
+frame visible behind DOM dialogs, search, and pane drop feedback, but disable
+terminal input while a covering overlay owns interaction. Windows and Linux
+retain native-surface yielding. Explicitly hidden owners remain hidden everywhere.
+An exited macOS pane may display its already-presented final frame without reconnecting
+to a dead PTY. Cold exited panes and panes awaiting their first presentation use
+the existing opaque `--terminal` backing. Genuine unmount/replacement releases
+the retained surface; no new color, spacing, or motion tokens are introduced.
+
 ## 7. Depth & Surface
 
 Existing mixed strategy: tonal shell/card/active surfaces, semantic 1px borders,
