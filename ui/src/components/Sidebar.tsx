@@ -26,7 +26,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { combineActivitySummaries, type ActivitySummary } from "../lib/activity";
+import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
 import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
@@ -390,6 +390,7 @@ export function Sidebar({
                   unreadWorktreePaths,
                 );
                 const attentionState = projectAttentionState(projectActivity);
+                const activityIndicator = resolveActivityIndicator(projectActivity);
                 const header = (
                   <ProjectHeader
                     project={project}
@@ -426,7 +427,7 @@ export function Sidebar({
                           {isStandaloneRemote ? (
                             <button
                               type="button"
-                              className={cn("my-0.5 w-full truncate rounded-md border px-2 py-1 text-left text-xs hover:bg-white/5",
+                              className={cn("my-0.5 flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs hover:bg-white/5",
                                 activeWorktreeOwnerId === project.workspaceId ? "border-[#6c6c6c] bg-[#3f3f3f]" : "border-transparent")}
                               aria-current={activeWorktreeOwnerId === project.workspaceId ? "true" : undefined}
                               title="Remote SSH root. Git worktrees and local file-manager reveal are unavailable."
@@ -434,7 +435,9 @@ export function Sidebar({
                               data-shortcut-workspace-id={project.workspaceId}
                               onClick={() => onSelectWorktree(projectRootWorktree(project))}
                             >
-                              {project.repoRoot} <span className="text-muted-foreground">SSH root</span>
+                              {activityIndicator ? <StatusDot state={activityIndicator} /> : null}
+                              <span className="min-w-0 truncate">{project.repoRoot}</span>
+                              <span className="shrink-0 text-muted-foreground">SSH root</span>
                             </button>
                           ) : <WorktreeList
                             worktrees={projectWorktrees}
@@ -657,7 +660,7 @@ function ProjectHeader({
             >
               <StatusDot state={attentionState} />
             </span>
-          ) : null}
+          ) : activity.hasWorking ? <StatusDot state="working" /> : null}
         </button>
         {!remote && project.gitRoot !== null ? (
           <IconButton
