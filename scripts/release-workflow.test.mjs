@@ -1,103 +1,357 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const WORKFLOW = readFileSync(join(REPO_ROOT, ".github/workflows/release.yml"), "utf8");
-const BUILD_TEST_WORKFLOW = readFileSync(join(REPO_ROOT, ".github/workflows/build-test.yml"), "utf8");
+const POLICY_BIN = join(REPO_ROOT, "scripts/release-workflow-policy.mjs");
+const BUILD_TEST_PATH = join(REPO_ROOT, ".github/workflows/build-test.yml");
+const PAGES_PATH = join(REPO_ROOT, ".github/workflows/deploy-pages.yml");
+const RELEASE_WORKFLOW_PATH = join(REPO_ROOT, ".github/workflows/release.yml");
 
-test("the bundle step receives the updater signing secrets", () => {
-  assert.match(WORKFLOW, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
-  assert.match(
-    WORKFLOW,
-    /TAURI_SIGNING_PRIVATE_KEY_PASSWORD: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}/,
-  );
+// Helper to run the policy validator via Bun
+function runPolicy(args = [], options = {}) {
+  return spawnSync("bun", [POLICY_BIN, ...args], {
+    encoding: "utf8",
+    ...options,
+  });
+}
+
+// Frozen fixture of the retired hosted producer (.github/workflows/release.yml)
+const RETIRED_PRODUCER_FIXTURE = `name: Release Ferryx
+
+'on':
+  push:
+    tags:
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import macOS signing credentials
+        env:
+          APPLE_CERTIFICATE: \${{ secrets.APPLE_CERTIFICATE }}
+          KEYCHAIN_PASSWORD: \${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import cert.p12 -k build.keychain
+      - name: Build Tauri Bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: \${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bunx @tauri-apps/cli build --target universal-apple-darwin
+      - name: Verify updater layout
+        run: node scripts/assert-updater-archive-layout.mjs test.tar.gz
+  build-msix:
+    runs-on: windows-latest
+    steps:
+      - run: .\\scripts\\build-msix.ps1 -Version "2026.908.1.0"
+  publish-release:
+    needs: [build-desktop, build-msix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - run: node scripts/build-latest-json.mjs --version "2026.908.1"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: \${{ github.ref_name }}
+`;
+
+test("actual current producer fixture is rejected by parsed-policy validator", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixturePath = join(tempDir, "release.yml");
+  writeFileSync(fixturePath, RETIRED_PRODUCER_FIXTURE, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}. Output: ${res.stderr || res.stdout}`);
+  const combined = (res.stderr + res.stdout);
+  assert.match(combined, /release\.yml/i);
+  assert.match(combined, /contents:\s*write/i);
+  assert.match(combined, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.match(combined, /APPLE_CERTIFICATE/);
+  assert.match(combined, /tauri.*build/i);
+  assert.match(combined, /build-msix\.ps1/);
+  assert.match(combined, /action-gh-release/);
+  assert.match(combined, /build-latest-json\.mjs/);
 });
 
-test("release builds use Zig setup v2 for Zig 0.16 archives", () => {
-  const setupActionReferences = WORKFLOW.match(/uses: mlugg\/setup-zig@v\d+/g) ?? [];
-  assert.deepEqual(setupActionReferences, [
-    "uses: mlugg/setup-zig@v2",
-    "uses: mlugg/setup-zig@v2",
-  ]);
-  assert.doesNotMatch(WORKFLOW, /uses: mlugg\/setup-zig@v1/);
+test("manual release producer fixture (workflow_dispatch) is rejected", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Manual Producer Backdoor
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  manual-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bunx @tauri-apps/cli build
+`;
+  const fixturePath = join(tempDir, "manual-backdoor.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /contents:\s*write/i);
+  assert.match(combined, /tauri.*build/i);
 });
 
-test("the macOS build imports its Developer ID identity and configures notarization", () => {
-  assert.match(WORKFLOW, /name: Import macOS signing and notarization credentials/);
-  assert.match(WORKFLOW, /APPLE_CERTIFICATE: \$\{\{ secrets\.APPLE_CERTIFICATE \}\}/);
-  assert.match(WORKFLOW, /APPLE_CERTIFICATE_PASSWORD: \$\{\{ secrets\.APPLE_CERTIFICATE_PASSWORD \}\}/);
-  assert.match(WORKFLOW, /KEYCHAIN_PASSWORD: \$\{\{ secrets\.KEYCHAIN_PASSWORD \}\}/);
-  assert.match(WORKFLOW, /security import "\$CERTIFICATE_PATH"/);
-  assert.match(WORKFLOW, /security set-key-partition-list/);
-  assert.match(WORKFLOW, /APPLE_API_KEY_CONTENT: \$\{\{ secrets\.APPLE_API_KEY_CONTENT \}\}/);
-  assert.match(WORKFLOW, /APPLE_API_KEY_PATH=/);
-  assert.match(WORKFLOW, /APPLE_API_ISSUER: \$\{\{ secrets\.APPLE_API_ISSUER \}\}/);
+test("tag release producer fixture (push.tags) is rejected", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Tag Release Producer
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  tag-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: \${{ github.ref_name }}
+`;
+  const fixturePath = join(tempDir, "tag-producer.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /push\.tags/i);
+  assert.match(combined, /action-gh-release/i);
 });
 
-test("the macOS bundle inherits its imported identity and App Store Connect key path", () => {
-  assert.match(WORKFLOW, /APPLE_SIGNING_IDENTITY: \$\{\{ secrets\.APPLE_SIGNING_IDENTITY \}\}/);
-  assert.match(WORKFLOW, /APPLE_API_KEY_PATH: \$\{\{ env\.APPLE_API_KEY_PATH \}\}/);
-  assert.doesNotMatch(WORKFLOW, /Skipping macOS codesigning/);
-  assert.doesNotMatch(WORKFLOW, /unset TAURI_SIGNING_PRIVATE_KEY/);
+test("callable release producer fixture (workflow_call) is rejected", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Callable Release Job
+on:
+  workflow_call:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release create "v2026.09.08" dist/*
+`;
+  const fixturePath = join(tempDir, "callable-producer.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /gh release/i);
 });
 
-test("both bundling jobs and the manifest derive a semver from the release tag", () => {
-  const occurrences = WORKFLOW.match(/node scripts\/sync-version\.mjs --tag/g) ?? [];
+test("reusable release producer fixture (workflow_call with release signing secrets) is rejected", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Reusable Signer
+on:
+  workflow_call:
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+
+jobs:
+  sign:
+    runs-on: macos-latest
+    steps:
+      - run: echo "Signing with private key..."
+`;
+  const fixturePath = join(tempDir, "reusable-signer.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /TAURI_SIGNING_PRIVATE_KEY/);
+});
+
+test("rejects 'bun tauri build' release entry point fixture", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Bun Tauri Build Backdoor
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bun tauri build
+`;
+  const fixturePath = join(tempDir, "bun-tauri-build.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /tauri.*build/i);
+});
+
+test("rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Root Build Delegation
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bun run build
+`;
+  const fixturePath = join(tempDir, "root-build.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /root.*build/i);
+});
+
+test("rejects 'tauri-apps/tauri-action' action in step uses", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Tauri Action Check
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: tauri-apps/tauri-action@v0
+`;
+  const fixturePath = join(tempDir, "tauri-action.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /tauri-action/i);
+});
+
+test("rejects 'scripts/release-local.mjs' coordinator invocation in workflow", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Local Release Coordinator in CI
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/release-local.mjs publish --plan release-plan.json
+`;
+  const fixturePath = join(tempDir, "release-local.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /release-local\.mjs/i);
+});
+
+test("rejects reusable job uses of release workflows and secrets: inherit", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "policy-test-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  const fixture = `name: Reusable Release Job
+on:
+  pull_request:
+jobs:
+  reusable-release:
+    uses: ./.github/workflows/release-reusable.yml
+    secrets: inherit
+`;
+  const fixturePath = join(tempDir, "reusable-job.yml");
+  writeFileSync(fixturePath, fixture, "utf8");
+
+  const res = runPolicy([fixturePath]);
+  assert.equal(res.status, 1, `Expected exit 1, got ${res.status}`);
+  const combined = res.stderr + res.stdout;
+  assert.match(combined, /reusable-release|secrets:\s*inherit/i);
+});
+
+test("PR check workflow (.github/workflows/build-test.yml) complies with release policy", () => {
+  const res = runPolicy([BUILD_TEST_PATH]);
   assert.equal(
-    occurrences.length,
-    3,
-    "build-desktop, build-msix, and latest.json must derive the same semver",
+    res.status,
+    0,
+    `build-test.yml failed policy check: ${res.stderr || res.stdout}`,
   );
 });
 
-test("signatures and updater bundles are collected as release artifacts", () => {
-  assert.match(WORKFLOW, /-name "\*\.sig"/);
-  assert.match(WORKFLOW, /-name "\*\.nsis\.zip"/);
-  assert.match(WORKFLOW, /-name "\*\.AppImage\.tar\.gz"/);
-  assert.match(WORKFLOW, /-name "\*-setup\.exe"/);
-  assert.match(WORKFLOW, /-name "\*\.AppImage"/);
+test("Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy", () => {
+  const res = runPolicy([PAGES_PATH]);
+  assert.equal(
+    res.status,
+    0,
+    `deploy-pages.yml failed policy check: ${res.stderr || res.stdout}`,
+  );
 });
 
-test("macOS updater archives are scrubbed and validated before publishing", () => {
-  assert.match(WORKFLOW, /Remove AppleDouble metadata before macOS bundling/);
-  assert.match(WORKFLOW, /find ui src-tauri -type f -name '._\*' -delete/);
-  assert.match(WORKFLOW, /Verify macOS updater archive layout/);
-  assert.match(WORKFLOW, /find src-tauri\/target -type f -name '\*\.app\.tar\.gz' -print0/);
-  assert.match(WORKFLOW, /node scripts\/assert-updater-archive-layout\.mjs/);
-});
-
-test("the publish job generates latest.json into the uploaded directory", () => {
-  assert.match(WORKFLOW, /node scripts\/build-latest-json\.mjs/);
-  assert.match(WORKFLOW, /MANIFEST_VERSION="\$\(node scripts\/sync-version\.mjs --tag/);
-  assert.match(WORKFLOW, /--version "\$\{MANIFEST_VERSION\}"/);
-  assert.match(WORKFLOW, /--out release-dist\/latest\.json/);
-  assert.match(WORKFLOW, /files: release-dist\/\*/);
-});
-
-test("release workflow triggers on date-versioned tag pushes and retains manual dispatch", () => {
+test("PR check workflow wires the release workflow policy check", () => {
+  const content = readFileSync(BUILD_TEST_PATH, "utf8");
   assert.match(
-    WORKFLOW,
-    /push:\s*\n\s*tags:\s*\n\s*-\s*['"]v\[0-9\]\[0-9\]\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]['"]\s*\n\s*-\s*['"]v\[0-9\]\[0-9\]\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]\.\[0-9\]\[0-9\]\.\[0-9\]\*['"]/,
+    content,
+    /bun\s+scripts\/release-workflow-policy\.mjs/,
+    "build-test.yml must execute release-workflow-policy.mjs",
   );
-  assert.match(WORKFLOW, /^\s*workflow_dispatch:\s*$/m);
-  assert.doesNotMatch(WORKFLOW, /^\s*branches:\s*$/m);
 });
 
 test("Windows CI links the native binary before a release tag", () => {
-  assert.match(BUILD_TEST_WORKFLOW, /name: Cargo Link \(Windows\)/);
+  const content = readFileSync(BUILD_TEST_PATH, "utf8");
+  assert.match(content, /name: Cargo Link \(Windows\)/);
   assert.match(
-    BUILD_TEST_WORKFLOW,
+    content,
     /if: matrix\.os_name == 'windows'[\s\S]*cargo build --manifest-path src-tauri\/Cargo\.toml --target \$\{\{ matrix\.target \}\}/,
   );
 });
 
-test("the date-based updater release builds only the NSIS bundle on Windows to avoid WiX's MSI version ceiling", () => {
-  assert.match(
-    WORKFLOW,
-    /platform:\s*['"]windows-latest['"][\s\S]*?tauri_args:\s*['"][^'"]*--bundles\s+nsis[^'"]*['"]/,
+test("hosted release producer .github/workflows/release.yml is absent from disk", () => {
+  assert.equal(
+    existsSync(RELEASE_WORKFLOW_PATH),
+    false,
+    ".github/workflows/release.yml must be removed from repository to prevent backdoor release runs",
   );
-  assert.doesNotMatch(WORKFLOW, /\| \*\*Windows\*\* \| `\.msi`/);
+});
+
+test("live repository .github/workflows directory complies fully with policy", () => {
+  const workflowsDir = join(REPO_ROOT, ".github/workflows");
+  const res = runPolicy([workflowsDir]);
+  assert.equal(
+    res.status,
+    0,
+    `.github/workflows directory failed policy check: ${res.stderr || res.stdout}`,
+  );
 });

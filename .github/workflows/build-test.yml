@@ -31,6 +31,9 @@ jobs:
           bun install --frozen-lockfile || bun install
           bun install --cwd ui --frozen-lockfile || bun install --cwd ui
 
+      - name: Verify release workflow policy
+        run: bun scripts/release-workflow-policy.mjs
+
       - name: Build Frontend UI
         run: bun run --cwd ui build
 
