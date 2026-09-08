@@ -79,6 +79,7 @@ type SidebarProps = {
   activeProjectId?: string;
   worktrees: Worktree[];
   inactiveProjectWorktrees?: Record<string, Worktree[]>;
+  emptyWorkspaceIds?: readonly string[];
   agents: ActiveAgent[];
   activePath: string;
   statuses?: Record<string, DirtyState | undefined>;
@@ -104,6 +105,7 @@ export function Sidebar({
   activeProjectId,
   worktrees,
   inactiveProjectWorktrees,
+  emptyWorkspaceIds,
   agents,
   activePath,
   statuses = {},
@@ -134,6 +136,14 @@ export function Sidebar({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
+  const projectGroups = useMemo(() => groupProjects(projects), [projects]);
+  const emptyGroupIds = useMemo(
+    () => new Set(projectGroups
+      .filter((group) => group.memberProjects.every((member) => emptyWorkspaceIds?.includes(member.workspaceId)))
+      .map((group) => group.groupId)),
+    [emptyWorkspaceIds, projectGroups],
+  );
+
   // Accordion state is stored as the set of *collapsed* projects, so each project keeps its own
   // open/closed state and toggling one never disturbs another. Projects the user has never
   // toggled default to collapsed unless they are the active project.
@@ -141,8 +151,18 @@ export function Sidebar({
     const stored = loadCollapsedProjects();
     // Once the user has toggled anything the persisted set is authoritative; only a first run
     // (nothing persisted) falls back to "everything but the active project starts collapsed".
-    return stored ?? seedCollapsedProjects(new Set<string>(), projects, activeProjectId);
+    return new Set([
+      ...(stored ?? seedCollapsedProjects(new Set<string>(), projects, activeProjectId)),
+      ...emptyGroupIds,
+    ]);
   });
+  const previousEmptyGroupIds = useRef(emptyGroupIds);
+  useEffect(() => {
+    const newlyEmpty = [...emptyGroupIds].filter((id) => !previousEmptyGroupIds.current.has(id));
+    previousEmptyGroupIds.current = emptyGroupIds;
+    if (newlyEmpty.length === 0) return;
+    setCollapsedProjects((current) => new Set([...current, ...newlyEmpty]));
+  }, [emptyGroupIds]);
   const knownProjectsRef = useRef<Set<string> | null>(null);
   if (knownProjectsRef.current === null) {
     knownProjectsRef.current = new Set(projects.map((project) => project.workspaceId));
@@ -169,8 +189,6 @@ export function Sidebar({
       return next;
     });
   }, []);
-
-  const projectGroups = useMemo(() => groupProjects(projects), [projects]);
 
   const naturalWorktreesByProject = useMemo(
     () => groupWorktreesByProject(
@@ -389,7 +407,7 @@ export function Sidebar({
 
                 return (
                   <SortableProjectSection key={group.groupId} workspaceId={group.groupId} header={header}>
-                    {expanded ? (
+                    {expanded && !emptyGroupIds.has(group.groupId) ? (
                       <div
                         className="pl-5 pr-0.5 pt-0.5"
                         onPointerDown={(event) => event.stopPropagation()}

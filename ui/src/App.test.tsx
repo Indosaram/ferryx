@@ -43,6 +43,8 @@ const { act, cleanup, fireEvent, render, screen, waitFor, within } = await impor
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 import type { Worktree } from "./lib/types";
+import { createLayoutState } from "./state/layout";
+import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
 
 const { saveBrowserSettings } = await import("./lib/browserSettings");
 const { saveAgentSettings } = await import("./lib/agentsSettings");
@@ -233,6 +235,7 @@ vi.mock("./components/Sidebar", () => ({
     projects = [],
     worktrees = [],
     inactiveProjectWorktrees: _inactiveProjectWorktrees,
+    emptyWorkspaceIds,
     activeProjectId,
   }: {
     open?: boolean;
@@ -247,9 +250,10 @@ vi.mock("./components/Sidebar", () => ({
     projects?: Array<{ workspaceId: string; gitRoot?: string | null }>;
     worktrees?: Array<{ path: string }>;
     inactiveProjectWorktrees?: Record<string, Array<{ path: string }>>;
+    emptyWorkspaceIds?: readonly string[];
     activeProjectId?: string;
   }) => (
-    <div data-testid="mock-sidebar" data-open={open}>
+    <div data-testid="mock-sidebar" data-open={open} data-empty-workspaces={JSON.stringify(emptyWorkspaceIds)}>
       <button type="button" onClick={onToggle}>
         {open ? "Hide sidebar" : "Show sidebar"}
       </button>
@@ -357,6 +361,24 @@ vi.mock("./components/WorktreeDeleteDialog", () => ({
 }));
 
 const defaultStoreState = JSON.parse(JSON.stringify(workspace.storeState));
+
+function seedSidebarBrowserTab(workspaceId: string) {
+  setWorkspaceSnapshot(workspaceId, {
+    workspaceId,
+    activeWorktreePath: null,
+    worktrees: [],
+    sessions: {},
+    layout: createLayoutState([{
+      id: `${workspaceId}-browser`,
+      kind: "browser",
+      label: "Browser",
+      url: "about:blank",
+      browserId: `${workspaceId}-browser`,
+    }]),
+    unreadTabIds: {},
+    unreadWorktreePaths: {},
+  });
+}
 
 const { App } = await import("./App");
 const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
@@ -475,6 +497,27 @@ describe("App project workspace flow", () => {
     native.writeTerminal.mockResolvedValue(undefined);
     native.isTauriRuntime.mockReset();
     native.isTauriRuntime.mockReturnValue(false);
+  });
+
+  it("passes live tabless workspace state to the sidebar", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "." }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    workspace.storeState.layout.tabs = [];
+    await act(async () => { render(<App />); });
+
+    expect(screen.getByTestId("mock-sidebar")).toHaveAttribute("data-empty-workspaces", '["default"]');
+  });
+
+  it("does not select tabless workspace rows through Cmd+digit", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "." }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    workspace.storeState.layout.tabs = [];
+    await act(async () => { render(<App />); });
+
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+
+    expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
   });
 
   it("routes the native Cmd+T menu accelerator through the normal new-terminal callback", async () => {
@@ -1351,6 +1394,7 @@ describe("App project workspace flow", () => {
   });
 
   it("walks visible worktrees top to bottom across expanded projects with Cmd+1..", async () => {
+    seedSidebarBrowserTab("beta");
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha" },
       { workspaceId: "beta", repoRoot: "/repos/beta" },
@@ -1395,10 +1439,12 @@ describe("App project workspace flow", () => {
       await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(betaDocs));
     } finally {
       workspace.storeState.worktrees.length = 4;
+      clearWorkspaceSnapshot("beta");
     }
   });
 
   it("skips a collapsed project's rows when counting Cmd+N positions", async () => {
+    seedSidebarBrowserTab("beta");
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
       { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
@@ -1431,6 +1477,7 @@ describe("App project workspace flow", () => {
       );
     } finally {
       workspace.storeState.worktrees.length = 4;
+      clearWorkspaceSnapshot("beta");
     }
   });
 
@@ -1463,6 +1510,7 @@ describe("App project workspace flow", () => {
   });
 
   it("targets the synthesized root row of a visible non-Git project via native Cmd+digit", async () => {
+    seedSidebarBrowserTab("plain-docs");
     const originalWorktrees = [...workspace.storeState.worktrees];
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
@@ -1526,10 +1574,12 @@ describe("App project workspace flow", () => {
       );
     } finally {
       workspace.storeState.worktrees = originalWorktrees;
+      clearWorkspaceSnapshot("plain-docs");
     }
   });
 
   it("targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit", async () => {
+    seedSidebarBrowserTab("beta");
     const originalWorktrees = [...workspace.storeState.worktrees];
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
@@ -1612,6 +1662,7 @@ describe("App project workspace flow", () => {
       );
     } finally {
       workspace.storeState.worktrees = originalWorktrees;
+      clearWorkspaceSnapshot("beta");
     }
   });
 

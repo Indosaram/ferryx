@@ -89,6 +89,54 @@ function renderSidebar(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Sidebar navigation", () => {
+  it("starts a tabless active workspace collapsed even when saved as expanded", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree],
+      emptyWorkspaceIds: ["default"],
+    });
+
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
+  });
+
+  it("renders no children when a tabless workspace is explicitly expanded", () => {
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree],
+      emptyWorkspaceIds: ["default"],
+    });
+
+    fireEvent.click(projectToggle("default"));
+
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
+    expect(screen.queryByText("primary")).not.toBeInTheDocument();
+    expect(screen.queryByText("No worktrees yet.")).not.toBeInTheDocument();
+  });
+
+  it("collapses when the final tab closes and restores rows after a tab opens", () => {
+    const props = baseProps({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree],
+      emptyWorkspaceIds: [],
+    });
+    const view = render(<Sidebar {...props} />);
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+
+    view.rerender(<Sidebar {...props} emptyWorkspaceIds={["default"]} />);
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(projectToggle("default"));
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
+
+    view.rerender(<Sidebar {...props} emptyWorkspaceIds={[]} />);
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+  });
+
   it("renders cached worktrees for a newly active project while active store rows are temporarily empty", () => {
     localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
     const cachedWorktree: Worktree = {

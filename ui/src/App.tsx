@@ -106,6 +106,7 @@ import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
+import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { hasNavigableSession, selectGlobalUnreadBadgeCount, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
@@ -1627,6 +1628,12 @@ function WorkspaceApp({
         stateRef.current.worktrees,
         activeProjectRef.current.workspaceId,
         inactiveProjectWorktreesRef.current,
+        emptySidebarWorkspaceIds(
+          projectsRef.current,
+          activeProjectRef.current.workspaceId,
+          stateRef.current,
+          listWorkspaceSnapshots(),
+        ),
       );
       const target = visible[index];
       if (target) handleSelectWorktree(target);
@@ -1937,6 +1944,7 @@ function WorkspaceApp({
           activeProjectId={activeProject.workspaceId}
           worktrees={state.worktrees}
           inactiveProjectWorktrees={inactiveProjectWorktrees}
+          emptyWorkspaceIds={emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots())}
           agents={agents}
           activePath={activeWorktree?.path || ""}
           statuses={worktreeStatuses}
@@ -2159,6 +2167,7 @@ function listVisibleWorktrees(
   worktrees: Worktree[],
   activeProjectId: string,
   inactiveProjectWorktrees: Record<string, Worktree[]> = {},
+  emptyWorkspaceIds: readonly string[] = [],
 ): Worktree[] {
   const groups = groupProjects(projects);
   const collapsed = loadCollapsedProjectIds(projects, activeProjectId);
@@ -2166,6 +2175,7 @@ function listVisibleWorktrees(
 
   for (const group of groups) {
     if (collapsed.has(group.groupId)) continue;
+    if (group.memberProjects.every((member) => emptyWorkspaceIds.includes(member.workspaceId))) continue;
     const project = group.primaryProject;
     const owned = worktrees.filter(
       (worktree) => resolveWorktreeOwnerId(worktree, projects, activeProjectId) === project.workspaceId,
