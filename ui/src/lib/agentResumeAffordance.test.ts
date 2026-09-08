@@ -269,6 +269,49 @@ describe("getAgentReconnectAffordance", () => {
       return { worktrees: [], activeWorktreePath: null, sessions: { [session.id]: session }, layout: createLayoutState(), unreadTabIds: {}, unreadWorktreePaths: {} };
     }
 
+    it("allows reconnect after a live backend reports exit without losing the provider reference", () => {
+      // Given: a running agent owns a live PTY and its own resumable conversation.
+      const initial = createSession({ lifecycle: "running", backendSessionId: "pty-running" });
+
+      // When: that PTY exits.
+      const next = workspaceReducer(createInitialWorkspace(initial), {
+        type: "SESSION_LIFECYCLE",
+        backendSessionId: "pty-running",
+        lifecycle: "exited",
+      });
+      const exited = next.sessions[initial.id];
+
+      // Then: the dead binding is released, but the conversation remains reconnectable.
+      expect(exited.backendSessionId).toBeNull();
+      expect(exited.providerSession).toEqual(initial.providerSession);
+      expect(getAgentReconnectAffordance(exited, next.sessions)).toMatchObject({
+        canReconnect: true,
+        providerSession: initial.providerSession,
+      });
+    });
+
+    it("ignores an old backend exit after the pane has rebound to a new backend", () => {
+      // Given: the same pane already resumed on a replacement PTY.
+      const initial = createSession({ lifecycle: "running", backendSessionId: "pty-old" });
+      const rebound = workspaceReducer(createInitialWorkspace(initial), {
+        type: "REBIND_SESSION_BACKEND",
+        sessionId: initial.id,
+        backendSessionId: "pty-new",
+      });
+
+      // When: a delayed exit from the old PTY arrives.
+      const next = workspaceReducer(rebound, {
+        type: "SESSION_LIFECYCLE",
+        backendSessionId: "pty-old",
+        lifecycle: "exited",
+      });
+
+      // Then: the new live binding is untouched.
+      expect(next.sessions[initial.id]).toBe(rebound.sessions[initial.id]);
+      expect(next.sessions[initial.id].backendSessionId).toBe("pty-new");
+      expect(next.sessions[initial.id].lifecycle).toBe("running");
+    });
+
     it("SET_RECONNECT_LIFECYCLE updates transient state while keeping exited lifecycle and null backend", () => {
       const initial = createSession({ id: "sess-rec" });
       const state = createInitialWorkspace(initial);

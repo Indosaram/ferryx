@@ -82,20 +82,24 @@ async fn production_input_boundary_rejects_detached_session_without_resurrecting
     state.detach_session(session_id);
 
     // Text input to detached session must fail and not recreate state
-    assert!(matches!(
-        encode_attached_native_input(&state, session_id, &text_input),
-        Err(NativeTerminalError::NoValue)
-    ));
+    assert_eq!(
+        encode_attached_native_input(&state, session_id, &text_input)
+            .expect_err("detached text input must fail before writing")
+            .details,
+        Some(serde_json::json!({ "inputWritten": false }))
+    );
     assert!(
         state.ensure_surface_attached(session_id).is_err(),
         "rejected production text input must not re-attach the detached surface"
     );
 
     // Key event to detached session must also fail and not recreate state
-    assert!(matches!(
-        encode_attached_native_input(&state, session_id, &key_input),
-        Err(NativeTerminalError::NoValue)
-    ));
+    assert_eq!(
+        encode_attached_native_input(&state, session_id, &key_input)
+            .expect_err("detached key input must fail before writing")
+            .details,
+        Some(serde_json::json!({ "inputWritten": false }))
+    );
     assert!(
         state.ensure_surface_attached(session_id).is_err(),
         "rejected production key input must not re-attach the detached surface"
@@ -110,10 +114,12 @@ async fn production_input_boundary_rejects_unattached_session_without_creating_n
     let text_input = NativeTerminalInput::Text {
         text: "hello".to_string(),
     };
-    assert!(matches!(
-        encode_attached_native_input(&state, unattached_id, &text_input),
-        Err(NativeTerminalError::NoValue)
-    ));
+    assert_eq!(
+        encode_attached_native_input(&state, unattached_id, &text_input)
+            .expect_err("unattached text input must fail before writing")
+            .details,
+        Some(serde_json::json!({ "inputWritten": false }))
+    );
     assert!(
         state
             .snapshot_for_session(unattached_id)
@@ -141,10 +147,12 @@ async fn production_input_boundary_rejects_unattached_session_without_creating_n
     )
     .expect("deserialize key event");
 
-    assert!(matches!(
-        encode_attached_native_input(&state, unattached_id, &key_input),
-        Err(NativeTerminalError::NoValue)
-    ));
+    assert_eq!(
+        encode_attached_native_input(&state, unattached_id, &key_input)
+            .expect_err("unattached key input must fail before writing")
+            .details,
+        Some(serde_json::json!({ "inputWritten": false }))
+    );
     assert!(
         state
             .snapshot_for_session(unattached_id)
@@ -161,14 +169,15 @@ async fn production_input_boundary_rejects_invalid_session_id() {
         text: "hello".to_string(),
     };
 
-    assert!(matches!(
-        encode_attached_native_input(&state, "", &text_input),
-        Err(NativeTerminalError::InvalidValue(_))
-    ));
-    assert!(matches!(
-        encode_attached_native_input(&state, "   ", &text_input),
-        Err(NativeTerminalError::InvalidValue(_))
-    ));
+    for session_id in ["", "   "] {
+        let error = encode_attached_native_input(&state, session_id, &text_input)
+            .expect_err("invalid session ids must fail before writing");
+        assert_eq!(error.code, ferryx_lib::ipc::IpcErrorCode::InternalError);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "inputWritten": false }))
+        );
+    }
 }
 
 #[tokio::test]

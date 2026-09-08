@@ -92,13 +92,19 @@ const PANE_RECT = {
 
 function deferred<T = void>() {
   let resolve = (_value: T) => {};
-  let reject = (_error: Error) => {};
+  let reject = (_error: unknown) => {};
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
 }
 
 const PRESENTED = {
   presented: true, cursorCol: 2, cursorRow: 3, cellWidthPx: 10, cellHeightPx: 20,
+};
+
+const INPUT_NOT_WRITTEN = {
+  code: "INTERNAL_ERROR",
+  message: "Native input surface is detached",
+  details: { inputWritten: false },
 };
 
 function inputRecoveryBoundary() {
@@ -309,7 +315,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     const view = render(<NativeTerminalPane session={session("owner-a")} />);
     await act(async () => {});
     await startPendingInput(view, boundary);
-    await act(async () => { boundary.input.reject(new Error("recoverable input")); await boundary.recoveryStarted.promise; });
+    await act(async () => { boundary.input.reject(INPUT_NOT_WRITTEN); await boundary.recoveryStarted.promise; });
 
     HTMLElement.prototype.getBoundingClientRect = () => ({ ...PANE_RECT, x: 90, y: 100, width: 400, height: 300 });
     await act(async () => { view.rerender(<NativeTerminalPane session={session("owner-b")} />); });
@@ -339,7 +345,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     });
     const view = render(<NativeTerminalPane session={session("owner-a")} />);
     await startPendingInput(view, boundary);
-    await act(async () => { boundary.input.reject(new Error("queue recovery behind initial attach")); });
+    await act(async () => { boundary.input.reject(INPUT_NOT_WRITTEN); });
     expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(1);
 
     if (returns) {
@@ -382,7 +388,7 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     await act(async () => {});
     await startPendingInput(view, boundary);
     if (outcome !== "input receipt") {
-      await act(async () => { boundary.input.reject(new Error("recover input")); await boundary.recoveryStarted.promise; });
+      await act(async () => { boundary.input.reject(INPUT_NOT_WRITTEN); await boundary.recoveryStarted.promise; });
       if (outcome !== "recovery error") {
         await act(async () => { boundary.recovery.resolve(); await retryStarted.promise; });
       }
@@ -424,14 +430,45 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     await act(async () => {
       fireEvent.input(view.getByTestId("native-terminal-focus-sink"), { target: { value: "y" } });
       await secondStarted.promise;
-      boundary.input.reject(new Error("first input failure"));
-      secondInput.reject(new Error("second input failure"));
+      boundary.input.reject(INPUT_NOT_WRITTEN);
+      secondInput.reject(INPUT_NOT_WRITTEN);
       await boundary.recoveryStarted.promise;
     });
     expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(2);
     await act(async () => { boundary.recovery.resolve(); });
     expect(inputs).toBe(4);
     expect(view.queryByRole("alert")).toBeNull();
+  });
+
+  it.each([
+    new Error("Input receipt failed after delivery"),
+    { code: "INTERNAL_ERROR", message: "Receipt unavailable" },
+    { code: "PTY_IO_ERROR", message: "Write acknowledgement unavailable", details: { inputWritten: true } },
+  ])("does not replay Ctrl+C when delivery is ambiguous: %j", async (failure) => {
+    // Given: the write succeeds, but its IPC response fails afterward.
+    const writes: string[] = [];
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_set_bounds") return PRESENTED;
+      if (command === "cmd_native_terminal_send_input") {
+        writes.push(args.input.keyEvent.key);
+        throw failure;
+      }
+      return undefined;
+    });
+    const view = render(<NativeTerminalPane session={session("accepted-input")} />);
+    await act(async () => {});
+
+    // When: one physical Ctrl+C reaches the focus sink.
+    await act(async () => {
+      fireEvent.keyDown(view.getByTestId("native-terminal-focus-sink"), {
+        key: "c", code: "KeyC", ctrlKey: true,
+      });
+    });
+
+    // Then: no reattachment or replay can turn cancellation into termination.
+    expect(writes).toEqual(["c"]);
+    expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(1);
+    expect(view.getByRole("alert")).toBeInTheDocument();
   });
 
   it("retains the outgoing pane until a dropped frame is retried and presented", async () => {

@@ -686,9 +686,12 @@ pub fn encode_attached_native_input(
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
     input: &NativeTerminalInput,
-) -> Result<Vec<u8>, NativeTerminalError> {
-    require_attached_surface(state, session_id)?;
-    state.encode_input(session_id, input)
+) -> Result<Vec<u8>, IpcError> {
+    require_attached_surface(state, session_id)
+        .and_then(|()| state.encode_input(session_id, input))
+        .map_err(|error| {
+            IpcError::from(error).with_details(serde_json::json!({ "inputWritten": false }))
+        })
 }
 
 fn require_attached_surface(
@@ -869,10 +872,7 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     session_id: String,
     input: NativeTerminalInput,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    let bytes = match encode_attached_native_input(state.inner(), &session_id, &input) {
-        Ok(bytes) => bytes,
-        Err(err) => return Err(IpcError::internal(err.to_string())),
-    };
+    let bytes = encode_attached_native_input(state.inner(), &session_id, &input)?;
     state.emit_scrollbar_if_changed(Some(&app), &session_id);
     if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
         return Err(err);
@@ -1816,6 +1816,21 @@ mod tests {
                 padding_right: 0,
                 padding_left: 0,
             })
+        );
+    }
+
+    #[test]
+    fn rejected_native_input_reports_that_no_pty_write_occurred() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let input = NativeTerminalInput::Text {
+            text: "\u{3}".to_string(),
+        };
+
+        let error = encode_attached_native_input(&state, "unattached-input", &input)
+            .expect_err("an unattached surface cannot accept input");
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "inputWritten": false }))
         );
     }
 

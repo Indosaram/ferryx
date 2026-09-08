@@ -1977,6 +1977,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             {
               ...session,
               lifecycle: action.lifecycle,
+              backendSessionId: action.lifecycle === "exited" ? null : session.backendSessionId,
               reconnectLifecycle: action.lifecycle === "exited" ? "idle" : session.reconnectLifecycle,
             },
           ];

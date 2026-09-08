@@ -489,16 +489,9 @@ export function NativeTerminalPane({
   session,
   className,
   style,
-  activity,
   needsAttention = false,
   active,
 }: NativeTerminalPaneProps): ReactElement {
-  const agentDetected = Boolean(
-    (session?.agentType && session.agentType.trim().length > 0) ||
-      session?.providerSession ||
-      activity?.isAgent === true,
-  );
-  const translateClearToKillLine = agentDetected && activity?.state !== "working";
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const scrollbarTrackRef = useRef<HTMLDivElement>(null);
@@ -538,8 +531,6 @@ export function NativeTerminalPane({
   const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
   const [isCmdHeld, setIsCmdHeld] = useState(false);
   const cmdClickDownRef = useRef<{ clientX: number; clientY: number; shiftKey: boolean } | null>(null);
-  const lastKillLineCtrlCRef = useRef(0);
-  const ctrlCExitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isScrollbarHoveredRef = useRef(false);
   const scrollbarRevisionRef = useRef(0);
@@ -605,10 +596,6 @@ export function NativeTerminalPane({
       if (scrollbarHideTimeoutRef.current !== null) {
         clearTimeout(scrollbarHideTimeoutRef.current);
         scrollbarHideTimeoutRef.current = null;
-      }
-      if (ctrlCExitTimeoutRef.current !== null) {
-        clearTimeout(ctrlCExitTimeoutRef.current);
-        ctrlCExitTimeoutRef.current = null;
       }
     };
   }, []);
@@ -838,7 +825,7 @@ export function NativeTerminalPane({
         setError(null);
       } catch (error: unknown) {
         if (!isCurrentOwner()) return;
-        if (!isRetry) {
+        if (!isRetry && isStructuredIpcError(error) && error.details?.inputWritten === false) {
           switchDebug("terminal.surface.input.error.recovering", {
             backendSessionId: currentSessionId,
             error: String(error),
@@ -867,7 +854,7 @@ export function NativeTerminalPane({
             setError("Failed to send terminal input");
           }
         } else {
-          switchDebug("terminal.surface.input.retry.failed", {
+          switchDebug("terminal.surface.input.failed", {
             backendSessionId: currentSessionId,
             error: String(error),
           });
@@ -880,73 +867,10 @@ export function NativeTerminalPane({
     void executeInput(false);
   }, [performAttach, targetSessionId, visible]);
 
-  const sendCtrlCClearOrExit = useCallback(() => {
-    if (!translateClearToKillLine) {
-      sendInput({
-        keyEvent: {
-          key: "c",
-          action: "Press",
-          modifiers: {
-            shift: false,
-            ctrl: true,
-            alt: false,
-            superKey: false,
-            capsLock: false,
-            numLock: false,
-          },
-          utf8: null,
-        },
-      });
-      return;
-    }
-
-    const now = Date.now();
-    const isDoublePress = now - lastKillLineCtrlCRef.current < 700;
-    lastKillLineCtrlCRef.current = now;
-
-    if (isDoublePress) {
-      sendInput({
-        keyEvent: {
-          key: "c",
-          action: "Press",
-          modifiers: {
-            shift: false,
-            ctrl: true,
-            alt: false,
-            superKey: false,
-            capsLock: false,
-            numLock: false,
-          },
-          utf8: null,
-        },
-      });
-      if (ctrlCExitTimeoutRef.current !== null) {
-        clearTimeout(ctrlCExitTimeoutRef.current);
-      }
-      ctrlCExitTimeoutRef.current = setTimeout(() => {
-        ctrlCExitTimeoutRef.current = null;
-        sendInput({
-          keyEvent: {
-            key: "c",
-            action: "Press",
-            modifiers: {
-              shift: false,
-              ctrl: true,
-              alt: false,
-              superKey: false,
-              capsLock: false,
-              numLock: false,
-            },
-            utf8: null,
-          },
-        });
-      }, 120);
-      return;
-    }
-
+  const sendCtrlC = useCallback(() => {
     sendInput({
       keyEvent: {
-        key: "u",
+        key: "c",
         action: "Press",
         modifiers: {
           shift: false,
@@ -959,7 +883,7 @@ export function NativeTerminalPane({
         utf8: null,
       },
     });
-  }, [sendInput, translateClearToKillLine]);
+  }, [sendInput]);
 
   const copySelectionOrInterrupt = useCallback(() => {
     if (!visible || !isTauri() || !targetSessionId) return;
@@ -1395,7 +1319,7 @@ export function NativeTerminalPane({
       ) {
         event.preventDefault();
         inputRef.current?.focus();
-        sendCtrlCClearOrExit();
+        sendCtrlC();
         return;
       }
       if (
@@ -1493,7 +1417,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [active, copySelectionOrInterrupt, performNativePasteFallback, sendCtrlCClearOrExit, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
+  }, [active, copySelectionOrInterrupt, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;
@@ -2199,7 +2123,7 @@ export function NativeTerminalPane({
 
             if (isPlainCtrlCChord(event)) {
               event.preventDefault();
-              sendCtrlCClearOrExit();
+              sendCtrlC();
               return;
             }
 
