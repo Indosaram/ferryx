@@ -91,10 +91,8 @@ fi
 install_atomic "$TARGET_DIR/Contents/Info.plist" "$CONTENTS_DIR/Info.plist"
 install_atomic "$SRC_TAURI_DIR/icons/icon.icns" "$RESOURCES_DIR/icon.icns"
 
-# cargo's linker-signed ad-hoc signature seals the bare binary. Once it sits in a bundle beside
-# Info.plist and Resources, codesign reports "code has no resources but signature indicates they must
-# be present", so re-sign the assembled bundle to write Contents/_CodeSignature/CodeResources.
-codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
+# A stable Developer ID requirement preserves TCC grants across debug rebuilds.
+codesign --force --sign "Developer ID Application: Indo Yoon (5DUM8WPB4C)" "$APP_DIR"
 
 if (( ${#app_args[@]} )); then
     exec "$MACOS_DIR/ferryx" "${app_args[@]}"
