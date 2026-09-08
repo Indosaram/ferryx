@@ -34,7 +34,7 @@ export function serializeWorkspaceState(
   repoRoot: string,
   state: WorkspaceState,
   existingSession?: PersistedWorkspaceSession | null,
-  project?: Pick<import("./types").RegisteredProject, "target" | "gitRoot">,
+  project?: Pick<import("./types").RegisteredProject, "target" | "gitRoot" | "gitRemote" | "gitCommonDir">,
 ): PersistedWorkspaceSession {
   const browserSettings = loadBrowserSettings();
   const restoreBrowserTabs = browserSettings.restoreTabsOnLaunch;
@@ -245,6 +245,8 @@ export function serializeWorkspaceState(
     repoRoot,
     target: project?.target ?? existingSession?.workspaces[workspaceId]?.target,
     gitRoot: project?.gitRoot === undefined ? existingSession?.workspaces[workspaceId]?.gitRoot : project.gitRoot,
+    gitRemote: project?.gitRemote === undefined ? existingSession?.workspaces[workspaceId]?.gitRemote : project.gitRemote,
+    gitCommonDir: project?.gitCommonDir === undefined ? existingSession?.workspaces[workspaceId]?.gitCommonDir : project.gitCommonDir,
     worktrees: persistedWorktrees,
     activeWorktreePath: state.activeWorktreePath,
     layout: persistedLayout,

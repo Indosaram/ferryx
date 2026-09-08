@@ -724,9 +724,14 @@ function groupWorktreesByProject(
   const grouped = new Map<string, Worktree[]>();
   for (const group of groups) {
     const primaryId = group.primaryProject.workspaceId;
-    const isPrimaryActive = activeProjectId === primaryId;
-    const listed = isPrimaryActive ? [] : inactiveProjectWorktrees?.[primaryId];
-    grouped.set(primaryId, listed ? [...listed] : []);
+    const listed = group.memberProjects.flatMap((member) => {
+      if (member.workspaceId === activeProjectId) return [];
+      return (inactiveProjectWorktrees?.[member.workspaceId] ?? []).map((row) =>
+        member.workspaceId === primaryId || row.workspaceId
+          ? row
+          : { ...row, workspaceId: member.workspaceId });
+    });
+    grouped.set(primaryId, listed);
   }
 
   for (const worktree of worktrees) {
@@ -747,7 +752,9 @@ function groupWorktreesByProject(
       continue;
     }
     const member = targetGroup?.memberProjects.find((m) => m.workspaceId === resolvedWorkspaceId);
-    let resolvedWorktree = worktree;
+    let resolvedWorktree = owner !== targetId && !worktree.workspaceId
+      ? { ...worktree, workspaceId: owner }
+      : worktree;
     const memberTarget = member?.target;
     if (!resolvedWorktree.hostLabel && memberTarget?.kind === "ssh") {
       const hostLabel = hosts?.find((h) => h.id === memberTarget.hostId)?.label ?? memberTarget.hostId;

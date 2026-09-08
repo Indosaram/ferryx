@@ -638,6 +638,8 @@ export interface PersistedWorkspace {
   repoRoot: string;
   target?: import("./scopedContracts").RunTarget;
   gitRoot?: string | null;
+  gitRemote?: string | null;
+  gitCommonDir?: string | null;
   worktrees: PersistedWorktree[];
   activeWorktreePath: string | null;
   layout: PersistedLayout;

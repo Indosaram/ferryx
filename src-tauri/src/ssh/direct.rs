@@ -231,7 +231,8 @@ pub fn parse_probe(bytes: &[u8]) -> Result<(String, Option<String>, Option<Strin
 
 pub async fn probe(host: &SshHost, path: &str) -> Result<(String, Option<String>, Option<String>), IpcError> {
     let environment = super::runtime::detect(host).await?;
-    super::operations::probe(host, &environment, path).await
+    let (root, git_root, git_remote, _) = super::operations::probe(host, &environment, path).await?;
+    Ok((root, git_root, git_remote))
 }
 
 fn spawn_child(

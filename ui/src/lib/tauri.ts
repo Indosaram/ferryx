@@ -53,6 +53,7 @@ export type RegisteredProject = {
   repoRoot: string;
   gitRoot?: string | null;
   gitRemote?: string | null;
+  gitCommonDir?: string | null;
   target?: RunTarget;
 };
 

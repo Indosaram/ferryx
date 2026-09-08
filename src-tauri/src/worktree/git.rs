@@ -413,10 +413,51 @@ pub fn git_branch_delete(
 }
 
 pub fn git_remote_origin_url(repo_root: &Path) -> Option<String> {
-    run_git(repo_root, &["remote", "get-url", "origin"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    select_project_remote(&run_git(repo_root, &["remote", "-v"]).ok()?)
+}
+
+pub fn select_project_remote(remotes: &str) -> Option<String> {
+    remotes
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            let url = fields.next()?;
+            if fields.next()? != "(fetch)" || !is_hosted_git_remote(url) {
+                return None;
+            }
+            let priority = match name {
+                "upstream" => 0,
+                "origin" => 1,
+                _ => 2,
+            };
+            Some((priority, name, url))
+        })
+        .min()
+        .map(|(_, _, url)| url.to_string())
+}
+
+fn is_hosted_git_remote(remote: &str) -> bool {
+    if remote.contains("://") {
+        return tauri::Url::parse(remote).is_ok_and(|url| {
+            matches!(url.scheme(), "ssh" | "git" | "https" | "http")
+                && url.host_str().is_some()
+                && !url.path().trim_matches('/').is_empty()
+        });
+    }
+    let Some((host, path)) = remote.split_once(':') else {
+        return false;
+    };
+    !host.is_empty()
+        && !host.contains(['/', '\\'])
+        && !(host.len() == 1 && path.starts_with(['/', '\\']))
+        && !path.is_empty()
+}
+
+pub fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {
+    let common = run_git(repo_root, &["rev-parse", "--git-common-dir"]).ok()?;
+    let common = Path::new(common.trim_end_matches(['\r', '\n']));
+    std::fs::canonicalize(repo_root.join(common)).ok()
 }
 
 #[cfg(test)]

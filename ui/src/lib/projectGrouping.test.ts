@@ -27,6 +27,27 @@ describe("projectGrouping", () => {
       expect(normalizeGitRemote(undefined)).toBeNull();
       expect(normalizeGitRemote("   ")).toBeNull();
     });
+
+    it.each(["/srv/repo", "../repo", "C:\\repos\\app", "file:///srv/repo", "not a remote"])(
+      "does not treat filesystem or invalid remote %s as a cross-machine identity",
+      (remote) => {
+        expect(normalizeGitRemote(remote)).toBeNull();
+      },
+    );
+
+    it("preserves case-sensitive repository paths outside GitHub", () => {
+      expect(normalizeGitRemote("ssh://git@git.example.com/Team/App.git"))
+        .toBe("git.example.com/Team/App");
+      expect(normalizeGitRemote("https://git.example.com/team/app.git"))
+        .not.toBe(normalizeGitRemote("https://git.example.com/Team/App.git"));
+    });
+
+    it("normalizes SSH transport ports but preserves distinct HTTP endpoints", () => {
+      expect(normalizeGitRemote("ssh://git@github.com:22/Org/App.git"))
+        .toBe("github.com/org/app");
+      expect(normalizeGitRemote("https://git.example.com:8443/team/app.git"))
+        .not.toBe(normalizeGitRemote("https://git.example.com/team/app.git"));
+    });
   });
 
   describe("getProjectFolderName", () => {
@@ -73,7 +94,7 @@ describe("projectGrouping", () => {
       expect(matchesSameProject(local, remote)).toBe(true);
     });
 
-    it("matches projects when folder names match even without git remote", () => {
+    it("keeps same-named folders separate without shared Git identity", () => {
       const local: RegisteredProject = {
         workspaceId: "my-app",
         repoRoot: "/Users/dev/my-app",
@@ -86,7 +107,38 @@ describe("projectGrouping", () => {
         target: { kind: "ssh", hostId: "dev-server" },
       };
 
-      expect(matchesSameProject(local, remote)).toBe(true);
+      expect(matchesSameProject(local, remote)).toBe(false);
+    });
+
+    it("keeps same-named repositories separate when their remotes differ", () => {
+      const local = { workspaceId: "a", repoRoot: "/mac/app", gitRemote: "https://github.com/alice/app.git" };
+      const remote = { workspaceId: "b", repoRoot: "/linux/app", gitRemote: "https://github.com/bob/app.git" };
+      expect(matchesSameProject(local, remote)).toBe(false);
+    });
+
+    it("matches linked worktrees by common Git directory on the same host without a remote", () => {
+      const main = { workspaceId: "main", repoRoot: "/repo", gitCommonDir: "/repo/.git" };
+      const linked = { workspaceId: "feature", repoRoot: "/worktrees/feature", gitCommonDir: "/repo/.git" };
+      expect(matchesSameProject(main, linked)).toBe(true);
+    });
+
+    it("does not confuse identical Git directory paths or workspace IDs on different hosts", () => {
+      const local = { workspaceId: "same-id", repoRoot: "/repo", gitCommonDir: "/repo/.git" };
+      const remote = {
+        ...local,
+        target: { kind: "ssh", hostId: "other" } as const,
+      };
+      expect(matchesSameProject(local, remote)).toBe(false);
+    });
+
+    it("normalizes Windows common-directory spelling without folding POSIX path case", () => {
+      const main = { workspaceId: "a", repoRoot: "C:\\repo", gitCommonDir: "\\\\?\\C:\\Repo\\.git" };
+      const linked = { workspaceId: "b", repoRoot: "C:/worktree", gitCommonDir: "c:/repo/.git" };
+      expect(matchesSameProject(main, linked)).toBe(true);
+      expect(matchesSameProject(
+        { ...main, gitCommonDir: "/repo/.git" },
+        { ...linked, gitCommonDir: "/Repo/.git" },
+      )).toBe(false);
     });
 
     it("does not match unrelated projects with different remotes and different folder names", () => {
@@ -108,6 +160,26 @@ describe("projectGrouping", () => {
   });
 
   describe("groupProjects", () => {
+    it("joins common-directory and remote matches regardless of registration order", () => {
+      const main = {
+        workspaceId: "main", repoRoot: "/repo", gitCommonDir: "/repo/.git",
+        gitRemote: "https://github.com/org/app.git",
+      };
+      const linked = { workspaceId: "linked", repoRoot: "/feature", gitCommonDir: "/repo/.git" };
+      const remote = {
+        workspaceId: "ssh:remote", repoRoot: "/srv/checkout",
+        gitRemote: "git@github.com:org/app.git",
+        target: { kind: "ssh", hostId: "linux" } as const,
+      };
+      for (const projects of [[linked, remote, main], [remote, main, linked], [main, linked, remote]]) {
+        const groups = groupProjects(projects);
+        expect(groups).toHaveLength(1);
+        expect(new Set(groups[0]?.memberProjects.map((project) => project.workspaceId)))
+          .toEqual(new Set(["main", "linked", "ssh:remote"]));
+        expect(groups[0]?.primaryProject.target?.kind).not.toBe("ssh");
+      }
+    });
+
     it("groups matching local and remote projects into one project group with local as primary", () => {
       const local: RegisteredProject = {
         workspaceId: "orca-lite",

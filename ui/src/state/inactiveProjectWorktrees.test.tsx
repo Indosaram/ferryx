@@ -52,6 +52,21 @@ async function settleServices(services: InactiveProjectWorktreeServices) {
 }
 
 describe("useInactiveProjectWorktrees", () => {
+  it("publishes freshly registered Git metadata for inactive project grouping", async () => {
+    const onRegistered = vi.fn();
+    const registered = {
+      ...gitProject,
+      gitRemote: "https://github.com/team/app.git",
+      gitCommonDir: "/Users/dev/orca-lite/.git",
+    };
+    const services = createServices({ registerProject: vi.fn(async () => registered) });
+    renderHook(() =>
+      useInactiveProjectWorktrees([gitProject], "other", [], services, onRegistered),
+    );
+    await settleServices(services);
+    expect(onRegistered).toHaveBeenCalledWith(registered);
+  });
+
   it("registers then lists worktrees for inactive projects only", async () => {
     const services = createServices();
     const { result } = renderHook(() =>

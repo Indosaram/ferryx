@@ -32,6 +32,7 @@ export function useInactiveProjectWorktrees(
   activeProjectId: string,
   activeWorktrees: Worktree[] = [],
   services: InactiveProjectWorktreeServices = defaultServices,
+  onRegistered?: (project: RegisteredProject) => void,
 ): Record<string, Worktree[]> {
   const [worktreesByProject, setWorktreesByProject] = useState<Record<string, Worktree[]>>(() =>
     activeProjectId && activeWorktrees.length > 0
@@ -49,7 +50,11 @@ export function useInactiveProjectWorktrees(
   }, [activeProjectId, activeWorktrees]);
 
   const inactiveTargets = projects.filter((project) => project.workspaceId !== activeProjectId);
-  const inactiveKey = JSON.stringify(inactiveTargets);
+  const inactiveKey = JSON.stringify(inactiveTargets.map(({ workspaceId, repoRoot, gitRoot, target }) => ({
+    workspaceId, repoRoot, gitRoot, target,
+  })));
+  const onRegisteredRef = useRef(onRegistered);
+  onRegisteredRef.current = onRegistered;
 
   // Deletions of an inactive project's worktree (sidebar trash icon, another
   // desktop, remote client) arrive as backend `worktree_changed` events. The
@@ -128,6 +133,7 @@ export function useInactiveProjectWorktrees(
               workspaceId: project.workspaceId,
               repoPath: project.repoRoot,
             });
+            if (!cancelled) onRegisteredRef.current?.(registered);
             switchDebug("inactive-worktrees.registered", {
               requestedWorkspaceId: project.workspaceId,
               registeredWorkspaceId: registered.workspaceId,

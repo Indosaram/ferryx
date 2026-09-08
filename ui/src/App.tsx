@@ -143,7 +143,11 @@ function recoverProjectBootstrap(session: PersistedWorkspaceSession | null): Pro
   const projects = Object.values(session.workspaces).reduce<RegisteredProject[]>((recovered, workspace) => {
     if (!workspace.workspaceId || !workspace.repoRoot || !hasValidProjectTarget(workspace)) return recovered;
     if (!recovered.some((project) => project.workspaceId === workspace.workspaceId)) {
-      recovered.push({ workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot, target: workspace.target, gitRoot: workspace.gitRoot });
+      recovered.push({
+        workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot,
+        target: workspace.target, gitRoot: workspace.gitRoot,
+        gitRemote: workspace.gitRemote, gitCommonDir: workspace.gitCommonDir,
+      });
     }
     return recovered;
   }, []);
@@ -682,6 +686,22 @@ function WorkspaceApp({
     projects,
     activeProject.workspaceId,
     state.worktrees,
+    undefined,
+    (registered) => {
+      setProjects((current) => {
+        const index = current.findIndex((project) =>
+          project.workspaceId === registered.workspaceId &&
+          project.repoRoot === registered.repoRoot &&
+          project.target?.kind !== "ssh");
+        const previous = current[index];
+        if (!previous || (previous.gitRemote === registered.gitRemote &&
+            previous.gitCommonDir === registered.gitCommonDir)) return current;
+        const next = [...current];
+        next[index] = { ...previous, gitRemote: registered.gitRemote, gitCommonDir: registered.gitCommonDir };
+        persistProjects(next);
+        return next;
+      });
+    },
   );
   const inactiveProjectWorktreesRef = useRef(inactiveProjectWorktrees);
 
@@ -828,6 +848,7 @@ function WorkspaceApp({
                 candidate.repoRoot === registered.repoRoot &&
                 candidate.gitRoot === registered.gitRoot &&
                 candidate.gitRemote === registered.gitRemote &&
+                candidate.gitCommonDir === registered.gitCommonDir &&
                 JSON.stringify(candidate.target) === JSON.stringify(registered.target),
             )
           ) {
@@ -2246,6 +2267,12 @@ function listVisibleWorktrees(
       if (project.gitRoot === null && rows.length === 0) rows = [projectRootWorktree(project)];
       for (const member of group.memberProjects) {
         const target = member.target;
+        if (member.workspaceId !== project.workspaceId && target?.kind !== "ssh") {
+          const memberRows = member.workspaceId === activeProjectId
+            ? worktrees.filter((row) => resolveWorktreeOwnerId(row, projects, activeProjectId) === member.workspaceId)
+            : inactiveProjectWorktrees[member.workspaceId] ?? [];
+          rows.push(...memberRows.map((row) => ({ ...row, workspaceId: row.workspaceId ?? member.workspaceId })));
+        }
         if (target?.kind === "ssh") {
           if (!rows.some((candidate) => candidate.path === member.repoRoot && candidate.workspaceId === member.workspaceId)) {
             const hostLabel = typeof getCachedSshHosts === "function"
@@ -2300,6 +2327,7 @@ function loadProjects(): RegisteredProject[] {
         workspaceId: project.workspaceId,
         repoRoot: project.repoRoot,
         target: project.target,
+        gitCommonDir: typeof project.gitCommonDir === "string" ? project.gitCommonDir : undefined,
         gitRemote:
           typeof project.gitRemote === "string"
             ? project.gitRemote

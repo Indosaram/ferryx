@@ -93,6 +93,17 @@ function workspaceState(): WorkspaceState {
 }
 
 describe("sessionPersistence v2 serialization and migration", () => {
+  it("retains Git grouping metadata in session snapshots and subsequent saves", () => {
+    const project = {
+      gitRoot: "/workspace/main",
+      gitRemote: "https://github.com/team/app.git",
+      gitCommonDir: "/workspace/main/.git",
+    };
+    const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState(), null, project);
+    const next = serializeWorkspaceState("default", "/workspace/main", workspaceState(), saved);
+    expect(next.workspaces.default).toMatchObject(project);
+  });
+
   it("serializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities", () => {
     const serialized = serializeWorkspaceState("default", "/workspace/main", workspaceState());
 

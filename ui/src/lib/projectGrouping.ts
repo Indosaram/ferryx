@@ -7,16 +7,29 @@ export interface ProjectGroup {
 }
 
 export function normalizeGitRemote(url: string | null | undefined): string | null {
-  if (!url || typeof url !== "string") return null;
-  let clean = url.trim().toLowerCase();
-  if (!clean) return null;
-  clean = clean.replace(/^(?:ssh|git|https?):\/\//, "");
-  clean = clean.replace(/^[a-zA-Z0-9._-]+@/, "");
-  clean = clean.replace(/^([^/:]+):/, "$1/");
-  clean = clean.replace(/^([^/]+):\d+\//, "$1/");
-  clean = clean.replace(/\.git\/?$/, "");
-  clean = clean.replace(/\/+$/, "");
-  return clean || null;
+  const value = url?.trim();
+  if (!value || /^[a-z]:[\\/]/i.test(value)) return null;
+  const scp = value.includes("://") ? null : /^(?:[^@\s/:]+@)?([^:\s/]+):(.+)$/.exec(value);
+  let host: string;
+  let path: string;
+  if (scp) {
+    host = scp[1].toLowerCase();
+    path = scp[2];
+  } else {
+    try {
+      const parsed = new URL(value);
+      if (!["https:", "http:", "ssh:", "git:"].includes(parsed.protocol)) return null;
+      host = parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.host : parsed.hostname;
+      path = parsed.pathname;
+    } catch (error) {
+      if (error instanceof TypeError) return null;
+      throw error;
+    }
+  }
+  if (host === "ssh.github.com") host = "github.com";
+  if (host === "github.com") path = path.toLowerCase();
+  path = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  return host && path ? `${host}/${path}` : null;
 }
 
 export function getProjectFolderName(project: RegisteredProject): string {
@@ -27,36 +40,45 @@ export function getProjectFolderName(project: RegisteredProject): string {
 }
 
 export function matchesSameProject(a: RegisteredProject, b: RegisteredProject): boolean {
-  if (a.workspaceId === b.workspaceId) return true;
+  const hostA = a.target?.kind === "ssh" ? `ssh:${a.target.hostId}` : "local";
+  const hostB = b.target?.kind === "ssh" ? `ssh:${b.target.hostId}` : "local";
+  if (hostA === hostB) {
+    if (a.workspaceId === b.workspaceId) return true;
+    if (a.gitCommonDir && b.gitCommonDir &&
+        normalizeGitDirectory(a.gitCommonDir) === normalizeGitDirectory(b.gitCommonDir)) return true;
+  }
 
   const remoteA = normalizeGitRemote(a.gitRemote);
   const remoteB = normalizeGitRemote(b.gitRemote);
-  if (remoteA && remoteB && remoteA === remoteB) {
-    return true;
-  }
+  return remoteA !== null && remoteA === remoteB;
+}
 
-  const folderA = getProjectFolderName(a);
-  const folderB = getProjectFolderName(b);
-  if (folderA && folderB && folderA === folderB) {
-    return true;
+function normalizeGitDirectory(path: string): string {
+  if (/^[a-z]:[\\/]/i.test(path) || path.startsWith("\\\\") || path.startsWith("//?/")) {
+    return path.replace(/\\/g, "/").replace(/^\/\/\?\//, "")
+      .replace(/^UNC\//i, "//").replace(/\/+$/, "").toLowerCase();
   }
-
-  return false;
+  return path.replace(/\/+$/, "");
 }
 
 export function groupProjects(projects: RegisteredProject[]): ProjectGroup[] {
   const groups: ProjectGroup[] = [];
 
   for (const project of projects) {
-    const existing = groups.find((group) =>
-      matchesSameProject(group.primaryProject, project),
+    const matching = groups.filter((group) =>
+      group.memberProjects.some((member) => matchesSameProject(member, project)),
     );
+    const existing = matching[0];
     if (existing) {
-      existing.memberProjects.push(project);
-      if (existing.primaryProject.target?.kind === "ssh" && project.target?.kind !== "ssh") {
-        existing.primaryProject = project;
-        existing.groupId = project.workspaceId;
+      // A newly resolved checkout can connect a host-local worktree group to a remote group.
+      for (const group of matching.slice(1)) {
+        existing.memberProjects.push(...group.memberProjects);
+        groups.splice(groups.indexOf(group), 1);
       }
+      existing.memberProjects.push(project);
+      existing.primaryProject = existing.memberProjects.find((member) => member.target?.kind !== "ssh")
+        ?? existing.primaryProject;
+      existing.groupId = existing.primaryProject.workspaceId;
     } else {
       groups.push({
         groupId: project.workspaceId,

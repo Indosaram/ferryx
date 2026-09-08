@@ -117,4 +117,17 @@ describe("remoteProject adapter", () => {
       hostId: "host-data",
     });
   });
+
+  it("preserves Git identity metadata without changing the remote execution target", () => {
+    const response = {
+      workspaceId: "ssh:linked", repoRoot: "/srv/feature", gitRoot: "/srv/feature",
+      gitRemote: "git@github.com:org/app.git", gitCommonDir: "/srv/main/.git",
+      hostId: "linux", hostLabel: "Linux",
+    };
+    expect(toRegisteredProject(response)).toEqual({
+      workspaceId: "ssh:linked", repoRoot: "/srv/feature", gitRoot: "/srv/feature",
+      gitRemote: "git@github.com:org/app.git", gitCommonDir: "/srv/main/.git",
+      target: { kind: "ssh", hostId: "linux" },
+    });
+  });
 });

@@ -12,6 +12,7 @@ export interface RegisteredRemoteProject {
   repoRoot: string;
   gitRoot: string | null;
   gitRemote?: string | null;
+  gitCommonDir?: string | null;
   hostId: string;
   hostLabel: string;
 }
@@ -47,6 +48,7 @@ export function toRegisteredProject(remote: RegisteredRemoteProject): Registered
     repoRoot: remote.repoRoot,
     gitRoot: remote.gitRoot ?? null,
     ...(remote.gitRemote ? { gitRemote: remote.gitRemote } : {}),
+    ...(remote.gitCommonDir ? { gitCommonDir: remote.gitCommonDir } : {}),
     target: {
       kind: "ssh",
       hostId: remote.hostId,

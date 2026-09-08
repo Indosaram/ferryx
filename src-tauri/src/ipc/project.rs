@@ -96,6 +96,11 @@ fn register_canonical_project(
     } else {
         None
     };
+    let git_common_dir = if manager.is_git_backed() {
+        crate::worktree::git::git_common_dir(&repo_root)
+    } else {
+        None
+    };
 
     if let Some((workspace_id, _)) = registry
         .list()
@@ -107,6 +112,7 @@ fn register_canonical_project(
             repo_root,
             git_root,
             git_remote,
+            git_common_dir,
         });
     }
 
@@ -125,6 +131,7 @@ fn register_canonical_project(
         repo_root,
         git_root,
         git_remote,
+        git_common_dir,
     })
 }
 
@@ -145,6 +152,8 @@ pub struct RegisteredProject {
     pub git_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_common_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,4 +351,115 @@ pub async fn cmd_path_reveal<R: tauri::Runtime>(
         Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+mod git_identity_tests {
+    use super::*;
+
+    fn repository() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        run_git(directory.path(), &["init"]).unwrap();
+        run_git(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        directory
+    }
+
+    #[test]
+    fn registration_prefers_upstream_identity_over_fork_origin() {
+        let directory = repository();
+        run_git(
+            directory.path(),
+            &["remote", "add", "origin", "git@github.com:fork/app.git"],
+        )
+        .unwrap();
+        run_git(
+            directory.path(),
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/team/app.git",
+            ],
+        )
+        .unwrap();
+        let project =
+            register_canonical_project(&WorkspaceRegistry::new(), directory.path(), None).unwrap();
+        assert_eq!(
+            project.git_remote.as_deref(),
+            Some("https://github.com/team/app.git")
+        );
+    }
+
+    #[test]
+    fn registration_skips_filesystem_remotes_and_selects_named_hosted_remote() {
+        let directory = repository();
+        run_git(
+            directory.path(),
+            &["remote", "add", "origin", "../local-bundle"],
+        )
+        .unwrap();
+        run_git(
+            directory.path(),
+            &[
+                "remote",
+                "add",
+                "zeta",
+                "https://git.example.com/team/z.git",
+            ],
+        )
+        .unwrap();
+        run_git(
+            directory.path(),
+            &[
+                "remote",
+                "add",
+                "alpha",
+                "https://git.example.com/team/a.git",
+            ],
+        )
+        .unwrap();
+        let project =
+            register_canonical_project(&WorkspaceRegistry::new(), directory.path(), None).unwrap();
+        assert_eq!(
+            project.git_remote.as_deref(),
+            Some("https://git.example.com/team/a.git")
+        );
+    }
+
+    #[test]
+    fn linked_worktree_registration_keeps_execution_root_and_exposes_common_git_directory() {
+        let directory = repository();
+        let linked = directory.path().join("feature-checkout");
+        run_git(
+            directory.path(),
+            &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        )
+        .unwrap();
+        let registry = WorkspaceRegistry::new();
+        let main = register_canonical_project(&registry, directory.path(), None).unwrap();
+        let feature = register_canonical_project(&registry, &linked, None).unwrap();
+        let main_wire = serde_json::to_value(&main).unwrap();
+        let feature_wire = serde_json::to_value(&feature).unwrap();
+        assert_eq!(
+            main_wire["gitCommonDir"],
+            serde_json::json!(std::fs::canonicalize(directory.path().join(".git")).unwrap())
+        );
+        assert_eq!(feature_wire["gitCommonDir"], main_wire["gitCommonDir"]);
+        assert_ne!(feature.workspace_id, main.workspace_id);
+        assert_eq!(feature.repo_root, std::fs::canonicalize(linked).unwrap());
+        assert_eq!(feature.git_root.as_ref(), Some(&feature.repo_root));
+    }
 }

@@ -10,31 +10,10 @@ pub async fn probe(
     host: &SshHost,
     environment: &RemoteEnvironment,
     path: &str,
-) -> Result<(String, Option<String>, Option<String>), IpcError> {
+) -> Result<(String, Option<String>, Option<String>, Option<String>), IpcError> {
     environment.platform.validate_path(path)?;
     let marker = format!("FERRYX_DIR_V1_{}", uuid::Uuid::new_v4().simple());
-    let script = match environment.platform {
-        RemotePlatform::Posix => format!(
-            "cd {} || exit; root=$(pwd -P) || exit; \
-             gitroot=$(git rev-parse --show-toplevel 2>/dev/null) || gitroot=; \
-             origin=$(git remote get-url origin 2>/dev/null) || origin=; \
-             printf '{marker}\\000%s\\000%s\\000%s\\000' \"$root\" \"$gitroot\" \"$origin\"",
-            direct::quote_posix(path)
-        ),
-        RemotePlatform::Windows => format!(
-            "{POWERSHELL_GIT}\n$p={}; $item=Get-Item -LiteralPath $p -Force; \
-             if (!$item.PSIsContainer) {{ throw 'Remote path is not a directory' }}; \
-             $root=$item.FullName; $gitroot=''; $origin=''; \
-             if (Get-Command git -ErrorAction SilentlyContinue) {{ \
-                 $g=Invoke-FerryxGit @('-C',$root,'rev-parse','--show-toplevel'); \
-                 if ($g.Code -eq 0) {{ $gitroot=$g.Output.TrimEnd([char[]]\"`r`n\"); \
-                     $g=Invoke-FerryxGit @('-C',$root,'remote','get-url','origin'); \
-                     if ($g.Code -eq 0) {{ $origin=$g.Output.TrimEnd([char[]]\"`r`n\") }} \
-                 }} \
-             }}; [Console]::Write(('{marker}',$root,$gitroot,$origin,'' -join [char]0))",
-            powershell_data(path)
-        ),
-    };
+    let script = project_probe_script(environment.platform, path, &marker);
     let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
     let output = direct::bounded_output(&plan, Duration::from_secs(12))
         .await
@@ -44,16 +23,51 @@ pub async fn probe(
             }
             err
         })?;
-    let fields = parse_fields(&output, &marker, 3)?;
+    let fields = parse_fields(&output, &marker, 4)?;
     environment.platform.validate_path(fields[0])?;
-    if !fields[1].is_empty() {
-        environment.platform.validate_path(fields[1])?;
+    for path in [fields[1], fields[3]] {
+        if !path.is_empty() {
+            environment.platform.validate_path(path)?;
+        }
     }
     Ok((
         fields[0].into(),
         (!fields[1].is_empty()).then(|| fields[1].into()),
-        (!fields[2].is_empty()).then(|| fields[2].into()),
+        crate::worktree::git::select_project_remote(fields[2]),
+        (!fields[3].is_empty()).then(|| fields[3].into()),
     ))
+}
+
+fn project_probe_script(platform: RemotePlatform, path: &str, marker: &str) -> String {
+    match platform {
+        RemotePlatform::Posix => format!(
+            "cd {} || exit; root=$(pwd -P) || exit; \
+             gitroot=$(git rev-parse --show-toplevel 2>/dev/null) || gitroot=; \
+             remotes=$(git remote -v 2>/dev/null) || remotes=; \
+             common=$(git rev-parse --git-common-dir 2>/dev/null) || common=; \
+             if [ -n \"$common\" ]; then common=$(cd \"$common\" && pwd -P) || common=; fi; \
+             printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000' \"$root\" \"$gitroot\" \"$remotes\" \"$common\"",
+            direct::quote_posix(path)
+        ),
+        RemotePlatform::Windows => format!(
+            "{POWERSHELL_GIT}\n$p={}; $item=Get-Item -LiteralPath $p -Force; \
+             if (!$item.PSIsContainer) {{ throw 'Remote path is not a directory' }}; \
+             $root=$item.FullName; $gitroot=''; $remotes=''; $common=''; \
+             if (Get-Command git -ErrorAction SilentlyContinue) {{ \
+                 $g=Invoke-FerryxGit @('-C',$root,'rev-parse','--show-toplevel'); \
+                 if ($g.Code -eq 0) {{ $gitroot=$g.Output.TrimEnd([char[]]\"`r`n\"); \
+                     $g=Invoke-FerryxGit @('-C',$root,'remote','-v'); \
+                     if ($g.Code -eq 0) {{ $remotes=$g.Output.TrimEnd([char[]]\"`r`n\") }}; \
+                     $g=Invoke-FerryxGit @('-C',$root,'rev-parse','--git-common-dir'); \
+                     if ($g.Code -eq 0) {{ $c=$g.Output.TrimEnd([char[]]\"`r`n\"); \
+                         if (![IO.Path]::IsPathRooted($c)) {{ $c=Join-Path $root $c }}; \
+                         $common=(Get-Item -LiteralPath $c -Force).FullName \
+                     }} \
+                 }} \
+             }}; [Console]::Write(('{marker}',$root,$gitroot,$remotes,$common,'' -join [char]0))",
+            powershell_data(path)
+        ),
+    }
 }
 
 pub fn shell_plan(
