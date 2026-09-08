@@ -1,0 +1,17 @@
+QA initial PID 79244; runtime /tmp/fx-handover-ErHo6D/runtime
+CLEANUP isolated runtime removed: /tmp/fx-handover-ErHo6D
+file:///Users/indo/code/project/orca-lite/scripts/verify-daemon-handover.mjs:25
+      timer = setTimeout(() => reject(new Error(`Timed out: ${label}\n${stderr}`)), 10000);
+                                      ^
+
+Error: Timed out: replacement canonical daemon
+
+thread 'main' (1719894) panicked at library/std/src/io/stdio.rs:1165:9:
+failed printing to stdout: Broken pipe (os error 32)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    at Timeout.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/verify-daemon-handover.mjs:25:39)
+    at listOnTimeout (node:internal/timers:585:17)
+    at process.processTimers (node:internal/timers:521:7)
+
+Node.js v22.22.3

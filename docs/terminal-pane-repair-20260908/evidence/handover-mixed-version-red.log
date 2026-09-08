@@ -1,0 +1,13 @@
+QA initial PID 21382; runtime /tmp/fx-handover-yUhhZv/runtime
+QA initial version 2026.902.2
+CLEANUP isolated runtime removed: /tmp/fx-handover-yUhhZv
+file:///Users/indo/code/project/orca-lite/scripts/verify-daemon-handover.mjs:68
+    fail(new Error(`Connection closed: ${socketPath}`));
+         ^
+
+Error: Connection closed: /tmp/fx-handover-yUhhZv/runtime/daemon.sock
+    at Socket.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/verify-daemon-handover.mjs:68:10)
+    at Socket.emit (node:events:519:28)
+    at Pipe.<anonymous> (node:net:346:12)
+
+Node.js v22.22.3

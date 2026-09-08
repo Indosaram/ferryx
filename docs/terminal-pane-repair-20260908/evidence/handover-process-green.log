@@ -1,0 +1,4 @@
+QA initial PID 14740; runtime /tmp/fx-handover-RRGJZG/runtime
+PASS generation 1: 1 original PTYs; history, executed input, resize preserved
+PASS generation 2: 2 original PTYs; history, executed input, resize preserved
+CLEANUP isolated runtime removed: /tmp/fx-handover-RRGJZG
