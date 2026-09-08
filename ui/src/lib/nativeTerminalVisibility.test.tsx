@@ -9,6 +9,7 @@ vi.mock("./shortcuts", () => ({
 import {
   NativeTerminalVisibilityProvider,
   useNativeTerminalVisibility,
+  useNativeTerminalVisibilityState,
 } from "./nativeTerminalVisibility";
 
 /**
@@ -35,7 +36,7 @@ describe("useNativeTerminalVisibility", () => {
 
   it.each(["dialog", "search"])("keeps macOS terminal visible behind a %s overlay", async (role) => {
     vi.mocked(isMacShortcutPlatform).mockReturnValue(true);
-    const { result } = renderHook(() => useNativeTerminalVisibility());
+    const { result } = renderHook(() => useNativeTerminalVisibilityState());
     const overlay = document.createElement("div");
     overlay.setAttribute("role", role);
 
@@ -43,7 +44,31 @@ describe("useNativeTerminalVisibility", () => {
       document.body.appendChild(overlay);
     });
 
+    expect(result.current).toEqual({ visible: true, interactive: false });
+  });
+
+  it.each(["dialog", "search"])("masks the macOS browser surface while a %s overlay owns input", async (role) => {
+    vi.mocked(isMacShortcutPlatform).mockReturnValue(true);
+    const { result } = renderHook(() => useNativeTerminalVisibility());
+    const overlay = document.createElement("div");
+    overlay.setAttribute("role", role);
+    await act(async () => {
+      document.body.appendChild(overlay);
+    });
+    expect(result.current).toBe(false);
+    await act(async () => {
+      overlay.remove();
+    });
     expect(result.current).toBe(true);
+  });
+
+  it("masks the macOS browser surface during owner drop occlusion", () => {
+    vi.mocked(isMacShortcutPlatform).mockReturnValue(true);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <NativeTerminalVisibilityProvider visible occluded>{children}</NativeTerminalVisibilityProvider>
+    );
+    const { result } = renderHook(() => useNativeTerminalVisibility(), { wrapper });
+    expect(result.current).toBe(false);
   });
 
   it("still hides an explicitly hidden macOS owner", () => {

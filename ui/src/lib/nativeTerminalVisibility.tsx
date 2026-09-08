@@ -73,5 +73,5 @@ export function useNativeTerminalVisibilityState(): { readonly visible: boolean;
 }
 
 export function useNativeTerminalVisibility(): boolean {
-  return useNativeTerminalVisibilityState().visible;
+  return useNativeTerminalVisibilityState().interactive;
 }
