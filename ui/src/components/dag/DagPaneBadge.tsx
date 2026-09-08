@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import type { DagRunSnapshot } from "../../lib/dagTypes";
 import type { TerminalSession } from "../../lib/types";
 import { dagStore } from "../../state/dagStore";
-import { dagRunOwnership } from "../../state/dagRunOwnership";
 import { DagGraphView } from "./DagGraphView";
 
 export type DagPaneBadgeProps = {
@@ -82,17 +81,9 @@ function GraphGlyph(): JSX.Element {
 
 export function DagPaneBadge({
   projectPath,
-  paneId,
   providerSessionId,
-  sessions,
-  agentPresent = false,
-  agentWorking = false,
 }: DagPaneBadgeProps): JSX.Element | null {
   const storeState = useSyncExternalStore(dagStore.subscribe, () => dagStore.getState());
-  const ownersByRunId = useSyncExternalStore(
-    dagRunOwnership.subscribe,
-    () => dagRunOwnership.getState(),
-  );
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
@@ -108,75 +99,15 @@ export function DagPaneBadge({
     [runs],
   );
 
-  useEffect(() => {
-    dagRunOwnership.retain(
-      runningRuns.map((candidate) => candidate.runId),
-      runs.map((candidate) => candidate.runId),
-    );
-  }, [runningRuns, runs]);
-
-  useEffect(() => {
-    if (!agentWorking || paneId === undefined || paneId === "") return;
-    const sessionList = sessions ? Object.values(sessions) : [];
-    for (const candidate of runningRuns) {
-      const explicitOwner = candidate.rootSessionId
-        ? sessionList.find((session) => session.providerSession?.id === candidate.rootSessionId)?.id
-          ?? (candidate.rootSessionId === providerSessionId ? paneId : undefined)
-        : undefined;
-      if (explicitOwner) dagRunOwnership.claim(candidate.runId, explicitOwner, true);
-      else dagRunOwnership.claim(candidate.runId, paneId);
-    }
-  }, [agentWorking, paneId, runningRuns, sessions, providerSessionId]);
-
-  const exactlyMatchedByAnotherPane = useMemo(() => {
-    const matchedRunIds = new Set<string>();
-    if (!sessions) return matchedRunIds;
-    const sessionList = Array.isArray(sessions) ? sessions : Object.values(sessions);
-    for (const candidate of runningRuns) {
-      if (typeof candidate.rootSessionId !== "string" || candidate.rootSessionId.trim() === "") {
-        continue;
-      }
-      if (
-        sessionList.some(
-          (session) =>
-            session.id !== paneId &&
-            session.providerSession?.id === candidate.rootSessionId,
-        )
-      ) {
-        matchedRunIds.add(candidate.runId);
-      }
-    }
-    return matchedRunIds;
-  }, [runningRuns, sessions, paneId]);
-
-  const paneRuns = useMemo(() => {
-    const matching = runningRuns.filter((candidate) => {
-      const exact =
-        typeof candidate.rootSessionId === "string" &&
-        candidate.rootSessionId.trim() !== "" &&
-        candidate.rootSessionId === providerSessionId;
-      if (exact) return true;
-      if (ownersByRunId[candidate.runId] === paneId && !exactlyMatchedByAnotherPane.has(candidate.runId)) {
-        return true;
-      }
-      if (agentPresent && ownersByRunId[candidate.runId] === undefined && !exactlyMatchedByAnotherPane.has(candidate.runId)) {
-        return true;
-      }
-      return false;
-    });
-
-    return matching.sort((a, b) => {
-      const aExact = a.rootSessionId === providerSessionId ? 1 : 0;
-      const bExact = b.rootSessionId === providerSessionId ? 1 : 0;
-      if (aExact !== bExact) return bExact - aExact;
-
-      const aOwned = ownersByRunId[a.runId] === paneId ? 1 : 0;
-      const bOwned = ownersByRunId[b.runId] === paneId ? 1 : 0;
-      if (aOwned !== bOwned) return bOwned - aOwned;
-
-      return runUpdatedAt(b) - runUpdatedAt(a);
-    });
-  }, [runningRuns, providerSessionId, ownersByRunId, paneId, exactlyMatchedByAnotherPane, agentPresent]);
+  // A shared project path or agent activity cannot establish run ownership.
+  const paneRuns = useMemo(
+    () => runningRuns.filter((candidate) =>
+      typeof candidate.rootSessionId === "string" &&
+      candidate.rootSessionId.trim() !== "" &&
+      candidate.rootSessionId === providerSessionId,
+    ),
+    [runningRuns, providerSessionId],
+  );
 
   const run = paneRuns.length > 0 ? paneRuns[0] : null;
   const activeRun = (selectedRunId ? paneRuns.find((r) => r.runId === selectedRunId) : null) ?? run;

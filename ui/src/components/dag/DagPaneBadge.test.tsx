@@ -8,7 +8,10 @@ import { dagRunOwnership } from "../../state/dagRunOwnership";
 import { dagStore } from "../../state/dagStore";
 import { DagPaneBadge } from "./DagPaneBadge";
 
-const baseSnapshot: DagRunSnapshot = parseDagRunSnapshot(dagRunSampleJson)!;
+const baseSnapshot: DagRunSnapshot = {
+  ...parseDagRunSnapshot(dagRunSampleJson)!,
+  rootSessionId: "provider-a",
+};
 
 function createSession(id: string, providerSessionId?: string): TerminalSession {
   return {
@@ -35,7 +38,7 @@ describe("DagPaneBadge", () => {
   });
 
   it("idle hidden: renders null when dagStore has no runs", () => {
-    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
@@ -48,7 +51,7 @@ describe("DagPaneBadge", () => {
     render(<DagPaneBadge projectPath="/repo/my-project" paneId="pane-b"
       providerSessionId="provider-b" sessions={sessions} agentWorking agentPresent />);
     expect(screen.getAllByTestId("dag-pane-badge")).toHaveLength(1);
-    expect(dagRunOwnership.ownerOf("explicit-owner")).toBe("pane-b");
+    expect(first.container.querySelector("[data-testid=dag-pane-badge]")).toBeNull();
   });
 
   it("idle hidden: renders null when projectPath is undefined or empty", () => {
@@ -59,11 +62,11 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
-    const { unmount } = render(<DagPaneBadge projectPath={undefined} agentWorking agentPresent paneId="pane-a" />);
+    const { unmount } = render(<DagPaneBadge providerSessionId="provider-a" projectPath={undefined} agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
     unmount();
 
-    render(<DagPaneBadge projectPath="" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
@@ -75,7 +78,7 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
-    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
 
     const badge = screen.getByTestId("dag-pane-badge");
     expect(badge).toBeInTheDocument();
@@ -95,7 +98,7 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/project-a", runningRun);
 
-    render(<DagPaneBadge projectPath="/repo/project-b" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/project-b" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
@@ -108,27 +111,27 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/repo/a", runningRun);
 
     // Exact match
-    const { unmount: unmount1 } = render(<DagPaneBadge projectPath="/repo/a" agentWorking agentPresent paneId="pane-a" />);
+    const { unmount: unmount1 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
     unmount1();
 
     // Trailing slash match
-    const { unmount: unmount2 } = render(<DagPaneBadge projectPath="/repo/a/" agentWorking agentPresent paneId="pane-a" />);
+    const { unmount: unmount2 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a/" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
     unmount2();
 
     // Nested cwd match
-    const { unmount: unmount3 } = render(<DagPaneBadge projectPath="/repo/a/nested/subdir" agentWorking agentPresent paneId="pane-a" />);
+    const { unmount: unmount3 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a/nested/subdir" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
     unmount3();
 
     // Sibling directory with shared prefix must NOT match (/repo/a vs /repo/another)
-    const { unmount: unmount4 } = render(<DagPaneBadge projectPath="/repo/another" agentWorking agentPresent paneId="pane-a" />);
+    const { unmount: unmount4 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/another" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
     unmount4();
 
     // Sibling directory /repo/a-pkg must NOT match
-    render(<DagPaneBadge projectPath="/repo/a-pkg" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a-pkg" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
@@ -141,7 +144,7 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
-    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
 
     expect(screen.queryByTestId("dag-pane-modal")).not.toBeInTheDocument();
 
@@ -174,12 +177,12 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
     const { rerender } = render(
-      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+      <DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
     );
     expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
 
     rerender(
-      <DagPaneBadge
+      <DagPaneBadge providerSessionId="provider-a"
         projectPath="/repo/my-project"
         paneId="pane-a"
         agentPresent
@@ -198,17 +201,17 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
     render(
-      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+      <DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
     );
     expect(screen.getAllByTestId("dag-pane-badge")).toHaveLength(1);
 
     render(
-      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-b" agentPresent agentWorking />,
+      <DagPaneBadge providerSessionId="provider-b" projectPath="/repo/my-project" paneId="pane-b" agentPresent agentWorking />,
     );
     expect(screen.getAllByTestId("dag-pane-badge")).toHaveLength(1);
   });
 
-  it("releases ownership once the run stops running so a later run can be reclaimed", () => {
+  it("hides the owned run once it stops running", () => {
     dagStore.applySnapshot("/repo/my-project", {
       ...baseSnapshot,
       runId: "run-cycle",
@@ -216,9 +219,9 @@ describe("DagPaneBadge", () => {
     });
 
     render(
-      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+      <DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
     );
-    expect(dagRunOwnership.ownerOf("run-cycle")).toBe("pane-a");
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
 
     act(() => {
       dagStore.applySnapshot("/repo/my-project", {
@@ -280,7 +283,7 @@ describe("DagPaneBadge", () => {
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
-  it("falls back to an agent-present pane when no pane exactly matches the run", () => {
+  it("hides the badge when no pane exactly matches the run", () => {
     dagStore.applySnapshot("/repo/my-project", {
       ...baseSnapshot,
       runId: "run-with-unmatched-root-session",
@@ -290,7 +293,7 @@ describe("DagPaneBadge", () => {
     const currentSession = createSession("pane-current");
 
     render(
-      <DagPaneBadge
+      <DagPaneBadge providerSessionId="provider-a"
         projectPath="/repo/my-project"
         paneId={currentSession.id}
         sessions={[currentSession]}
@@ -299,10 +302,10 @@ describe("DagPaneBadge", () => {
       />,
     );
 
-    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+    expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
-  it("falls back only to an unclaimed run when another run exactly matches a sibling pane", () => {
+  it("shows only the exact owned run when another run belongs to a sibling", () => {
     const rootSessionId = "01a055f9-a8de-7619-a1f5-81ca62e3d3b1";
     dagStore.applySnapshot("/repo/my-project", {
       ...baseSnapshot,
@@ -323,7 +326,7 @@ describe("DagPaneBadge", () => {
     const matchingSession = createSession("pane-matching", rootSessionId);
 
     render(
-      <DagPaneBadge
+      <DagPaneBadge providerSessionId="provider-a"
         projectPath="/repo/my-project"
         paneId={currentSession.id}
         sessions={{
@@ -360,7 +363,7 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
-    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
 
     const button = screen.getByTestId("dag-pane-badge-button");
     const glyph = button.querySelector("svg");
@@ -378,11 +381,11 @@ describe("DagPaneBadge", () => {
         ...baseSnapshot,
         runId: `run-${status}`,
         status,
-        updatedAt: new Date().toISOString(),
+        updatedAt: "2026-08-29T12:00:00.000Z",
       };
       dagStore.applySnapshot("/repo/my-project", nonRunningRun);
 
-      const { unmount } = render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+      const { unmount } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
       expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
       unmount();
     }
@@ -397,7 +400,7 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/my-project", activeRun);
 
-    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
 
     // Open popover
     fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
@@ -426,7 +429,7 @@ describe("DagPaneBadge", () => {
     });
 
     render(
-      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+      <DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
     );
     fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
 
@@ -451,7 +454,7 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/repo/my-project", run1);
     dagStore.applySnapshot("/repo/my-project", run2);
 
-    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
 
     fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
 
@@ -480,7 +483,7 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/repo/my-project", run1);
     dagStore.applySnapshot("/repo/my-project", run2);
 
-    render(<DagPaneBadge projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" agentWorking agentPresent paneId="pane-a" />);
 
     fireEvent.click(screen.getByTestId("dag-pane-badge-button"));
 
@@ -506,7 +509,7 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/repo/my-project", run1);
 
     const { unmount: unmount1 } = render(
-      <DagPaneBadge
+      <DagPaneBadge providerSessionId="provider-a"
         projectPath="/private/repo/my-project"
         agentWorking
         agentPresent
@@ -525,7 +528,7 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/private/repo/my-project", run2);
 
     const { unmount: unmount2 } = render(
-      <DagPaneBadge
+      <DagPaneBadge providerSessionId="provider-a"
         projectPath="/repo/my-project"
         agentWorking
         agentPresent
@@ -581,7 +584,7 @@ describe("DagPaneBadge", () => {
     });
 
     render(
-      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+      <DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
     );
 
     expect(dagRunOwnership.ownerOf("run-other")).toBe("pane-other");
@@ -597,7 +600,7 @@ describe("DagPaneBadge", () => {
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
     render(
-      <DagPaneBadge projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
+      <DagPaneBadge providerSessionId="provider-a" projectPath="/repo/my-project" paneId="pane-a" agentPresent agentWorking />,
     );
 
     const button = screen.getByTestId("dag-pane-badge-button");

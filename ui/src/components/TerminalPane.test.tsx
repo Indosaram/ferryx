@@ -14,7 +14,7 @@ import { TerminalPane } from "./TerminalPane";
 
 const parsedDagSnapshot = parseDagRunSnapshot(dagRunSampleJson);
 if (!parsedDagSnapshot) throw new TypeError("DAG test fixture is invalid");
-const dagSnapshot = parsedDagSnapshot;
+const dagSnapshot = { ...parsedDagSnapshot, rootSessionId: "provider-dag-owner" };
 
 const agentActivity: TerminalActivity = {
   state: "working",
@@ -110,8 +110,9 @@ describe("TerminalPane native routing contract", () => {
       runId: "worktree-dag",
       status: "running",
     });
-    const session = {
+    const session: TerminalSession = {
       ...createSession(),
+      providerSession: { key: "session_id", id: "provider-dag-owner" },
       cwd: "/repo/worktree/packages/ui",
       worktreePath: "/repo/worktree",
     };
@@ -146,6 +147,7 @@ describe("TerminalPane native routing contract", () => {
       status: "running",
     });
     const session = createSession();
+    session.providerSession = { key: "session_id", id: "provider-dag-owner" };
 
     render(<TerminalPane session={session} active={true} activity={agentActivity} />);
 
@@ -180,6 +182,7 @@ describe("TerminalPane native routing contract", () => {
       status: "running",
     });
     const session = createSession();
+    session.providerSession = { key: "session_id", id: "provider-dag-owner" };
 
     render(<TerminalPane session={session} active={true} activity={agentActivity} />);
 
