@@ -2033,6 +2033,16 @@ impl DaemonServer {
                 .resolve_terminal_target(workspace_id, worktree.as_ref())
                 .map_err(|e| SpawnError::Other(e.to_string()))?;
 
+            let resume_startup = startup.clone();
+            let resume_cwd = crate::ipc::run_blocking(move || {
+                crate::terminal::resume_cwd::resolve_agent_resume_cwd(resume_startup.as_ref())
+                    .map_err(|error| crate::ipc::IpcError::new(
+                        crate::ipc::IpcErrorCode::AgentResumeInvalid, error.to_string(),
+                    ))
+            })
+            .await
+            .map_err(|error| SpawnError::InvalidAgentResume(error.to_string()))?;
+            let cwd = resume_cwd.map(|path| path.to_string_lossy().into_owned()).or(cwd);
             let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {
                 let custom_path = PathBuf::from(custom_cwd_str);
                 if !custom_path.exists() {
@@ -2980,6 +2990,32 @@ mod tests {
         );
         assert!(valid.is_ok());
         assert_eq!(server.provider_claim_len_for_test(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_omo_resume_cwd_cannot_escape_workspace() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        let outside = tempdir().unwrap();
+        server.handle_register_workspace("default", repo.path().to_str().unwrap()).unwrap();
+        let transcript = outside.path().join("session.jsonl");
+        fs::write(&transcript, format!("{}\n", serde_json::json!({
+            "type": "session", "id": "provider-session", "cwd": outside.path(),
+        }))).unwrap();
+        let result = server.handle_spawn(
+            "omo-outside-workspace", "default", None,
+            Some(repo.path().to_string_lossy().into_owned()), 80, 24, None,
+            Some(TerminalStartup::AgentResume {
+                agent_type: "omo".to_string(),
+                provider_session: crate::daemon::protocol::AgentProviderSession {
+                    key: AgentProviderSessionKey::SessionId,
+                    id: "provider-session".to_string(),
+                    transcript_path: Some(transcript.to_string_lossy().into_owned()),
+                },
+            }),
+        ).await;
+        assert!(matches!(result, Err(SpawnError::Other(_))));
+        assert!(server.terminal_service().list_sessions().is_empty());
     }
 
     #[tokio::test]

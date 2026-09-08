@@ -17,6 +17,61 @@ function coldAgent(): TerminalSession {
 }
 
 describe("agent reconnect cross-layer contracts", () => {
+  it("persists recovered OMO CWD and transcript without changing the workspace root", async () => {
+    const providerSession = {
+      key: "session_id",
+      id: "omo-provider",
+      transcriptPath: "/home/user/.omo/agent/sessions/project/session.jsonl",
+    } as const;
+    const persisted: PersistedWorkspaceSession = {
+      version: 2, timestamp: 1, activeWorkspaceId: "ws",
+      workspaces: {
+        ws: {
+          workspaceId: "ws", repoRoot: "/repo", worktrees: [], activeWorktreePath: "/repo",
+          layout: {
+            splitMode: "none", primaryTabId: "tab", secondaryTabId: null, activeTabId: "tab",
+            tabs: [{
+              id: "tab", kind: "terminal", label: "OMO",
+              terminal: {
+                primarySessionId: "local-agent", paneTree: { type: "leaf", leafId: "leaf" },
+                sessionIdsByLeafId: { leaf: "local-agent" }, activeLeafId: "leaf", expandedLeafId: null,
+              },
+            }],
+          },
+          terminalSessions: {
+            "local-agent": {
+              localSessionId: "local-agent", backendSessionId: null, cwd: "/repo",
+              worktreePath: "/repo", createdAt: 1, agentType: "omo", providerSession,
+            },
+          },
+        },
+      },
+    };
+    const restored = deserializeWorkspaceState("ws", persisted, []);
+    if (!restored) throw new Error("Missing restored workspace");
+    let state = restored;
+    const spawn = vi.fn(async () => ({
+      sessionId: "new-backend", daemonEpoch: "new",
+      session: {
+        sessionId: "new-backend", workspaceId: "ws", worktree: null,
+        cwd: "/repo/nested", cols: 80, rows: 24, running: true,
+      },
+    }));
+    await reconnectAgentSession("local-agent", {
+      getSessions: () => state.sessions,
+      dispatch: (action) => { state = workspaceReducer(state, action); },
+      spawn, attach: async () => undefined, createRequestId: () => "omo-cwd-repair",
+    });
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+      startup: { kind: "agentResume", agentType: "omo", providerSession },
+    }));
+    const saved = serializeWorkspaceState("ws", "/repo", state, persisted);
+    expect(saved.workspaces.ws?.terminalSessions["local-agent"]).toMatchObject({
+      cwd: "/repo/nested", worktreePath: "/repo", providerSession,
+    });
+    expect(saved.workspaces.ws?.repoRoot).toBe("/repo");
+  });
+
   it("spans stale persisted load through typed reconnect and saved snapshot", async () => {
     const persisted = {
       version: 2, timestamp: 1, activeWorkspaceId: "ws",

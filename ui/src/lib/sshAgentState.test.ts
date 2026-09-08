@@ -37,9 +37,21 @@ it("delivers authenticated state over a loopback TCP endpoint", async () => {
   try {
     const extension = await import("../../../src-tauri/resources/agent-extensions/ferryx-agent-state");
     extension.default({ on: (event: string, handler: (event: unknown, context: unknown) => void) => handlers.set(event, handler) });
-    handlers.get("session_start")?.({}, { mode: "tui", isIdle: () => true });
+    handlers.get("session_start")?.({}, {
+      mode: "tui",
+      isIdle: () => true,
+      sessionManager: {
+        getSessionId: () => "provider-session",
+        getSessionFile: () => "/home/user/.omo/agent/sessions/project/subdir/session.jsonl",
+      },
+    });
     expect(JSON.parse(await received)).toMatchObject({
       type: "agentState", sessionId: "test-session", token: "test-session-token", state: "idle",
+      providerSession: {
+        key: "session_id",
+        id: "provider-session",
+        transcriptPath: "/home/user/.omo/agent/sessions/project/subdir/session.jsonl",
+      },
     });
   } finally {
     clearTimeout(timeout);

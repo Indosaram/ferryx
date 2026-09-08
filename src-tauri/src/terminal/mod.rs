@@ -31,6 +31,7 @@ pub(crate) mod metrics;
 pub mod output_hub;
 pub mod preferences;
 pub mod pty;
+pub(crate) mod resume_cwd;
 pub mod service;
 pub mod session;
 pub mod shell;

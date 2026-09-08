@@ -33,7 +33,12 @@ function providerSessionFromContext(ctx): unknown {
   const sessionManager = ctx?.sessionManager;
   const id = sessionManager?.getSessionId?.();
   if (typeof id !== "string" || id.length === 0) return undefined;
-  return { key: "session_id", id };
+  const transcriptPath = sessionManager?.getSessionFile?.();
+  return {
+    key: "session_id",
+    id,
+    ...(typeof transcriptPath === "string" && transcriptPath.length > 0 ? { transcriptPath } : {}),
+  };
 }
 
 function send(state: AgentState, providerSession?: unknown): void {
