@@ -10,9 +10,16 @@ clone operation, or new remote agent.
 
 - Add Project > Remote opens the selected host's home directory automatically.
 - A saved, enabled host in SSH settings offers Open Project into the same flow.
-- The path field supports explicit Go and Enter navigation. These never register a project.
-- Home, parent and refresh controls navigate; folder rows are keyboard-operable buttons.
-- Filter only the loaded immediate directories; hidden directories are an explicit toggle.
+- The path field is a combobox, prefilled with the actual remote home after connection.
+- Typing a trailing separator lists that remote directory immediately. Typing the last
+  path segment filters its parent's children in the dropdown directly under the input.
+- Windows accepts both slash forms; POSIX treats backslash as a filename character.
+- Clicking a candidate or completing it with Tab/Enter appends a separator and lists
+  its children. Arrow keys move the active candidate while focus stays in the input.
+- Enter without a candidate validates/navigates the typed path, never registers a project.
+- Escape closes suggestions without closing the dialog; input focus/click reopens them.
+- Home, parent and refresh controls navigate; hidden directories are an explicit toggle.
+- There is no separate Go button, filter input, or permanently visible directory browser.
 - Add this folder registers only the successfully listed canonical path. Editing a path,
   loading, errors and host changes invalidate that selection.
 - Host changes remount the picker, discard its listing cache and invalidate outstanding replies.

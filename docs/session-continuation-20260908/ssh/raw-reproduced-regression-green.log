@@ -1,0 +1,13 @@
+$ vitest run --maxWorkers=1 src/components/RemoteDirectoryPicker.test.tsx src/components/ProjectDialogs.test.tsx src/lib/remoteProject.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/components/ProjectDialogs.test.tsx (43 tests) 379ms
+ ✓ src/components/RemoteDirectoryPicker.test.tsx (12 tests) 149ms
+ ✓ src/lib/remoteProject.test.ts (6 tests) 3ms
+
+ Test Files  3 passed (3)
+      Tests  61 passed (61)
+   Start at  00:49:52
+   Duration  2.19s (transform 124ms, setup 200ms, collect 606ms, tests 531ms, environment 510ms, prepare 78ms)
+

@@ -1,0 +1,128 @@
+{
+  "timestamp": "2026-09-08T15:36:13.548Z",
+  "allPass": true,
+  "results": [
+    {
+      "scenario": 1,
+      "name": "Windows Home Prefill",
+      "pass": true,
+      "data": {
+        "inputValue": "C:\\Users\\developer",
+        "options": [
+          "code",
+          "Documents",
+          "denied",
+          "empty",
+          "loading"
+        ],
+        "confirmDisabled": false,
+        "confirmText": "Add this folder",
+        "noGoBtn": true
+      }
+    },
+    {
+      "scenario": 2,
+      "name": "Windows Separator Immediate Children",
+      "pass": true,
+      "data": {
+        "inputValue": "C:\\Users\\developer\\code\\",
+        "options": [
+          "ferryx",
+          "frontend",
+          "folder-with-a-very-long-name-for-path-width-verification"
+        ],
+        "confirmDisabled": false,
+        "noGoBtn": true
+      }
+    },
+    {
+      "scenario": 3,
+      "name": "Prefix Narrowing In Same Input",
+      "pass": true,
+      "data": {
+        "inputValue": "C:\\Users\\developer\\code\\fe",
+        "options": [
+          "ferryx"
+        ],
+        "confirmDisabled": true
+      }
+    },
+    {
+      "scenario": 4,
+      "name": "Tab Autocomplete Path",
+      "pass": true,
+      "data": {
+        "inputValue": "C:\\Users\\developer\\code\\ferryx\\",
+        "active": true,
+        "options": []
+      }
+    },
+    {
+      "scenario": 5,
+      "name": "Linux Arrow Key and Enter Browsing",
+      "pass": true,
+      "data": {
+        "selectedOption": "Documents",
+        "inputValue": "/home/developer/Documents/",
+        "isRegistered": false
+      }
+    },
+    {
+      "scenario": 6,
+      "name": "Escape Closes Dropdown and Click Reopens",
+      "pass": true,
+      "data": {
+        "sc6EscData": {
+          "hasListbox": false,
+          "isClosed": false
+        },
+        "sc6ReopenData": {
+          "hasListbox": true
+        }
+      }
+    },
+    {
+      "scenario": 7,
+      "name": "Error Handling and Retry Display",
+      "pass": true,
+      "data": {
+        "hasAlert": true,
+        "alertText": "Permission deniedRetry",
+        "hasRetry": true,
+        "confirmDisabled": true
+      }
+    },
+    {
+      "scenario": 8,
+      "name": "Host Switch Cache Invalidation & Home Prefill",
+      "pass": true,
+      "data": {
+        "hostValue": "windows",
+        "inputValue": "C:\\Users\\developer",
+        "options": [
+          "code",
+          "Documents",
+          "denied",
+          "empty",
+          "loading"
+        ]
+      }
+    },
+    {
+      "scenario": 9,
+      "name": "Final Project Registration Distinct From Browsing",
+      "pass": true,
+      "data": {
+        "registered": {
+          "workspaceId": "ssh:qa",
+          "repoRoot": "C:\\Users\\developer\\code",
+          "gitRoot": null,
+          "target": {
+            "kind": "ssh",
+            "hostId": "windows"
+          }
+        }
+      }
+    }
+  ]
+}

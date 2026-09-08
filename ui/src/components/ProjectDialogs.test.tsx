@@ -63,8 +63,7 @@ import type { RemoteDirectoryListing } from "../lib/remoteDirectories";
 
 async function openRemotePath(path: string) {
   await act(async () => {
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), { target: { value: path } });
-    fireEvent.click(screen.getByRole("button", { name: "Go" }));
+    fireEvent.change(screen.getByTestId("remote-repo-path-input"), { target: { value: `${path}/` } });
   });
 }
 
@@ -112,7 +111,7 @@ beforeEach(() => {
   ssh.useSshHosts.mockReset();
   directories.listRemoteDirectories.mockReset();
   directories.listRemoteDirectories.mockImplementation(async (_host: string, path: string | null): Promise<RemoteDirectoryListing> => ({
-    path: path ?? "/home/ubuntu",
+    path: path === null ? "/home/ubuntu" : path.length > 1 ? path.replace(/\/$/, "") : path,
     parentPath: "/",
     homePath: "/home/ubuntu",
     entries: [],
@@ -564,8 +563,8 @@ describe("AddProjectDialog Remote flow", () => {
       workspaceId: "ssh:canonical", hostId: "host-1", repoRoot: "/srv/projects/My App", gitRoot: null,
     });
     await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={onRegistered} />); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "projects" })); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "My App" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("option", { name: "projects" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("option", { name: "My App" })); });
     await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-remote")); });
     expect(remote.registerRemoteProject).toHaveBeenCalledWith({
       workspaceId: "My-App", hostId: "host-1", repoPath: "/srv/projects/My App",
@@ -579,15 +578,13 @@ describe("AddProjectDialog Remote flow", () => {
     await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />); });
     directories.listRemoteDirectories.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
     const input = screen.getByTestId("remote-repo-path-input");
-    fireEvent.change(input, { target: { value: "/slow" } });
-    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.change(input, { target: { value: "/slow/" } });
     expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
-    fireEvent.change(input, { target: { value: "/fast" } });
-    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.change(input, { target: { value: "/fast/" } });
     const result = { path: "/fast", parentPath: "/", homePath: "/home/ubuntu", entries: [], truncated: false };
     await act(async () => { fast.resolve(result); });
     await act(async () => { slow.resolve({ ...result, path: "/slow" }); });
-    expect(input).toHaveValue("/fast");
+    expect(input).toHaveValue("/fast/");
     expect(screen.getByLabelText("Selected remote folder")).toHaveTextContent("/fast");
     expect(remote.registerRemoteProject).not.toHaveBeenCalled();
   });
@@ -619,11 +616,16 @@ describe("AddProjectDialog Remote flow", () => {
       ],
     });
     await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />); });
-    expect(screen.queryByRole("button", { name: ".config" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: ".config" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: "Hidden folders" }));
-    expect(screen.getByRole("button", { name: ".config" })).toBeInTheDocument();
-    fireEvent.change(screen.getByRole("textbox", { name: "Filter folders" }), { target: { value: ".con" } });
-    expect(screen.queryByRole("button", { name: "projects" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: ".config" })).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.change(screen.getByRole("combobox", { name: "Remote repository path" }), {
+        target: { value: "/home/ubuntu/.con" },
+      });
+    });
+    expect(screen.getByRole("option", { name: ".config" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "projects" })).not.toBeInTheDocument();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remote home" })); });
     expect(directories.listRemoteDirectories).toHaveBeenCalledTimes(1);
     directories.listRemoteDirectories.mockResolvedValueOnce({
@@ -632,9 +634,9 @@ describe("AddProjectDialog Remote flow", () => {
     });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh folders" })); });
     expect(directories.listRemoteDirectories).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("button", { name: "new-project" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "projects" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: ".config" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "new-project" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "projects" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: ".config" })).not.toBeInTheDocument();
   });
 
   it("invalidates cached and pending selections when the same host ID changes configuration", async () => {
@@ -681,7 +683,7 @@ describe("AddProjectDialog Remote flow", () => {
     directories.listRemoteDirectories.mockResolvedValueOnce(home)
       .mockRejectedValueOnce({ code: "IO_ERROR", message: "Permission denied" });
     await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "denied" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("option", { name: "denied" })); });
     expect(screen.getByTestId("remote-repo-path-input")).toHaveValue("/home/ubuntu/denied");
     expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });

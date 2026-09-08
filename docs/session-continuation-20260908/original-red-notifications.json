@@ -1,0 +1,62 @@
+[
+  {
+    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-50-08-015Z_01a0817f-710f-7f2f-bf80-5b19a379b312.jsonl",
+    "event": {
+      "type": "custom_message",
+      "customType": "senpi-monitor:notification",
+      "content": "<system-reminder>Monitor event(Sidebar empty-workspace regression RED):  Test Files 0 passed (1)\n      Tests 0 passed (0)\n Test Files 0 passed (1)\n      Tests 0 passed (0)\n Test Files 0 passed (1)\n      Tests 0 passed (34)\n Test Files 0 passed (1)\n      Tests 1 passed (34)\nExpected the element to have attribute:\nReceived:\nExpected the element to have attribute:\nReceived:\nExpected the element to have attribute:\nReceived:\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > keeps a tabless workspace collapsed after clicking its chevron\n FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > keeps a tabless workspace collapsed after clicking its project name\nExpected the element to have attribute:\nReceived:\n FAIL  src/components/Sidebar.test.tsx > Sidebar navigation > collapses when the final tab closes and restores rows after a tab opens\nExpected the element to have attribute:\nReceived:\n Test Files  1 failed (1)\n      Tests  3 failed | 1 passed | 30 skipped (34)\nwatcher exited_1 (exit code 1)</system-reminder>",
+      "display": false,
+      "id": "c27d8599",
+      "parentId": "fec5828f",
+      "timestamp": "2026-09-08T14:54:02.783Z"
+    }
+  },
+  {
+    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl",
+    "event": {
+      "type": "custom_message",
+      "customType": "senpi-monitor:notification",
+      "content": "<system-reminder>Monitor event(자동완성 회귀 RED 확인): ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > loads children when a separator is typed without submitting navigation\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"app\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > filters the final segment and completes with Tab into the next directory\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"code\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > keeps focus in the input while arrow keys and Enter browse a candidate\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"Documents\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > closes suggestions with Escape and reopens on input click\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"code\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > browses Windows separator form C:/Users/dev/code/\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"app\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > browses Windows separator form C:\\Users\\dev\\code\\\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"app\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > treats a POSIX backslash as a literal name character\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"a\\b\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > does not let an old directory response overwrite a newer prefix\nTestingLibraryElementError: Unable to find an accessible element with the role \"option\" and name \"app\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n Test Files  1 failed (1)\nwatcher exited_1 (exit code 1)\n[2 additional event lines omitted; peek bash_output for full history.]</system-reminder>",
+      "display": false,
+      "id": "837cd36f",
+      "parentId": "f9c3921e",
+      "timestamp": "2026-09-08T14:49:15.642Z"
+    }
+  },
+  {
+    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl",
+    "event": {
+      "type": "custom_message",
+      "customType": "senpi-monitor:notification",
+      "content": "<system-reminder>Monitor event(초기 재시도와 비활성 상태 회귀 RED): ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > fills the actual home path when a failed initial connection is retried\nError: expect(element).toHaveValue(C:\\Users\\dev)\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > does not offer stale candidates or refresh a selected folder for an empty input\nTestingLibraryElementError: Found multiple elements with the role \"option\"\n ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19\n ❯ getElementError node_modules/@testing-library/dom/dist/query-helpers.js:20:35\n ❯ getMultipleElementsFoundError node_modules/@testing-library/dom/dist/query-helpers.js:23:10\n FAIL  src/components/RemoteDirectoryPicker.test.tsx > remote path autocomplete > does not navigate by clicking an option while registration disables the picker\nAssertionError: expected \"spy\" to be called 1 times, but got 2 times\n Test Files  1 failed (1)\n      Tests  3 failed | 9 passed (12)\nwatcher exited_1 (exit code 1)</system-reminder>",
+      "display": false,
+      "id": "dce63196",
+      "parentId": "c624c101",
+      "timestamp": "2026-09-08T14:55:28.635Z"
+    }
+  },
+  {
+    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl",
+    "event": {
+      "type": "custom_message",
+      "customType": "senpi-monitor:notification",
+      "content": "<system-reminder>Monitor event(Full-height pane regression RED):  Test Files 0 passed (2)\n      Tests 0 passed (0)\n Test Files 0 passed (2)\n      Tests 0 passed (150)\n     → expected '12px' to be '' // Object.is equality\n Test Files 1 failed | 0 passed (2)\n      Tests 1 failed | 0 passed | 149 skipped (150)\n Test Files 1 failed | 0 passed (2)\n      Tests 1 failed | 0 passed | 149 skipped (150)\n Test Files 1 failed | 0 passed (2)\n      Tests 1 failed | 0 passed | 149 skipped (151)\n     → expected '12px' to be '' // Object.is equality\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/components/NativeTerminalPane.test.tsx > NativeTerminalPane geometry reporting contract > uses the entire pane height beneath the handle and bottom overlays\nAssertionError: expected '12px' to be '' // Object.is equality\n FAIL  src/components/TerminalSplitView.paneHandleReach.test.tsx > pane handle reachability over a native terminal > overlays the handle only inside the narrow hotspot without shrinking the terminal\nAssertionError: expected '12px' to be '' // Object.is equality\n Test Files  2 failed (2)\n      Tests  2 failed | 149 skipped (151)</system-reminder>",
+      "display": false,
+      "id": "73305e94",
+      "parentId": "011b2755",
+      "timestamp": "2026-09-08T14:53:04.528Z"
+    }
+  },
+  {
+    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl",
+    "event": {
+      "type": "custom_message",
+      "customType": "senpi-monitor:notification",
+      "content": "<system-reminder>Monitor event(Opaque strip removal RED): ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/components/TerminalPane.test.tsx > TerminalPane native routing contract > overlays the running DAG indicator without opaque top or bottom strips\n Test Files  1 failed (1)\n      Tests  1 failed | 17 skipped (18)\nwatcher exited_1 (exit code 1)</system-reminder>",
+      "display": false,
+      "id": "c721a5ae",
+      "parentId": "37f2a4a2",
+      "timestamp": "2026-09-08T14:56:36.511Z"
+    }
+  }
+]
