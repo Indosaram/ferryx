@@ -22,6 +22,9 @@ fn write_hosts(path: &Path, hosts: Vec<SshHost>) {
 #[path = "remote_ssh_qa.rs"]
 mod qa;
 
+#[path = "remote_ssh_gateway_qa.rs"]
+mod gateway_qa;
+
 #[tokio::test]
 async fn direct_ssh_real_transport_registration_and_pty() {
     if let Some(config) = std::env::var_os(qa::CONFIG_ENV) {
@@ -279,6 +282,7 @@ async fn exercise_child(root: &Path) {
             .worktree_path()
             .is_none());
         if request_id == "new-tab" {
+            gateway_qa::exercise(&daemon, &response.workspace_id, &id, &host_store).await;
             daemon.handle_close(&id).await.unwrap();
         } else {
             retained = Some(id);
@@ -289,6 +293,9 @@ async fn exercise_child(root: &Path) {
     host.disabled = Some(true);
     write_hosts(&host_store, vec![host]);
     assert!(daemon.validate_session_ssh_target(&retained).await.is_err());
+    assert!(crate::remote::RemoteSessionBackend::write_input(
+        &*daemon.session_router, &retained, b"\n"
+    ).await.is_err());
     daemon.handle_close(&retained).await.unwrap();
     assert!(daemon
         .handle_spawn(

@@ -381,7 +381,8 @@ fn sanitize_session_id(value: Option<String>) -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn cmd_remote_set_active_selection(
+pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     manager: State<'_, Arc<RemoteGatewayManager>>,
     request: SetActiveDesktopSelectionRequest,
 ) -> Result<(), IpcError> {
@@ -428,9 +429,11 @@ pub async fn cmd_remote_set_active_selection(
     };
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => {
-            client.remote_set_active_selection(selection).await
+            let path = crate::ipc::ssh::get_ssh_store_path(&app)?;
+            client.remote_set_active_selection_with_ssh_store(selection, Some(path)).await
         }
         RemoteGatewayManagerInner::State { state, .. } => {
+            *state.ssh_store_path.write() = Some(crate::ipc::ssh::get_ssh_store_path(&app)?);
             state.set_active_selection_opt(selection);
             Ok(())
         }

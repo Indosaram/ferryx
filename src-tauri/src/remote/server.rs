@@ -502,6 +502,7 @@ fn relative_label(root: &Path, canonical: &Path) -> Option<String> {
 pub(crate) async fn get_active_running_sessions(
     state: &RemoteGatewayState,
     cache: &WorkspaceSnapshotCache,
+    ssh_projects: &[crate::ssh::projects::RemoteProject],
 ) -> Vec<RemoteTerminalSession> {
     let active = state.active_selection.read().clone();
     let mut sessions = Vec::new();
@@ -510,6 +511,18 @@ pub(crate) async fn get_active_running_sessions(
             continue;
         };
         if !details.running {
+            continue;
+        }
+        if let Some(id) = details.workspace_id.as_deref().filter(|id| crate::ssh::projects::is_remote(id)) {
+            if let Some(project) = ssh_projects.iter().find(|project| project.workspace_id == id) {
+                sessions.push(RemoteTerminalSession {
+                    session_id: details.session_id,
+                    title: None,
+                    workspace_id: Some(id.to_owned()),
+                    worktree_label: Some(super::ssh::label(project)),
+                    running: true,
+                });
+            }
             continue;
         }
         let selected = active
@@ -562,7 +575,9 @@ async fn list_sessions(
         .workspace_snapshot()
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    let sessions = get_active_running_sessions(&state, &cache).await;
+    let ssh_projects = super::ssh::projects(&state).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
+    let sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
 
     Ok(Json(sessions))
 }
@@ -584,8 +599,23 @@ async fn get_workspace_state(
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
-    let active_selection = state.active_selection.read().clone();
-    let projects = cache.projects(active_selection.as_ref());
+    let ssh_projects = super::ssh::projects(&state).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
+    let active_selection = state.active_selection.read().clone().filter(|selection| {
+        selection.workspace_id.as_deref().is_none_or(|id| {
+            !crate::ssh::projects::is_remote(id)
+                || ssh_projects.iter().any(|project| project.workspace_id == id)
+        })
+    });
+    let mut projects = cache.projects(active_selection.as_ref());
+    projects.extend(ssh_projects.iter().map(|project| RemoteProjectInfo {
+        workspace_id: project.workspace_id.clone(),
+        worktrees: vec![RemoteWorktreeInfo {
+            worktree_slug: None,
+            worktree_label: Some(super::ssh::label(project)),
+            attention: None,
+        }],
+    }));
     let active_ws = active_selection
         .as_ref()
         .and_then(|sel| sel.workspace_id.clone())
@@ -604,7 +634,7 @@ async fn get_workspace_state(
             terminal_tabs: Vec::new(),
         });
     let worktrees = cache.worktrees_for(&active_ws, active_selection.as_ref());
-    let sessions = get_active_running_sessions(&state, &cache).await;
+    let sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
 
     Ok(Json(RemoteWorkspaceState {
         projects,
@@ -635,10 +665,27 @@ async fn select_workspace(
         ));
     }
 
-    let _mgr = state
-        .workspace_registry
-        .manager(&payload.workspace_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let is_ssh = crate::ssh::projects::is_remote(&payload.workspace_id);
+    if is_ssh {
+        let projects = super::ssh::projects(&state).await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
+        if !projects.iter().any(|project| project.workspace_id == payload.workspace_id)
+            || payload.worktree.is_some() || payload.worktree_slug.is_some()
+        {
+            return Err((StatusCode::BAD_REQUEST, "SSH project is unavailable".into()));
+        }
+    } else {
+        state.workspace_registry.manager(&payload.workspace_id)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    }
+
+    if let Some(session_id) = payload.session_id.as_deref() {
+        let details = state.session_backend.describe_session(session_id).await
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Session unavailable".into()))?;
+        if !details.running || details.workspace_id.as_deref() != Some(&payload.workspace_id) {
+            return Err((StatusCode::BAD_REQUEST, "Session does not belong to project".into()));
+        }
+    }
 
     let (worktree_identity, worktree_slug, worktree_label) = if let Some(ref wt) = payload.worktree
     {
@@ -673,8 +720,11 @@ async fn select_workspace(
         let selection = state.active_selection();
         let tab_is_available = selection.as_ref().is_some_and(|selection| {
             selection.workspace_id.as_deref() == Some(payload.workspace_id.as_str())
-                && selection.worktree_slug.as_deref() == worktree_slug.as_deref()
-                && selection.terminal_tabs.iter().any(|tab| tab.id == tab_id)
+                && selection.terminal_tabs.iter().any(|tab| {
+                    tab.id == tab_id
+                        && tab.worktree_slug.as_deref().or(selection.worktree_slug.as_deref()) == worktree_slug.as_deref()
+                        && payload.session_id.as_deref().is_none_or(|id| tab.session_id.as_deref() == Some(id))
+                })
         });
         if !tab_is_available {
             return Err((

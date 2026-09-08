@@ -7,6 +7,7 @@ const native = vi.hoisted(() => ({
   registerProject: vi.fn(), registerRemoteProject: vi.fn(), listWorktrees: vi.fn(),
   spawnTerminalDetailed: vi.fn(), spawnTerminal: vi.fn(), watchDagProject: vi.fn(),
   loadSession: vi.fn(), saveSession: vi.fn(), isTauriRuntime: vi.fn(),
+  remoteSelection: null as null | ((payload: import("./lib/tauri").RemoteSelectionRequestedPayload) => void),
   closeGuard: null as null | (() => Promise<void>),
 }));
 vi.mock("./lib/tauri", async (importOriginal) => ({
@@ -22,7 +23,10 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
   onNewTerminalTabMenu: async () => () => undefined,
   onCloseTabMenu: async () => () => undefined,
   onSelectWorktreeMenu: async () => () => undefined,
-  onRemoteSelectionRequested: async () => () => undefined,
+  onRemoteSelectionRequested: async (handler: (payload: import("./lib/tauri").RemoteSelectionRequestedPayload) => void) => {
+    native.remoteSelection = handler;
+    return () => { native.remoteSelection = null; };
+  },
   listenDagRunUpdated: async () => () => undefined,
   publishFocusedTerminal: async () => undefined,
   setBadgeCount: async () => ({ supported: false, count: 0 }),
@@ -46,6 +50,7 @@ vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTa
   onSplitPane: (tabId: string, leafId: string, direction: "horizontal") => void;
   layout: import("./lib/types").LayoutState;
 }) => <div>
+  <output data-testid="active-tab">{layout.activeTabId}</output>
   <button onClick={() => onAddTab()}>New remote tab</button>
   <button onClick={() => {
     const tab = layout.tabs[0];
@@ -85,6 +90,22 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("App SSH project lifecycle", () => {
+  it("focuses the existing SSH terminal addressed by its backend identity", async () => {
+    native.spawnTerminal.mockResolvedValueOnce("backend-first").mockResolvedValueOnce("backend-second");
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const first = screen.getByTestId("active-tab").textContent;
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New remote tab" })); });
+    if (!native.remoteSelection) throw new Error("Missing remote session bridge");
+    expect(native.spawnTerminal).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("active-tab").textContent).not.toBe(first);
+    await act(async () => {
+      native.remoteSelection?.({ workspaceId: remote.workspaceId, sessionId: "backend-first" });
+    });
+    expect(screen.getByTestId("active-tab").textContent).toBe(first);
+  });
+
   it("loads a stored remote target without registering its path locally", async () => {
     seed([remote]);
     const registration = deferred<RegisteredRemoteProject>();
@@ -97,6 +118,32 @@ describe("App SSH project lifecycle", () => {
     expect(native.watchDagProject).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /New Terminal/ })).toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!)[0].target).toEqual(remote.target);
+  });
+
+  it("returns from a local project to the requested existing SSH session", async () => {
+    native.spawnTerminal.mockResolvedValueOnce("backend-ssh");
+    seed([remote, { workspaceId: "local", repoRoot: "/local", gitRoot: null }]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const first = screen.getByTestId("active-tab").textContent;
+    await act(async () => { native.remoteSelection?.({ workspaceId: "local" }); });
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("local");
+    await act(async () => {
+      native.remoteSelection?.({ workspaceId: remote.workspaceId, sessionId: "backend-ssh" });
+    });
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
+    expect(screen.getByTestId("active-tab").textContent).toBe(first);
+    expect(native.spawnTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the registered SSH project from remote without a preexisting terminal", async () => {
+    seed([{ workspaceId: "local", repoRoot: "/local", gitRoot: null }, remote], "local");
+    await mount();
+    await act(async () => { native.remoteSelection?.({ workspaceId: remote.workspaceId }); });
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
+    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: remote.workspaceId, cwd: remote.repoRoot,
+    }));
   });
 
   it("handles the chooser's registered remote project through actual App registration", async () => {

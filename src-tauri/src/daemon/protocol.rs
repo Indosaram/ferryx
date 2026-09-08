@@ -8,6 +8,7 @@ use crate::terminal::TerminalSignal;
 use crate::worktree::WorktreeIdentity;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 pub const DAEMON_PROTOCOL_VERSION: u32 = 3;
 
@@ -199,6 +200,8 @@ pub enum DaemonRequest {
     #[serde(rename_all = "camelCase")]
     RemoteSetActiveSelection {
         selection: Option<RemoteActiveDesktopSelection>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh_store_path: Option<PathBuf>,
     },
     RemoteGetActiveSelection,
     /// Turns this connection into a one-way stream of desktop-directed remote

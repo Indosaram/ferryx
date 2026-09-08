@@ -3,6 +3,7 @@ pub mod backend;
 pub mod mirror;
 pub mod protocol;
 pub mod server;
+mod ssh;
 pub mod state;
 
 pub use auth::*;

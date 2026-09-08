@@ -168,6 +168,10 @@ function selectionMatchesActiveContext(
 }
 
 function modelConfirmsSelection(option: RemoteContextOption, model: RemoteWorkspaceModel): boolean {
+  if (option.sessionId && !option.tabId) {
+    return model.context.workspaceId === option.workspaceId
+      && model.context.activeTerminal?.sessionId === option.sessionId;
+  }
   const confirmedWorktree = model.context.worktreeSlug ?? model.context.worktreeLabel;
   const requestedWorktree = option.worktreeSlug ?? option.worktreeLabel;
   const workspaceMatches = model.context.workspaceId === option.workspaceId;
@@ -427,6 +431,7 @@ export const RemoteApp: React.FC = () => {
             workspaceId: option.workspaceId,
             ...(option.worktreeSlug ? { worktreeSlug: option.worktreeSlug } : {}),
             ...(option.tabId ? { tabId: option.tabId } : {}),
+            ...(!option.tabId && option.sessionId ? { sessionId: option.sessionId } : {}),
           }),
         },
       );

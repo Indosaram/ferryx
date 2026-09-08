@@ -9,6 +9,9 @@ use std::sync::Arc;
 #[path = "security_tests.rs"]
 mod security;
 
+#[path = "ssh_tests.rs"]
+mod ssh;
+
 #[test]
 fn test_auth_manager_pairing_and_revocation() {
     let auth = AuthManager::new();
@@ -1248,6 +1251,7 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
 
     // 6. Active selection set & get via GUI IPC command -> updates daemon
     crate::ipc::remote::cmd_remote_set_active_selection(
+        app.handle().clone(),
         app.state(),
         crate::ipc::remote::SetActiveDesktopSelectionRequest {
             attention_inventory: Vec::new(),

@@ -1318,6 +1318,10 @@ function WorkspaceApp({
       setPendingRemoteSlug(null);
       return;
     }
+    if (state.workspaceId !== pendingRemoteSlug.workspaceId) return;
+    if (activeProject.target?.kind === "ssh" &&
+      (registeredProjectId !== activeProject.workspaceId ||
+        workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading")) return;
     const target = pendingRemoteSlug.slug
       ? matchWorktreeBySlug(state.worktrees, pendingRemoteSlug.slug)
       : (state.worktrees.find((wt) => worktreeIdentity(wt) === null) ??
@@ -1334,7 +1338,7 @@ function WorkspaceApp({
         }
       })
       .catch(reportRuntimeError);
-  }, [activeProject.repoRoot, activeProject.workspaceId, activateRemoteEntry, ensureTabForWorktree, pendingRemoteSlug, reportRuntimeError, state.worktrees]);
+  }, [activeProject.repoRoot, activeProject.target, activeProject.workspaceId, activateRemoteEntry, ensureTabForWorktree, pendingRemoteSlug, registeredProjectId, reportRuntimeError, state.worktrees, state.workspaceId, workspaceRestoreStatus]);
 
   const handleRemoteSelectionRequested = useCallback(
     (payload: RemoteSelectionRequestedPayload) => {
@@ -1343,7 +1347,27 @@ function WorkspaceApp({
       const isCurrentProject = activeProjectRef.current.workspaceId === payload.workspaceId;
       const requestedEntryId = payload.tabId ?? payload.activeTabId ?? null;
 
+      if (payload.sessionId && !requestedEntryId) {
+        if (!targetProject) return;
+        const snapshot = isCurrentProject ? stateRef.current
+          : getHmrWorkspaceState(payload.workspaceId) ?? getWorkspaceSnapshot(payload.workspaceId);
+        const session = snapshot && Object.values(snapshot.sessions)
+          .find((candidate) => candidate.backendSessionId === payload.sessionId);
+        if (!snapshot || !session || !hasNavigableSession(snapshot, session.id)) return;
+        if (isCurrentProject) {
+          dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId: session.id });
+        } else {
+          handleSelectProject(targetProject);
+          setPendingNotificationTarget({ workspaceId: payload.workspaceId, sessionId: session.id });
+        }
+        return;
+      }
+
       if (isCurrentProject) {
+        if (!requestedEntryId) {
+          setPendingRemoteSlug({ workspaceId: payload.workspaceId, slug: payload.worktreeSlug ?? null });
+          return;
+        }
         const targetWorktree = payload.worktreeSlug
           ? matchWorktreeBySlug(stateRef.current.worktrees, payload.worktreeSlug)
           : (stateRef.current.worktrees.find((wt) => worktreeIdentity(wt) === null) ??
@@ -1375,7 +1399,7 @@ function WorkspaceApp({
         });
       }
     },
-    [activateRemoteEntry, ensureTabForWorktree, handleSelectProject, reportRuntimeError],
+    [activateRemoteEntry, dispatchWorkspaceAction, ensureTabForWorktree, handleSelectProject, reportRuntimeError],
   );
 
   useEffect(() => {

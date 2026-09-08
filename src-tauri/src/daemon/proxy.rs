@@ -467,6 +467,7 @@ impl LegacyPeer {
 pub struct SessionRouter {
     terminal_service: Arc<TerminalService>,
     legacy_peers: Arc<RwLock<Vec<Arc<LegacyPeer>>>>,
+    workspace_ids: RwLock<std::collections::HashMap<String, (String, Option<PathBuf>)>>,
 }
 
 impl SessionRouter {
@@ -474,7 +475,25 @@ impl SessionRouter {
         Self {
             terminal_service,
             legacy_peers: Arc::new(RwLock::new(Vec::new())),
+            workspace_ids: RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    pub(crate) fn register_workspace(&self, session_id: &str, workspace_id: &str, ssh_store: Option<PathBuf>) {
+        self.workspace_ids.write().insert(session_id.to_owned(), (workspace_id.to_owned(), ssh_store));
+    }
+
+    pub(crate) fn remove_workspace(&self, session_id: &str) {
+        self.workspace_ids.write().remove(session_id);
+    }
+
+    async fn validate_ssh_workspace(&self, session_id: &str) -> Result<(), String> {
+        let target = self.workspace_ids.read().get(session_id).cloned();
+        if let Some((id, Some(path))) = target {
+            crate::ipc::run_blocking(move || crate::ssh::projects::resolve(&path, &id))
+                .await.map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn add_legacy_peer(&self, peer: Arc<LegacyPeer>) {
@@ -562,6 +581,7 @@ impl RemoteSessionBackend for SessionRouter {
     ) -> BoxFuture<'_, Result<RemoteSessionDetails, String>> {
         let session_id = session_id.to_string();
         Box::pin(async move {
+            self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
                 let session = self
                     .terminal_service
@@ -573,9 +593,10 @@ impl RemoteSessionBackend for SessionRouter {
                     PtySessionState::Running | PtySessionState::Starting
                 );
                 let worktree_path = session.worktree_path();
+                let workspace_id = self.workspace_ids.read().get(&session_id).map(|(id, _)| id.clone());
                 Ok(RemoteSessionDetails {
                     session_id,
-                    workspace_id: None,
+                    workspace_id,
                     worktree_label: None,
                     worktree_path,
                     running,
@@ -606,6 +627,7 @@ impl RemoteSessionBackend for SessionRouter {
     ) -> BoxFuture<'_, Result<SessionAttachment, String>> {
         let session_id = session_id.to_string();
         Box::pin(async move {
+            self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
                 self.terminal_service
                     .attach_with_sequence(&session_id, after_sequence)
@@ -622,6 +644,7 @@ impl RemoteSessionBackend for SessionRouter {
         let session_id = session_id.to_string();
         let data = data.to_vec();
         Box::pin(async move {
+            self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
                 self.terminal_service
                     .write_input(&session_id, &data)
@@ -637,6 +660,7 @@ impl RemoteSessionBackend for SessionRouter {
     fn resize(&self, session_id: &str, cols: u16, rows: u16) -> BoxFuture<'_, Result<(), String>> {
         let session_id = session_id.to_string();
         Box::pin(async move {
+            self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
                 self.terminal_service
                     .resize(&session_id, cols, rows)
@@ -656,6 +680,7 @@ impl RemoteSessionBackend for SessionRouter {
     ) -> BoxFuture<'_, Result<(), String>> {
         let session_id = session_id.to_string();
         Box::pin(async move {
+            self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
                 self.terminal_service
                     .signal(&session_id, signal)

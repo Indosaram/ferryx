@@ -43,6 +43,7 @@ export type RemoteContextOption = {
   worktreeLabel: string | null;
   tabId?: string | null;
   sessionId?: string | null;
+  sessionLabel?: string;
   attention?: "working" | "waiting" | "done";
 };
 
@@ -283,6 +284,23 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
     });
   }
 
+  for (const project of projectRows) {
+    const projectId = safeContextText(project.workspaceId ?? project.id);
+    if (!projectId?.startsWith("ssh:")) continue;
+    const sessions = sessionRows.map(terminal)
+      .filter((session) => session?.workspaceId === projectId);
+    sessions.forEach((session, index) => {
+      if (!session) return;
+      options.push({
+        workspaceId: projectId,
+        worktreeSlug: null,
+        worktreeLabel: session.worktreeLabel ?? null,
+        sessionId: session.sessionId,
+        sessionLabel: session.title ?? `Terminal ${index + 1}`,
+      });
+    });
+  }
+
   return {
     context: {
       workspaceId: activeWorkspaceId,
@@ -303,12 +321,13 @@ export function contextName(context: Pick<RemoteContext, "workspaceId" | "worktr
 }
 
 function optionName(option: RemoteContextOption) {
-  const name = contextName(option);
+  const name = `${contextName(option)}${option.sessionLabel ? ` / ${option.sessionLabel}` : ""}`;
   return option.attention ? `${name} (${option.attention})` : name;
 }
 
 function isCurrentOption(option: RemoteContextOption, context: RemoteContext) {
   if (option.workspaceId !== context.workspaceId) return false;
+  if (option.sessionId) return option.sessionId === context.activeTerminal?.sessionId;
   const optionWorktree = option.worktreeSlug ?? option.worktreeLabel;
   const activeWorktree = context.worktreeSlug ?? context.worktreeLabel;
   return optionWorktree ? optionWorktree === activeWorktree : activeWorktree === null;
@@ -414,12 +433,13 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                         const loading = pending
                           ? pending.workspaceId === option.workspaceId &&
                             pending.worktreeSlug === option.worktreeSlug &&
-                            pending.worktreeLabel === option.worktreeLabel
+                            pending.worktreeLabel === option.worktreeLabel &&
+                            pending.sessionId === option.sessionId
                           : false;
                         const worktree = option.worktreeLabel ?? option.worktreeSlug;
                         return (
                           <button
-                            key={`${option.workspaceId}:${option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`}
+                            key={`${option.workspaceId}:${option.sessionId ?? option.worktreeSlug ?? option.worktreeLabel ?? "workspace"}`}
                             type="button"
                             aria-current={active ? "true" : undefined}
                             aria-label={optionName(option)}
@@ -434,13 +454,15 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                             <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
                               {loading ? (
                                 <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                              ) : option.sessionId ? (
+                                <TerminalIcon className="size-4" aria-hidden="true" />
                               ) : (
                                 <GitBranch className="size-4" aria-hidden="true" />
                               )}
                             </span>
                             <span className="min-w-0 flex-1">
                               <span className="block truncate font-mono text-sm font-medium">
-                                {worktree ?? "Primary worktree"}
+                                {option.sessionLabel ?? worktree ?? "Primary worktree"}
                               </span>
                             </span>
                             {option.attention === "working" ? (
@@ -625,7 +647,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
       })() : null}
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {model.context.activeTerminal ? (
+        {children ? (
           children
         ) : (
           <div className="flex flex-1 items-center justify-center p-6">

@@ -1327,8 +1327,16 @@ impl DaemonClient {
         &self,
         selection: Option<RemoteActiveDesktopSelection>,
     ) -> Result<(), IpcError> {
+        self.remote_set_active_selection_with_ssh_store(selection, None).await
+    }
+
+    pub async fn remote_set_active_selection_with_ssh_store(
+        &self,
+        selection: Option<RemoteActiveDesktopSelection>,
+        ssh_store_path: Option<PathBuf>,
+    ) -> Result<(), IpcError> {
         let resp = self
-            .send_request(DaemonRequest::RemoteSetActiveSelection { selection })
+            .send_request(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path })
             .await?;
         match resp {
             DaemonResponse::RemoteSetActiveSelectionOk => Ok(()),
@@ -2152,6 +2160,7 @@ mod tests {
     #[test]
     fn test_remote_set_active_selection_is_retry_safe() {
         let req = DaemonRequest::RemoteSetActiveSelection {
+            ssh_store_path: None,
             selection: Some(RemoteActiveDesktopSelection {
                 workspace_id: Some("ws".into()),
                 worktree_slug: None,

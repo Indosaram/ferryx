@@ -1556,7 +1556,10 @@ impl DaemonServer {
                         }
                     }
                 }
-                Ok(DaemonRequest::RemoteSetActiveSelection { selection }) => {
+                Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {
+                    if let Some(path) = ssh_store_path {
+                        *self.remote_state.ssh_store_path.write() = Some(path);
+                    }
                     self.remote_state.set_active_selection_opt(selection);
                     DaemonResponse::RemoteSetActiveSelectionOk
                 }
@@ -2060,6 +2063,11 @@ impl DaemonServer {
         };
 
         // Store idempotency entry and session metadata before releasing the request lock.
+        let ssh_store = match startup.as_ref() {
+            Some(TerminalStartup::RemoteSsh { host_store_path }) => Some(host_store_path.clone()),
+            _ => None,
+        };
+        self.session_router.register_workspace(&session_id, workspace_id, ssh_store);
         self.spawn_idempotency_cache.lock().insert(
             client_request_id.to_string(),
             SpawnCacheEntry {
@@ -2086,6 +2094,7 @@ impl DaemonServer {
         }
 
         let cleanup_session_id = session_id.clone();
+        let cleanup_router = Arc::clone(&self.session_router);
         let cleanup_cache = Arc::clone(&self.spawn_idempotency_cache);
         let cleanup_metadata = Arc::clone(&self.session_metadata);
         let cleanup_claims = Arc::clone(&self.provider_session_claims);
@@ -2098,6 +2107,7 @@ impl DaemonServer {
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+            cleanup_router.remove_workspace(&cleanup_session_id);
             cleanup_cache
                 .lock()
                 .retain(|_, entry| entry.session_id != cleanup_session_id);
@@ -2150,6 +2160,7 @@ impl DaemonServer {
     }
 
     fn release_session_ownership(&self, session_id: &str) {
+        self.session_router.remove_workspace(session_id);
         self.spawn_idempotency_cache
             .lock()
             .retain(|_, entry| entry.session_id != session_id);
@@ -3396,6 +3407,7 @@ mod tests {
         // 3. Active selection set & get
         line.clear();
         let sel_req = DaemonRequest::RemoteSetActiveSelection {
+            ssh_store_path: None,
             selection: Some(crate::remote::protocol::RemoteActiveDesktopSelection {
                 workspace_id: Some("ws-desktop".to_string()),
                 worktree_slug: None,
