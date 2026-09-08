@@ -1,0 +1,48 @@
+{
+  "protocolVersion": 3,
+  "daemonVersion": "2026.902.2",
+  "daemons": [
+    {
+      "pid": 57449,
+      "epoch": 1788877224715,
+      "socket": "/tmp/rorca-501/daemon.sock",
+      "sessions": [
+        "6bf0eeab-4178-4305-8772-7091061c6d50",
+        "f923257c-5e52-4d71-b006-f6a0fa1e2221",
+        "abe30eec-9310-4fac-a794-fb2421e83203",
+        "31583ffc-8fda-4972-9436-d68722d864fb",
+        "db477f21-4cd5-4408-9c3a-fd395e4b39be",
+        "0f1ce615-6544-4b1a-8a89-1b13405f66a8",
+        "76ba1d1b-9661-4d2e-b9df-cdfef01ad80e",
+        "c4f77317-bd20-4369-a69b-e2c7d7fac248",
+        "89afe7a2-19cd-4489-acf8-1380fa9422b7"
+      ]
+    },
+    {
+      "pid": 845,
+      "epoch": 1788875291502,
+      "socket": "/tmp/rorca-501/legacy-845-1788877044782.sock",
+      "sessions": [
+        "fed99a21-4aa3-48d1-8348-3dbb9b513dd7",
+        "1ce70fc3-94b3-434b-957b-c40a25fac53d",
+        "c83185a6-d762-4eae-8ea4-6df770591e5e",
+        "def31f13-ea91-42c3-b633-bdb1ad4994a2",
+        "6c499f69-4f84-4326-82da-e6e6cfd21bad",
+        "dea15c95-49ee-4867-b733-1c722b14973b",
+        "29c78a8b-775a-460d-a010-49534d306902",
+        "f834c4cd-d92f-4f59-bce4-ddb7e6ff97db",
+        "65385f8e-9556-47f5-92f7-92a042dd5baa",
+        "60dd9360-4bc4-460e-9c41-638839e79d05",
+        "7bb7951a-e8d8-4d7c-b426-a82f42e968d3",
+        "08a48c76-ad60-4a34-8e29-1e3f4183eb11",
+        "27be5475-93dd-449c-b797-0015e566ff12",
+        "c6b01b6a-4011-44a9-b297-5ab9a8805170",
+        "31840038-290b-4e57-9035-d5d9f03b1f4b",
+        "dc9d421d-4ca0-43f3-805b-e89f4a1bc23d",
+        "9ece997c-ac8a-4db6-99dd-83cd38043739",
+        "0dbabb98-4264-4523-b4dc-5dc314438626",
+        "e791de02-6585-4a1f-970f-b11133f32f45"
+      ]
+    }
+  ]
+}
