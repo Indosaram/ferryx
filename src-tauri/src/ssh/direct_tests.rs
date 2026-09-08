@@ -36,6 +36,67 @@ fn startup_plan_honors_saved_options_and_quotes_remote_root() {
 }
 
 #[test]
+fn upload_temp_command_rejects_names_that_could_escape_the_scratch_directory() {
+    for name in [
+        "",
+        ".hidden.png",
+        "../escape.png",
+        "na me.png",
+        "name$(id).png",
+        "name';touch x;'.png",
+        &"a".repeat(129),
+    ] {
+        assert!(
+            upload_temp_command(name).is_err(),
+            "expected rejection for {name:?}"
+        );
+    }
+    assert!(upload_temp_command("7f3a-9b.png").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn upload_temp_command_writes_stdin_to_a_private_file_and_prints_its_path() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let command = upload_temp_command("paste-1.png").expect("command");
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .env("TMPDIR", scratch.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run upload command");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(&[0x89, b'P', b'N', b'G', 0x00, 0xff])
+        .expect("write payload");
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success());
+
+    let printed = String::from_utf8(output.stdout).expect("utf-8 path");
+    assert_eq!(
+        printed,
+        format!("{}/ferryx-paste/paste-1.png", scratch.path().display())
+    );
+    assert!(validate_remote_path(&printed).is_ok());
+    assert_eq!(
+        std::fs::read(&printed).expect("read uploaded file"),
+        vec![0x89, b'P', b'N', b'G', 0x00, 0xff]
+    );
+    let mode = std::fs::metadata(scratch.path().join("ferryx-paste"))
+        .expect("scratch metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+#[test]
 fn unsafe_connection_tokens_and_paths_are_rejected() {
     for hostname in [
         "-oProxyCommand=touch",

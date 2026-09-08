@@ -1846,6 +1846,108 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(pasteCalls).toHaveLength(0);
   });
 
+  it.each([
+    {
+      description: "pastes the uploaded remote path",
+      result: { remotePath: "/tmp/ferryx-paste/7f3a.png", byteLength: 1234 },
+      expectedPaste: "/tmp/ferryx-paste/7f3a.png ",
+      expectedChordCalls: 0,
+    },
+    {
+      description: "falls back to the agent chord when the clipboard held no image",
+      result: null,
+      expectedPaste: null,
+      expectedChordCalls: 1,
+    },
+  ])(
+    "sends a clipboard image to the SSH host owning a remote pane and $description",
+    async ({ result, expectedPaste, expectedChordCalls }) => {
+      const sessionId = `term-session-remote-image-${expectedChordCalls}`;
+      const session = { ...createSession(sessionId), workspaceId: "ssh:9f2c" };
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_native_terminal_clipboard_content") return { kind: "image" };
+        if (cmd === "cmd_ssh_paste_clipboard_image") return result;
+        return undefined;
+      });
+
+      const { getByTestId } = render(
+        <NativeTerminalPane sessionId={sessionId} session={session} />,
+      );
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
+
+      act(() => {
+        textarea.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "v",
+            code: "KeyV",
+            metaKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_ssh_paste_clipboard_image", {
+          workspaceId: "ssh:9f2c",
+        });
+      });
+
+      await waitFor(() => {
+        const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+          ([cmd, args]) =>
+            cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+        );
+        expect(chordCalls).toHaveLength(expectedChordCalls);
+        const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+          ([cmd]) => cmd === "cmd_native_terminal_paste",
+        );
+        expect(pasteCalls.map(([, args]) => args?.text)).toEqual(
+          expectedPaste === null ? [] : [expectedPaste],
+        );
+      });
+    },
+  );
+
+  it("keeps a local pane on the agent paste chord and never uploads its clipboard image", async () => {
+    const session = createSession("term-session-local-image-paste");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) =>
+      cmd === "cmd_native_terminal_clipboard_content" ? { kind: "image" } : undefined,
+    );
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-local-image-paste" session={session} />,
+    );
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "v",
+          code: "KeyV",
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-local-image-paste",
+        input: { text: "\u0016" },
+      });
+    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_ssh_paste_clipboard_image",
+      expect.anything(),
+    );
+  });
+
   it("claims Ctrl+V with Korean layout key ㅍ on focused textarea and routes native text clipboard content", async () => {
     const session = createSession("term-session-korean-ctrl-v");
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {

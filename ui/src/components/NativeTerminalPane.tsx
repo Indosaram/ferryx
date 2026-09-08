@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { toast } from "sonner";
 
 import { cn } from "../lib/cn";
 import type { TerminalActivity } from "../lib/activity";
@@ -25,6 +26,8 @@ import {
   setNativeTerminalAttentionFrame,
 } from "../lib/tauri";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
+import { isRemoteWorkspaceId, pasteClipboardImageToRemote } from "../lib/remoteProject";
+import { extractIpcErrorMessage } from "../lib/sshHosts";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
 
 export interface TerminalBounds {
@@ -1007,6 +1010,35 @@ export function NativeTerminalPane({
     sendInput({ text: "\u0016" });
   }, [sendInput]);
 
+  const remoteWorkspaceId = isRemoteWorkspaceId(session?.workspaceId)
+    ? (session?.workspaceId ?? null)
+    : null;
+
+  const pasteClipboardImage = useCallback(() => {
+    // An SSH pane's agent cannot reach this machine's clipboard, so the image travels to the
+    // host and its remote path is pasted in place of the local paste chord.
+    if (!remoteWorkspaceId) {
+      sendImagePasteShortcut();
+      return;
+    }
+    void pasteClipboardImageToRemote(remoteWorkspaceId)
+      .then((result) => {
+        if (!result) {
+          sendImagePasteShortcut();
+          return;
+        }
+        sendPaste(`${quoteShellPath(result.remotePath)} `);
+      })
+      .catch((error: unknown) => {
+        toast.error(
+          `Failed to send the clipboard image to the remote host: ${extractIpcErrorMessage(
+            error,
+            "unknown error",
+          )}`,
+        );
+      });
+  }, [remoteWorkspaceId, sendImagePasteShortcut, sendPaste]);
+
   const suppressNextPasteRef = useRef(false);
 
   const performNativePasteFallback = useCallback(() => {
@@ -1029,7 +1061,7 @@ export function NativeTerminalPane({
         if (content.kind === "text" && content.text.length > 0) {
           sendPaste(content.text);
         } else if (content.kind === "image") {
-          sendImagePasteShortcut();
+          pasteClipboardImage();
         }
       })
       .catch((error: unknown) => {
@@ -1039,7 +1071,7 @@ export function NativeTerminalPane({
         });
         reportNativeTerminalIpcFailure("cmd_native_terminal_clipboard_content", error);
       });
-  }, [sendImagePasteShortcut, sendPaste, targetSessionId, visible]);
+  }, [pasteClipboardImage, sendPaste, targetSessionId, visible]);
 
   const sendMouse = useCallback((
     event: NativeMouseEvent,
@@ -2128,7 +2160,7 @@ export function NativeTerminalPane({
             if (text) {
               sendPaste(text);
             } else {
-              sendImagePasteShortcut();
+              pasteClipboardImage();
             }
           }}
           onCopy={(event) => {

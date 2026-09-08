@@ -167,6 +167,41 @@ pub async fn ensure_remote_extension_installed(host: &SshHost) -> Result<(), Ipc
     Ok(())
 }
 
+pub fn upload_temp_command(file_name: &str) -> Result<String, IpcError> {
+    if file_name.is_empty()
+        || file_name.len() > 128
+        || file_name.starts_with('.')
+        || !file_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(invalid("Invalid remote attachment file name"));
+    }
+    // Pasted attachments outlive the paste only long enough for the agent to read them, so
+    // each upload also prunes what an earlier day left behind.
+    Ok(format!(
+        "set -e; d=\"${{TMPDIR:-/tmp}}\"; d=\"${{d%/}}/ferryx-paste\"; mkdir -p \"$d\"; \
+         chmod 700 \"$d\"; find \"$d\" -type f -mtime +1 -delete 2>/dev/null || true; \
+         umask 077; cat > \"$d/{file_name}\"; printf '%s' \"$d/{file_name}\""
+    ))
+}
+
+/// Streams `bytes` into a fresh file on `host` and returns the absolute remote path.
+pub async fn upload_temp_file(
+    host: &SshHost,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<String, IpcError> {
+    let plan = ssh_plan(host, upload_temp_command(file_name)?, false)?;
+    let stdout = bounded_output_with_stdin(&plan, Duration::from_secs(60), bytes).await?;
+    let path = String::from_utf8(stdout)
+        .map_err(|_| invalid("Remote attachment path is not UTF-8"))?
+        .trim()
+        .to_string();
+    validate_remote_path(&path)?;
+    Ok(path)
+}
+
 pub fn probe_command(path: &str) -> Result<String, IpcError> {
     validate_remote_path(path)?;
     Ok(format!("cd {} && root=$(pwd -P) && printf 'FERRYX_REMOTE_V1\\0%s\\0' \"$root\" && if gitroot=$(git rev-parse --show-toplevel 2>/dev/null); then printf '%s\\0' \"$gitroot\"; else printf '\\0'; fi && if origin=$(git remote get-url origin 2>/dev/null); then printf '%s\\0' \"$origin\"; else printf '\\0'; fi", quote_posix(path)))
@@ -208,18 +243,45 @@ pub async fn probe(host: &SshHost, path: &str) -> Result<(String, Option<String>
     parse_probe(&output)
 }
 
-pub(crate) async fn bounded_output(
+fn spawn_child(
     plan: &ShellCommandPlan,
-    deadline: Duration,
-) -> Result<Vec<u8>, IpcError> {
-    let child = tokio::process::Command::new(&plan.program)
+    stdin: Stdio,
+) -> Result<tokio::process::Child, IpcError> {
+    tokio::process::Command::new(&plan.program)
         .args(&plan.args)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to start SSH: {e}")))?;
+        .map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to start SSH: {e}")))
+}
+
+pub(crate) async fn bounded_output(
+    plan: &ShellCommandPlan,
+    deadline: Duration,
+) -> Result<Vec<u8>, IpcError> {
+    collect_output(spawn_child(plan, Stdio::null())?, deadline).await
+}
+
+pub(crate) async fn bounded_output_with_stdin(
+    plan: &ShellCommandPlan,
+    deadline: Duration,
+    input: Vec<u8>,
+) -> Result<Vec<u8>, IpcError> {
+    let mut child = spawn_child(plan, Stdio::piped())?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| IpcError::internal("Missing SSH stdin"))?;
+    // A payload larger than the pipe buffer deadlocks if the write completes before the
+    // output is drained, so the two run concurrently. Write errors surface as the exit status.
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        if stdin.write_all(&input).await.is_ok() {
+            let _ = stdin.shutdown().await;
+        }
+    });
     collect_output(child, deadline).await
 }
 

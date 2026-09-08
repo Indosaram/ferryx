@@ -268,6 +268,46 @@ pub async fn cmd_ssh_test_connection(host: SshHost) -> Result<SshTargetSummary, 
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshClipboardImagePaste {
+    pub remote_path: String,
+    pub byte_length: usize,
+}
+
+/// Copies the clipboard image to the SSH host that owns `workspace_id` so the remote agent can
+/// open it, and answers with the path to paste. `Ok(None)` means the clipboard held nothing the
+/// remote could use, which leaves the caller on its local paste chord.
+#[tauri::command]
+pub async fn cmd_ssh_paste_clipboard_image<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+) -> Result<Option<SshClipboardImagePaste>, IpcError> {
+    let store = get_ssh_store_path(&app)?;
+    let (_, host) =
+        run_blocking(move || crate::ssh::projects::resolve(&store, &workspace_id)).await?;
+    let Some(image) = crate::clipboard_image::read_clipboard_image_for_app(&app).await? else {
+        return Ok(None);
+    };
+    let byte_length = image.bytes.len();
+    if byte_length > crate::clipboard_image::MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!(
+                "Clipboard image is {} MiB, above the {} MiB a remote paste may transfer",
+                byte_length / (1024 * 1024),
+                crate::clipboard_image::MAX_CLIPBOARD_IMAGE_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    let file_name = format!("{}.{}", uuid::Uuid::new_v4(), image.extension);
+    let remote_path = crate::ssh::direct::upload_temp_file(&host, &file_name, image.bytes).await?;
+    Ok(Some(SshClipboardImagePaste {
+        remote_path,
+        byte_length,
+    }))
+}
+
 #[tauri::command]
 pub async fn cmd_ssh_list_remote_worktrees(
     host: SshHost,

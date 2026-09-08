@@ -1,5 +1,6 @@
 pub mod agent_detect;
 pub mod browser;
+pub mod clipboard_image;
 pub mod daemon;
 pub mod dag;
 pub mod ipc;
@@ -947,6 +948,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_update_host,
         ipc::ssh::cmd_ssh_delete_host,
         ipc::ssh::cmd_ssh_test_connection,
+        ipc::ssh::cmd_ssh_paste_clipboard_image,
         ipc::ssh::cmd_ssh_list_remote_worktrees,
         ipc::ssh::cmd_ssh_create_remote_worktree,
         ipc::ssh::cmd_ssh_delete_remote_worktree,
