@@ -1,0 +1,24 @@
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1872 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                        1.29 kB │ gzip:   0.60 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-9DxUJu3o.css                        77.16 kB │ gzip:  14.01 kB
+dist/assets/check-CBsZBepc.js                          0.29 kB │ gzip:   0.25 kB
+dist/assets/card-DyTTKE3o.js                           2.08 kB │ gzip:   0.88 kB
+dist/assets/PermissionsOnboardingDialog-BqH-H7yo.js    6.21 kB │ gzip:   1.83 kB
+dist/assets/browser-5SrXuj6A.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-Be4ZUhYW.js                     45.82 kB │ gzip:  13.79 kB
+dist/assets/sonner-C2xXfOya.js                        63.88 kB │ gzip:  22.12 kB
+dist/assets/index-CbGYrT_b.js                        181.17 kB │ gzip:  58.25 kB
+dist/assets/SettingsDialog-H9UNgbYV.js               190.25 kB │ gzip:  56.46 kB
+dist/assets/App-hox6whQw.js                          481.67 kB │ gzip: 141.61 kB
+✓ built in 2.14s

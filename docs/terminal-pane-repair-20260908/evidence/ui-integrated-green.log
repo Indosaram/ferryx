@@ -1,0 +1,94 @@
+$ vitest run --maxWorkers=1 src/lib/nativeTerminalVisibility.test.tsx src/components/BrowserPane.test.tsx src/components/NativeTerminalPane.test.tsx src/components/NativeTerminalPane.lifecycle.test.tsx src/lib/nativeTerminalLifecycle.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/nativeTerminalVisibility.test.tsx (14 tests) 36ms
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: mount attach failed
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.test.tsx:5067:19
+      at mockCall [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at Object.operation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:754:13[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:157:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:325:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:240:22[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:752:12
+      at attemptAttach [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:1806:15[90m)[39m
+}
+
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: mount attach failed
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.test.tsx:5067:19
+      at mockCall [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at Object.operation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:754:13[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:157:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:325:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:240:22[90m)[39m
+      at reattachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:269:10[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:752:12
+}
+
+ ✓ src/components/NativeTerminalPane.test.tsx (150 tests) 2526ms
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > retries failed bounds with a fresh attachment and waits for presentation
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_set_bounds'[39m,
+  error: { code: [32m'INTERNAL_ERROR'[39m, message: [32m'native surface unavailable'[39m }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > preserves the structured cause of a bounds failure in the visible error
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_set_bounds'[39m,
+  error: {
+    code: [32m'INVALID_ARGUMENT'[39m,
+    message: [32m'Native terminal viewport is outside the configured surface'[39m
+  }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {}
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_send_input'[39m,
+  error: Error: Input receipt failed after delivery
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.lifecycle.test.tsx:447:5
+      at [90mfile:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:734:40
+      at runWithSuite [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1849:8[90m)[39m
+      at Object.collect [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:734:10[90m)[39m
+      at Object.collect [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:738:54[90m)[39m
+  [90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+      at collectTests [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1179:25[90m)[39m
+      at startTests [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1817:17[90m)[39m
+      at [90mfile:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/runBaseTests.9Ij9_de-.js:117:26
+      at withEnv [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mvitest[24m/dist/chunks/runBaseTests.9Ij9_de-.js:84:3[90m)[39m
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_send_input'[39m,
+  error: { code: [32m'INTERNAL_ERROR'[39m, message: [32m'Receipt unavailable'[39m }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"PTY_IO_ERROR","message":"Write acknowledgement unavailable","details":{"inputWritten":true}}
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_send_input'[39m,
+  error: {
+    code: [32m'PTY_IO_ERROR'[39m,
+    message: [32m'Write acknowledgement unavailable'[39m,
+    details: { inputWritten: [33mtrue[39m }
+  }
+}
+
+ ✓ src/components/NativeTerminalPane.lifecycle.test.tsx (30 tests) 430ms
+ ✓ src/components/BrowserPane.test.tsx (3 tests) 78ms
+ ✓ src/lib/nativeTerminalLifecycle.test.ts (7 tests) 3ms
+
+ Test Files  5 passed (5)
+      Tests  204 passed (204)
+   Start at  00:28:07
+   Duration  5.46s (transform 255ms, setup 326ms, collect 636ms, tests 3.07s, environment 849ms, prepare 131ms)
+

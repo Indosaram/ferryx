@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/lib/nativeTerminalVisibility.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/nativeTerminalVisibility.test.tsx (14 tests) 32ms
+
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+   Start at  00:45:06
+   Duration  471ms (transform 38ms, setup 85ms, collect 39ms, tests 32ms, environment 182ms, prepare 45ms)
+

@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1 src/lib/nativeTerminalVisibility.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/nativeTerminalVisibility.test.tsx (14 tests | 2 failed) 38ms
+   ✓ useNativeTerminalVisibility > returns true when no dialog is mounted 10ms
+   × useNativeTerminalVisibility > keeps macOS terminal visible behind a dialog overlay 7ms
+     → expected { visible: false, interactive: false } to deeply equal { visible: true, interactive: false }
+   × useNativeTerminalVisibility > keeps macOS terminal visible behind a search overlay 3ms
+     → expected { visible: false, interactive: false } to deeply equal { visible: true, interactive: false }
+   ✓ useNativeTerminalVisibility > masks the macOS browser surface while a dialog overlay owns input 2ms
+   ✓ useNativeTerminalVisibility > masks the macOS browser surface while a search overlay owns input 2ms
+   ✓ useNativeTerminalVisibility > masks the macOS browser surface during owner drop occlusion 1ms
+   ✓ useNativeTerminalVisibility > still hides an explicitly hidden macOS owner 1ms
+   ✓ useNativeTerminalVisibility > yields surface (returns false) when a standard modal dialog mounts 2ms
+   ✓ useNativeTerminalVisibility > does not yield surface (returns true) when dialog opts out on itself 2ms
+   ✓ useNativeTerminalVisibility > does not yield surface when dialog descends from an opted-out ancestor 1ms
+   ✓ useNativeTerminalVisibility > still yields for a real modal even when another opted-out dialog is open 2ms
+   ✓ useNativeTerminalVisibility > yields for a search surface that has not opted out 1ms
+   ✓ useNativeTerminalVisibility > keeps provider visible=false winning regardless of surface state 3ms
+   ✓ useNativeTerminalVisibility > disconnects its observer on unmount, leaving nothing subscribed 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/nativeTerminalVisibility.test.tsx > useNativeTerminalVisibility > keeps macOS terminal visible behind a dialog overlay
+ FAIL  src/lib/nativeTerminalVisibility.test.tsx > useNativeTerminalVisibility > keeps macOS terminal visible behind a search overlay
+AssertionError: expected { visible: false, interactive: false } to deeply equal { visible: true, interactive: false }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[2m    "interactive": false,[22m
+[32m-   "visible": true,[39m
+[31m+   "visible": false,[39m
+[2m  }[22m
+
+ ❯ src/lib/nativeTerminalVisibility.test.tsx:47:28
+     45|     });
+     46| 
+     47|     expect(result.current).toEqual({ visible: true, interactive: false…
+       |                            ^
+     48|   });
+     49| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 12 passed (14)
+   Start at  00:43:51
+   Duration  428ms (transform 38ms, setup 78ms, collect 36ms, tests 38ms, environment 166ms, prepare 26ms)
+
+error: script "test" exited with code 1

@@ -1,0 +1,4 @@
+$ cargo check --manifest-path /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml
+cargo_check_exit=0
+$ git diff --check
+git_diff_check_exit=0

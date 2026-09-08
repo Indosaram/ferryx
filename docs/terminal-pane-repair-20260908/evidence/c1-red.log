@@ -1,0 +1,189 @@
+$ vitest run --maxWorkers=1 src/components/NativeTerminalPane.test.tsx -t "keeps the terminal uncovered when a bounds failure is shown"
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/components/NativeTerminalPane.test.tsx (150 tests | 1 failed | 149 skipped) 65ms
+   ↓ NativeTerminalPane IPC failure reporting and visible error state > suppresses the attach error banner across fast retries, surfaces it once the failure persists, and clears it on retry
+   ↓ NativeTerminalPane IPC failure reporting and visible error state > allows clicking the attach error banner to retry connection immediately
+   ↓ NativeTerminalPane IPC failure reporting and visible error state > does not attempt attach or show error banner when session lifecycle is exited
+   ↓ NativeTerminalPane IPC failure reporting and visible error state > displays an accessible error banner when bounds IPC fails and does not show detach errors on unmount
+   × NativeTerminalPane IPC failure reporting and visible error state > keeps the terminal uncovered when a bounds failure is shown 64ms
+     → expected <div …(3)></div> to be null
+   ↓ NativeTerminalPane IPC failure reporting and visible error state > stays silent when a bounds update loses the race with its own detach
+   ↓ snapBoundsToDevicePixels > leaves an already pixel-aligned rect untouched
+   ↓ snapBoundsToDevicePixels > treats a half CSS pixel as aligned at 2x because it is a whole device pixel
+   ↓ snapBoundsToDevicePixels > clamps negative origin coordinates to 0 to prevent compositor layout errors
+   ↓ snapBoundsToDevicePixels > snaps the fractional origin a later split pane inherits
+   ↓ snapBoundsToDevicePixels > preserves the 1px divider gap between adjacent panes
+   ↓ snapBoundsToDevicePixels > returns the rect unchanged when the scale factor is not usable
+   ↓ NativeTerminalPane geometry reporting contract > measures viewport DOM geometry and passes bounds and scaleFactor in cmd_native_terminal_attach on mount
+   ↓ NativeTerminalPane geometry reporting contract > snaps a fractional split-pane rect to whole device pixels before attaching
+   ↓ NativeTerminalPane geometry reporting contract > omits geometry in cmd_native_terminal_attach when viewport has zero-area dimensions on mount
+   ↓ NativeTerminalPane geometry reporting contract > observes DOM rectangle, explicitly attaches session, and reports initial bounds on mount in Tauri mode
+   ↓ NativeTerminalPane geometry reporting contract > reserves the pane-handle strip at the top and bottom overlay strip in the reported native bounds
+   ↓ NativeTerminalPane geometry reporting contract > reports changed bounds payload once when geometry changes
+   ↓ NativeTerminalPane geometry reporting contract > does not retry a resize frame deferred by synchronized output
+   ↓ NativeTerminalPane geometry reporting contract > coalesces rapid height increases until the prior native resize completes
+   ↓ NativeTerminalPane geometry reporting contract > refreshes the thumb metrics after a height resize changes visible rows
+   ↓ NativeTerminalPane geometry reporting contract > skips the rejected zero-area measurement and reports the first real one
+   ↓ NativeTerminalPane geometry reporting contract > retries an identical measurement after a rejected bounds request
+   ↓ NativeTerminalPane geometry reporting contract > disconnects ResizeObserver and invokes detach on unmount
+   ↓ NativeTerminalPane geometry reporting contract > presents the replacement terminal before detaching the outgoing terminal
+   ↓ NativeTerminalPane geometry reporting contract > keeps the outgoing terminal until the last rapid replacement is presented
+   ↓ NativeTerminalPane geometry reporting contract > does not report Tauri geometry bounds in remote/web non-Tauri mode
+   ↓ NativeTerminalPane geometry reporting contract > converts physical native cursor cells to a high-DPI IME anchor
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > focuses the hidden input sink and notifies native focus after successful attach
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > positions the IME input sink at the native cursor receipt
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards a primary pointer press for native selection without cancelling the gesture
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards drag motion and release for native selection without cancelling pointer events
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > sends typed native focus and blur intent through IPC
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > reports rejected native input IPC commands
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > self-heals detached session on send_input error by re-attaching and retrying input once
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > does not loop infinitely when input retry repeatedly fails
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > encodes and forwards non-printable control keys on keydown without duplicating printable input
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards macOS word-navigation and word-deletion chords instead of letting the focus sink edit itself
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > recovers the physical key when macOS translates an Option chord into a glyph
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards modified character keys through the typed key IPC payload
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > sends DOM text paste as one bracketed paste IPC payload
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > sends multiline DOM text paste as a single payload to cmd_native_terminal_paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims macOS Cmd+V ('Latin v') on focused textarea and routes native text clipboard content without DOM paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims macOS Cmd+V ('Korean character ㅍ') on focused textarea and routes native text clipboard content without DOM paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims macOS Cmd+V ('IME Process key') on focused textarea and routes native text clipboard content without DOM paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims macOS Cmd+V on focused textarea and routes native image clipboard content through agent Ctrl+V shortcut without DOM paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > sends a clipboard image to the SSH host owning a remote pane and 'pastes the uploaded remote path'
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > sends a clipboard image to the SSH host owning a remote pane and 'falls back to the agent chord when th…'
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > keeps a local pane on the agent paste chord and never uploads its clipboard image
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims Ctrl+V with Korean layout key ㅍ on focused textarea and routes native text clipboard content
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims Ctrl+V with Latin v on focused textarea and routes native text clipboard content
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims Ctrl+Shift+V on focused textarea and routes native text clipboard content
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims Shift+Insert on focused textarea and routes native text clipboard content
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims Ctrl+V on focused textarea and routes native image clipboard content through agent Ctrl+V shortcut without DOM paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > routes AppKit-consumed macOS Cmd+V to the last-focused split terminal exactly once
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > leaves AppKit-consumed Cmd+V to an external editable instead of a terminal
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims macOS Cmd+V on focused textarea and sends no terminal input when clipboard is empty
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > recognizes macOS Korean layout Cmd+V ('Korean character ㅍ') through neutral document capture fallback, claims focus, and routes native paste without DOM paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > recognizes macOS Korean layout Cmd+V ('IME Process key') through neutral document capture fallback, claims focus, and routes native paste without DOM paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > suppresses a subsequent DOM paste event exactly once after macOS Cmd+V keydown fallback
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > keeps duplicate-paste suppression through async clipboard inspection until KeyV keyup
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > clears native paste suppression when the window loses focus before KeyV keyup
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > routes neutral BODY Cmd+V native clipboard fallback only to the last-focused split terminal
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > does not claim macOS Cmd+V when an external editable input is focused
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > claims native fallback on non-macOS platforms for Ctrl+V
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > ignores standalone Meta key before Korean Cmd+V (ㅍ) across capture fallback and textarea
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards a DOM image paste through the agent's Ctrl+V shortcut
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards a fixture PNG paste at the DOM paste seam through the agent's Ctrl+V shortcut
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > routes an image-only paste targeting the terminal pane when the focus sink is not active exclusively through Ctrl+V exactly once
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > routes a text paste targeting the terminal pane when the focus sink is not active to cmd_native_terminal_paste
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > routes a body-target image paste only to the last-focused split terminal
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > routes neutral BODY keyboard input only to the last-focused split terminal
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > gives a pane-target paste precedence over a previously focused sibling
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > lets the sole remaining pane claim BODY paste after the previous owner unmounts
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > uses half-open native drop bounds so a split divider belongs to only the right pane
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > subscribes to Tauri onDragDropEvent, atomically pasting dropped files inside bounds and ignoring drops outside bounds
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > handles Cmd+click to resolve line text and open URLs
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > handles Cmd+click to resolve line text and open file paths with line/column
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > handles Cmd+click on indented lines without coordinate drift
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > handles onWheel scrolling by issuing native scroll IPC command
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > shows, repositions, and drags the native scrollback thumb
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > hides native scrollbar track by default, reveals on wheel, and fades out after hide timer
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > reveals the native scrollbar on pointer down on the container
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > does not hide native scrollbar while dragging the thumb
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > keeps native scrollbar visible while hovered on track
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > copies native selection to navigator.clipboard on platform copy shortcut
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > copies native selection on macOS Korean layout Cmd+C (ㅊ and Process)
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > copy-or-interrupt event with empty selection does not send input to PTY
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > copy-or-interrupt event with selection copies
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > delivers copy request on first native copy event without depending on browser clipboard user activation on macOS
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > surfaces browser clipboard write rejection on non-macOS platforms
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > does not send standalone modifier and lock keys through IPC
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > renders composition updates as native terminal preedit
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > clears native preedit before committing composition text
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > clears a cancelled composition when focus leaves the input sink
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards ordinary non-composed printable text on input event and clears the sink
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > forwards printable character keydown directly and prevents default without firing input event
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > leaves IME-owned keydowns on the focused sink to the IME and commits the composition text once
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > leaves a legacy keyCode 229 keydown on the focused sink to the IME
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > leaves IME-owned keydowns in the document fallback to the IME
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > focuses the owning sink on a composition-starting IME keydown in the document fallback
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > treats an AltGr text key with only the AltGraph modifier set as text input
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > treats an AltGr chord on the focused sink as text input, not a Ctrl+Alt shortcut
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > treats an AltGr chord in the document fallback as text input and focuses the sink
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > still forwards a genuine Ctrl+Alt chord when AltGraph is not active
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > includes terminal-host class name on container to allow global shortcut handlers to target terminal
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > does not forward keyboard events when default has already been prevented by global shortcuts
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > does not forward split-pane shortcut key when default has been prevented
+   ↓ NativeTerminalPane focus, keyboard, and IME prototype contract > integrates with useShortcuts: New Tab and Split shortcuts trigger app handlers without leaking to native input
+   ↓ active prop and pane focus event dispatch > focuses the input sink and sends focus when active becomes true
+   ↓ active prop and pane focus event dispatch > sends focus false when active transitions to false
+   ↓ active prop and pane focus event dispatch > claims window keydown and forwards input to the active pane when document.activeElement is document.body
+   ↓ active prop and pane focus event dispatch > does not claim fallback keydown when active is false even if hovered
+   ↓ NativeTerminalPane daemon and session identity mapping > routes attach, bounds, focus, input, and detach to backendSessionId when id and backendSessionId intentionally differ
+   ↓ NativeTerminalPane daemon and session identity mapping > preserves fallback behavior when callers only supply sessionId without session object
+   ↓ NativeTerminalPane daemon and session identity mapping > makes no attach, focus, or input IPC calls when session has null backendSessionId, then attaches once upon receiving backendSessionId
+   ↓ NativeTerminalPane daemon and session identity mapping > focuses and routes input only to the pane receiving a reconnect binding
+   ↓ NativeTerminalPane daemon and session identity mapping > resets daemon replay before a reconnect result is bound
+   ↓ NativeTerminalPane daemon and session identity mapping > does not detach a replacement owner when the rebound pane reparents in the same turn
+   ↓ NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+   ↓ NativeTerminalPane daemon and session identity mapping > redirects printable keydown fallback when activeElement is document.body
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards Enter through the keydown fallback when activeElement is document.body
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards Ctrl+C through the keydown fallback when activeElement is document.body
+   ↓ NativeTerminalPane daemon and session identity mapping > delivers a fallback Enter to exactly one pane when two split panes are mounted
+   ↓ NativeTerminalPane daemon and session identity mapping > routes a keystroke to the swapped-in session after a workspace switch, never the outgoing one
+   ↓ NativeTerminalPane daemon and session identity mapping > preserves native mouse-up focus after WebKit mouse-down handling moves focus to BODY
+   ↓ NativeTerminalPane daemon and session identity mapping > lets immediate Hangul input start composition after a native pane switch
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards plain Ctrl+C with no activity prop as key 'c' with ctrl true
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards Ctrl+C unchanged when agent state is waiting
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards Ctrl+C unchanged when agent state is working
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards Ctrl+C unchanged when agent state is done
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards two quick Ctrl+C presses without scheduling an extra interrupt when agent is waiting
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards two spaced Ctrl+C presses unchanged when agent is waiting
+   ↓ NativeTerminalPane daemon and session identity mapping > sends key 'c' twice immediately with no delayed third send for quick plain Ctrl+C in a plain shell
+   ↓ NativeTerminalPane daemon and session identity mapping > sends key 'c' twice immediately with no delayed third send for quick Ctrl+C when agent is working
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards fallback document.body Ctrl+C presses without synthetic interrupts when agent is waiting
+   ↓ NativeTerminalPane daemon and session identity mapping > keeps interrupt key 'c' on plain Ctrl+C when activity indicates agent is working
+   ↓ NativeTerminalPane daemon and session identity mapping > normalizes Korean layout Ctrl+C (key ㅊ and code KeyC) to key 'c' instead of 'ㅊ'
+   ↓ NativeTerminalPane daemon and session identity mapping > normalizes Korean layout Ctrl+L (key ㅣ and code KeyL) to key 'l' instead of 'ㅣ'
+   ↓ NativeTerminalPane daemon and session identity mapping > forwards Ctrl+C unchanged when session has agentType and no activity prop
+   ↓ NativeTerminalPane daemon and session identity mapping > keeps interrupt key 'c' on plain Ctrl+C when session has agentType and activity indicates agent is working
+   ↓ NativeTerminalPane daemon and session identity mapping > does not send input or write clipboard on Cmd+C with empty selection when activity indicates agent is waiting
+   ↓ NativeTerminalPane daemon and session identity mapping > copies selection to clipboard on Cmd+C with non-empty selection without sending input when agent is waiting
+   ↓ NativeTerminalPane daemon and session identity mapping > copies selection to clipboard on Ctrl+Shift+C without sending input
+   ↓ NativeTerminalPane daemon and session identity mapping > syncs attention frame state to backend when needsAttention changes or component unmounts
+   ↓ NativeTerminalPane daemon and session identity mapping > swallows the keydown that terminates an IME composition
+   ↓ NativeTerminalPane daemon and session identity mapping > still sends standalone spaces after a committed composition
+   ↓ NativeTerminalPane daemon and session identity mapping > disarms the tail suppression when a different key arrives
+   ↓ NativeTerminalPane daemon and session identity mapping > sends plain space without any composition
+   ↓ NativeTerminalPane daemon and session identity mapping > does not swallow the first jamo of a new composition after a jamo-tailed commit
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/NativeTerminalPane.test.tsx > NativeTerminalPane IPC failure reporting and visible error state > keeps the terminal uncovered when a bounds failure is shown
+AssertionError: expected <div …(3)></div> to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+<div
+  aria-hidden="true"
+  class="pointer-events-none absolute inset-0 bg-terminal"
+  data-testid="native-terminal-error-backing"
+/>
+
+ ❯ src/components/NativeTerminalPane.test.tsx:403:65
+    401|       "true",
+    402|     );
+    403|     expect(view.queryByTestId("native-terminal-error-backing")).toBeNu…
+       |                                                                 ^
+    404|     expect(tauriCoreMocks.invoke.mock.calls.filter(
+    405|       ([command]) => command === "cmd_native_terminal_detach",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 149 skipped (150)
+   Start at  23:42:29
+   Duration  1.74s (transform 338ms, setup 341ms, collect 370ms, tests 65ms, environment 475ms, prepare 372ms)
+
+error: script "test" exited with code 1

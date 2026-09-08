@@ -1,0 +1,2 @@
+$ tsc && vite build
+src/state/inactiveProjectWorktrees.test.tsx(64,72): error TS2554: Expected 2-4 arguments, but got 5.

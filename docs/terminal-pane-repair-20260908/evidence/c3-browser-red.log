@@ -1,0 +1,71 @@
+$ vitest run --maxWorkers=1 src/lib/nativeTerminalVisibility.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/nativeTerminalVisibility.test.tsx (14 tests | 3 failed) 42ms
+   ✓ useNativeTerminalVisibility > returns true when no dialog is mounted 9ms
+   ✓ useNativeTerminalVisibility > keeps macOS terminal visible behind a dialog overlay 3ms
+   ✓ useNativeTerminalVisibility > keeps macOS terminal visible behind a search overlay 2ms
+   × useNativeTerminalVisibility > masks the macOS browser surface while a dialog overlay owns input 5ms
+     → expected true to be false // Object.is equality
+   × useNativeTerminalVisibility > masks the macOS browser surface while a search overlay owns input 2ms
+     → expected true to be false // Object.is equality
+   × useNativeTerminalVisibility > masks the macOS browser surface during owner drop occlusion 2ms
+     → expected undefined to be false // Object.is equality
+   ✓ useNativeTerminalVisibility > still hides an explicitly hidden macOS owner 1ms
+   ✓ useNativeTerminalVisibility > yields surface (returns false) when a standard modal dialog mounts 3ms
+   ✓ useNativeTerminalVisibility > does not yield surface (returns true) when dialog opts out on itself 3ms
+   ✓ useNativeTerminalVisibility > does not yield surface when dialog descends from an opted-out ancestor 2ms
+   ✓ useNativeTerminalVisibility > still yields for a real modal even when another opted-out dialog is open 3ms
+   ✓ useNativeTerminalVisibility > yields for a search surface that has not opted out 2ms
+   ✓ useNativeTerminalVisibility > keeps provider visible=false winning regardless of surface state 3ms
+   ✓ useNativeTerminalVisibility > disconnects its observer on unmount, leaving nothing subscribed 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/nativeTerminalVisibility.test.tsx > useNativeTerminalVisibility > masks the macOS browser surface while a dialog overlay owns input
+ FAIL  src/lib/nativeTerminalVisibility.test.tsx > useNativeTerminalVisibility > masks the macOS browser surface while a search overlay owns input
+AssertionError: expected true to be false // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- false[39m
+[31m+ true[39m
+
+ ❯ src/lib/nativeTerminalVisibility.test.tsx:58:28
+     56|       document.body.appendChild(overlay);
+     57|     });
+     58|     expect(result.current).toBe(false);
+       |                            ^
+     59|     await act(async () => {
+     60|       overlay.remove();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/lib/nativeTerminalVisibility.test.tsx > useNativeTerminalVisibility > masks the macOS browser surface during owner drop occlusion
+AssertionError: expected undefined to be false // Object.is equality
+
+[32m- Expected:[39m 
+false
+
+[31m+ Received:[39m 
+undefined
+
+ ❯ src/lib/nativeTerminalVisibility.test.tsx:71:28
+     69|     );
+     70|     const { result } = renderHook(() => useNativeTerminalVisibility(),…
+     71|     expect(result.current).toBe(false);
+       |                            ^
+     72|   });
+     73| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 11 passed (14)
+   Start at  00:26:26
+   Duration  664ms (transform 39ms, setup 85ms, collect 36ms, tests 42ms, environment 172ms, prepare 27ms)
+
+error: script "test" exited with code 1
