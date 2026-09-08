@@ -6,6 +6,7 @@ import { withTimeout } from "./lib/withTimeout";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
+import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
 import { Sidebar } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
@@ -66,6 +67,7 @@ import {
   saveSession,
   setBadgeCount,
   spawnTerminal,
+  toIpcError,
   writeTerminal,
   bootTrace,
   listenDagRunUpdated,
@@ -469,6 +471,13 @@ function WorkspaceApp({
   }, []);
   const [registeredProjectId, setRegisteredProjectId] = useState<string | null>(null);
   const [registrationAttempt, setRegistrationAttempt] = useState(0);
+  const [registrationError, setRegistrationError] = useState<{ workspaceId: string; message: string } | null>(null);
+  const [sshTabOperation, setSshTabOperation] = useState<{
+    workspaceId: string;
+    error?: string;
+    retry: () => void;
+  } | null>(null);
+  const sshTabOperationRef = useRef<object | null>(null);
   const registeredProjectIdRef = useRef<string | null>(null);
   registeredProjectIdRef.current = registeredProjectId;
   const [pendingBackendRecovery, setPendingBackendRecovery] = useState<{ workspaceId: string; sessionIds: string[] } | null>(
@@ -682,6 +691,31 @@ function WorkspaceApp({
   });
   reportRuntimeErrorRef.current = reportRuntimeError;
 
+  useEffect(() => {
+    setSshTabOperation(null);
+    return () => { sshTabOperationRef.current = null; };
+  }, [activeProject.workspaceId]);
+
+  const runTabOperation = useCallback((operation: () => Promise<unknown>) => {
+    const project = activeProjectRef.current;
+    if (project.target?.kind !== "ssh" || stateRef.current.layout.tabs.length > 0) {
+      void operation().catch(reportRuntimeError);
+      return;
+    }
+    const request = {};
+    sshTabOperationRef.current = request;
+    const retry = () => runTabOperation(operation);
+    setSshTabOperation({ workspaceId: project.workspaceId, retry });
+    void operation().then(() => {
+      if (sshTabOperationRef.current === request) setSshTabOperation(null);
+    }).catch((error: unknown) => {
+      if (sshTabOperationRef.current !== request || activeProjectRef.current.workspaceId !== project.workspaceId) return;
+      const ipcError = toIpcError(error);
+      setSshTabOperation({ workspaceId: project.workspaceId, error: `${ipcError.code}: ${ipcError.message}`, retry });
+      reportRuntimeError(error);
+    });
+  }, [reportRuntimeError]);
+
   const inactiveProjectWorktrees = useInactiveProjectWorktrees(
     projects,
     activeProject.workspaceId,
@@ -795,6 +829,7 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     setRegisteredProjectId(null);
+    setRegistrationError(null);
     const isPlaceholder =
       projects.length === 1 &&
       projects[0].workspaceId === DEFAULT_WORKSPACE_ID &&
@@ -899,7 +934,11 @@ function WorkspaceApp({
           error: String(error),
           cancelled,
         });
-        if (!cancelled) reportRuntimeError(error);
+        if (!cancelled) {
+          const ipcError = toIpcError(error);
+          setRegistrationError({ workspaceId: activeProject.workspaceId, message: `${ipcError.code}: ${ipcError.message}` });
+          reportRuntimeError(error);
+        }
       });
     return () => {
       cancelled = true;
@@ -1262,9 +1301,9 @@ function WorkspaceApp({
         setPendingWorktreePath(worktree.path);
         return;
       }
-      void ensureTabForWorktree(worktree).catch(reportRuntimeError);
+      runTabOperation(() => ensureTabForWorktree(worktree));
     },
-    [ensureTabForWorktree, handleSelectProject, reportRuntimeError],
+    [ensureTabForWorktree, handleSelectProject, runTabOperation],
   );
 
   useEffect(() => {
@@ -1286,7 +1325,7 @@ function WorkspaceApp({
       tabCount: state.layout.tabs.length,
     });
     setPendingWorktreePath(null);
-    void ensureTabForWorktree(target).catch(reportRuntimeError);
+    runTabOperation(() => ensureTabForWorktree(target));
   }, [
     activeProject.workspaceId,
     activeProject.target,
@@ -1294,6 +1333,7 @@ function WorkspaceApp({
     pendingWorktreePath,
     registeredProjectId,
     workspaceRestoreStatus,
+    runTabOperation,
     reportRuntimeError,
     state.layout.tabs.length,
     state.worktrees,
@@ -1354,14 +1394,13 @@ function WorkspaceApp({
     const requestedEntryId = pendingRemoteSlug.tabId ?? null;
     setPendingRemoteSlug(null);
     if (!isTerminalTabInWorktree(state, target, requestedEntryId)) return;
-    void Promise.resolve(ensureTabForWorktree(target))
+    runTabOperation(() => Promise.resolve(ensureTabForWorktree(target))
       .then(() => {
         if (requestedEntryId) {
           activateRemoteEntry(requestedEntryId);
         }
-      })
-      .catch(reportRuntimeError);
-  }, [activeProject.repoRoot, activeProject.target, activeProject.workspaceId, activateRemoteEntry, ensureTabForWorktree, pendingRemoteSlug, registeredProjectId, reportRuntimeError, state.worktrees, state.workspaceId, workspaceRestoreStatus]);
+      }));
+  }, [activeProject.repoRoot, activeProject.target, activeProject.workspaceId, activateRemoteEntry, ensureTabForWorktree, pendingRemoteSlug, registeredProjectId, runTabOperation, state.worktrees, state.workspaceId, workspaceRestoreStatus]);
 
   const handleRemoteSelectionRequested = useCallback(
     (payload: RemoteSelectionRequestedPayload) => {
@@ -1502,8 +1541,8 @@ function WorkspaceApp({
     if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
     const activeWt = activeWorktreeRef.current;
     if (!activeWt) return;
-    void openTab(activeWt, undefined, undefined, shell).catch(reportRuntimeError);
-  }, [openTab, reportRuntimeError]);
+    runTabOperation(() => openTab(activeWt, undefined, undefined, shell));
+  }, [openTab, runTabOperation]);
 
   const handleLaunchAgent = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
@@ -1989,6 +2028,17 @@ function WorkspaceApp({
   );
   useShortcuts(shortcutHandlers);
 
+  const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
+  const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId ? registrationError.message : undefined;
+  const activeSshTabOperation = sshTabOperation?.workspaceId === activeProject.workspaceId ? sshTabOperation : null;
+  const sshInitializing = registeredProjectId !== activeProject.workspaceId ||
+    workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading" ||
+    pendingWorktreePath !== null || pendingRemoteSlug?.workspaceId === activeProject.workspaceId ||
+    activeSshTabOperation !== null;
+  const showSshStatus = activeProject.target?.kind === "ssh" &&
+    (state.workspaceId !== activeProject.workspaceId || state.layout.tabs.length === 0) &&
+    (sshInitializing || activeRegistrationError);
+
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
@@ -2065,6 +2115,21 @@ function WorkspaceApp({
               <span>Add Project</span>
             </button>
           </div>
+        ) : showSshStatus && activeProject.target?.kind === "ssh" ? (
+          <SshWorkspaceStatus
+            hostLabel={getCachedSshHosts()?.find((host) => host.id === sshHostId)?.label ?? activeProject.target.hostId}
+            message={registeredProjectId !== activeProject.workspaceId ? "Connecting via SSH..."
+              : workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading" ? "Restoring workspace..."
+              : "Opening terminal..."}
+            error={activeRegistrationError ?? activeSshTabOperation?.error}
+            onRetry={() => {
+              if (activeSshTabOperation?.error) activeSshTabOperation.retry();
+              else {
+                setRegistrationError(null);
+                setRegistrationAttempt((attempt) => attempt + 1);
+              }
+            }}
+          />
         ) : activeWorktree && state.layout.tabs.length === 0 ? (
           <EmptyWorkspaceView
             onNewTerminal={handleAddTerminalTab}

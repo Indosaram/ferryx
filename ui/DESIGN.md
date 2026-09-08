@@ -184,7 +184,13 @@ Rules:
 - Only `transition-colors` on hover/active state changes (GPU-composited; no layout animation).
 - Disclosure chevrons rotate via `transition-transform` (`rotate-90` when expanded).
 - `animate-enter` (140ms `translateY(2px)` + fade) is available for newly revealed groups.
-- `StatusDot`'s ping/pulse is the only looping motion and is disabled under `motion-reduce`.
+- `StatusDot`'s ping/pulse and pending SSH connection spinners are the only looping motion;
+  both are disabled under `motion-reduce`.
+- SSH initialization replaces the empty workspace with a centered `Loader2` (`size-5`),
+  a `text-sm` phase label and `text-xs` host label on `bg-background`. Use muted foreground,
+  `gap-3`, `p-6`, wrapping text, and a polite status region with `aria-busy`.
+  Failed connections stop the spinner and show the structured error plus a small retry button.
+  Ready workspaces with no tabs retain the existing empty state.
 - No hover state may change anything other than color/opacity on a non-interactive element.
 
 ## 6. Responsive Behavior

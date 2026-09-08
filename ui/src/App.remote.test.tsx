@@ -90,6 +90,87 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("App SSH project lifecycle", () => {
+  it("shows progress throughout registration, restore, and first SSH tab creation", async () => {
+    // Given an inactive remote root and independently controlled connection stages.
+    seed([{ workspaceId: "local", repoRoot: remote.repoRoot, gitRoot: null }, remote]);
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+    await mount();
+    const registration = deferred<RegisteredRemoteProject>();
+    const restore = deferred<null>();
+    const spawn = deferred<string>();
+    native.registerRemoteProject.mockReturnValueOnce(registration.promise);
+    native.loadSession.mockReturnValueOnce(restore.promise);
+    native.spawnTerminal.mockReturnValueOnce(spawn.promise);
+
+    // When the user selects the SSH root, each unresolved stage stays busy.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "/srv/repo SSH root" })); });
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
+    await act(async () => { registration.resolve(registered); await registration.promise; });
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
+    await act(async () => { restore.resolve(null); await restore.promise; });
+    expect(native.spawnTerminal).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
+    await act(async () => { spawn.resolve("connected"); await spawn.promise; });
+
+    // Then the terminal replaces progress, without an extra tab.
+    expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
+    expect(screen.getByTestId("active-tab")).not.toBeEmptyDOMElement();
+    expect(native.spawnTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows progress for manual first-tab creation and allows retry after failure", async () => {
+    seed([remote]);
+    await mount();
+    expect(screen.getByTestId("empty-workspace-view")).toBeInTheDocument();
+    const spawn = deferred<string>();
+    native.spawnTerminal.mockReturnValueOnce(spawn.promise);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New Terminal" })); });
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
+    await act(async () => {
+      spawn.reject({ code: "SSH_CONNECT_FAILED", message: "Connection refused" });
+      await spawn.promise.catch(() => undefined);
+    });
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "false");
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveTextContent("SSH_CONNECT_FAILED");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry connection" })); });
+    expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
+    expect(screen.getByTestId("active-tab")).not.toBeEmptyDOMElement();
+  });
+
+  it("replaces registration failure with progress on explicit retry", async () => {
+    seed([remote]);
+    native.registerRemoteProject.mockRejectedValueOnce({ code: "SSH_CONNECT_FAILED", message: "Connection refused" });
+    await mount();
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "false");
+    const registration = deferred<RegisteredRemoteProject>();
+    native.registerRemoteProject.mockReturnValueOnce(registration.promise);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry connection" })); });
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    await act(async () => { registration.resolve(registered); await registration.promise; });
+    expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
+    expect(screen.getByTestId("empty-workspace-view")).toBeInTheDocument();
+  });
+
+  it("does not leak a late SSH failure into the selected local workspace", async () => {
+    seed([remote, { workspaceId: "local", repoRoot: "/local", gitRoot: null }]);
+    const registration = deferred<RegisteredRemoteProject>();
+    native.registerRemoteProject.mockReturnValueOnce(registration.promise);
+    await mount();
+    expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
+    await act(async () => {
+      registration.reject({ code: "SSH_CONNECT_FAILED", message: "Connection refused" });
+      await registration.promise.catch(() => undefined);
+    });
+    expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
+    expect(screen.getByTestId("empty-workspace-view")).toBeInTheDocument();
+  });
+
   it("focuses the existing SSH terminal addressed by its backend identity", async () => {
     native.spawnTerminal.mockResolvedValueOnce("backend-first").mockResolvedValueOnce("backend-second");
     seed([remote]);
