@@ -5,8 +5,8 @@ Date: 2026-09-08
 ## Behavior
 
 - A workspace with no tabs starts collapsed, including when its previous expanded state was saved.
-- Expanding an empty workspace displays no children, including the main/primary row, synthetic roots, and empty-list copy.
-- Closing the final tab collapses the workspace. Opening a tab makes its rows available again.
+- Expanding an empty workspace displays its primary worktree and registered worktrees, allowing the user to select them and open tabs.
+- Closing the final tab collapses the workspace automatically. Opening a tab makes its rows available again.
 - Browser tabs and tabs parked in another worktree count as open tabs.
 - Grouped local/SSH projects remain visible when any member has tabs.
 - Workspace selection shortcuts skip rows hidden by the empty-workspace rule.
@@ -34,7 +34,7 @@ The worktree inventory itself is not deleted or changed.
 ## Manual desktop check
 
 In the debug app launched through `bun tauri dev`, close every tab in a workspace.
-Confirm that its sidebar header collapses. Expand it and confirm that no main/primary row or other child appears.
-Open a terminal or browser tab and confirm that expanding the workspace shows its normal rows.
+Confirm that its sidebar header collapses automatically. Expand it by clicking the chevron or project folder name and confirm that its primary worktree row appears.
+Open a terminal or browser tab and confirm that expanding/collapsing the workspace preserves normal behavior.
 
 Other sessions added unrelated remote-selection changes to `App.tsx` during verification; those changes were preserved and excluded from the sidebar commit.

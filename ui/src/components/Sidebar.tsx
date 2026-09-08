@@ -187,7 +187,6 @@ export function Sidebar({
   }, [activeProjectId, projects]);
 
   const toggleProject = useCallback((workspaceId: string) => {
-    if (emptyGroupIds.has(workspaceId)) return;
     setCollapsedProjects((current) => {
       const next = new Set(current);
       if (next.has(workspaceId)) next.delete(workspaceId);
@@ -195,7 +194,7 @@ export function Sidebar({
       persistCollapsedProjects(next);
       return next;
     });
-  }, [emptyGroupIds]);
+  }, []);
 
   const naturalWorktreesByProject = useMemo(
     () => groupWorktreesByProject(
@@ -383,7 +382,7 @@ export function Sidebar({
               {projectGroups.map((group) => {
                 const project = group.primaryProject;
                 const active = isProjectGroupActive(group, activeProjectId);
-                const expanded = !emptyGroupIds.has(group.groupId) && !collapsedProjects.has(group.groupId);
+                const expanded = !collapsedProjects.has(group.groupId);
                 const projectWorktrees = worktreesByProject.get(project.workspaceId) ?? [];
                 const projectActivity = summarizeProjectActivity(
                   projectWorktrees,
@@ -490,7 +489,7 @@ export function Sidebar({
               <ProjectHeader
                 project={activeProjectOverlay}
                 active={activeProjectOverlay.workspaceId === activeProjectId}
-                expanded={!emptyGroupIds.has(activeProjectOverlay.workspaceId) && !collapsedProjects.has(activeProjectOverlay.workspaceId)}
+                expanded={!collapsedProjects.has(activeProjectOverlay.workspaceId)}
                 activity={summarizeProjectActivity(
                   worktreesByProject.get(activeProjectOverlay.workspaceId) ?? [],
                   activityByWorktreePath,

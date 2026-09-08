@@ -102,7 +102,7 @@ describe("Sidebar navigation", () => {
     expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
   });
 
-  it.each(["chevron", "project name"])("keeps a tabless workspace collapsed after clicking its %s", (target) => {
+  it.each(["chevron", "project name"])("expands a tabless workspace and reveals worktrees after clicking its %s", (target) => {
     renderSidebar({
       projects: accordionProjects,
       activeProjectId: "default",
@@ -110,12 +110,40 @@ describe("Sidebar navigation", () => {
       emptyWorkspaceIds: ["default"],
     });
 
-    fireEvent.click(target === "chevron" ? projectToggle("default") : projectRow("default"));
-
     expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
-    expect(screen.queryByText("primary")).not.toBeInTheDocument();
-    expect(screen.queryByText("No worktrees yet.")).not.toBeInTheDocument();
+
+    fireEvent.click(target === "chevron" ? projectToggle("default") : projectRow("default"));
+
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    const list = screen.getByRole("list", { name: "default worktrees" });
+    expect(list).toBeInTheDocument();
+    expect(within(list).getByRole("button", { name: /feature/ })).toBeInTheDocument();
+  });
+
+  it("reveals the primary worktree when expanding an empty workspace that has only a primary root", () => {
+    const primaryWorktree: Worktree = {
+      path: "/repos/default",
+      head: "def123",
+      branch: "refs/heads/main",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    renderSidebar({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [primaryWorktree],
+      emptyWorkspaceIds: ["default"],
+    });
+
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(projectToggle("default"));
+
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    const list = screen.getByRole("list", { name: "default worktrees" });
+    expect(within(list).getByRole("button", { name: /main/ })).toBeInTheDocument();
   });
 
   it("collapses when the final tab closes and restores rows after a tab opens without clicks", () => {
@@ -137,7 +165,7 @@ describe("Sidebar navigation", () => {
     expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
   });
 
-  it("remains collapsed across multiple clicks while empty and restores rows when tabs open, permitting normal toggling", () => {
+  it("toggles expansion when clicked while empty and auto-collapses when the final tab closes", () => {
     const props = baseProps({
       projects: accordionProjects,
       activeProjectId: "default",
@@ -150,12 +178,16 @@ describe("Sidebar navigation", () => {
     // Collapse when empty
     view.rerender(<Sidebar {...props} emptyWorkspaceIds={["default"]} />);
     expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
 
-    // Click toggle multiple times while empty
+    // Click toggle while empty expands and reveals worktrees
     fireEvent.click(projectToggle("default"));
-    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(projectRow("default"));
-    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    const list = screen.getByRole("list", { name: "default worktrees" });
+    expect(list).toBeInTheDocument();
+    expect(within(list).getByRole("button", { name: /feature/ })).toBeInTheDocument();
+
+    // Clicking again collapses
     fireEvent.click(projectToggle("default"));
     expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
