@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -43,6 +44,10 @@ function seed() {
 function runScript(args) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
 }
+
+// ---------------------------------------------------------------------------
+// Existing CLI baseline tests
+// ---------------------------------------------------------------------------
 
 test("a date tag maps to monotonic semver and leaves dependency versions untouched", () => {
   const { dir, conf, cargo } = seed();
@@ -166,4 +171,324 @@ test("a missing tag reports usage instead of guessing", () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /--tag/);
+});
+
+// ---------------------------------------------------------------------------
+// Regressions & Contract Hardening Tests (TDD)
+// ---------------------------------------------------------------------------
+
+test("importing sync-version.mjs has no side effects and exports canonical API", async () => {
+  const syncMod = await import("./sync-version.mjs");
+
+  assert.equal(typeof syncMod.parseReleaseTag, "function");
+  assert.equal(typeof syncMod.toAppVersion, "function");
+  assert.equal(typeof syncMod.toMsixVersion, "function");
+  assert.equal(typeof syncMod.syncVersion, "function");
+});
+
+test("parseReleaseTag handles valid CalVer tags with or without revision and leading v", async () => {
+  const { parseReleaseTag } = await import("./sync-version.mjs");
+
+  assert.deepEqual(parseReleaseTag("v2026.09.08.1"), {
+    year: 2026,
+    month: 9,
+    day: 8,
+    revision: 1,
+  });
+
+  assert.deepEqual(parseReleaseTag("v2026.09.08"), {
+    year: 2026,
+    month: 9,
+    day: 8,
+    revision: 0,
+  });
+
+  assert.deepEqual(parseReleaseTag("2026.12.31.5"), {
+    year: 2026,
+    month: 12,
+    day: 31,
+    revision: 5,
+  });
+});
+
+test("parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)", async () => {
+  const { parseReleaseTag } = await import("./sync-version.mjs");
+
+  // 2026 is not a leap year -> Feb 29 is invalid
+  assert.throws(() => parseReleaseTag("v2026.02.29"), /calendar date|invalid/i);
+  assert.throws(() => parseReleaseTag("v2026.02.29.1"), /calendar date|invalid/i);
+
+  // Month 13 is impossible
+  assert.throws(() => parseReleaseTag("v2026.13.01"), /month|calendar date|invalid/i);
+
+  // Month 00 is impossible
+  assert.throws(() => parseReleaseTag("v2026.00.01"), /month|calendar date|invalid/i);
+
+  // Day 00 is impossible
+  assert.throws(() => parseReleaseTag("v2026.01.00"), /day|calendar date|invalid/i);
+
+  // Day 32 is impossible
+  assert.throws(() => parseReleaseTag("v2026.01.32"), /day|calendar date|invalid/i);
+
+  // April 31 is impossible (April has 30 days)
+  assert.throws(() => parseReleaseTag("v2026.04.31"), /day|calendar date|invalid/i);
+  assert.throws(() => parseReleaseTag("v2026.06.31"), /day|calendar date|invalid/i);
+  assert.throws(() => parseReleaseTag("v2026.09.31"), /day|calendar date|invalid/i);
+  assert.throws(() => parseReleaseTag("v2026.11.31"), /day|calendar date|invalid/i);
+});
+
+test("parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)", async () => {
+  const { parseReleaseTag } = await import("./sync-version.mjs");
+
+  const parsed = parseReleaseTag("v2028.02.29");
+  assert.deepEqual(parsed, {
+    year: 2028,
+    month: 2,
+    day: 29,
+    revision: 0,
+  });
+});
+
+test("parseReleaseTag enforces boundaries and leading zero rules", async () => {
+  const { parseReleaseTag } = await import("./sync-version.mjs");
+
+  // Year < 2026 rejected in CalVer
+  assert.throws(() => parseReleaseTag("v2025.12.31"), /year|2026|invalid/i);
+
+  // Year = 2026 accepted
+  assert.equal(parseReleaseTag("v2026.01.01").year, 2026);
+
+  // Year > 65535 rejected (MSIX uint16 boundary)
+  assert.throws(() => parseReleaseTag("v65536.01.01"), /bound|range|invalid/i);
+
+  // Revision boundary: 0 and 65535 valid, 65536 rejected
+  assert.equal(parseReleaseTag("v2026.01.01.65535").revision, 65535);
+  assert.throws(() => parseReleaseTag("v2026.01.01.65536"), /bound|range|invalid/i);
+
+  // Leading zeros in revision forbidden (must be 0 or [1-9]\d*)
+  assert.throws(() => parseReleaseTag("v2026.01.01.01"), /leading zero|invalid/i);
+
+  // Single-digit month or day without leading zero forbidden in CalVer tag format
+  assert.throws(() => parseReleaseTag("v2026.1.01"), /format|invalid/i);
+  assert.throws(() => parseReleaseTag("v2026.01.1"), /format|invalid/i);
+});
+
+test("toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly", async () => {
+  const { toAppVersion, toMsixVersion } = await import("./sync-version.mjs");
+
+  // CalVer
+  assert.equal(toAppVersion("v2026.09.08.1"), "2026.908.1");
+  assert.equal(toMsixVersion("v2026.09.08.1"), "2026.908.1.0");
+
+  assert.equal(toAppVersion("v2026.09.08"), "2026.908.0");
+  assert.equal(toMsixVersion("v2026.09.08"), "2026.908.0.0");
+
+  // Legacy SemVer
+  assert.equal(toAppVersion("v1.4.2"), "1.4.2");
+  assert.equal(toMsixVersion("v1.4.2"), "1.4.2.0");
+
+  // Rejects already-formatted 4-part quad strings (contract requires tag/legacy SemVer input)
+  assert.throws(() => toMsixVersion("2026.908.1.0"), /invalid release tag/i);
+});
+
+test("syncVersion supports dryRun and returns version pair without modifying files", async () => {
+  const { syncVersion } = await import("./sync-version.mjs");
+  const { dir, conf, cargo } = seed();
+  try {
+    const result = await syncVersion({
+      tag: "v2026.09.08.1",
+      confPath: conf,
+      cargoPath: cargo,
+      dryRun: true,
+    });
+
+    assert.deepEqual(result, {
+      version: "2026.908.1",
+      msixVersion: "2026.908.1.0",
+    });
+
+    // Files remain unmodified on dry run
+    assert.equal(readFileSync(conf, "utf8"), TAURI_CONF_FIXTURE);
+    assert.equal(readFileSync(cargo, "utf8"), CARGO_FIXTURE);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("syncVersion writes atomically using sibling temp files and preserves dependencies", async () => {
+  const { syncVersion } = await import("./sync-version.mjs");
+  const { dir, conf, cargo } = seed();
+  try {
+    const result = await syncVersion({
+      tag: "v2026.09.08.1",
+      confPath: conf,
+      cargoPath: cargo,
+    });
+
+    assert.deepEqual(result, {
+      version: "2026.908.1",
+      msixVersion: "2026.908.1.0",
+    });
+
+    assert.equal(JSON.parse(readFileSync(conf, "utf8")).version, "2026.908.1");
+    const cargoContent = readFileSync(cargo, "utf8");
+    assert.match(cargoContent, /^version = "2026\.908\.1"$/m);
+    assert.match(cargoContent, /serde_json = "1\.0"/);
+
+    // Ensure no leftover temp files remain in directory
+    const files = readdirSync(dir);
+    assert.deepEqual(files.sort(), ["Cargo.toml", "tauri.conf.json"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("syncVersion validates both inputs before writing (second input invalid leaves first unchanged)", async () => {
+  const { syncVersion } = await import("./sync-version.mjs");
+  const { dir, conf, cargo } = seed();
+  try {
+    // Write invalid Cargo.toml with no [package] section
+    writeFileSync(cargo, `[dependencies]\ntauri = "2"\n`);
+
+    await assert.rejects(
+      async () => {
+        await syncVersion({
+          tag: "v2026.09.08.1",
+          confPath: conf,
+          cargoPath: cargo,
+        });
+      },
+      /no \[package\] version line found/i,
+    );
+
+    // tauri.conf.json MUST remain untouched because Cargo.toml validation failed before writes
+    assert.equal(readFileSync(conf, "utf8"), TAURI_CONF_FIXTURE);
+
+    // Ensure no leftover temp files
+    const files = readdirSync(dir);
+    assert.deepEqual(files.sort(), ["Cargo.toml", "tauri.conf.json"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("syncVersion rolls back first file replacement on synchronous second file failure", async () => {
+  const { syncVersion } = await import("./sync-version.mjs");
+  const { dir, conf, cargo } = seed();
+  let verifiedFirstTargetHadNewVersion = false;
+
+  const origRename = fs.renameSync.bind(fs);
+  mock.method(fs, "renameSync", (src, dest) => {
+    if (dest === cargo) {
+      // Assert that first target already contains NEW version before failure
+      const currentConf = fs.readFileSync(conf, "utf8");
+      assert.equal(JSON.parse(currentConf).version, "2026.908.1");
+      verifiedFirstTargetHadNewVersion = true;
+      const err = new Error("EIO: simulated second rename failure");
+      err.code = "EIO";
+      throw err;
+    }
+    return origRename(src, dest);
+  });
+  syncBuiltinESMExports();
+
+  try {
+    await assert.rejects(
+      async () => {
+        await syncVersion({
+          tag: "v2026.09.08.1",
+          confPath: conf,
+          cargoPath: cargo,
+        });
+      },
+      (err) => {
+        assert.equal(err.code, "EIO");
+        return true;
+      },
+    );
+
+    assert.equal(verifiedFirstTargetHadNewVersion, true, "First target must have contained new version before rollback");
+    // Afterward assert original restored and no temp files remain
+    assert.equal(fs.readFileSync(conf, "utf8"), TAURI_CONF_FIXTURE);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["Cargo.toml", "tauri.conf.json"]);
+  } finally {
+    mock.reset();
+    syncBuiltinESMExports();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("syncVersion surfaces AggregateError with original and rollback failures when rollback fails", async () => {
+  const { syncVersion } = await import("./sync-version.mjs");
+  const { dir, conf, cargo } = seed();
+
+  const origRename = fs.renameSync.bind(fs);
+  mock.method(fs, "renameSync", (src, dest) => {
+    if (dest === cargo) {
+      const err = new Error("EIO: simulated second rename failure");
+      err.code = "EIO";
+      throw err;
+    }
+    return origRename(src, dest);
+  });
+
+  const origWrite = fs.writeFileSync.bind(fs);
+  mock.method(fs, "writeFileSync", (targetPath, data, options) => {
+    // When rollback attempts to write TAURI_CONF_FIXTURE back to conf
+    if (targetPath === conf && data === TAURI_CONF_FIXTURE) {
+      const err = new Error("EACCES: simulated rollback failure");
+      err.code = "EACCES";
+      throw err;
+    }
+    return origWrite(targetPath, data, options);
+  });
+  syncBuiltinESMExports();
+
+  try {
+    await assert.rejects(
+      async () => {
+        await syncVersion({
+          tag: "v2026.09.08.1",
+          confPath: conf,
+          cargoPath: cargo,
+        });
+      },
+      (err) => {
+        assert.equal(err instanceof AggregateError, true, "Expected AggregateError");
+        assert.equal(err.errors[0].code, "EIO");
+        assert.equal(err.errors[1].code, "EACCES");
+        return true;
+      },
+    );
+  } finally {
+    mock.reset();
+    syncBuiltinESMExports();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI rejects invalid calendar dates and impossible inputs", () => {
+  const { dir, conf, cargo } = seed();
+  try {
+    // Feb 29 on non-leap year
+    const feb29Result = runScript(["--tag", "v2026.02.29", "--conf", conf, "--cargo", cargo]);
+    assert.notEqual(feb29Result.status, 0);
+    assert.match(feb29Result.stderr, /calendar date|invalid/i);
+    assert.equal(readFileSync(conf, "utf8"), TAURI_CONF_FIXTURE);
+    assert.equal(readFileSync(cargo, "utf8"), CARGO_FIXTURE);
+
+    // Month 13
+    const m13Result = runScript(["--tag", "v2026.13.01", "--conf", conf, "--cargo", cargo]);
+    assert.notEqual(m13Result.status, 0);
+    assert.match(m13Result.stderr, /month|calendar date|invalid/i);
+    assert.equal(readFileSync(conf, "utf8"), TAURI_CONF_FIXTURE);
+
+    // Year < 2026 CalVer
+    const pastYearResult = runScript(["--tag", "v2025.12.31", "--conf", conf, "--cargo", cargo]);
+    assert.notEqual(pastYearResult.status, 0);
+    assert.match(pastYearResult.stderr, /year|2026|invalid/i);
+    assert.equal(readFileSync(conf, "utf8"), TAURI_CONF_FIXTURE);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
