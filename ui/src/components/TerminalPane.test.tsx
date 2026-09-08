@@ -6,10 +6,6 @@ import type { TerminalActivity } from "../lib/activity";
 import { parseDagRunSnapshot } from "../lib/dagTypes";
 import type { TerminalSession } from "../lib/types";
 import { dagStore } from "../state/dagStore";
-import {
-  NATIVE_TERMINAL_BOTTOM_INSET_PX,
-  NATIVE_TERMINAL_HANDLE_INSET_PX,
-} from "./NativeTerminalPane";
 import { TerminalPane } from "./TerminalPane";
 
 const parsedDagSnapshot = parseDagRunSnapshot(dagRunSampleJson);
@@ -140,7 +136,7 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
-  it("renders running DAG indicator as a DOM sibling positioned in the reserved bottom strip outside native terminal viewport", () => {
+  it("overlays the running DAG indicator without opaque top or bottom strips", () => {
     dagStore.applySnapshot("/repo/main", {
       ...dagSnapshot,
       runId: "main-dag-running",
@@ -155,24 +151,18 @@ describe("TerminalPane native routing contract", () => {
     const badge = screen.getByTestId("dag-pane-badge");
     const nativePane = screen.getByTestId("native-terminal-pane");
 
-    // The badge must be a DOM sibling of the native terminal host under the surface container,
-    // NOT rendered inside the native terminal's reported viewport where macOS child view paints over it
     expect(surface).toContainElement(badge);
     expect(surface).toContainElement(nativePane);
     expect(badge.parentElement).toBe(surface);
     expect(nativePane.parentElement).toBe(surface);
     expect(nativePane).not.toContainElement(badge);
 
-    // Badge placement classes position it in the bottom strip reserved below the native terminal
     expect(badge).toHaveClass("absolute");
     expect(badge).toHaveClass("bottom-0");
     expect(badge).toHaveClass("right-5");
 
-    // Verify native host reservation constants for handle inset and bottom strip
-    expect(NATIVE_TERMINAL_HANDLE_INSET_PX).toBe(12);
-    expect(NATIVE_TERMINAL_BOTTOM_INSET_PX).toBe(20);
-    const totalReservedInsetPx = NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX;
-    expect(totalReservedInsetPx).toBe(32);
+    expect(screen.queryByTestId("terminal-pane-handle-backing")).toBeNull();
+    expect(screen.queryByTestId("terminal-pane-bottom-backing")).toBeNull();
   });
 
   it("exposes role='dialog' on modal open so native terminal visibility mechanism yields the surface", () => {

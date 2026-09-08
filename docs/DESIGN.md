@@ -59,6 +59,13 @@ Compose within existing panes and remote layout. Narrow rows truncate names and
 retain actions; mobile QA must exercise wrapping, scroll, and keyboard visibility
 without transplanting desktop fixed navigation into the phone layout.
 
+Terminal surfaces fill their pane slots without permanent top or bottom insets.
+The 12px pane handle overlays terminal content only while hovering within the
+top 16px hotspot; showing it must not change terminal bounds or row count.
+Keep the handle a sibling of the terminal input host so drag presses do not
+reach terminal mouse handling. Bottom attention accents overlay the full-height
+surface; their 20px corner height is decoration, not reserved layout space.
+
 ## 5. Components
 
 All paths below are under `ui/src/components/`; compose these existing controls.

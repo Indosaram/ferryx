@@ -60,7 +60,6 @@ import {
   type WorkspaceDropData,
 } from "./tab-dnd/tabDragTypes";
 import { TerminalPane } from "./TerminalPane";
-import { NATIVE_TERMINAL_BOTTOM_INSET_PX } from "./NativeTerminalPane";
 import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
@@ -1063,18 +1062,16 @@ const PaneLeafView = React.memo(function PaneLeafView({
           />
           <div
             data-testid="attention-frame-corner-left"
-            className="pointer-events-none absolute bottom-0 left-0 z-10 w-[2px]"
+            className="pointer-events-none absolute bottom-0 left-0 z-10 h-5 w-[2px]"
             style={{
-              height: NATIVE_TERMINAL_BOTTOM_INSET_PX,
               backgroundColor: "rgba(253, 230, 138, 0.95)",
               boxShadow: "0 0 8px rgba(253, 230, 138, 0.35)",
             }}
           />
           <div
             data-testid="attention-frame-corner-right"
-            className="pointer-events-none absolute bottom-0 right-0 z-10 w-[2px]"
+            className="pointer-events-none absolute bottom-0 right-0 z-10 h-5 w-[2px]"
             style={{
-              height: NATIVE_TERMINAL_BOTTOM_INSET_PX,
               backgroundColor: "rgba(253, 230, 138, 0.95)",
               boxShadow: "0 0 8px rgba(253, 230, 138, 0.35)",
             }}

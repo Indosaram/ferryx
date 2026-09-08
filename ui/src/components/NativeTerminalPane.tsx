@@ -432,26 +432,6 @@ export function snapBoundsToDevicePixels(
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
-/**
- * Height in CSS pixels reserved at the top of every terminal pane for the DOM
- * pane-drag handle.
- *
- * The native compositor view is coordinated with the WKWebView on macOS
- * (`src-tauri/src/native_terminal/platform/macos.rs`). Keeping this strip
- * outside the reported bounds preserves the DOM drag handle area.
- *
- * This is a fixed reservation rather than a hover-time inset on purpose: the
- * compositor derives rows from the surface height, so resizing on hover would
- * reflow the terminal on every pointer pass over the top edge.
- *
- * The reservation is applied to this component's OUTER box, not just the inner
- * viewport, so the strip is not terminal area in the DOM either. Keeping the
- * terminal box over the strip let its `onPointerDown` (which calls
- * `preventDefault()` to focus the PTY) swallow the press that starts a
- * pane-handle drag, so the handle could be seen and hovered but not dragged.
- */
-export const NATIVE_TERMINAL_HANDLE_INSET_PX = 12;
-export const NATIVE_TERMINAL_BOTTOM_INSET_PX = 20;
 export const NATIVE_TERMINAL_SCROLLBAR_WIDTH_PX = 12;
 export const NATIVE_TERMINAL_SCROLLBAR_HIDE_DELAY_MS = 800;
 const NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX = 20;
@@ -1994,11 +1974,7 @@ export function NativeTerminalPane({
       data-native-terminal-presented={surfaceVisible && retainedPresentation !== null ? "true" : "false"}
       data-native-terminal-input-enabled={visible ? "true" : "false"}
       className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", isCmdHeld && "cursor-pointer", className)}
-      style={{
-        marginTop: `${NATIVE_TERMINAL_HANDLE_INSET_PX}px`,
-        height: `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX}px)`,
-        ...style,
-      }}
+      style={style}
       onPointerEnter={() => {
         if (!visible) return;
         triggerScrollbarReveal();
@@ -2346,11 +2322,10 @@ export function NativeTerminalPane({
             retryAttach();
           }}
           title="Click to retry connecting terminal"
-          className="pointer-events-auto cursor-pointer absolute bottom-3 right-3 max-w-error rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive shadow-sm hover:bg-destructive/20 transition-colors"
+          className="pointer-events-auto cursor-pointer absolute bottom-3 right-3 z-50 max-w-error rounded-md border border-destructive/30 bg-popover px-2 py-1 text-[11px] text-destructive shadow-sm hover:bg-accent transition-colors"
         >
           {error}
         </button>
-        </>
       ) : null}
     </div>
   );

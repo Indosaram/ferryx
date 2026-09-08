@@ -7,8 +7,6 @@ import { resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecy
 import { attachNativeTerminalRebind, terminalEventBus } from "../lib/terminalEvents";
 import { useShortcuts } from "../lib/shortcuts";
 import {
-  NATIVE_TERMINAL_BOTTOM_INSET_PX,
-  NATIVE_TERMINAL_HANDLE_INSET_PX,
   NativeTerminalPane,
   dragDropPositionToLogical,
   resetNativeTerminalPaneForTest,
@@ -383,6 +381,30 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     consoleSpy.mockRestore();
   });
 
+  it("keeps the terminal uncovered when a bounds failure is shown", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_set_bounds") {
+        throw { code: "INTERNAL_ERROR", message: "Native surface unavailable" };
+      }
+      return undefined;
+    });
+
+    const view = render(<NativeTerminalPane session={createSession("uncovered-bounds")} />);
+    await act(async () => {});
+
+    expect(view.getByRole("alert")).toBeInTheDocument();
+    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute(
+      "data-native-terminal-visible",
+      "true",
+    );
+    expect(view.queryByTestId("native-terminal-error-backing")).toBeNull();
+    expect(tauriCoreMocks.invoke.mock.calls.filter(
+      ([command]) => command === "cmd_native_terminal_detach",
+    )).toHaveLength(0);
+    consoleSpy.mockRestore();
+  });
+
   it("stays silent when a bounds update loses the race with its own detach", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const session = createSession("term-session-1");
@@ -620,56 +642,29 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     expect(primaryRecord.observer.observe).toHaveBeenCalled();
   });
 
-  it("reserves the pane-handle strip at the top and bottom overlay strip in the reported native bounds", async () => {
-    // The native compositor view is parented above the WKWebView, so anything
-    // inside the reported bounds is painted over. The pane-drag handle only
-    // stays visible if that top strip is excluded, and bottom overlays (e.g. DAG indicator)
-    // stay visible if the bottom strip is excluded from surface geometry.
+  it("uses the entire pane height beneath the handle and bottom overlays", async () => {
+    // Given: the browser measures the full pane slot.
     const session = createSession("term-session-1");
-    const paneRect = { x: 10, y: 20, width: 800, height: 600 };
-    const totalInsetHeight = NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX;
-    // The viewport is offset from the pane box by the reserved handle strip, so
-    // the browser measures it shorter and lower than its parent.
-    // The browser applies the reservation, so both the pane box and the viewport
-    // inside it measure below the strip and shorter than the pane slot.
-    HTMLElement.prototype.getBoundingClientRect = function () {
-      return {
-        ...paneRect,
-        y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
-        height: paneRect.height - totalInsetHeight,
-        top: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
-        bottom: paneRect.y + paneRect.height - NATIVE_TERMINAL_BOTTOM_INSET_PX,
-        left: paneRect.x,
-        right: paneRect.x + paneRect.width,
-        toJSON: () => ({}),
-      } as DOMRect;
-    };
+    let reportBounds = () => {};
+    const boundsReported = new Promise<void>((resolve) => { reportBounds = resolve; });
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_set_bounds") reportBounds();
+      return undefined;
+    });
 
-    const { getByTestId } = render(
-      <NativeTerminalPane sessionId="term-session-1" session={session} />,
-    );
+    // When: the terminal attaches and reports its viewport.
+    const { getByTestId } = render(<NativeTerminalPane session={session} />);
+    await act(async () => { await boundsReported; });
 
-    expect(NATIVE_TERMINAL_BOTTOM_INSET_PX).toBe(20);
-
-    // The strip is reserved on the pane's own box, so it is not terminal area
-    // in the DOM and cannot swallow the press that starts a handle drag ...
+    // Then: neither CSS nor the native bounds subtract permanent chrome space.
     const pane = getByTestId("native-terminal-pane");
-    expect(pane.style.marginTop).toBe(`${NATIVE_TERMINAL_HANDLE_INSET_PX}px`);
-    expect(pane.style.height).toBe(`calc(100% - ${totalInsetHeight}px)`);
-
-    // ... and excluded from the geometry handed to the compositor, so the
-    // native surface cannot paint over the handle or the bottom overlay strip.
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
-        sessionId: "term-session-1",
-        bounds: {
-          x: paneRect.x,
-          y: paneRect.y + NATIVE_TERMINAL_HANDLE_INSET_PX,
-          width: paneRect.width,
-          height: paneRect.height - totalInsetHeight,
-        },
-        scaleFactor: 2,
-      });
+    expect(pane.style.marginTop).toBe("");
+    expect(pane.style.height).toBe("");
+    expect(pane).toHaveClass("h-full");
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
+      sessionId: "term-session-1",
+      bounds: { x: 10, y: 20, width: 800, height: 600 },
+      scaleFactor: 2,
     });
   });
 

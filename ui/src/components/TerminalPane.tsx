@@ -7,11 +7,7 @@ import { agentDisplayNameForType } from "../lib/agentTitle";
 import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
 import type { TerminalSession } from "../lib/types";
-import {
-  NativeTerminalPane,
-  NATIVE_TERMINAL_BOTTOM_INSET_PX,
-  NATIVE_TERMINAL_HANDLE_INSET_PX,
-} from "./NativeTerminalPane";
+import { NativeTerminalPane } from "./NativeTerminalPane";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { DagPaneBadge } from "./dag/DagPaneBadge";
 
@@ -126,18 +122,6 @@ export function TerminalPane({
       data-testid="terminal-pane-surface"
       className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
     >
-      <div
-        data-testid="terminal-pane-handle-backing"
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 bg-terminal"
-        style={{ height: NATIVE_TERMINAL_HANDLE_INSET_PX }}
-      />
-      <div
-        data-testid="terminal-pane-bottom-backing"
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 bottom-0 bg-terminal"
-        style={{ height: NATIVE_TERMINAL_BOTTOM_INSET_PX }}
-      />
       <DagPaneBadge
         projectPath={session.worktreePath ?? session.cwd}
         paneId={session.id}

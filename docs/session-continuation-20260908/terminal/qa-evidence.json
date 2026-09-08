@@ -1,0 +1,233 @@
+{
+  "timestamp": "2026-09-08T15:54:33.093Z",
+  "allPass": true,
+  "evidenceLog": [
+    {
+      "phase": "Scenario 1",
+      "assertion": "No top handle backing strip in DOM",
+      "pass": true,
+      "details": {
+        "handleBackingNull": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "No bottom overlay backing strip in DOM",
+      "pass": true,
+      "details": {
+        "bottomBackingNull": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "No error backing strip in DOM",
+      "pass": true,
+      "details": {
+        "errorBackingNull": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Handle toolbar hidden initially (opacity-0, pointer-events-none)",
+      "pass": true,
+      "details": {
+        "opacity0": true,
+        "pointerEventsNone": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Terminal pane has h-full class and empty inline margins/height",
+      "pass": true,
+      "details": {
+        "marginTop": "",
+        "inlineHeight": "",
+        "hasHFull": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Terminal height matches leaf height exactly (>600px)",
+      "pass": true,
+      "details": {
+        "termHeight": 696,
+        "leafHeight": 696
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Terminal presentation active",
+      "pass": true,
+      "details": {
+        "presented": "true"
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "Handle toolbar becomes visible and interactive on hover",
+      "pass": true,
+      "details": {
+        "opacity100": true,
+        "pointerEventsAuto": true
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "Handle toolbar height is exactly 12px (h-3)",
+      "pass": true,
+      "details": {
+        "toolbarHeight": 12
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "Buttons in toolbar maintain overflowing 20px size (size-5)",
+      "pass": true,
+      "details": {
+        "btnWidth": 20,
+        "btnHeight": 20
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "Terminal height unchanged during hover (no reflow)",
+      "pass": true,
+      "details": {
+        "termHeight": 696,
+        "leafHeight": 696
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "Pressing drag handle does not dispatch terminal mouse IPC",
+      "pass": true,
+      "details": {
+        "mouseIpcDispatched": false
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "Terminal maintains full-height inline styles during handle press",
+      "pass": true,
+      "details": {
+        "marginTop": "",
+        "inlineHeight": ""
+      }
+    },
+    {
+      "phase": "Scenario 4",
+      "assertion": "Handle toolbar hides when pointer leaves hotspot",
+      "pass": true,
+      "details": {
+        "opacity0": true,
+        "pointerEventsNone": true
+      }
+    },
+    {
+      "phase": "Scenario 4",
+      "assertion": "Terminal height unchanged after hover leaves",
+      "pass": true,
+      "details": {
+        "termHeight": 696,
+        "leafHeight": 696
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "Attention frame elements present with pointer-events-none",
+      "pass": true,
+      "details": {
+        "bottomPresent": true,
+        "cornerL": true,
+        "cornerR": true
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "Attention corner has fixed 20px height (h-5)",
+      "pass": true,
+      "details": {
+        "cornerLHeight": 20
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "Attention frame does not reserve layout space (terminal retains full height)",
+      "pass": true,
+      "details": {
+        "termHeight": 696,
+        "leafHeight": 696
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "Running DAG badge overlays terminal surface as DOM sibling",
+      "pass": true,
+      "details": {
+        "badgePresent": true,
+        "badgeParentIsSurface": true
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "No permanent bottom backing strip behind DAG badge",
+      "pass": true,
+      "details": {
+        "bottomBackingNull": true
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "Terminal height matches leaf height with DAG badge present",
+      "pass": true,
+      "details": {
+        "termHeight": 696,
+        "leafHeight": 696
+      }
+    },
+    {
+      "phase": "Scenario 7",
+      "assertion": "Pointer event in terminal body routes to native terminal mouse IPC (action=Press, button=Left)",
+      "pass": true,
+      "details": {
+        "mouseCallPresent": true,
+        "action": "Press",
+        "button": "Left"
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "Recovery alert rendered with z-50 over terminal (foreign regression check)",
+      "pass": true,
+      "details": {
+        "alertPresent": true,
+        "alertZIndex": true
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "Last terminal frame uncovered: native-terminal-error-backing is null (foreign regression check)",
+      "pass": true,
+      "details": {
+        "errorBackingNull": true
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "Terminal visible state preserved during error display (foreign regression check)",
+      "pass": true,
+      "details": {
+        "visibleAttr": "true"
+      }
+    }
+  ],
+  "teardownReceipt": {
+    "serverPid": 88377,
+    "serverExited": true,
+    "serverExitCode": null,
+    "serverExitSignal": "SIGKILL",
+    "portFreed": true,
+    "webviewClosed": true,
+    "cacheCleaned": true
+  }
+}

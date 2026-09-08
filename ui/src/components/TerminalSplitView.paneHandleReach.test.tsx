@@ -1,10 +1,6 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  NATIVE_TERMINAL_BOTTOM_INSET_PX,
-  NATIVE_TERMINAL_HANDLE_INSET_PX,
-} from "./NativeTerminalPane";
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
 
 const tauriCoreMocks = vi.hoisted(() => ({
@@ -69,12 +65,8 @@ function singleTabLayout(): LayoutState {
 }
 
 describe("pane handle reachability over a native terminal", () => {
-  it("keeps the handle strip outside the terminal surface box", () => {
-    // The native terminal focuses its PTY from `onPointerDown` and calls
-    // preventDefault(). If its box still covered the handle strip, that press
-    // would cancel the gesture before dnd-kit's distance threshold, so the
-    // handle would hover but never drag. The reservation must therefore keep
-    // the strip out of the terminal's own box.
+  it("overlays the handle only inside the narrow hotspot without shrinking the terminal", () => {
+    // Given: a full-height terminal with its handle hidden.
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
 
     render(
@@ -86,20 +78,27 @@ describe("pane handle reachability over a native terminal", () => {
 
     const handle = screen.getByTestId("pane-toolbar");
     const terminal = screen.getByTestId("native-terminal-pane");
+    const leaf = screen.getByTestId("pane-leaf");
 
-    // The handle row and the reserved strip are the same height, so the
-    // terminal starting exactly below the strip leaves the handle uncovered.
     expect(handle).toHaveClass("h-3");
-    expect(terminal.style.marginTop).toBe(`${NATIVE_TERMINAL_HANDLE_INSET_PX}px`);
-    // The bottom strip is reserved too, so the floating DAG badge lands outside
-    // the native surface box instead of being painted over by it.
-    expect(terminal.style.height).toBe(
-      `calc(100% - ${NATIVE_TERMINAL_HANDLE_INSET_PX + NATIVE_TERMINAL_BOTTOM_INSET_PX}px)`,
-    );
+    expect(handle).toHaveClass("opacity-0", "pointer-events-none");
+    expect(terminal.style.marginTop).toBe("");
+    expect(terminal.style.height).toBe("");
+    expect(terminal).toHaveClass("h-full");
 
-    // The handle is a sibling of the terminal, so a press on it must not be
-    // observable by the terminal's pointer handler at all.
+    // When: the pointer reaches the last pixel of the 16px hotspot.
+    fireEvent.mouseMove(leaf, { clientY: 16 });
+    // Then: only the overlay changes; a handle press never reaches terminal mouse input.
+    expect(handle).toHaveClass("opacity-100", "pointer-events-auto");
     expect(terminal.contains(handle)).toBe(false);
+    tauriCoreMocks.invoke.mockClear();
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1 });
+    expect(tauriCoreMocks.invoke.mock.calls.some(([cmd]) => cmd === "cmd_native_terminal_mouse")).toBe(false);
+    expect(terminal.style.marginTop).toBe("");
+    expect(terminal.style.height).toBe("");
+
+    fireEvent.mouseMove(leaf, { clientY: 17 });
+    expect(handle).toHaveClass("opacity-0", "pointer-events-none");
   });
 
 });
