@@ -1,0 +1,1009 @@
+status: exited_1 exit_code: 1
+$ vitest run --maxWorkers=1 src/components/Sidebar.test.tsx src/components/Sidebar.activity.test.tsx src/components/Sidebar.dnd.test.tsx src/components/Sidebar.remote.test.tsx src/state/sidebarWorkspaceState.test.ts src/lib/projectGrouping.test.ts src/components/NativeTerminalPane.test.tsx src/components/NativeTerminalPane.lifecycle.test.tsx src/components/TerminalPane.test.tsx src/components/TerminalSplitView.paneHandleReach.test.tsx src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx src/components/NativeTerminalPane.presentation.test.tsx src/components/RemoteDirectoryPicker.test.tsx src/components/ProjectDialogs.test.tsx src/lib/remoteProject.test.ts src/components/settings/SshSection.test.tsx src/components/SettingsDialog.ssh.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+
+ ❯ src/components/Sidebar.remote.test.tsx [queued]
+
+ Test Files 0 passed (18)
+      Tests 0 passed (0)
+   Start at 01:35:28
+   Duration 546ms
+
+ ❯ src/components/Sidebar.remote.test.tsx [queued]
+
+ Test Files 0 passed (18)
+      Tests 0 passed (0)
+   Start at 01:35:28
+   Duration 951ms
+
+ ❯ src/components/Sidebar.remote.test.tsx 0/6
+
+ Test Files 0 passed (18)
+      Tests 0 passed (6)
+   Start at 01:35:28
+   Duration 1.16s
+
+ ❯ src/components/Sidebar.remote.test.tsx 1/6
+
+ Test Files 0 passed (18)
+      Tests 1 passed (6)
+   Start at 01:35:28
+   Duration 1.36s
+ ❯ src/components/Sidebar.remote.test.tsx (6 tests | 2 failed) 119ms
+   ✓ renders a host-labelled remote root and selects its explicit backend workspace identity 58ms
+   ✓ disables remote Git and reveal menu actions and rejects even stale native callbacks 12ms
+   ✓ falls back to the configured host ID rather than a workspace hash when the host is missing 8ms
+   × groups matching remote project under existing local project as a remote worktree 20ms
+     → expect(element).not.toBeInTheDocument()
+
+expected document not to contain element, found <button
+  aria-label="my-app (Build machine)"
+  class="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+  title="SSH: Build machine - /srv/my-app"
+  type="button"
+>
+  <svg
+    class="lucide lucide-folder size-3.5 shrink-0"
+    fill="none"
+    height="24"
+    stroke="currentColor"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="2"
+    viewBox="0 0 24 24"
+    width="24"
+    xmlns="http://www.w3.org/2000/svg"
+  >
+    <path
+      d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+    />
+  </svg>
+  <span
+    class="min-w-0 flex-1 truncate"
+  >
+    my-app (Build machine)
+  </span>
+</button> instead
+   ✓ groups remote project under local project when git remote matches even if folder names differ 13ms
+   × preserves local worktrees in the sidebar and accurately highlights remote worktree when active 7ms
+     → Unable to find an element with the text: main. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <aside
+      class="relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
+      style="width: 236px; min-width: 220px; max-width: 420px;"
+    >
+      <div
+        class="drag-region flex h-titlebar shrink-0 items-center px-2"
+        data-tauri-drag-region="true"
+        data-testid="sidebar-drag-region"
+      >
+        <div
+          aria-hidden="true"
+          class="w-[72px] shrink-0"
+          data-testid="titlebar-traffic-light-pad"
+        />
+        <button
+          aria-label="Hide sidebar"
+          class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag"
+          title="Hide sidebar"
+          type="button"
+        >
+          <svg
+            class="lucide lucide-panel-left-close size-3.5"
+            fill="none"
+            height="24"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="18"
+              rx="2"
+              width="18"
+              x="3"
+              y="3"
+            />
+            <path
+              d="M9 3v18"
+            />
+            <path
+              d="m16 15-3-3 3-3"
+            />
+          </svg>
+        </button>
+        <button
+          aria-label="Add project"
+          class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag"
+          title="Add project"
+          type="button"
+        >
+          <svg
+            class="lucide lucide-plus size-3.5"
+            fill="none"
+            height="24"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M5 12h14"
+            />
+            <path
+              d="M12 5v14"
+            />
+          </svg>
+        </button>
+      </div>
+      <div
+        class="flex min-h-0 flex-1 flex-col outline-none"
+        data-testid="worktree-region"
+        tabindex="-1"
+      >
+        <div
+          class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pt-2 pb-2 scrollbar-sleek"
+        >
+          <div
+            class="relative w-full pb-0.5"
+            data-sidebar-dnd-type="project"
+          >
+            <div
+              aria-describedby="DndDescribedBy-5"
+              aria-disabled="false"
+              aria-roledescription="sortable"
+              class="min-w-0 select-none"
+            >
+              <div
+                class="group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground"
+              >
+                <button
+                  aria-expanded="false"
+                  aria-label="Expand shared-app"
+                  class="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                  type="button"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="lucide lucide-chevron-right size-3 shrink-0 transition-transform"
+                    fill="none"
+                    height="24"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="m9 18 6-6-6-6"
+                    />
+                  </svg>
+                </button>
+                <button
+                  aria-label="shared-app"
+                  class="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                  title="/srv/shared-app"
+                  type="button"
+                >
+                  <svg
+                    class="lucide lucide-folder size-3.5 shrink-0"
+       ...
+
+ ❯ src/components/NativeTerminalPane.test.tsx [queued]
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 4 passed (6)
+   Start at 01:35:28
+   Duration 1.56s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 0/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 4 passed (156)
+   Start at 01:35:28
+   Duration 1.90s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 1/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 5 passed (156)
+   Start at 01:35:28
+   Duration 2.00s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 4/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 8 passed (156)
+   Start at 01:35:28
+   Duration 2.10s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 16/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 20 passed (156)
+   Start at 01:35:28
+   Duration 2.20s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 20/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 24 passed (156)
+   Start at 01:35:28
+   Duration 2.30s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 25/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 29 passed (156)
+   Start at 01:35:28
+   Duration 2.51s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 26/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 30 passed (156)
+   Start at 01:35:28
+   Duration 2.61s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 44/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 48 passed (156)
+   Start at 01:35:28
+   Duration 2.91s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 46/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 50 passed (156)
+   Start at 01:35:28
+   Duration 3.02s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 48/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 52 passed (156)
+   Start at 01:35:28
+   Duration 3.12s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 50/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 54 passed (156)
+   Start at 01:35:28
+   Duration 3.22s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 52/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 56 passed (156)
+   Start at 01:35:28
+   Duration 3.32s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 54/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 58 passed (156)
+   Start at 01:35:28
+   Duration 3.42s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 58/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 62 passed (156)
+   Start at 01:35:28
+   Duration 3.53s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 60/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 64 passed (156)
+   Start at 01:35:28
+   Duration 3.63s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 63/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 67 passed (156)
+   Start at 01:35:28
+   Duration 3.73s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 66/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 70 passed (156)
+   Start at 01:35:28
+   Duration 3.93s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 78/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 82 passed (156)
+   Start at 01:35:28
+   Duration 4.03s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 112/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 116 passed (156)
+   Start at 01:35:28
+   Duration 4.23s
+
+ ❯ src/components/NativeTerminalPane.test.tsx 114/150
+
+ Test Files 1 failed | 0 passed (18)
+      Tests 2 failed | 118 passed (156)
+   Start at 01:35:28
+   Duration 4.34s
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: 'cmd_native_terminal_attach',
+  error: Error: mount attach failed
+      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.test.tsx:5067:19
+      at mockCall (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/spy/dist/index.js:96:15)
+      at spy (file:///Users/indo/code/project/orca-lite/ui/node_modules/tinyspy/dist/index.js:47:80)
+      at Object.operation (/Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:754:13)
+      at /Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:157:30)
+      at enqueueNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:325:12)
+      at attachNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:240:22)
+      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:752:12
+      at attemptAttach (/Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:1806:15)
+}
+
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: 'cmd_native_terminal_attach',
+  error: Error: mount attach failed
+      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.test.tsx:5067:19
+      at mockCall (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/spy/dist/index.js:96:15)
+      at spy (file:///Users/indo/code/project/orca-lite/ui/node_modules/tinyspy/dist/index.js:47:80)
+      at Object.operation (/Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:754:13)
+      at /Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:157:30)
+      at enqueueNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:325:12)
+      at attachNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:240:22)
+      at reattachNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:269:10)
+      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:752:12
+}
+
+
+ ❯ src/components/Sidebar.test.tsx [queued]
+
+ Test Files 1 failed | 1 passed (18)
+      Tests 2 failed | 154 passed (156)
+   Start at 01:35:28
+   Duration 4.64s
+ ✓ src/components/NativeTerminalPane.test.tsx (150 tests) 2533ms
+
+ ❯ src/components/Sidebar.test.tsx [queued]
+
+ Test Files 1 failed | 1 passed (18)
+      Tests 2 failed | 154 passed (156)
+   Start at 01:35:28
+   Duration 4.64s
+
+ ❯ src/components/Sidebar.test.tsx [queued]
+
+ Test Files 1 failed | 1 passed (18)
+      Tests 2 failed | 154 passed (156)
+   Start at 01:35:28
+   Duration 4.95s
+
+ ❯ src/components/Sidebar.test.tsx 1/35
+
+ Test Files 1 failed | 1 passed (18)
+      Tests 2 failed | 155 passed (191)
+   Start at 01:35:28
+   Duration 5.15s
+
+ ❯ src/components/Sidebar.test.tsx 4/35
+
+ Test Files 1 failed | 1 passed (18)
+      Tests 2 failed | 158 passed (191)
+   Start at 01:35:28
+   Duration 5.25s
+
+ ❯ src/components/Sidebar.test.tsx 10/35
+
+ Test Files 1 failed | 1 passed (18)
+      Tests 2 failed | 164 passed (191)
+   Start at 01:35:28
+   Duration 5.35s
+
+ ❯ src/components/Sidebar.test.tsx 19/35
+
+ Test Files 1 failed | 1 passed (18)
+      Tests 2 failed | 173 passed (191)
+   Start at 01:35:28
+   Duration 5.45s
+ ✓ src/components/Sidebar.test.tsx (35 tests) 533ms
+
+ ❯ src/components/settings/SshSection.test.tsx [queued]
+
+ Test Files 1 failed | 2 passed (18)
+      Tests 2 failed | 189 passed (191)
+   Start at 01:35:28
+   Duration 5.76s
+
+ ❯ src/components/settings/SshSection.test.tsx [queued]
+
+ Test Files 1 failed | 2 passed (18)
+      Tests 2 failed | 189 passed (191)
+   Start at 01:35:28
+   Duration 5.96s
+
+ ❯ src/components/settings/SshSection.test.tsx 0/26
+
+ Test Files 1 failed | 2 passed (18)
+      Tests 2 failed | 189 passed (217)
+   Start at 01:35:28
+   Duration 6.17s
+
+ ❯ src/components/settings/SshSection.test.tsx 4/26
+
+ Test Files 1 failed | 2 passed (18)
+      Tests 2 failed | 193 passed (217)
+   Start at 01:35:28
+   Duration 6.37s
+
+ ❯ src/components/settings/SshSection.test.tsx 7/26
+
+ Test Files 1 failed | 2 passed (18)
+      Tests 2 failed | 196 passed (217)
+   Start at 01:35:28
+   Duration 6.47s
+
+ ❯ src/components/settings/SshSection.test.tsx 17/26
+
+ Test Files 1 failed | 2 passed (18)
+      Tests 2 failed | 206 passed (217)
+   Start at 01:35:28
+   Duration 6.67s
+ ✓ src/components/settings/SshSection.test.tsx (26 tests) 501ms
+
+ ❯ src/components/NativeTerminalPane.lifecycle.test.tsx [queued]
+
+ Test Files 1 failed | 3 passed (18)
+      Tests 2 failed | 215 passed (217)
+   Start at 01:35:28
+   Duration 6.88s
+
+ ❯ src/components/NativeTerminalPane.lifecycle.test.tsx 0/30
+
+ Test Files 1 failed | 3 passed (18)
+      Tests 2 failed | 215 passed (247)
+   Start at 01:35:28
+   Duration 7.08s
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > retries failed bounds with a fresh attachment and waits for presentation
+Native terminal IPC command failed {
+  command: 'cmd_native_terminal_set_bounds',
+  error: { code: 'INTERNAL_ERROR', message: 'native surface unavailable' }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > preserves the structured cause of a bounds failure in the visible error
+Native terminal IPC command failed {
+  command: 'cmd_native_terminal_set_bounds',
+  error: {
+    code: 'INVALID_ARGUMENT',
+    message: 'Native terminal viewport is outside the configured surface'
+  }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {}
+Native terminal IPC command failed {
+  command: 'cmd_native_terminal_send_input',
+  error: Error: Input receipt failed after delivery
+      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.lifecycle.test.tsx:447:5
+      at file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:734:40
+      at runWithSuite (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1849:8)
+      at Object.collect (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:734:10)
+      at Object.collect (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:738:54)
+      at processTicksAndRejections (node:internal/process/task_queues:103:5)
+      at collectTests (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1179:25)
+      at startTests (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1817:17)
+      at file:///Users/indo/code/project/orca-lite/ui/node_modules/vitest/dist/chunks/runBaseTests.9Ij9_de-.js:117:26
+      at withEnv (file:///Users/indo/code/project/orca-lite/ui/node_modules/vitest/dist/chunks/runBaseTests.9Ij9_de-.js:84:3)
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}
+Native terminal IPC command failed {
+  command: 'cmd_native_terminal_send_input',
+  error: { code: 'INTERNAL_ERROR', message: 'Receipt unavailable' }
+}
+
+stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"PTY_IO_ERROR","message":"Write acknowledgement unavailable","details":{"inputWritten":true}}
+Native terminal IPC command failed {
+  command: 'cmd_native_terminal_send_input',
+  error: {
+    code: 'PTY_IO_ERROR',
+    message: 'Write acknowledgement unavailable',
+    details: { inputWritten: true }
+  }
+}
+
+
+ ❯ src/components/NativeTerminalPane.lifecycle.test.tsx 18/30
+
+ Test Files 1 failed | 3 passed (18)
+      Tests 2 failed | 233 passed (247)
+   Start at 01:35:28
+   Duration 7.28s
+
+ ❯ src/components/NativeTerminalPane.lifecycle.test.tsx 24/30
+
+ Test Files 1 failed | 3 passed (18)
+      Tests 2 failed | 239 passed (247)
+   Start at 01:35:28
+   Duration 7.38s
+ ✓ src/components/NativeTerminalPane.lifecycle.test.tsx (30 tests) 419ms
+
+ ❯ src/components/ProjectDialogs.test.tsx [queued]
+
+ Test Files 1 failed | 4 passed (18)
+      Tests 2 failed | 245 passed (247)
+   Start at 01:35:28
+   Duration 7.69s
+
+ ❯ src/components/ProjectDialogs.test.tsx [queued]
+
+ Test Files 1 failed | 4 passed (18)
+      Tests 2 failed | 245 passed (247)
+   Start at 01:35:28
+   Duration 7.99s
+
+ ❯ src/components/ProjectDialogs.test.tsx 0/43
+
+ Test Files 1 failed | 4 passed (18)
+      Tests 2 failed | 245 passed (290)
+   Start at 01:35:28
+   Duration 8.09s
+
+ ❯ src/components/ProjectDialogs.test.tsx 1/43
+
+ Test Files 1 failed | 4 passed (18)
+      Tests 2 failed | 246 passed (290)
+   Start at 01:35:28
+   Duration 8.19s
+
+ ❯ src/components/ProjectDialogs.test.tsx 10/43
+
+ Test Files 1 failed | 4 passed (18)
+      Tests 2 failed | 255 passed (290)
+   Start at 01:35:28
+   Duration 8.30s
+
+ ❯ src/components/ProjectDialogs.test.tsx 21/43
+
+ Test Files 1 failed | 4 passed (18)
+      Tests 2 failed | 266 passed (290)
+   Start at 01:35:28
+   Duration 8.40s
+ ✓ src/components/ProjectDialogs.test.tsx (43 tests) 360ms
+
+ ❯ src/components/Sidebar.dnd.test.tsx [queued]
+
+ Test Files 1 failed | 5 passed (18)
+      Tests 2 failed | 288 passed (290)
+   Start at 01:35:28
+   Duration 8.70s
+
+ ❯ src/components/Sidebar.dnd.test.tsx [queued]
+
+ Test Files 1 failed | 5 passed (18)
+      Tests 2 failed | 288 passed (290)
+   Start at 01:35:28
+   Duration 8.91s
+
+ ❯ src/components/Sidebar.dnd.test.tsx 1/7
+
+ Test Files 1 failed | 5 passed (18)
+      Tests 2 failed | 289 passed (297)
+   Start at 01:35:28
+   Duration 9.11s
+ ✓ src/components/Sidebar.dnd.test.tsx (7 tests) 168ms
+
+ ❯ src/components/RemoteDirectoryPicker.test.tsx [queued]
+
+ Test Files 1 failed | 6 passed (18)
+      Tests 2 failed | 295 passed (297)
+   Start at 01:35:28
+   Duration 9.41s
+
+ ❯ src/components/RemoteDirectoryPicker.test.tsx 0/12
+
+ Test Files 1 failed | 6 passed (18)
+      Tests 2 failed | 295 passed (309)
+   Start at 01:35:28
+   Duration 9.72s
+
+ ❯ src/components/RemoteDirectoryPicker.test.tsx 1/12
+
+ Test Files 1 failed | 6 passed (18)
+      Tests 2 failed | 296 passed (309)
+   Start at 01:35:28
+   Duration 9.82s
+ ✓ src/components/RemoteDirectoryPicker.test.tsx (12 tests) 138ms
+
+ ❯ src/components/RemoteDirectoryPicker.test.tsx 12/12
+
+ Test Files 1 failed | 7 passed (18)
+      Tests 2 failed | 307 passed (309)
+   Start at 01:35:28
+   Duration 9.92s
+
+ ❯ src/components/SettingsDialog.ssh.test.tsx [queued]
+
+ Test Files 1 failed | 7 passed (18)
+      Tests 2 failed | 307 passed (309)
+   Start at 01:35:28
+   Duration 10.13s
+
+ ❯ src/components/SettingsDialog.ssh.test.tsx 0/2
+
+ Test Files 1 failed | 7 passed (18)
+      Tests 2 failed | 307 passed (311)
+   Start at 01:35:28
+   Duration 10.63s
+
+ ❯ src/components/SettingsDialog.ssh.test.tsx 1/2
+
+ Test Files 1 failed | 7 passed (18)
+      Tests 2 failed | 308 passed (311)
+   Start at 01:35:28
+   Duration 10.74s
+ ✓ src/components/SettingsDialog.ssh.test.tsx (2 tests) 123ms
+
+ ❯ src/components/SettingsDialog.ssh.test.tsx 2/2
+
+ Test Files 1 failed | 8 passed (18)
+      Tests 2 failed | 309 passed (311)
+   Start at 01:35:28
+   Duration 10.94s
+
+ ❯ src/components/Sidebar.activity.test.tsx 0/4
+
+ Test Files 1 failed | 8 passed (18)
+      Tests 2 failed | 309 passed (315)
+   Start at 01:35:28
+   Duration 11.35s
+
+ ❯ src/components/Sidebar.activity.test.tsx 1/4
+
+ Test Files 1 failed | 8 passed (18)
+      Tests 2 failed | 310 passed (315)
+   Start at 01:35:28
+   Duration 11.45s
+ ✓ src/components/Sidebar.activity.test.tsx (4 tests) 112ms
+
+ ❯ src/components/TerminalPane.test.tsx [queued]
+
+ Test Files 1 failed | 9 passed (18)
+      Tests 2 failed | 313 passed (315)
+   Start at 01:35:28
+   Duration 11.65s
+
+ ❯ src/components/TerminalPane.test.tsx [queued]
+
+ Test Files 1 failed | 9 passed (18)
+      Tests 2 failed | 313 passed (315)
+   Start at 01:35:28
+   Duration 11.96s
+
+ ❯ src/components/TerminalPane.test.tsx 1/18
+
+ Test Files 1 failed | 9 passed (18)
+      Tests 2 failed | 314 passed (333)
+   Start at 01:35:28
+   Duration 12.16s
+ ✓ src/components/TerminalPane.test.tsx (18 tests) 99ms
+
+ ❯ src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx [queued]
+
+ Test Files 1 failed | 10 passed (18)
+      Tests 2 failed | 331 passed (333)
+   Start at 01:35:28
+   Duration 12.36s
+
+ ❯ src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx 0/4
+
+ Test Files 1 failed | 10 passed (18)
+      Tests 2 failed | 331 passed (337)
+   Start at 01:35:28
+   Duration 12.77s
+ ✓ src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx (4 tests) 76ms
+
+ ❯ src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx 4/4
+
+ Test Files 1 failed | 11 passed (18)
+      Tests 2 failed | 335 passed (337)
+   Start at 01:35:28
+   Duration 12.97s
+
+ ❯ src/components/NativeTerminalPane.presentation.test.tsx [queued]
+
+ Test Files 1 failed | 11 passed (18)
+      Tests 2 failed | 335 passed (337)
+   Start at 01:35:28
+   Duration 13.08s
+
+ ❯ src/components/NativeTerminalPane.presentation.test.tsx 0/9
+
+ Test Files 1 failed | 11 passed (18)
+      Tests 2 failed | 335 passed (346)
+   Start at 01:35:28
+   Duration 13.28s
+ ✓ src/components/NativeTerminalPane.presentation.test.tsx (9 tests) 70ms
+
+ ❯ src/components/TerminalSplitView.paneHandleReach.test.tsx [queued]
+
+ Test Files 1 failed | 12 passed (18)
+      Tests 2 failed | 344 passed (346)
+   Start at 01:35:28
+   Duration 13.58s
+
+ ❯ src/components/TerminalSplitView.paneHandleReach.test.tsx 0/1
+
+ Test Files 1 failed | 12 passed (18)
+      Tests 2 failed | 344 passed (347)
+   Start at 01:35:28
+   Duration 13.88s
+ ✓ src/components/TerminalSplitView.paneHandleReach.test.tsx (1 test) 40ms
+
+ ❯ src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx [queued]
+
+ Test Files 1 failed | 13 passed (18)
+      Tests 2 failed | 345 passed (347)
+   Start at 01:35:28
+   Duration 14.19s
+
+ ❯ src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx 0/3
+
+ Test Files 1 failed | 13 passed (18)
+      Tests 2 failed | 345 passed (350)
+   Start at 01:35:28
+   Duration 14.49s
+ ✓ src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx (3 tests) 35ms
+
+ ❯ src/lib/projectGrouping.test.ts [queued]
+
+ Test Files 1 failed | 14 passed (18)
+      Tests 2 failed | 348 passed (350)
+   Start at 01:35:28
+   Duration 14.80s
+ ✓ src/lib/projectGrouping.test.ts (19 tests) 5ms
+
+ ❯ src/lib/projectGrouping.test.ts 19/19
+
+ Test Files 1 failed | 15 passed (18)
+      Tests 2 failed | 367 passed (369)
+   Start at 01:35:28
+   Duration 15.00s
+
+ ❯ src/lib/remoteProject.test.ts [queued]
+
+ Test Files 1 failed | 15 passed (18)
+      Tests 2 failed | 367 passed (369)
+   Start at 01:35:28
+   Duration 15.11s
+ ✓ src/lib/remoteProject.test.ts (6 tests) 3ms
+
+ ❯ src/state/sidebarWorkspaceState.test.ts [queued]
+
+ Test Files 1 failed | 16 passed (18)
+      Tests 2 failed | 373 passed (375)
+   Start at 01:35:28
+   Duration 15.41s
+ ✓ src/state/sidebarWorkspaceState.test.ts (3 tests) 2ms
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.remote.test.tsx > groups matching remote project under existing local project as a remote worktree
+Error: expect(element).not.toBeInTheDocument()
+
+expected document not to contain element, found <button
+  aria-label="my-app (Build machine)"
+  class="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+  title="SSH: Build machine - /srv/my-app"
+  type="button"
+>
+  <svg
+    class="lucide lucide-folder size-3.5 shrink-0"
+    fill="none"
+    height="24"
+    stroke="currentColor"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="2"
+    viewBox="0 0 24 24"
+    width="24"
+    xmlns="http://www.w3.org/2000/svg"
+  >
+    <path
+      d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+    />
+  </svg>
+  <span
+    class="min-w-0 flex-1 truncate"
+  >
+    my-app (Build machine)
+  </span>
+</button> instead
+ ❯ src/components/Sidebar.remote.test.tsx:84:80
+     82|
+     83|   expect(screen.getByRole("button", { name: "my-app" })).toBeInTheDocument();
+     84|   expect(screen.queryByRole("button", { name: "my-app (Build machine)" })).not.toBeInTheDocument();
+       |                                                                                ^
+     85|
+     86|   expect(screen.getByText("main")).toBeInTheDocument();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/components/Sidebar.remote.test.tsx > preserves local worktrees in the sidebar and accurately highlights remote worktree when active
+TestingLibraryElementError: Unable to find an element with the text: main. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <aside
+      class="relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
+      style="width: 236px; min-width: 220px; max-width: 420px;"
+    >
+      <div
+        class="drag-region flex h-titlebar shrink-0 items-center px-2"
+        data-tauri-drag-region="true"
+        data-testid="sidebar-drag-region"
+      >
+        <div
+          aria-hidden="true"
+          class="w-[72px] shrink-0"
+          data-testid="titlebar-traffic-light-pad"
+        />
+        <button
+          aria-label="Hide sidebar"
+          class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag"
+          title="Hide sidebar"
+          type="button"
+        >
+          <svg
+            class="lucide lucide-panel-left-close size-3.5"
+            fill="none"
+            height="24"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="18"
+              rx="2"
+              width="18"
+              x="3"
+              y="3"
+            />
+            <path
+              d="M9 3v18"
+            />
+            <path
+              d="m16 15-3-3 3-3"
+            />
+          </svg>
+        </button>
+        <button
+          aria-label="Add project"
+          class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 size-6 no-drag"
+          title="Add project"
+          type="button"
+        >
+          <svg
+            class="lucide lucide-plus size-3.5"
+            fill="none"
+            height="24"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M5 12h14"
+            />
+            <path
+              d="M12 5v14"
+            />
+          </svg>
+        </button>
+      </div>
+      <div
+        class="flex min-h-0 flex-1 flex-col outline-none"
+        data-testid="worktree-region"
+        tabindex="-1"
+      >
+        <div
+          class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pt-2 pb-2 scrollbar-sleek"
+        >
+          <div
+            class="relative w-full pb-0.5"
+            data-sidebar-dnd-type="project"
+          >
+            <div
+              aria-describedby="DndDescribedBy-5"
+              aria-disabled="false"
+              aria-roledescription="sortable"
+              class="min-w-0 select-none"
+            >
+              <div
+                class="group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground"
+              >
+                <button
+                  aria-expanded="false"
+                  aria-label="Expand shared-app"
+                  class="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                  type="button"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="lucide lucide-chevron-right size-3 shrink-0 transition-transform"
+                    fill="none"
+                    height="24"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="m9 18 6-6-6-6"
+                    />
+                  </svg>
+                </button>
+                <button
+                  aria-label="shared-app"
+                  class="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+                  title="/srv/shared-app"
+                  type="button"
+                >
+                  <svg
+                    class="lucide lucide-folder size-3.5 shrink-0"
+       ...
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/Sidebar.remote.test.tsx:181:17
+    179|
+    180|   // Both local and remote worktrees must appear in the unified project group
+    181|   expect(screen.getByText("main")).toBeInTheDocument();
+       |                 ^
+    182|   expect(screen.getByText("Build machine")).toBeInTheDocument();
+    183|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed | 17 passed (18)
+      Tests  2 failed | 376 passed (378)
+   Start at  01:35:28
+   Duration  15.57s (transform 593ms, setup 1.09s, collect 4.10s, tests 5.34s, environment 2.99s, prepare 469ms)
+
+error: script "test" exited with code 1

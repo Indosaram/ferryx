@@ -1,0 +1,189 @@
+{
+  "evidenceLog": [
+    {
+      "phase": "Scenario 1",
+      "assertion": "Sidebar has orca-local worktrees rendered",
+      "pass": true,
+      "details": {
+        "hasList": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "orca-local is initially expanded",
+      "pass": true,
+      "details": {
+        "expanded": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Terminal pane height matches leaf container",
+      "pass": true,
+      "details": {
+        "termH": 707,
+        "leafH": 707
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Top handle backing strip is null",
+      "pass": true,
+      "details": {
+        "hasHandleBacking": false
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Bottom overlay backing strip is null",
+      "pass": true,
+      "details": {
+        "hasBottomBacking": false
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "Overlay toolbar hidden by default",
+      "pass": true,
+      "details": {
+        "toolbarHidden": true
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "Handle toolbar becomes visible on hover (opacity > 0.9)",
+      "pass": true,
+      "details": {
+        "opacity": "1"
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "Handle toolbar height is exactly 12px (h-3)",
+      "pass": true,
+      "details": {
+        "height": 12
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "Tab count is 0",
+      "pass": true,
+      "details": {
+        "tabCount": 0
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "orca-local is in emptyWorkspaceIds",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": [
+          "orca-local",
+          "orca-parked"
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "orca-local aria-expanded is false",
+      "pass": true,
+      "details": {
+        "expanded": false
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "orca-local worktree list is unmounted",
+      "pass": true,
+      "details": {
+        "hasList": false
+      }
+    },
+    {
+      "phase": "Scenario 4",
+      "assertion": "orca-local remains collapsed after clicks while empty",
+      "pass": true,
+      "details": {
+        "expanded": false
+      }
+    },
+    {
+      "phase": "Scenario 4",
+      "assertion": "Worktree list remains unmounted",
+      "pass": true,
+      "details": {
+        "hasList": false
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "Input has trailing backslash",
+      "pass": true,
+      "details": {
+        "input": "C:\\Users\\developer\\code\\"
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "Child suggestions displayed without Go/Enter",
+      "pass": true,
+      "details": {
+        "options": [
+          "ferryx/",
+          "frontend/",
+          "project-demo/"
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "No Go button present",
+      "pass": true,
+      "details": {
+        "hasGoBtn": false
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "Tab count restored to 1",
+      "pass": true,
+      "details": {
+        "tabCount": 1
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "orca-local removed from emptyWorkspaceIds",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": [
+          "orca-parked"
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "orca-local automatically re-expanded",
+      "pass": true,
+      "details": {
+        "expanded": true
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "orca-local worktree list restored in DOM",
+      "pass": true,
+      "details": {
+        "hasList": true
+      }
+    }
+  ],
+  "teardownReceipt": {
+    "serverPid": 18823,
+    "serverExited": true,
+    "portFreed": true,
+    "webviewClosed": true,
+    "cacheCleaned": true
+  }
+}

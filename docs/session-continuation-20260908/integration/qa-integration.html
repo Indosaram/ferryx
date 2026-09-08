@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en" class="dark h-full w-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Integration QA Harness</title>
+    <script>
+      window.__ERRORS__ = [];
+      window.addEventListener("error", (e) => {
+        window.__ERRORS__.push(String(e.message || e.error));
+      });
+      window.addEventListener("unhandledrejection", (e) => {
+        window.__ERRORS__.push(String(e.reason));
+      });
+    </script>
+  </head>
+  <body class="bg-[#121212] text-foreground m-0 p-0 overflow-hidden select-none font-sans h-full w-full">
+    <div id="root" class="h-full w-full"></div>
+    <script type="module" src="./qa-integration.tsx"></script>
+  </body>
+</html>

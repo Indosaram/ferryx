@@ -1,10 +1,10 @@
 # Remote Directory Autocomplete Picker — Continuation & Verification Report
 
-**Date**: 2026-09-08  
-**Agent**: hephaestus (omo senpi-task child `st_01a081a7`)  
-**Parent Session**: `01a0819e-72f9-7b47-811b-7239f0ca96e3`  
-**Root Session**: `01a0819e-72f9-7b47-811b-7239f0ca96e3`  
-**Model**: Gemini 3.8 Flash (`PI_MODEL=gemini-3.8-flash-high`)  
+**Date**: 2026-09-08
+**Agent**: hephaestus (omo senpi-task child `st_01a081a7`)
+**Parent Session**: `01a0819e-72f9-7b47-811b-7239f0ca96e3`
+**Root Session**: `01a0819e-72f9-7b47-811b-7239f0ca96e3`
+**Model**: Gemini 3.8 Flash (`PI_MODEL=gemini-3.8-flash-high`)
 **Status**: COMPLETE (All tests GREEN, 9/9 real browser scenarios PASS, live SSH probes PASS)
 
 ---
