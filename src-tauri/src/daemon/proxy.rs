@@ -1,4 +1,4 @@
-use crate::daemon::manifest::{get_manifest_path, HandoverManifest, HandoverRoute};
+use crate::daemon::manifest::{get_manifest_path, HandoverManifest};
 use crate::daemon::protocol::{
     DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
     DAEMON_PROTOCOL_VERSION,
@@ -497,32 +497,23 @@ impl SessionRouter {
     }
 
     pub fn add_legacy_peer(&self, peer: Arc<LegacyPeer>) {
-        self.legacy_peers.write().push(Arc::clone(&peer));
-        let manifest_path = get_manifest_path();
-        let socket_path = peer.socket_path().to_path_buf();
-        let sessions = peer.known_sessions.read().clone();
-        tokio::task::spawn_blocking(move || {
-            let mut manifest = HandoverManifest::load_from_path(&manifest_path);
-            manifest.add_or_update_route(HandoverRoute {
-                legacy_socket_path: socket_path,
-                sessions,
-            });
-            let _ = manifest.save_to_path(&manifest_path);
-        });
+        self.legacy_peers.write().push(peer);
     }
 
-    pub async fn adopt_routes_from_manifest(&self) {
+    pub async fn adopt_routes_from_manifest(&self) -> Result<(), String> {
         let manifest_path = get_manifest_path();
-        let routes = tokio::task::spawn_blocking(move || {
-            let mut manifest = HandoverManifest::load_from_path(&manifest_path);
-            manifest.prune_dead_routes();
-            let _ = manifest.save_to_path(&manifest_path);
-            manifest.routes
+        let manifest = crate::ipc::run_blocking(move || {
+            HandoverManifest::update_at_path(&manifest_path, |manifest| {
+                manifest.prune_dead_routes();
+            })
+            .map_err(|error| {
+                crate::ipc::IpcError::internal(format!("Failed to load handover routes: {error}"))
+            })
         })
         .await
-        .unwrap_or_default();
+        .map_err(|error| error.to_string())?;
 
-        for route in routes {
+        for route in manifest.routes {
             if self
                 .legacy_peers
                 .read()
@@ -535,11 +526,10 @@ impl SessionRouter {
                 route.legacy_socket_path.clone(),
                 route.sessions.clone(),
             ));
-            if let Ok(live_sessions) = peer.list_sessions().await {
-                *peer.known_sessions.write() = live_sessions;
-                self.legacy_peers.write().push(peer);
-            }
+            peer.list_sessions().await?;
+            self.legacy_peers.write().push(peer);
         }
+        Ok(())
     }
 
     pub fn is_local_session(&self, session_id: &str) -> bool {

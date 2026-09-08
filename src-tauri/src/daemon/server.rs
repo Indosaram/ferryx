@@ -223,7 +223,9 @@ pub fn perform_daemon_exec_with_path(exe: &std::path::Path) -> Result<(), std::i
     tracing::info!("Re-executing daemon with binary at: {}", exe.display());
 
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--daemon");
+    cmd.arg("--daemon")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
     let err = cmd.exec();
     tracing::error!("Daemon exec failed: {err}");
     Err(err)
@@ -1069,6 +1071,25 @@ impl DaemonServer {
                 legacy_path.clone(),
                 Vec::new(),
             ));
+            let sessions = legacy_peer.list_sessions().await?;
+            let route = crate::daemon::manifest::HandoverRoute {
+                legacy_socket_path: legacy_path.clone(),
+                sessions,
+            };
+            crate::ipc::run_blocking(move || {
+                crate::daemon::manifest::HandoverManifest::update_at_path(
+                    &crate::daemon::manifest::get_manifest_path(),
+                    |manifest| manifest.add_or_update_route(route),
+                )
+                .map_err(|error| {
+                    crate::ipc::IpcError::internal(format!(
+                        "Failed to persist predecessor route before handover: {error}"
+                    ))
+                })?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| error.to_string())?;
             // Commit handover with old daemon so it drops locks
             let commit_resp = legacy_peer
                 .send_request(&DaemonRequest::CommitHandover {
@@ -1078,8 +1099,6 @@ impl DaemonServer {
             if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
                 return Err(format!("CommitHandover failed: {commit_resp:?}"));
             }
-            // Populate legacy peer sessions
-            let _ = legacy_peer.list_sessions().await;
             self.session_router.add_legacy_peer(legacy_peer);
         }
 
@@ -1120,7 +1139,7 @@ impl DaemonServer {
 
         tracing::info!("rorca daemon listening on {}", socket_path.display());
 
-        self.session_router.adopt_routes_from_manifest().await;
+        self.session_router.adopt_routes_from_manifest().await?;
 
         if let Some(tx) = ready_tx {
             let _ = tx.send(());
@@ -1620,9 +1639,13 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::CommitHandover { .. }) => {
-                    match self.handover_manager.commit_handover(&self.terminal_service) {
+                    let manager = Arc::clone(&self.handover_manager);
+                    let service = Arc::clone(&self.terminal_service);
+                    match crate::ipc::run_blocking(move || {
+                        manager.commit_handover(&service).map_err(crate::ipc::IpcError::internal)
+                    }).await {
                         Ok(()) => DaemonResponse::CommitHandoverOk,
-                        Err(e) => DaemonResponse::Error { message: e },
+                        Err(e) => DaemonResponse::Error { message: e.to_string() },
                     }
                 }
                 Ok(DaemonRequest::AbortHandover) => {
@@ -1684,7 +1707,11 @@ impl DaemonServer {
     ) {
         tokio::spawn(async move {
             let mut cmd = std::process::Command::new(exe);
-            cmd.arg("--daemon").arg("--handover-from").arg(&legacy_path);
+            cmd.arg("--daemon")
+                .arg("--handover-from")
+                .arg(&legacy_path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null());
             if let Err(e) = cmd.spawn() {
                 tracing::error!("Failed to spawn new daemon for handover: {e}");
                 return;

@@ -211,6 +211,7 @@ where
 pub fn run_daemon_headless(
     handover_from: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let announce_readiness = handover_from.is_none();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -227,8 +228,10 @@ pub fn run_daemon_headless(
         // Wait for server to bind listener and initialize before emitting readiness signal
         match ready_rx.await {
             Ok(()) => {
-                println!("FERRYX_DAEMON_READY");
-                let _ = std::io::stdout().flush();
+                if announce_readiness {
+                    println!("FERRYX_DAEMON_READY");
+                    let _ = std::io::stdout().flush();
+                }
             }
             Err(_) => {
                 // If ready_tx dropped, server_task must have returned an error

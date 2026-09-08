@@ -16,6 +16,30 @@ pub struct HandoverManifest {
 }
 
 impl HandoverManifest {
+    pub fn update_at_path(
+        path: &Path,
+        update: impl FnOnce(&mut Self),
+    ) -> Result<Self, std::io::Error> {
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let lock = options.open(path.with_extension("lock"))?;
+        lock.lock()?;
+        let mut manifest = match fs::read(path) {
+            Ok(data) => serde_json::from_slice(&data)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => return Err(error),
+        };
+        update(&mut manifest);
+        manifest.save_to_path(path)?;
+        Ok(manifest)
+    }
+
     pub fn load_from_path(path: &Path) -> Self {
         let Ok(data) = fs::read_to_string(path) else {
             return Self::default();
@@ -68,6 +92,51 @@ pub fn get_manifest_path() -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn handover_manifest_update_excludes_other_file_handles() {
+        let dir = tempdir().expect("isolated manifest directory");
+        let path = dir.path().join("routes.json");
+        let competing_writer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))
+            .expect("competing writer lock");
+
+        HandoverManifest::update_at_path(&path, |manifest| {
+            assert!(
+                matches!(
+                    competing_writer.try_lock(),
+                    Err(fs::TryLockError::WouldBlock)
+                ),
+                "another writer can overwrite the transaction's manifest snapshot"
+            );
+            manifest.add_or_update_route(HandoverRoute {
+                legacy_socket_path: dir.path().join("legacy.sock"),
+                sessions: vec!["existing-session".into()],
+            });
+        })
+        .expect("serialized update");
+
+        assert_eq!(HandoverManifest::load_from_path(&path).routes.len(), 1);
+        competing_writer.try_lock().expect("transaction released lock");
+    }
+
+    #[test]
+    fn handover_manifest_update_preserves_unreadable_route_data() {
+        let dir = tempdir().expect("isolated manifest directory");
+        let path = dir.path().join("routes.json");
+        fs::write(&path, b"{broken manifest").expect("invalid manifest fixture");
+
+        let result = HandoverManifest::update_at_path(&path, |manifest| {
+            manifest.prune_dead_routes();
+        });
+
+        assert!(result.is_err(), "corrupt routes must not become an empty manifest");
+        assert_eq!(fs::read(&path).expect("preserved bytes"), b"{broken manifest");
+    }
 
     #[test]
     fn test_handover_manifest_save_load_prune() {

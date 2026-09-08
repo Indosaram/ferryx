@@ -1,4 +1,4 @@
-use crate::daemon::manifest::{get_manifest_path, HandoverManifest};
+use crate::daemon::manifest::{get_manifest_path, HandoverManifest, HandoverRoute};
 use crate::daemon::server::{get_runtime_dir, DaemonLockFiles};
 use crate::terminal::TerminalService;
 use parking_lot::{Mutex, RwLock};
@@ -16,6 +16,122 @@ pub enum HandoverStatus {
     Prepared,
     Draining,
     Retired,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn handover_commit_does_not_unlink_the_replacement_listener() {
+        // Given: the blocking pool cannot run deferred socket cleanup yet.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("isolated runtime");
+        let dir = tempfile::tempdir().expect("isolated runtime directory");
+        let path = dir.path().join("daemon.sock");
+        let old_listener = UnixListener::bind(&path).expect("old canonical listener");
+        let manager = HandoverManager::new(path.clone());
+        let service = Arc::new(TerminalService::default());
+        let (occupied_tx, occupied_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = runtime.spawn_blocking(move || {
+            occupied_tx.send(()).expect("notify occupied worker");
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release occupied worker");
+        });
+        occupied_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("worker occupied");
+
+        // When: handover commits and the new owner replaces the canonical socket.
+        let _runtime_guard = runtime.enter();
+        manager.commit_handover(&service).expect("commit handover");
+        drop(old_listener);
+        if path.exists() {
+            fs::remove_file(&path).expect("new owner's stale socket cleanup");
+        }
+        let replacement = UnixListener::bind(&path).expect("replacement listener");
+        release_tx.send(()).expect("release worker");
+        runtime.block_on(async {
+            worker.await.expect("occupied worker exited");
+            tokio::task::spawn_blocking(|| {})
+                .await
+                .expect("all queued cleanup completed");
+        });
+
+        // Then: delayed old-owner work cannot remove the new listener's address.
+        assert!(
+            UnixStream::connect(&path).is_ok(),
+            "old handover cleanup unlinked the replacement canonical listener"
+        );
+        drop(replacement);
+    }
+
+    #[test]
+    fn handover_commit_persists_legacy_route_before_releasing_ownership() {
+        let dir = tempfile::tempdir().expect("isolated runtime directory");
+        let canonical = dir.path().join("daemon.sock");
+        let legacy = dir.path().join("legacy.sock");
+        let _canonical_listener = UnixListener::bind(&canonical).expect("canonical listener");
+        let _legacy_listener = UnixListener::bind(&legacy).expect("legacy listener");
+        let manager = HandoverManager::new(canonical.clone());
+        *manager.status.write() = HandoverStatus::Prepared;
+        *manager.legacy_socket_path.write() = Some(legacy.clone());
+        let manifest_path = dir.path().join("handover_routes.json");
+        let mut committed = manager.subscribe_client_abort();
+
+        manager
+            .commit_handover(&Arc::new(TerminalService::default()))
+            .expect("commit with persisted route");
+
+        committed.try_recv().expect("clients may reconnect");
+        assert!(!canonical.exists());
+        assert_eq!(
+            HandoverManifest::load_from_path(&manifest_path).routes,
+            vec![HandoverRoute {
+                legacy_socket_path: legacy,
+                sessions: Vec::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn handover_commit_preserves_ownership_when_route_persistence_fails() {
+        let dir = tempfile::tempdir().expect("isolated runtime directory");
+        let canonical = dir.path().join("daemon.sock");
+        let _listener = UnixListener::bind(&canonical).expect("canonical listener");
+        let manager = HandoverManager::new(canonical.clone());
+        *manager.status.write() = HandoverStatus::Prepared;
+        *manager.legacy_socket_path.write() = Some(dir.path().join("legacy.sock"));
+        let lock_path = dir.path().join("daemon.lock");
+        manager.set_lock_files(
+            crate::daemon::server::acquire_daemon_locks(None, &lock_path)
+                .expect("canonical ownership"),
+        );
+        fs::write(dir.path().join("handover_routes.json"), b"{broken")
+            .expect("corrupt route fixture");
+        let mut disconnected = manager.subscribe_client_abort();
+
+        assert!(manager
+            .commit_handover(&Arc::new(TerminalService::default()))
+            .is_err());
+
+        assert_eq!(manager.status(), HandoverStatus::Prepared);
+        assert!(!manager.is_draining());
+        assert!(UnixStream::connect(&canonical).is_ok());
+        assert!(crate::daemon::server::acquire_daemon_locks(None, &lock_path).is_err());
+        assert!(matches!(
+            disconnected.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
 }
 
 pub struct HandoverManager {
@@ -131,7 +247,7 @@ impl HandoverManager {
         Err("Handover unsupported on Windows".to_string())
     }
 
-    pub fn commit_handover(&self, _terminal_service: &Arc<TerminalService>) -> Result<(), String> {
+    pub fn commit_handover(&self, terminal_service: &Arc<TerminalService>) -> Result<(), String> {
         let mut status_guard = self.status.write();
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(
@@ -140,14 +256,25 @@ impl HandoverManager {
             ));
         }
 
-        // Release canonical locks so new daemon can acquire them immediately
-        let _dropped_locks = self.canonical_lock_files.lock().take();
+        if let Some(legacy_path) = self.legacy_socket_path.read().clone() {
+            let manifest_path = self
+                .canonical_socket_path
+                .with_file_name("handover_routes.json");
+            HandoverManifest::update_at_path(&manifest_path, |manifest| {
+                manifest.add_or_update_route(HandoverRoute {
+                    legacy_socket_path: legacy_path,
+                    sessions: terminal_service.list_sessions(),
+                });
+            })
+            .map_err(|error| format!("Failed to persist handover route: {error}"))?;
+        }
 
-        // Unlink canonical socket so new daemon can bind it cleanly
-        let sock = self.canonical_socket_path.clone();
-        tokio::task::spawn_blocking(move || {
-            let _ = fs::remove_file(&sock);
-        });
+        match fs::remove_file(&self.canonical_socket_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Failed to remove old canonical socket: {error}")),
+        }
+        let _dropped_locks = self.canonical_lock_files.lock().take();
 
         // Run any registered on_commit callbacks (e.g. stopping remote gateway and clearing active selection)
         let callbacks = std::mem::take(&mut *self.commit_callbacks.lock());
@@ -195,14 +322,29 @@ impl HandoverManager {
 
     pub fn retire(&self) {
         *self.status.write() = HandoverStatus::Retired;
-        if let Some(path) = self.legacy_socket_path.write().take() {
-            let manifest_path = get_manifest_path();
-            let _ = fs::remove_file(&path);
-            let mut manifest = HandoverManifest::load_from_path(&manifest_path);
-            manifest.remove_route(&path);
-            let _ = manifest.save_to_path(&manifest_path);
-        }
-        tracing::info!("Old daemon drained all active sessions and is retiring cleanly.");
-        std::process::exit(0);
+        self.is_draining.store(false, Ordering::SeqCst);
+        let legacy_path = self.legacy_socket_path.write().take();
+        tokio::spawn(async move {
+            let cleanup = crate::ipc::run_blocking(move || {
+                if let Some(path) = legacy_path {
+                    fs::remove_file(&path).map_err(|error| {
+                        crate::ipc::IpcError::internal(format!("Legacy socket cleanup failed: {error}"))
+                    })?;
+                    HandoverManifest::update_at_path(&get_manifest_path(), |manifest| {
+                        manifest.remove_route(&path);
+                    })
+                    .map_err(|error| {
+                        crate::ipc::IpcError::internal(format!("Legacy route cleanup failed: {error}"))
+                    })?;
+                }
+                Ok(())
+            })
+            .await;
+            if let Err(error) = cleanup {
+                tracing::warn!(%error, "Failed to clean up retired daemon route");
+            }
+            tracing::info!("Old daemon drained all active sessions and is retiring cleanly.");
+            std::process::exit(0);
+        });
     }
 }
