@@ -34,11 +34,13 @@ use super::selection::{
 };
 use super::snapshot::RenderSnapshot;
 use super::sys::ffi::{
-    ghostty_terminal_reset, ghostty_terminal_resize, ghostty_terminal_set,
+    ghostty_terminal_get, ghostty_terminal_reset, ghostty_terminal_resize, ghostty_terminal_set,
     ghostty_terminal_vt_write,
 };
 use super::sys::types::{
-    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalModeConfig,
+    GHOSTTY_MODE_SYNCHRONIZED_OUTPUT, GHOSTTY_TERMINAL_DATA_MODE,
+    GHOSTTY_TERMINAL_OPT_MODE, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
     GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
     GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, GHOSTTY_TERMINAL_OPT_TITLE,
 };
@@ -112,6 +114,7 @@ pub struct NativeTerminal {
     handle: NonNull<GhosttyTerminalImpl>,
     context: Box<TerminalContext>,
     gesture: SelectionGestureGuard,
+    synchronized_output_deadline: Option<tokio::time::Instant>,
 }
 
 // SAFETY: Category: Thread Transfer Safety.
@@ -141,7 +144,62 @@ impl NativeTerminal {
             handle,
             context,
             gesture,
+            synchronized_output_deadline: None,
         })
+    }
+
+    pub(crate) fn synchronized_output_enabled(&self) -> Result<bool, NativeTerminalError> {
+        let mut config = GhosttyTerminalModeConfig {
+            mode: GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
+            value: false,
+        };
+        // SAFETY: The owned terminal is live; the initialized in/out struct matches the C mode ABI.
+        let result = unsafe {
+            ghostty_terminal_get(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_DATA_MODE,
+                &mut config as *mut GhosttyTerminalModeConfig as *mut c_void,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_get(ModeSynchronizedOutput)")?;
+        Ok(config.value)
+    }
+
+    pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+        self.synchronized_output_deadline
+    }
+
+    pub(crate) fn expire_synchronized_output(
+        &mut self,
+        now: tokio::time::Instant,
+    ) -> Result<bool, NativeTerminalError> {
+        if !self.synchronized_output_deadline.is_some_and(|deadline| now >= deadline) {
+            return Ok(false);
+        }
+        self.finish_synchronized_output()?;
+        Ok(true)
+    }
+
+    pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+        self.set_synchronized_output(false)?;
+        self.synchronized_output_deadline = None;
+        Ok(())
+    }
+
+    fn set_synchronized_output(&mut self, enabled: bool) -> Result<(), NativeTerminalError> {
+        let config = GhosttyTerminalModeConfig {
+            mode: GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
+            value: enabled,
+        };
+        // SAFETY: The live terminal borrows the initialized C mode struct only for this call.
+        let result = unsafe {
+            ghostty_terminal_set(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_OPT_MODE,
+                &config as *const GhosttyTerminalModeConfig as *const c_void,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_set(ModeSynchronizedOutput)")
     }
 
     /// Handles a selection gesture mouse event (press, drag, release) when mouse tracking is disabled.
@@ -230,6 +288,7 @@ impl TerminalEngine for NativeTerminal {
         unsafe {
             ghostty_terminal_reset(self.handle.as_ptr());
         }
+        self.synchronized_output_deadline = None;
         reset_selection_gesture(&self.gesture, self.handle);
     }
 
@@ -257,6 +316,7 @@ impl TerminalEngine for NativeTerminal {
         if cols == 0 || rows == 0 {
             return Err(NativeTerminalError::InvalidDimensions(cols, rows));
         }
+        let synchronized_output = self.synchronized_output_enabled()?;
 
         // SAFETY: Category: Foreign State Mutation.
         // Invariant: self.handle is valid; non-zero dimensions; non-unwinding ABI.
@@ -269,7 +329,13 @@ impl TerminalEngine for NativeTerminal {
                 cell_height_px,
             )
         };
-        NativeTerminalError::from_c_result(result, "ghostty_terminal_resize")
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_resize")?;
+        // Ghostty resize clears DEC 2026. Preserve the application's transaction and its
+        // original deadline so repeated geometry changes cannot expose or prolong it.
+        if synchronized_output {
+            self.set_synchronized_output(true)?;
+        }
+        Ok(())
     }
 
     fn feed(&mut self, data: &[u8]) -> Result<(), NativeTerminalError> {
@@ -282,7 +348,14 @@ impl TerminalEngine for NativeTerminal {
         unsafe {
             ghostty_terminal_vt_write(self.handle.as_ptr(), data.as_ptr(), data.len());
         }
-
+        if self.synchronized_output_enabled()? {
+            // A missing DEC 2026 reset must not freeze the terminal indefinitely.
+            self.synchronized_output_deadline.get_or_insert_with(|| {
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+            });
+        } else {
+            self.synchronized_output_deadline = None;
+        }
         Ok(())
     }
 
@@ -463,6 +536,45 @@ mod tests {
         MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize,
     };
     use crate::terminal::TerminalThemeColors;
+
+    #[test]
+    fn synchronized_output_survives_resize_until_redraw_completes() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        terminal.feed_str("\x1b[?2026h\x1b[2Jpartial").unwrap();
+        let deadline = terminal.synchronized_output_deadline();
+
+        terminal.resize(120, 30, 8, 16).unwrap();
+
+        assert!(terminal.synchronized_output_enabled().unwrap(),
+            "a geometry change must not publish a half-written synchronized frame");
+        assert_eq!(terminal.synchronized_output_deadline(), deadline);
+        terminal.feed_str("\rcomplete\x1b[?2026l").unwrap();
+        assert!(!terminal.synchronized_output_enabled().unwrap());
+        assert_eq!(terminal.synchronized_output_deadline(), None);
+    }
+
+    #[test]
+    fn synchronized_output_uses_vt_mode_and_a_bounded_deadline() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        terminal.feed_str("\x1b[?20").unwrap();
+        assert!(!terminal.synchronized_output_enabled().unwrap());
+        terminal.feed_str("26h").unwrap();
+        let deadline = terminal.synchronized_output_deadline().unwrap();
+        terminal.feed_str("more output").unwrap();
+        assert_eq!(terminal.synchronized_output_deadline(), Some(deadline));
+        assert!(!terminal.expire_synchronized_output(
+            deadline - std::time::Duration::from_nanos(1)
+        ).unwrap());
+
+        assert!(terminal.expire_synchronized_output(deadline).unwrap());
+
+        assert!(!terminal.synchronized_output_enabled().unwrap());
+        assert_eq!(terminal.synchronized_output_deadline(), None);
+        terminal.feed_str("\x1b[?2026h").unwrap();
+        terminal.reset();
+        assert!(!terminal.synchronized_output_enabled().unwrap());
+        assert_eq!(terminal.synchronized_output_deadline(), None);
+    }
 
     #[test]
     fn test_full_palette_defaults_cube_grays_and_overrides() {

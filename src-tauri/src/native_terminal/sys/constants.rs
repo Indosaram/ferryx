@@ -42,6 +42,7 @@ pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 12;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: c_int = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_PALETTE: c_int = 14;
 pub const GHOSTTY_TERMINAL_OPT_SELECTION: c_int = 21;
+pub const GHOSTTY_TERMINAL_OPT_MODE: c_int = 34;
 
 // GhosttyTerminalScrollViewportTag matching `ghostty/vt/terminal.h`.
 pub const GHOSTTY_SCROLL_VIEWPORT_TOP: c_int = 0;
@@ -63,6 +64,7 @@ pub const GHOSTTY_FORMATTER_FORMAT_PLAIN: c_int = 0;
 
 // Packed DEC private mode 2004 matching `GHOSTTY_MODE_BRACKETED_PASTE`.
 pub const GHOSTTY_MODE_BRACKETED_PASTE: u16 = 2004;
+pub const GHOSTTY_MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 
 // GhosttyRenderStateData C integer constants matching `ghostty/vt/render.h`.
 pub const GHOSTTY_RENDER_STATE_DATA_COLS: c_int = 1;

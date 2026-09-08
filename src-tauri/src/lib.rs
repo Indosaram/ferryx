@@ -849,6 +849,18 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = (window, event);
         })
         .setup(move |app| {
+            #[cfg(all(target_os = "macos", feature = "native-terminal"))]
+            if let Some(window) = app.get_webview_window("main") {
+                let raw_window = window.ns_window()?;
+                // SAFETY: Tauri owns this NSWindow; setup executes on the AppKit main thread.
+                let native_window = unsafe {
+                    (raw_window as *const objc2_app_kit::NSWindow).as_ref()
+                }.ok_or_else(|| std::io::Error::other("Main NSWindow is unavailable"))?;
+                crate::native_terminal::platform::macos::configure_window_background(
+                    native_window,
+                    crate::native_terminal::renderer::RendererTheme::default().background,
+                );
+            }
             #[cfg(target_os = "macos")]
             install_app_menu(app)?;
             #[cfg(target_os = "macos")]

@@ -27,6 +27,8 @@ pub struct NativeTerminalLogicalRect {
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalBoundsReceipt {
     pub presented: bool,
+    #[serde(default)]
+    pub render_deferred: bool,
     pub session_id: String,
     pub cols: u16,
     pub rows: u16,
@@ -409,11 +411,39 @@ fn read_native_pasteboard() -> (NativeTerminalClipboardContent, Vec<String>) {
     (NativeTerminalClipboardContent::Empty, Vec::new())
 }
 
+async fn dispatch_pty_resizes<F, Fut>(
+    mut receiver: mpsc::UnboundedReceiver<(String, u16, u16)>,
+    mut resize: F,
+) where
+    F: FnMut(String, u16, u16) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut pending = std::collections::VecDeque::<(String, u16, u16)>::new();
+    loop {
+        if pending.is_empty() {
+            match receiver.recv().await {
+                Some(request) => pending.push_back(request),
+                None => break,
+            }
+        }
+        while let Ok(request) = receiver.try_recv() {
+            if let Some(previous) = pending.iter_mut().find(|previous| previous.0 == request.0) {
+                *previous = request;
+            } else {
+                pending.push_back(request);
+            }
+        }
+        if let Some((session_id, cols, rows)) = pending.pop_front() {
+            resize(session_id, cols, rows).await;
+        }
+    }
+}
+
 fn install_pty_resize_dispatcher(
     state: &NativeTerminalSurfaceHostState,
     daemon_client: Arc<DaemonClient>,
 ) {
-    let (sender, mut receiver) = mpsc::unbounded_channel::<(String, u16, u16)>();
+    let (sender, receiver) = mpsc::unbounded_channel::<(String, u16, u16)>();
     let installed = state.set_pty_resize_sink_if_absent(Arc::new(move |session_id, cols, rows| {
         if let Err(error) = sender.send((session_id.to_string(), cols, rows)) {
             tracing::warn!(
@@ -429,17 +459,20 @@ fn install_pty_resize_dispatcher(
         return;
     }
     tauri::async_runtime::spawn(async move {
-        while let Some((session_id, cols, rows)) = receiver.recv().await {
-            if let Err(error) = daemon_client.resize_terminal(&session_id, cols, rows).await {
-                tracing::warn!(
-                    session_id,
-                    cols,
-                    rows,
-                    %error,
-                    "Failed to resize native terminal PTY"
-                );
+        dispatch_pty_resizes(receiver, |session_id, cols, rows| {
+            let daemon_client = Arc::clone(&daemon_client);
+            async move {
+                if let Err(error) = daemon_client.resize_terminal(&session_id, cols, rows).await {
+                    tracing::warn!(
+                        session_id,
+                        cols,
+                        rows,
+                        %error,
+                        "Failed to resize native terminal PTY"
+                    );
+                }
             }
-        }
+        }).await;
     });
 }
 
@@ -531,26 +564,44 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
-    let state_inner = state.inner().clone();
-    let surface_window = window.clone();
-    let (sender, receiver) = oneshot::channel();
-    let session_id_clone = session_id.clone();
-    window
-        .run_on_main_thread(move || {
-            let result = state_inner
-                .render(&surface_window, request)
-                .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
-                .map_err(IpcError::from);
-            let _ = sender.send(result);
-        })
-        .map_err(|error| {
-            IpcError::internal(format!(
-                "Could not dispatch native terminal render: {error}"
-            ))
-        })?;
-    receiver.await.map_err(|_| {
-        IpcError::internal("Main thread stopped before native terminal render completed")
-    })?
+    let mut updates = state.subscribe_session_update(&session_id).map_err(IpcError::from)?;
+    let mut detached = state.subscribe_session_detach(&session_id).map_err(IpcError::from)?;
+    loop {
+        let state_inner = state.inner().clone();
+        let surface_window = window.clone();
+        let (sender, receiver) = oneshot::channel();
+        let session_id_clone = session_id.clone();
+        let request = request.clone();
+        window
+            .run_on_main_thread(move || {
+                let result = state_inner
+                    .render(&surface_window, request)
+                    .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
+                    .map_err(IpcError::from);
+                let _ = sender.send(result);
+            })
+            .map_err(|error| {
+                IpcError::internal(format!(
+                    "Could not dispatch native terminal render: {error}"
+                ))
+            })?;
+        let receipt = receiver.await.map_err(|_| {
+            IpcError::internal("Main thread stopped before native terminal render completed")
+        })??;
+        if !receipt.render_deferred {
+            return Ok(receipt);
+        }
+        // Subscribe before dispatch so a completed redraw cannot race the readiness wait.
+        tokio::select! {
+            biased;
+            _ = detached.changed() => {
+                return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+            }
+            result = updates.changed() => result.map_err(|_| {
+                IpcError::from(NativeTerminalError::SessionDetached(session_id.clone()))
+            })?,
+        }
+    }
 }
 
 #[tauri::command]
@@ -1497,6 +1548,7 @@ fn into_ipc_receipt(
 ) -> NativeTerminalBoundsReceipt {
     NativeTerminalBoundsReceipt {
         presented: receipt.presented,
+        render_deferred: receipt.render_deferred,
         session_id,
         cols: receipt.cols,
         rows: receipt.rows,
@@ -1514,6 +1566,83 @@ fn into_ipc_receipt(
 mod tests {
     use super::*;
     use crate::native_terminal::{MouseButton, MousePosition, MouseRendererSize};
+
+    #[tokio::test]
+    async fn pty_resize_queue_keeps_latest_size_for_each_pane() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender.send(("left".into(), 80, 24)).unwrap();
+        sender.send(("right".into(), 60, 24)).unwrap();
+        sender.send(("left".into(), 120, 40)).unwrap();
+        sender.send(("right".into(), 100, 30)).unwrap();
+        drop(sender);
+        let mut applied = Vec::new();
+
+        dispatch_pty_resizes(receiver, |session, cols, rows| {
+            applied.push((session, cols, rows));
+            std::future::ready(())
+        }).await;
+
+        assert_eq!(applied, vec![("left".into(), 120, 40), ("right".into(), 100, 30)]);
+    }
+
+    #[test]
+    fn deferred_presentation_status_survives_the_ipc_boundary() {
+        let receipt = into_ipc_receipt("deferred".into(), NativeTerminalSurfaceReceipt {
+            presented: false,
+            render_deferred: true,
+            cols: 80,
+            rows: 24,
+            rebuilt_rows: 0,
+            reused_rows: 0,
+            cursor_col: 0,
+            cursor_row: 0,
+            cell_width_px: 10,
+            cell_height_px: 20,
+            effective_scale_factor: Some(2.0),
+        });
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["renderDeferred"], true);
+        assert_eq!(json["presented"], false);
+    }
+
+    #[tokio::test]
+    async fn pty_resize_queue_coalesces_updates_arriving_during_an_inflight_request() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (started, start) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let mut started = Some(started);
+        let mut released = Some(released);
+        let applied = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&applied);
+        let worker = tokio::spawn(dispatch_pty_resizes(receiver, move |session, cols, rows| {
+            let observed = Arc::clone(&observed);
+            let started = started.take();
+            let released = released.take();
+            async move {
+                observed.lock().push((session, cols, rows));
+                if let Some(started) = started {
+                    started.send(()).unwrap();
+                }
+                if let Some(released) = released {
+                    released.await.unwrap();
+                }
+            }
+        }));
+        sender.send(("left".into(), 80, 24)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), start).await.unwrap().unwrap();
+        sender.send(("left".into(), 90, 25)).unwrap();
+        sender.send(("right".into(), 60, 24)).unwrap();
+        sender.send(("left".into(), 120, 40)).unwrap();
+        sender.send(("right".into(), 100, 30)).unwrap();
+        drop(sender);
+
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker).await.unwrap().unwrap();
+
+        assert_eq!(*applied.lock(), vec![
+            ("left".into(), 80, 24), ("left".into(), 120, 40), ("right".into(), 100, 30),
+        ]);
+    }
 
     #[test]
     fn wire_receipt_reports_effective_presentation_scale() {
@@ -1566,6 +1695,7 @@ mod tests {
         ] {
             let receipt = into_ipc_receipt("presentation".into(), NativeTerminalSurfaceReceipt {
                 presented,
+                render_deferred: false,
                 cols: 80,
                 rows: 24,
                 rebuilt_rows: 0,

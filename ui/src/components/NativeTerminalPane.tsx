@@ -65,6 +65,7 @@ function isGeometryEqual(a: GeometryState | null, b: GeometryState | null): bool
 
 interface NativeTerminalReceipt {
   readonly presented: boolean;
+  readonly renderDeferred?: boolean;
   readonly cursorCol: number;
   readonly cursorRow: number;
   readonly cellWidthPx: number;
@@ -1753,6 +1754,7 @@ export function NativeTerminalPane({
         .then((receipt) => {
           if (isSubscribed) {
             if (receipt?.presented === false) {
+              if (receipt.renderDeferred) return;
               lastGeometry = null;
               presentationFrame = requestAnimationFrame(() => {
                 presentationFrame = null;

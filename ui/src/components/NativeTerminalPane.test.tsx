@@ -732,6 +732,36 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     });
   });
 
+  it("does not retry a resize frame deferred by synchronized output", async () => {
+    const session = createSession("term-session-deferred-redraw");
+    let renderDeferred = false;
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_set_bounds") {
+        return { presented: !renderDeferred, renderDeferred };
+      }
+      return undefined;
+    });
+    await act(async () => {
+      render(<NativeTerminalPane sessionId={session.id} session={session} />);
+    });
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+    renderDeferred = true;
+    HTMLElement.prototype.getBoundingClientRect = () => new DOMRect(10, 20, 800, 700);
+    const record = resizeRecords[0];
+    expect(record).toBeDefined();
+
+    await act(async () => {
+      record.callback([], record.observer);
+    });
+
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_bounds", {
+      sessionId: session.id,
+      bounds: { x: 10, y: 20, width: 800, height: 700 },
+      scaleFactor: 2,
+    });
+    expect(requestFrame).not.toHaveBeenCalled();
+  });
+
   it("coalesces rapid height increases until the prior native resize completes", async () => {
     const session = createSession("term-session-resize-coalesce");
     let resolveInitialBounds!: () => void;

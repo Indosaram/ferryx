@@ -30,6 +30,11 @@ required-features = ["native-terminal"]
 name = "terminal_attribute_evidence"
 required-features = ["native-terminal"]
 
+[[test]]
+name = "native_terminal_macos_background"
+harness = false
+required-features = ["native-terminal"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -106,6 +111,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSGraphicsContext",
     "NSView",
     "NSWindow",
+    "NSColor",
+    "NSGraphics",
     "NSResponder",
     "NSPasteboard",
     "NSDragging",

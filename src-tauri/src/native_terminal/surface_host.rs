@@ -134,6 +134,7 @@ fn panic_free_layout(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NativeTerminalSurfaceReceipt {
     pub presented: bool,
+    pub render_deferred: bool,
     pub cols: u16,
     pub rows: u16,
     pub rebuilt_rows: u16,
@@ -156,6 +157,7 @@ impl NativeTerminalSurfaceReceipt {
     ) -> Self {
         Self {
             presented: false,
+            render_deferred: false,
             cols: layout.cols,
             rows: layout.rows,
             rebuilt_rows,
@@ -287,6 +289,7 @@ pub struct NativeTerminalSession {
     pub pump_task: Option<tokio::task::JoinHandle<()>>,
     pub last_sequence: Option<u64>,
     pub update_sender: tokio::sync::watch::Sender<()>,
+    detach_sender: tokio::sync::watch::Sender<()>,
     pub render_coordinator: Arc<RenderScheduleCoordinator>,
     pub last_agent_activity: Option<crate::agent_detect::AgentActivity>,
     pub last_agent_detect_at: Option<std::time::Instant>,
@@ -369,9 +372,10 @@ fn dispatch_scheduled_render<R: Runtime>(
                     render_input.selection.as_ref(),
                     render_input.scrollbar_overlay.as_ref(),
                     render_input.attention_frame,
+                    render_input.synchronized_output,
                 ) {
                     Ok(receipt) => {
-                        if !receipt.presented {
+                        if !receipt.presented && !receipt.render_deferred {
                             coordinator.schedule_render();
                         }
                     }
@@ -582,6 +586,7 @@ struct SessionRenderInput {
     selection: Option<SelectionSnapshot>,
     scrollbar_overlay: Option<ScrollbarOverlayState>,
     attention_frame: bool,
+    synchronized_output: bool,
 }
 
 fn preedit_char_wide(c: char) -> bool {
@@ -682,6 +687,7 @@ fn session_render_snapshot(
         selection,
         scrollbar_overlay,
         attention_frame: session.attention_frame,
+        synchronized_output: session.terminal.synchronized_output_enabled()?,
     })
 }
 
@@ -943,6 +949,7 @@ impl NativeTerminalSurfaceHostState {
                         pump_task: None,
                         last_sequence: None,
                         update_sender,
+                        detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator,
                         last_agent_activity: None,
                         last_agent_detect_at: None,
@@ -1282,6 +1289,7 @@ impl NativeTerminalSurfaceHostState {
                         pump_task: None,
                         last_sequence: attachment.end_sequence,
                         update_sender: update_sender.clone(),
+                        detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator: Arc::clone(&render_coordinator),
                         last_agent_activity: None,
                         last_agent_detect_at: None,
@@ -1334,10 +1342,43 @@ impl NativeTerminalSurfaceHostState {
                 }
             };
             loop {
-                let msg =
-                    match tokio::time::timeout(AGENT_DETECT_TRAILING_IDLE, messages.recv()).await {
+                let deadline = sessions.lock().get(&session_id_owned)
+                    .and_then(|session| session.terminal.synchronized_output_deadline());
+                let received = tokio::select! {
+                    biased;
+                    _ = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        let mut sessions_guard = sessions.lock();
+                        if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
+                            if let Err(error) = session.terminal.expire_synchronized_output(tokio::time::Instant::now()) {
+                                tracing::warn!(session_id = %session_id_owned, %error, "Failed to end synchronized output");
+                            }
+                        }
+                        drop(sessions_guard);
+                        update_sender.send_replace(());
+                        schedule_render();
+                        continue;
+                    }
+                    result = tokio::time::timeout(AGENT_DETECT_TRAILING_IDLE, messages.recv()) => result,
+                };
+                let msg = match received {
                         Ok(Some(msg)) => msg,
-                        Ok(None) => break,
+                        Ok(None) => {
+                            let mut sessions_guard = sessions.lock();
+                            if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
+                                if let Err(error) = session.terminal.finish_synchronized_output() {
+                                    tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
+                                }
+                            }
+                            drop(sessions_guard);
+                            update_sender.send_replace(());
+                            schedule_render();
+                            break;
+                        }
                         Err(_) => {
                             // Burst went quiet: re-run any detection the throttle skipped so the
                             // final frame of a burst (often the agent's last word before it blocks
@@ -1582,6 +1623,7 @@ impl NativeTerminalSurfaceHostState {
                 // detect immediately instead of waiting out the attached-pane interval.
                 session.last_agent_detect_at = None;
                 session.render_coordinator.consume_render();
+                session.detach_sender.send_replace(());
             }
         }
 
@@ -1647,6 +1689,16 @@ impl NativeTerminalSurfaceHostState {
             .get(session_id)
             .ok_or(NativeTerminalError::NoValue)?;
         Ok(session.update_sender.subscribe())
+    }
+
+    pub(crate) fn subscribe_session_detach(
+        &self,
+        session_id: &str,
+    ) -> Result<tokio::sync::watch::Receiver<()>, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let sessions = self.sessions.lock();
+        let session = sessions.get(session_id).ok_or(NativeTerminalError::NoValue)?;
+        Ok(session.detach_sender.subscribe())
     }
 
     pub fn session_render_coordinator(
@@ -1727,6 +1779,7 @@ impl NativeTerminalSurfaceHostState {
                         pump_task: None,
                         last_sequence: None,
                         update_sender,
+                        detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator,
                         last_agent_activity: None,
                         last_agent_detect_at: None,
@@ -1833,6 +1886,7 @@ impl NativeTerminalSurfaceHostState {
             render_input.selection.as_ref(),
             render_input.scrollbar_overlay.as_ref(),
             render_input.attention_frame,
+            render_input.synchronized_output,
         )?;
         drop(hosts);
         self.rearm_dropped_direct_frame(window, &session_id, receipt);
@@ -1869,6 +1923,7 @@ impl NativeTerminalSurfaceHostState {
                 render_input.selection.as_ref(),
                 render_input.scrollbar_overlay.as_ref(),
                 render_input.attention_frame,
+                render_input.synchronized_output,
             )?;
             drop(hosts);
             self.rearm_dropped_direct_frame(window, session_id, receipt);
@@ -1891,7 +1946,7 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
         receipt: NativeTerminalSurfaceReceipt,
     ) {
-        if receipt.presented {
+        if receipt.presented || receipt.render_deferred {
             return;
         }
         let coordinator = self
@@ -2030,7 +2085,24 @@ impl NativeTerminalSurfaceHost {
         selection: Option<&SelectionSnapshot>,
         scrollbar_overlay: Option<&ScrollbarOverlayState>,
         attention_frame: bool,
+        synchronized_output: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        if synchronized_output {
+            let cell_metrics = match &self.frame_target {
+                HostFrameTarget::Native(target) => CellMetrics {
+                    width_px: target.renderer.config().cell_width_px,
+                    height_px: target.renderer.config().cell_height_px,
+                },
+                #[cfg(test)]
+                HostFrameTarget::Injected(target) => target.cell_metrics,
+            };
+            return Ok(NativeTerminalSurfaceReceipt {
+                render_deferred: true,
+                ..NativeTerminalSurfaceReceipt::from_snapshot(
+                    layout, snapshot, 0, 0, cell_metrics, self.logical_bounds,
+                )
+            });
+        }
         match &mut self.frame_target {
             HostFrameTarget::Native(target) => target.render_snapshot(
                 window,
@@ -2397,7 +2469,7 @@ mod tests {
                         messages,
                         stream_task: tokio::spawn(std::future::pending()),
                     },
-                    None,
+                    Some(app.handle().clone()),
                     Some(request.bounds),
                 )
                 .unwrap();
@@ -2490,6 +2562,167 @@ mod tests {
         fn drop(&mut self) {
             self.state.teardown();
         }
+    }
+
+    #[tokio::test]
+    async fn synchronized_output_bounds_ipc_waits_for_actual_presentation() {
+        let harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Frame,
+            SimulatedAcquisition::Frame,
+        ]);
+        harness._app.manage(harness.state.clone());
+        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
+        harness.state.render(&harness.window, harness.request.clone()).unwrap();
+        harness.events.lock().clear();
+        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
+            terminal.feed_str("\x1b[?2026hpartial")
+        }).unwrap();
+        let bounds = harness.request.bounds;
+        let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            harness._app.handle().clone(),
+            harness._app.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+            },
+            bounds.scale_factor,
+        ));
+
+        assert!(futures_util::poll!(command.as_mut()).is_pending(),
+            "bounds IPC must not acknowledge an unpresented replacement surface");
+        assert!(harness.events.lock().is_empty());
+
+        harness._output.send(DaemonStreamMessage::Output {
+            session_id: harness.request.session_id.clone().into(),
+            sequence: 2,
+            data: b"\rcomplete\x1b[?2026l".to_vec().into(),
+            metrics_read_unix_micros: None,
+        }).await.unwrap();
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), command)
+            .await.unwrap().unwrap();
+        assert!(receipt.presented);
+        assert!(!receipt.render_deferred);
+        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+    }
+
+    #[tokio::test]
+    async fn synchronized_output_bounds_ipc_finishes_on_detach_or_stream_end() {
+        for detach in [false, true] {
+            let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+            harness._app.manage(harness.state.clone());
+            harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
+            harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
+                terminal.feed_str("\x1b[?2026hpartial")
+            }).unwrap();
+            let bounds = harness.request.bounds;
+            let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+                harness._app.handle().clone(),
+                harness._app.state::<NativeTerminalSurfaceHostState>(),
+                harness.request.session_id.clone(),
+                crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                    x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+                },
+                bounds.scale_factor,
+            ));
+            assert!(futures_util::poll!(command.as_mut()).is_pending());
+
+            if detach {
+                harness.state.detach_session(&harness.request.session_id);
+            } else {
+                let (replacement, _) = tokio::sync::mpsc::channel(1);
+                drop(std::mem::replace(&mut harness._output, replacement));
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), command)
+                .await.expect("termination must wake the outstanding bounds request");
+
+            if detach {
+                assert!(result.is_err());
+                assert_eq!(*harness.events.lock(), vec![FrameEvent::Destroyed]);
+            } else {
+                assert!(result.unwrap().presented);
+                assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn synchronized_output_pump_presents_only_the_completed_redraw() {
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
+        let mut updates = harness.state.subscribe_session_update(&harness.request.session_id).unwrap();
+        for (sequence, data) in [
+            (2, b"\x1b[?2026h\x1b[2J\x1b[Hpartial".as_slice()),
+            (3, b"\rcomplete\x1b[?2026l".as_slice()),
+        ] {
+            harness._output.send(DaemonStreamMessage::Output {
+                session_id: harness.request.session_id.clone().into(),
+                sequence,
+                data: data.to_vec().into(),
+                metrics_read_unix_micros: None,
+            }).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed()).await.unwrap().unwrap();
+            harness.execute_dispatched().await;
+            if sequence == 2 {
+                assert!(harness.events.lock().is_empty(), "the output pump must retain the last complete frame");
+                assert!(!harness.state.is_session_render_pending(&harness.request.session_id));
+                assert!(harness.dispatched.try_recv().is_err(), "no retry spin during synchronized output");
+            }
+        }
+        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn synchronized_output_pump_recovers_a_missing_end_without_more_output() {
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
+        let mut updates = harness.state.subscribe_session_update(&harness.request.session_id).unwrap();
+        harness._output.send(DaemonStreamMessage::Output {
+            session_id: harness.request.session_id.clone().into(),
+            sequence: 2,
+            data: b"\x1b[?2026hpartial".to_vec().into(),
+            metrics_read_unix_micros: None,
+        }).await.unwrap();
+        updates.changed().await.unwrap();
+        harness.execute_dispatched().await;
+        assert!(harness.events.lock().is_empty());
+
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        harness.execute_dispatched().await;
+
+        assert!(!harness.state.with_session_terminal(&harness.request.session_id,
+            |terminal| terminal.synchronized_output_enabled()).unwrap());
+        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+    }
+
+    #[tokio::test]
+    async fn synchronized_output_does_not_present_partial_redraw() {
+        let harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Frame,
+            SimulatedAcquisition::Frame,
+        ]);
+        // Establish the resized grid before the application starts its redraw.
+        assert!(harness
+            .state
+            .render(&harness.window, harness.request.clone())
+            .unwrap()
+            .presented);
+        harness.events.lock().clear();
+        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
+            terminal.feed_str("\x1b[?2026h\x1b[2J\x1b[Hpartial redraw")
+        }).unwrap();
+
+        let receipt = harness.state.render(&harness.window, harness.request.clone()).unwrap();
+
+        assert!(!receipt.presented, "an unfinished synchronized redraw must not reach presentation");
+        assert!(harness.events.lock().is_empty(), "keep the previous drawable without acquiring another");
+        assert!(!harness.state.is_session_render_pending(&harness.request.session_id),
+            "a protocol-deferred frame must not enter the dropped-frame retry loop");
+
+        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
+            terminal.feed_str("\rcomplete redraw\x1b[?2026l")
+        }).unwrap();
+        assert!(harness.state.render(&harness.window, harness.request.clone()).unwrap().presented);
+        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
     }
 
     #[tokio::test]

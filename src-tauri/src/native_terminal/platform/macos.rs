@@ -23,7 +23,7 @@ use std::sync::Arc;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadMarker};
-use objc2_app_kit::{NSView, NSWindow, NSWindowOrderingMode};
+use objc2_app_kit::{NSColor, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
@@ -45,6 +45,18 @@ fn log_first_responder_error_once(msg: &str) {
 }
 
 use crate::native_terminal::error::NativeTerminalError;
+
+/// The window owns the opaque backing below both WebKit and transient Metal drawables.
+pub fn configure_window_background(window: &NSWindow, background: [f32; 4]) {
+    let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+        background[0] as f64,
+        background[1] as f64,
+        background[2] as f64,
+        1.0,
+    );
+    window.setBackgroundColor(Some(&color));
+    window.setOpaque(true);
+}
 
 define_class!(
     /// Custom NSView subclass that is completely pointer-transparent.
@@ -146,6 +158,14 @@ unsafe impl Sync for MacosCompositorTarget {}
 /// branches cannot drift apart.
 unsafe fn apply_viewport(view: &FerryxNativeTerminalView, bounds: Option<LogicalBounds>) {
     unsafe {
+        if let Some(window) = view.window() {
+            configure_window_background(
+                &window,
+                crate::native_terminal::renderer::RendererTheme::from(
+                    crate::terminal::preferences::cached_terminal_preferences().as_ref(),
+                ).background,
+            );
+        }
         let Some(bounds) = bounds else {
             view.setHidden(true);
             view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)));
@@ -243,6 +263,12 @@ impl MacosCompositorTarget {
         })?;
 
         let ns_window: &NSWindow = unsafe { &*(raw_ns_window as *const NSWindow) };
+        configure_window_background(
+            ns_window,
+            crate::native_terminal::renderer::RendererTheme::from(
+                crate::terminal::preferences::cached_terminal_preferences().as_ref(),
+            ).background,
+        );
         let content_view = ns_window.contentView().ok_or_else(|| {
             NativeTerminalError::GpuPipelineError("NSWindow has no contentView".into())
         })?;
