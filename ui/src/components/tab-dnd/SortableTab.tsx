@@ -159,6 +159,7 @@ export const SortableTab = memo(function SortableTab({
           role="button"
           tabIndex={0}
           aria-label={`Close ${tab.label}`}
+          data-shortcut-close-tab={tab.id}
           onPointerDown={stopPointer}
           onClick={(event) => {
             event.stopPropagation();

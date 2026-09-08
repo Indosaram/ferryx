@@ -1025,6 +1025,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         droppable.isOver ? "ring-2 ring-primary/80 ring-inset" : ""
       }`}
       data-testid="pane-leaf"
+      data-shortcut-scope-active={isActive && !showsDropFeedback}
       data-leaf-id={leafId}
       data-tab-id={tab.id}
       data-dnd-type="pane-leaf"
@@ -1112,6 +1113,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         <div className="flex items-center gap-0.5">
           <IconButton
             label="Split pane right"
+            data-shortcut={tab.kind !== "browser" ? "terminal.splitRight" : undefined}
             size="sm"
             className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
             onPointerDown={(event) => event.stopPropagation()}
@@ -1124,6 +1126,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
           </IconButton>
           <IconButton
             label="Split pane down"
+            data-shortcut={tab.kind !== "browser" ? "terminal.splitDown" : undefined}
             size="sm"
             className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
             onPointerDown={(event) => event.stopPropagation()}
@@ -1137,6 +1140,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
           {!isOnlyLeaf ? (
             <IconButton
               label="Close split view"
+              data-shortcut={tab.kind !== "browser" ? "terminal.unsplit tab.close" : "tab.close"}
               size="sm"
               className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
               onPointerDown={(event) => event.stopPropagation()}

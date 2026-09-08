@@ -368,6 +368,7 @@ export function TabBar({
           <div ref={addButtonRef} className="no-drag relative flex shrink-0 items-center">
             <IconButton
               label="New tab"
+              data-shortcut={onAddBrowser ? "tab.newTerminal tab.newBrowser" : "tab.newTerminal"}
               size="sm"
               className="no-drag my-auto ml-1"
               onClick={handleNewTabClick}

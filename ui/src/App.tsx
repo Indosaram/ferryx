@@ -8,6 +8,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
 import { Sidebar } from "./components/Sidebar";
+import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
@@ -24,7 +25,7 @@ import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState } from "./lib/sessionPersistence";
-import { isMacShortcutPlatform, useShortcuts } from "./lib/shortcuts";
+import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
 import {
   loadPermissionsOnboardingDismissed,
@@ -1970,6 +1971,24 @@ function WorkspaceApp({
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
+      <ShortcutHints
+        enabledActions={SHORTCUTS.filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
+        getContext={() => {
+          const current = stateRef.current;
+          const group = current.layout.focusedGroupId ? current.layout.tabGroups?.[current.layout.focusedGroupId] : undefined;
+          const activeTab = current.layout.tabs.find((tab) => tab.id === current.layout.activeTabId);
+          const paneLayout = activeTab ? current.layout.layoutsByTabId?.[activeTab.id] : undefined;
+          return {
+            tabIds: Array.from({ length: 9 }, (_, index) => group?.tabIds[index] ?? current.layout.tabs[index]?.id ?? ""),
+            closeTabId: activeTab && !activeTab.pinned && (!paneLayout || paneLayout.root.type === "leaf") ? activeTab.id : null,
+            worktrees: listVisibleWorktrees(
+              projectsRef.current, current.worktrees, activeProjectRef.current.workspaceId,
+              inactiveProjectWorktreesRef.current,
+              emptySidebarWorkspaceIds(projectsRef.current, activeProjectRef.current.workspaceId, current, listWorkspaceSnapshots()),
+            ),
+          };
+        }}
+      />
       <TerminalLinkActions />
       {isSidebarOpen ? (
         <Sidebar
@@ -2000,7 +2019,7 @@ function WorkspaceApp({
             {isMacShortcutPlatform() ? (
               <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" />
             ) : null}
-            <IconButton label="Show sidebar" className="no-drag" size="sm" onClick={toggleSidebar}>
+            <IconButton data-shortcut="sidebar.left.toggle" label="Show sidebar" className="no-drag" size="sm" onClick={toggleSidebar}>
               <PanelLeft className="size-3.5" />
             </IconButton>
           </div>

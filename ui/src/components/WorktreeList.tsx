@@ -156,6 +156,8 @@ export const WorktreeRow = memo(function WorktreeRow({
         <button
           type="button"
           onClick={() => onSelect(worktree)}
+          data-shortcut-worktree-path={worktree.path}
+          data-shortcut-workspace-id={worktree.workspaceId ?? ""}
           aria-current={active ? "true" : undefined}
           title={isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined}
           className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"

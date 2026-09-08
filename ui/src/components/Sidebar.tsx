@@ -359,6 +359,7 @@ export function Sidebar({
           {isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           <IconButton
             label="Hide sidebar"
+            data-shortcut={onToggle || onHide ? "sidebar.left.toggle" : undefined}
             className="no-drag"
             size="sm"
             onClick={onToggle ?? onHide}
@@ -430,6 +431,8 @@ export function Sidebar({
                                 activeWorktreeOwnerId === project.workspaceId ? "border-[#6c6c6c] bg-[#3f3f3f]" : "border-transparent")}
                               aria-current={activeWorktreeOwnerId === project.workspaceId ? "true" : undefined}
                               title="Remote SSH root. Git worktrees and local file-manager reveal are unavailable."
+                              data-shortcut-worktree-path={project.repoRoot}
+                              data-shortcut-workspace-id={project.workspaceId}
                               onClick={() => onSelectWorktree(projectRootWorktree(project))}
                             >
                               {project.repoRoot} <span className="text-muted-foreground">SSH root</span>
@@ -461,7 +464,7 @@ export function Sidebar({
         </div>
 
         <div className="flex shrink-0 items-center justify-end border-t border-worktree-sidebar-border px-2 py-1.5">
-          <IconButton label="Settings" size="sm" onClick={onOpenSettings}>
+          <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>
             <Settings2 className="size-3.5" />
           </IconButton>
         </div>

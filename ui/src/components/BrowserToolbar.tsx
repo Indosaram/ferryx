@@ -277,6 +277,7 @@ export function BrowserToolbar({
             disabled={!tab.canGoBack}
             onClick={() => void handleGoBack()}
             aria-label="Back"
+            data-shortcut="browser.back"
             className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
@@ -286,6 +287,7 @@ export function BrowserToolbar({
             disabled={!tab.canGoForward}
             onClick={() => void handleGoForward()}
             aria-label="Forward"
+            data-shortcut="browser.forward"
             className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
           >
             <ArrowRight className="w-3.5 h-3.5" />
@@ -294,6 +296,7 @@ export function BrowserToolbar({
             type="button"
             onClick={onReload}
             aria-label="Reload"
+            data-shortcut="browser.reload"
             className="p-1 rounded hover:bg-muted transition-colors"
           >
             <RotateCw className={`w-3.5 h-3.5 ${tab.loading ? "animate-spin" : ""}`} />
@@ -320,6 +323,7 @@ export function BrowserToolbar({
             onKeyDown={handleAddressKeyDown}
             placeholder="Search or enter URL"
             aria-label="URL address bar"
+            data-shortcut="browser.focusAddress"
             aria-expanded={settings.rememberBrowsingHistory && omniboxOpen}
             aria-controls="browser-omnibox-history"
             className="w-full bg-background border border-border rounded px-2.5 py-1 text-xs text-foreground focus:outline-none focus:border-primary font-mono"

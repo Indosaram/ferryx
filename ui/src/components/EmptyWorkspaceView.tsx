@@ -19,6 +19,7 @@ export function EmptyWorkspaceView({ onNewTerminal, onNewBrowserTab }: EmptyWork
         <button
           type="button"
           onClick={onNewTerminal}
+          data-shortcut="tab.newTerminal"
           className="flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-xs font-medium hover:bg-accent/80"
         >
           <Terminal className="size-4" />
@@ -27,6 +28,7 @@ export function EmptyWorkspaceView({ onNewTerminal, onNewBrowserTab }: EmptyWork
         <button
           type="button"
           onClick={onNewBrowserTab}
+          data-shortcut="tab.newBrowser"
           className="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent/50"
         >
           <Globe className="size-4" />
