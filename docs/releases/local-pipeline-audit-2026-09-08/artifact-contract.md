@@ -1,0 +1,27 @@
+# Artifact validation and release contract audit
+
+Date: 2026-09-08. Executable recovery of artifact validation audit. This report verifies findings 2, 3, and 4 from LOCAL_RELEASE_PIPELINE_AUDIT_2026-09-08.md with exact source citations. No code changes, builds, or test reruns were performed.
+
+## Verified source vulnerabilities and code evidence
+
+- Incomplete platform matrix: scripts/build-latest-json.mjs:37-56 iterates scanned files; lines 42-45 log a warning to stderr and skip artifacts lacking a .sig sibling instead of failing. Lines 81-86 only abort when zero platforms are found. If a single platform is found (e.g. Darwin only), main exits 0 and outputs a partial latest.json. scripts/build-latest-json.test.mjs:140-161 explicitly codifies and tests this permissive partial-output behavior.
+- Arbitrary signature text acceptance: scripts/build-latest-json.mjs:47-50 reads signature files as raw UTF-8 text and trims whitespace directly into entry.signature. It performs no cryptographic verification against the minisign public key in src-tauri/tauri.conf.json:38, nor does it check format or content validity. Unit tests (scripts/build-latest-json.test.mjs:49, 75 fixture strings, asserted at :61, 85) pass arbitrary string literals ("macos-signature-blob", "windows-signature") through to the manifest without validation.
+- Duplicate and ambiguous target selection: scripts/build-latest-json.mjs:22-35 maps multiple filename patterns to the same platform key (e.g. .nsis.zip and -setup.exe both map to windows-x86_64). Lines 38, 51-54 sort files alphabetically and assign platforms[target] = entry, causing later matching files to silently overwrite earlier entries without error or collision detection. In .github/workflows/release.yml:281, cp suppresses errors; lines 286-297 use broad glob *setup.exe|*.exe when aliasing to Ferryx_x64-setup.exe, risking selection of unintended executables.
+- Version stamping and non-atomic writes: scripts/sync-version.mjs:7 uses regex ^\d{4}\.\d{2}\.\d{2}(\.\d+)?$ which validates syntax but does not validate calendar dates (permitting invalid days/months). Lines 27-30 transform vYYYY.MM.DD.R to YYYY.(MM*100+DD).R. Lines 98-103 write tauri.conf.json before Cargo.toml; a failure on the second file leaves partial stamping without rollback. Furthermore, scripts/build-msix.ps1:40-52 parses versions independently into quad integers; passing CalVer directly yields 2026.9.8.1, whereas passing app version yields 2026.908.1.0.
+- Stale MSIX binary discovery and unverified execution: scripts/build-msix.ps1:107-124 scans four candidate paths and selects the first match without checking creation time, build receipt, or file version. Lines 171-176 invoke MakeAppx with overwrite flag /o but do not check $LASTEXITCODE; if MakeAppx fails and an older .msix exists, Test-Path still succeeds and the script exits successfully. Lines 179-200 run SignTool without an exit code check, and catch blocks at lines 197-199 swallow signing failures with a warning, silently downgrading a failed sideload sign to an unsigned package.
+
+## Release channels, checksums, and layout boundaries
+
+- Channel alignment (historic vs captured response): site/src/lib/downloads.ts:22-24, 54-77 designates Microsoft Store as the primary Windows channel via an interim search query URL. Historical release docs/releases/v2026.09.06.1.md records the final NSIS installer as a migration bridge for delivering update notifications. Earlier captured GitHub API output (with timeout exit 1 caveat documented in probe-evidence.md, not a fresh successful query) listed both NSIS and MSIX attached to tag v2026.09.06.1.
+- Checksum coverage gap: In .github/workflows/release.yml:300, sha256sum is executed before latest.json is generated at line 309. Consequently, SHA256SUMS.txt does not cover latest.json, leaving the updater manifest unhashed.
+- Archive layout boundaries: scripts/assert-updater-archive-layout.mjs:54-74 inspects parsed tar header paths in macOS .app.tar.gz archives for AppleDouble entries and Ferryx.app/ root prefix, without validating entire archive integrity or requiring a non-empty payload. It does not inspect universal Mach-O slices, code signatures, Info.plist version strings, Linux AppImages, or Windows packages.
+
+## Hardening requirements (proposed contract, not implemented)
+
+All gates below represent proposed local release criteria, not existing script behavior.
+
+- Explicit release inventory: Manifest generation must require an explicit run inventory specifying required targets (darwin-aarch64, darwin-x86_64, linux-x86_64, and windows-x86_64 when migration is active). Missing targets or unexplained files must fail the build.
+- Minisign validation: Every .sig file must be verified against the configured public key (src-tauri/tauri.conf.json:38) before inclusion in latest.json. Empty or unverified signatures must halt publication.
+- Unified version contract: Enforce single-source mapping: tag vYYYY.MM.DD.R, app/updater YYYY.(MM*100+DD).R, and MSIX YYYY.(MM*100+DD).R.0 with full calendar validation. Perform atomic multi-file writes with rollback on error.
+- Strict packager invocation: Pass exact binary paths and build receipts to build-msix.ps1. Fail immediately on non-zero native exit codes ($LASTEXITCODE) for MakeAppx and SignTool. Remove silent fallback from signing failures to unsigned packages.
+- Comprehensive checksums: Generate latest.json first, then compute SHA256SUMS.txt across the entire publish set excluding only the checksum file itself.
