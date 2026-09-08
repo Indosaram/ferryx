@@ -2626,6 +2626,7 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_bounds_retry_does_not_restore_obsolete_width() {
+        for newest_finishes_first in [false, true] {
         let harness = DirectRenderHarness::new(vec![
             SimulatedAcquisition::Frame,
             SimulatedAcquisition::Frame,
@@ -2652,6 +2653,16 @@ mod tests {
             1.0,
         ));
         assert!(futures_util::poll!(old_command.as_mut()).is_pending());
+        let mut latest_command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            harness._app.handle().clone(),
+            harness._app.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: 0.0, y: 0.0, width: 900.0, height: 480.0,
+            },
+            1.0,
+        ));
+        assert!(futures_util::poll!(latest_command.as_mut()).is_pending());
 
         let mut updates = harness.state.subscribe_session_update(&harness.request.session_id).unwrap();
         harness._output.send(DaemonStreamMessage::Output {
@@ -2662,19 +2673,18 @@ mod tests {
         }).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed())
             .await.unwrap().unwrap();
-        let latest = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            harness._app.handle().clone(),
-            harness._app.state::<NativeTerminalSurfaceHostState>(),
-            harness.request.session_id.clone(),
-            crate::ipc::native_terminal::NativeTerminalLogicalRect {
-                x: 0.0, y: 0.0, width: 900.0, height: 480.0,
-            },
-            1.0,
-        ).await.unwrap();
-        assert!(latest.presented);
-        let old_receipt = tokio::time::timeout(std::time::Duration::from_secs(5), old_command)
-            .await.unwrap().unwrap();
+        let (old_receipt, latest) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            if newest_finishes_first {
+                let latest = latest_command.await.unwrap();
+                (old_command.await.unwrap(), latest)
+            } else {
+                let old_receipt = old_command.await.unwrap();
+                assert_eq!(harness.state.session_logical_bounds(&harness.request.session_id).unwrap().width, 900.0);
+                (old_receipt, latest_command.await.unwrap())
+            }
+        }).await.unwrap();
 
+        assert!(latest.presented);
         assert!(old_receipt.presented);
         assert_eq!(harness.state.session_logical_bounds(&harness.request.session_id).unwrap().width, 900.0);
         assert_eq!(harness.state.hosts.lock().get(&harness.request.session_id)
@@ -2683,6 +2693,7 @@ mod tests {
             terminal.dimensions()
         }).unwrap(), (latest.cols, latest.rows));
         assert_eq!(resizes.lock().last().copied(), Some((latest.cols, latest.rows)));
+        }
     }
 
     #[tokio::test]
