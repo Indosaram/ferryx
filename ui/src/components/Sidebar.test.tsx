@@ -102,7 +102,7 @@ describe("Sidebar navigation", () => {
     expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
   });
 
-  it("renders no children when a tabless workspace is explicitly expanded", () => {
+  it.each(["chevron", "project name"])("keeps a tabless workspace collapsed after clicking its %s", (target) => {
     renderSidebar({
       projects: accordionProjects,
       activeProjectId: "default",
@@ -110,15 +110,15 @@ describe("Sidebar navigation", () => {
       emptyWorkspaceIds: ["default"],
     });
 
-    fireEvent.click(projectToggle("default"));
+    fireEvent.click(target === "chevron" ? projectToggle("default") : projectRow("default"));
 
-    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
     expect(screen.queryByText("primary")).not.toBeInTheDocument();
     expect(screen.queryByText("No worktrees yet.")).not.toBeInTheDocument();
   });
 
-  it("collapses when the final tab closes and restores rows after a tab opens", () => {
+  it("collapses when the final tab closes and restores rows after a tab opens without clicks", () => {
     const props = baseProps({
       projects: accordionProjects,
       activeProjectId: "default",
@@ -130,10 +130,48 @@ describe("Sidebar navigation", () => {
 
     view.rerender(<Sidebar {...props} emptyWorkspaceIds={["default"]} />);
     expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(projectToggle("default"));
     expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
 
     view.rerender(<Sidebar {...props} emptyWorkspaceIds={[]} />);
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+  });
+
+  it("remains collapsed across multiple clicks while empty and restores rows when tabs open, permitting normal toggling", () => {
+    const props = baseProps({
+      projects: accordionProjects,
+      activeProjectId: "default",
+      worktrees: [defaultWorktree],
+      emptyWorkspaceIds: [],
+    });
+    const view = render(<Sidebar {...props} />);
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+
+    // Collapse when empty
+    view.rerender(<Sidebar {...props} emptyWorkspaceIds={["default"]} />);
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+
+    // Click toggle multiple times while empty
+    fireEvent.click(projectToggle("default"));
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(projectRow("default"));
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(projectToggle("default"));
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
+
+    // Normal tab reopening restores expansion
+    view.rerender(<Sidebar {...props} emptyWorkspaceIds={[]} />);
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
+
+    // Normal toggling permitted now that it is not empty
+    fireEvent.click(projectToggle("default"));
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "default worktrees" })).not.toBeInTheDocument();
+
+    fireEvent.click(projectToggle("default"));
+    expect(projectToggle("default")).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("list", { name: "default worktrees" })).toBeInTheDocument();
   });
 

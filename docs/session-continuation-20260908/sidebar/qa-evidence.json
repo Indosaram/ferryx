@@ -1,0 +1,318 @@
+{
+  "evidenceLog": [
+    {
+      "phase": "Scenario 1",
+      "assertion": "orca-local has 2 initial live tabs",
+      "pass": true,
+      "details": {
+        "liveTabs": [
+          {
+            "id": "term-1",
+            "kind": "terminal",
+            "label": "Terminal 1"
+          },
+          {
+            "id": "browser-1",
+            "kind": "browser",
+            "label": "Browser 1"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "orca-local is expanded",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "orca-local worktree list rendered in DOM",
+      "pass": true,
+      "details": {
+        "hasList": true
+      }
+    },
+    {
+      "phase": "Scenario 1",
+      "assertion": "emptyWorkspaceIds contains neither workspace",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": []
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "orca-local has 1 tab left (browser-1)",
+      "pass": true,
+      "details": {
+        "liveTabs": [
+          {
+            "id": "browser-1",
+            "kind": "browser",
+            "label": "Browser 1"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "orca-local remains expanded while browser tab open",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": true
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "orca-local worktree list still rendered",
+      "pass": true,
+      "details": {
+        "hasList": true
+      }
+    },
+    {
+      "phase": "Scenario 2",
+      "assertion": "emptyWorkspaceIds still does not contain orca-local",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": []
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "orca-local has 0 tabs",
+      "pass": true,
+      "details": {
+        "liveTabs": []
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "emptyWorkspaceIds now contains orca-local",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": [
+          "orca-local"
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "orca-local automatically collapsed (aria-expanded=false)",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": false
+      }
+    },
+    {
+      "phase": "Scenario 3",
+      "assertion": "orca-local worktree list removed from DOM",
+      "pass": true,
+      "details": {
+        "hasList": false
+      }
+    },
+    {
+      "phase": "Scenario 4",
+      "assertion": "orca-local remains collapsed after chevron click",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": false
+      }
+    },
+    {
+      "phase": "Scenario 4",
+      "assertion": "orca-local worktree list remains absent",
+      "pass": true,
+      "details": {
+        "hasList": false
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "orca-local remains collapsed after title click",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": false
+      }
+    },
+    {
+      "phase": "Scenario 5",
+      "assertion": "orca-local worktree list remains absent",
+      "pass": true,
+      "details": {
+        "hasList": false
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "orca-local has 1 live tab",
+      "pass": true,
+      "details": {
+        "liveTabs": [
+          {
+            "id": "term-2",
+            "kind": "terminal",
+            "label": "Terminal 2"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "emptyWorkspaceIds no longer contains orca-local",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": []
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "orca-local expansion restored (aria-expanded=true)",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": true
+      }
+    },
+    {
+      "phase": "Scenario 6",
+      "assertion": "orca-local worktree list restored in DOM",
+      "pass": true,
+      "details": {
+        "hasList": true
+      }
+    },
+    {
+      "phase": "Scenario 7",
+      "assertion": "orca-local remains collapsed after multiple clicks while empty",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": false
+      }
+    },
+    {
+      "phase": "Scenario 7",
+      "assertion": "browser tab reopened",
+      "pass": true,
+      "details": {
+        "liveTabs": [
+          {
+            "id": "browser-2",
+            "kind": "browser",
+            "label": "Docs"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 7",
+      "assertion": "emptyWorkspaceIds no longer contains orca-local",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": []
+      }
+    },
+    {
+      "phase": "Scenario 7",
+      "assertion": "orca-local expansion restored after browser tab addition",
+      "pass": true,
+      "details": {
+        "orcaLocalExpanded": true
+      }
+    },
+    {
+      "phase": "Scenario 7",
+      "assertion": "orca-local worktree list restored in DOM",
+      "pass": true,
+      "details": {
+        "hasList": true
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked not in emptyWorkspaceIds while having parked tab",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": []
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked added to emptyWorkspaceIds after closing parked tab",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": [
+          "orca-parked"
+        ]
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked remains collapsed after chevron click while empty",
+      "pass": true,
+      "details": {
+        "orcaParkedExpanded": false
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked worktree list not in DOM",
+      "pass": true,
+      "details": {
+        "hasList": false
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked removed from emptyWorkspaceIds after adding tab",
+      "pass": true,
+      "details": {
+        "emptyWorkspaceIds": []
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked automatically restored to expanded state",
+      "pass": true,
+      "details": {
+        "orcaParkedExpanded": true
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked worktree list rendered in DOM",
+      "pass": true,
+      "details": {
+        "hasList": true
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked collapsed after chevron click when non-empty",
+      "pass": true,
+      "details": {
+        "orcaParkedExpanded": false
+      }
+    },
+    {
+      "phase": "Scenario 8",
+      "assertion": "orca-parked re-expanded after second chevron click",
+      "pass": true,
+      "details": {
+        "orcaParkedExpanded": true
+      }
+    }
+  ],
+  "teardownReceipt": {
+    "serverPid": 85767,
+    "serverExited": true,
+    "serverExitCode": 143,
+    "serverExitSignal": null,
+    "portFreed": true,
+    "webviewClosed": true,
+    "cacheCleaned": true
+  }
+}
