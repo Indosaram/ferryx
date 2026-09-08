@@ -1,0 +1,27 @@
+Release run prepared successfully at /tmp/ferryx-qa-st01a080d4-prepare-1788867956
+{
+  "schemaVersion": 1,
+  "runId": "rel-2026.09.08.1-3a19bdf7",
+  "repo": "Indosaram/ferryx",
+  "commitSha": "3a19bdf727870fd28a75866123ac06f80e443076",
+  "tag": "v2026.09.08.1",
+  "appVersion": "2026.908.1",
+  "msixVersion": "2026.908.1.0",
+  "channels": {
+    "store": true,
+    "nsisMigration": false
+  },
+  "requiredTargets": [
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "linux-x86_64"
+  ],
+  "toolchains": {
+    "node": ">=22.0.0",
+    "bun": ">=1.4.0",
+    "zig": "0.16.0"
+  },
+  "sourceDateEpoch": 1788849930,
+  "createdAt": "2026-09-08T06:45:30.000Z"
+}
+Exit: 0

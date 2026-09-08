@@ -1,0 +1,326 @@
+$ node --test scripts/release-hosts.test.mjs scripts/release-local.test.mjs scripts/release-platforms.test.mjs
+TAP version 13
+# Subtest: validateHostConfig: accepts canonical valid host config
+ok 1 - validateHostConfig: accepts canonical valid host config
+  ---
+  duration_ms: 1.332208
+  type: 'test'
+  ...
+# Subtest: loadHostConfig: successfully loads and parses example config file
+ok 2 - loadHostConfig: successfully loads and parses example config file
+  ---
+  duration_ms: 0.590125
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects non-object configs
+ok 3 - validateHostConfig: rejects non-object configs
+  ---
+  duration_ms: 0.631167
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects missing or invalid schemaVersion
+ok 4 - validateHostConfig: rejects missing or invalid schemaVersion
+  ---
+  duration_ms: 0.205709
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects invalid repo
+ok 5 - validateHostConfig: rejects invalid repo
+  ---
+  duration_ms: 0.849292
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects relative repository or ghosttyRepository paths
+ok 6 - validateHostConfig: rejects relative repository or ghosttyRepository paths
+  ---
+  duration_ms: 0.329292
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects missing required hosts or unknown hosts
+ok 7 - validateHostConfig: rejects missing required hosts or unknown hosts
+  ---
+  duration_ms: 0.154084
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects unknown root properties
+ok 8 - validateHostConfig: rejects unknown root properties
+  ---
+  duration_ms: 0.076
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects secrets, tokens, or credential fields in keys and values
+ok 9 - validateHostConfig: rejects secrets, tokens, or credential fields in keys and values
+  ---
+  duration_ms: 0.3065
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: enforces ssh null on macbook and non-empty destination on remotes
+ok 10 - validateHostConfig: enforces ssh null on macbook and non-empty destination on remotes
+  ---
+  duration_ms: 0.381667
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: enforces platform match per host
+ok 11 - validateHostConfig: enforces platform match per host
+  ---
+  duration_ms: 0.142625
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: validates build root path rules
+ok 12 - validateHostConfig: validates build root path rules
+  ---
+  duration_ms: 0.123875
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: enforces positive integer minFreeBytes
+ok 13 - validateHostConfig: enforces positive integer minFreeBytes
+  ---
+  duration_ms: 0.121792
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects notaryProfile and signingIdentity on non-darwin hosts
+ok 14 - validateHostConfig: rejects notaryProfile and signingIdentity on non-darwin hosts
+  ---
+  duration_ms: 0.107959
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: validates expectedTools schema
+ok 15 - validateHostConfig: validates expectedTools schema
+  ---
+  duration_ms: 0.097834
+  type: 'test'
+  ...
+# Subtest: quoteSh: correctly handles POSIX quoting edge cases
+ok 16 - quoteSh: correctly handles POSIX quoting edge cases
+  ---
+  duration_ms: 0.04725
+  type: 'test'
+  ...
+# Subtest: quotePowerShell: correctly handles PowerShell quoting without JS backslash escapes
+ok 17 - quotePowerShell: correctly handles PowerShell quoting without JS backslash escapes
+  ---
+  duration_ms: 0.036042
+  type: 'test'
+  ...
+# Subtest: runProcess: captures stdout and stderr on clean exit
+ok 18 - runProcess: captures stdout and stderr on clean exit
+  ---
+  duration_ms: 54.086167
+  type: 'test'
+  ...
+# Subtest: runProcess: passes stdin input to child process
+ok 19 - runProcess: passes stdin input to child process
+  ---
+  duration_ms: 47.886583
+  type: 'test'
+  ...
+# Subtest: runProcess: subscribes to error/exit BEFORE writing input
+ok 20 - runProcess: subscribes to error/exit BEFORE writing input
+  ---
+  duration_ms: 61.394166
+  type: 'test'
+  ...
+# Subtest: runProcess: rejects non-zero exit with ProcessExecutionError and does not echo env secrets
+ok 21 - runProcess: rejects non-zero exit with ProcessExecutionError and does not echo env secrets
+  ---
+  duration_ms: 44.798041
+  type: 'test'
+  ...
+# Subtest: runProcess: enforces bounded timeout and terminates hanging child process tree
+ok 22 - runProcess: enforces bounded timeout and terminates hanging child process tree
+  ---
+  duration_ms: 313.403083
+  type: 'test'
+  ...
+# Subtest: runHostScript: macbook runs locally via bash -s and uname succeeds
+ok 23 - runHostScript: macbook runs locally via bash -s and uname succeeds
+  ---
+  duration_ms: 67.904416
+  type: 'test'
+  ...
+# Subtest: runHostScript: macbook fails closed on script non-zero exit
+ok 24 - runHostScript: macbook fails closed on script non-zero exit
+  ---
+  duration_ms: 31.716792
+  type: 'test'
+  ...
+# Subtest: runHostScript: omaki Linux SSH transport invokes BatchMode and bash -s via executable SSH fixture
+ok 25 - runHostScript: omaki Linux SSH transport invokes BatchMode and bash -s via executable SSH fixture
+  ---
+  duration_ms: 464.809
+  type: 'test'
+  ...
+# Subtest: runHostScript: maho-win Windows SSH transport invokes base64 UTF16LE EncodedCommand via executable SSH fixture
+ok 26 - runHostScript: maho-win Windows SSH transport invokes base64 UTF16LE EncodedCommand via executable SSH fixture
+  ---
+  duration_ms: 374.60925
+  type: 'test'
+  ...
+# Subtest: runHostScript: rejects invalid script requests for host platform
+ok 27 - runHostScript: rejects invalid script requests for host platform
+  ---
+  duration_ms: 0.269083
+  type: 'test'
+  ...
+# Subtest: runHostScript: live read-only remote smoke probe (if available)
+ok 28 - runHostScript: live read-only remote smoke probe (if available)
+  ---
+  duration_ms: 2274.633125
+  type: 'test'
+  ...
+# Subtest: runProcess: redacts sensitive child environment variables from stdout and stderr on clean exit across chunks
+ok 29 - runProcess: redacts sensitive child environment variables from stdout and stderr on clean exit across chunks
+  ---
+  duration_ms: 41.410375
+  type: 'test'
+  ...
+# Subtest: runProcess: redacts sensitive child environment variables from error message, stdout, stderr, and command on non-zero exit across chunks
+ok 30 - runProcess: redacts sensitive child environment variables from error message, stdout, stderr, and command on non-zero exit across chunks
+  ---
+  duration_ms: 42.897417
+  type: 'test'
+  ...
+# Subtest: runProcess: redacts sensitive values inherited from process.env when options.env is omitted
+ok 31 - runProcess: redacts sensitive values inherited from process.env when options.env is omitted
+  ---
+  duration_ms: 53.140417
+  type: 'test'
+  ...
+# Subtest: runProcess: respects explicit per-command env={} without inheriting process.env sensitive values
+ok 32 - runProcess: respects explicit per-command env={} without inheriting process.env sensitive values
+  ---
+  duration_ms: 39.279708
+  type: 'test'
+  ...
+# Subtest: runProcess: preserves normal build output and non-sensitive env variables without redacting
+ok 33 - runProcess: preserves normal build output and non-sensitive env variables without redacting
+  ---
+  duration_ms: 48.559875
+  type: 'test'
+  ...
+# Subtest: runProcess reports non-EPIPE input errors after terminating its child
+ok 34 - runProcess reports non-EPIPE input errors after terminating its child
+  ---
+  duration_ms: 6.631
+  type: 'test'
+  ...
+# Subtest: release-local CLI: --help outputs usage and exits 0
+ok 35 - release-local CLI: --help outputs usage and exits 0
+  ---
+  duration_ms: 64.466208
+  type: 'test'
+  ...
+# Subtest: release-local: importing module has no side effects
+ok 36 - release-local: importing module has no side effects
+  ---
+  duration_ms: 2.831125
+  type: 'test'
+  ...
+# Subtest: release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+ok 37 - release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+  ---
+  duration_ms: 603.269375
+  type: 'test'
+  ...
+# Subtest: prepare: rejects invalid calendar date tags and revision overflow
+ok 38 - prepare: rejects invalid calendar date tags and revision overflow
+  ---
+  duration_ms: 279.283041
+  type: 'test'
+  ...
+# Subtest: prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+ok 39 - prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+  ---
+  duration_ms: 336.077708
+  type: 'test'
+  ...
+# Subtest: preflight: exits non-zero and reports failure when disk budget is unmet
+ok 40 - preflight: exits non-zero and reports failure when disk budget is unmet
+  ---
+  duration_ms: 1960.048125
+  type: 'test'
+  ...
+# Subtest: verify: detects tampered artifacts and altered receipts
+ok 41 - verify: detects tampered artifacts and altered receipts
+  ---
+  duration_ms: 2.706083
+  type: 'test'
+  ...
+# Subtest: publish: enforces double approval gate and rejects unapproved invocation
+ok 42 - publish: enforces double approval gate and rejects unapproved invocation
+  ---
+  duration_ms: 1.847916
+  type: 'test'
+  ...
+# Subtest: publish: full pipeline with fake gh executable and byte verification
+ok 43 - publish: full pipeline with fake gh executable and byte verification
+  ---
+  duration_ms: 615.483792
+  type: 'test'
+  ...
+# Subtest: verify-remote: verifies release availability against local HTTP server
+ok 44 - verify-remote: verifies release availability against local HTTP server
+  ---
+  duration_ms: 27.95925
+  type: 'test'
+  ...
+# Cloning into '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bundle-test-q7pJsF/clone-test'...
+# Subtest: release-platforms: exports required APIs
+ok 45 - release-platforms: exports required APIs
+  ---
+  duration_ms: 0.421834
+  type: 'test'
+  ...
+# Subtest: probeMacbook: correctly inspects disk budget and detects insufficiency
+ok 46 - probeMacbook: correctly inspects disk budget and detects insufficiency
+  ---
+  duration_ms: 894.188167
+  type: 'test'
+  ...
+# Subtest: probeMacbook: passes disk check when budget is conservative
+ok 47 - probeMacbook: passes disk check when budget is conservative
+  ---
+  duration_ms: 691.974541
+  type: 'test'
+  ...
+# Subtest: createGitBundles: produces valid standalone git bundles and sha256 digests
+ok 48 - createGitBundles: produces valid standalone git bundles and sha256 digests
+  ---
+  duration_ms: 829.141125
+  type: 'test'
+  ...
+# Subtest: createBuildReceipt: creates valid receipt conforming to release contract
+ok 49 - createBuildReceipt: creates valid receipt conforming to release contract
+  ---
+  duration_ms: 1.664334
+  type: 'test'
+  ...
+# Subtest: buildHost: rejects unknown host or missing run directory
+ok 50 - buildHost: rejects unknown host or missing run directory
+  ---
+  duration_ms: 0.411166
+  type: 'test'
+  ...
+# Subtest: buildHost: fails closed if workspace already exists on host
+ok 51 - buildHost: fails closed if workspace already exists on host
+  ---
+  duration_ms: 2.483708
+  type: 'test'
+  ...
+# Subtest: buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+ok 52 - buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+  ---
+  duration_ms: 6.691542
+  type: 'test'
+  ...
+1..52
+# tests 52
+# suites 0
+# pass 52
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4069.88225
+
+EXIT_STATUS=0

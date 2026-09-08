@@ -1,0 +1,4 @@
+COMMAND: node scripts/build-latest-json.mjs --version ... --dir ... --out ... --repo ... --tag ...
+EXIT_CODE: 2
+STDERR:
+Legacy CLI arguments are no longer supported. Receipt-driven assembly requires: --plan <path> --receipts-dir <path> --artifacts-dir <path> --out-dir <path> [--pubkey <key>]

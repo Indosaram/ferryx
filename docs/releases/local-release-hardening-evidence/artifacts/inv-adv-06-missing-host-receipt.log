@@ -1,0 +1,6 @@
+ATTEMPT: Assembling without omaki host receipt
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Missing expected build receipt file: 'build-receipt-omaki.json'
+
+OUTDIR_EXISTS: false

@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Missing host receipt build-receipt-omaki.json
+ERROR_THROWN: Missing expected build receipt file: 'build-receipt-omaki.json'

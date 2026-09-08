@@ -1,0 +1,2 @@
+exitCode: 1
+stderr: Invalid release tag "v2026.01.01.65536": revision must be 0..65535, got 65536

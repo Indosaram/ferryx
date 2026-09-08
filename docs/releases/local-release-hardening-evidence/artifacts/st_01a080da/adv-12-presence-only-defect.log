@@ -1,0 +1,7 @@
+=== Testing expectedTools version checking on macbook ===
+probed tools.bun.version: 1.4.0
+expectedTools.bun:        999.999.999
+probe result.ok:          true
+probe failures:           []
+CRITICAL DEFECT: Version check bypassed because only presence (tools[tool].ok) is tested: true
+Exit: 0

@@ -1,0 +1,7 @@
+Preflight deficit result: ok=false, available=7746973696, required=109951162777600
+Failures: [
+  'Insufficient disk space on macbook: required 109951162777600 bytes, available 7746973696 bytes',
+  "Notary profile 'FerryxNotary' not found in keychain"
+]
+ADV-COORD-04 VERIFIED PASS
+Exit: 0

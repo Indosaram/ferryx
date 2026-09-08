@@ -1,0 +1,6 @@
+ATTEMPT: Assembling with corrupted Minisign signature
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Minisign verification failed for updater artifact 'Ferryx.app.tar.gz': Invalid signature: missing 'untrusted comment:' header
+
+OUTDIR_EXISTS: false

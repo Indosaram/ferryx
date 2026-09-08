@@ -1,0 +1,4 @@
+exitCode: 0
+stdout: version=1.4.2
+conf.version: 1.4.2
+cargo package version: 1.4.2

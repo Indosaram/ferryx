@@ -1,0 +1,9 @@
+[GITHUB_ACTIONS=true] prepare exit: 1, output: Error in prepare: Mutating release stage 'prepare' is forbidden under CI / GitHub Actions environment.
+[CI=true] prepare exit: 1, output: Error in prepare: Mutating release stage 'prepare' is forbidden under CI / GitHub Actions environment.
+[GITHUB_ACTIONS=true] build exit: 1, output: Error in build: Mutating release stage 'build' is forbidden under CI / GitHub Actions environment.
+[CI=true] build exit: 1, output: Error in build: Mutating release stage 'build' is forbidden under CI / GitHub Actions environment.
+[GITHUB_ACTIONS=true] assemble exit: 1, output: Error in assemble: Mutating release stage 'assemble' is forbidden under CI / GitHub Actions environment.
+[CI=true] assemble exit: 1, output: Error in assemble: Mutating release stage 'assemble' is forbidden under CI / GitHub Actions environment.
+[GITHUB_ACTIONS=true] publish exit: 1, output: Error in publish: Mutating release stage 'publish' is forbidden under CI / GitHub Actions environment.
+[CI=true] publish exit: 1, output: Error in publish: Mutating release stage 'publish' is forbidden under CI / GitHub Actions environment.
+Exit: 0

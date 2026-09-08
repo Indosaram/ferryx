@@ -1,0 +1,37 @@
+$ env -u CI -u GITHUB_ACTIONS bun run release:local prepare --config scripts/release-hosts.example.json --tag v2026.09.08.65000 --commit HEAD --out /Users/indo/code/project/orca-lite/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run
+$ node scripts/release-local.mjs prepare --config scripts/release-hosts.example.json --tag "v2026.09.08.65000" --commit HEAD --out "/Users/indo/code/project/orca-lite/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run"
+Release run prepared successfully at /Users/indo/code/project/orca-lite/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run
+{
+  "schemaVersion": 1,
+  "runId": "rel-2026.09.08.65000-c85f17ea",
+  "repo": "Indosaram/ferryx",
+  "commitSha": "c85f17ea8737beca3998b3d92bce0408501c6ef3",
+  "tag": "v2026.09.08.65000",
+  "appVersion": "2026.908.65000",
+  "msixVersion": "2026.908.65000.0",
+  "channels": {
+    "store": true,
+    "nsisMigration": false
+  },
+  "requiredTargets": [
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "linux-x86_64"
+  ],
+  "toolchains": {
+    "node": ">=22.0.0",
+    "bun": ">=1.4.0",
+    "zig": "0.16.0"
+  },
+  "sourceDateEpoch": 1788869082,
+  "createdAt": "2026-09-08T12:04:42.000Z"
+}
+
+EXIT_STATUS=0
+
+$ python3 sidecar inspection
+plan.json exists= True absolute= True bytes= 581
+prepare-state.json exists= True absolute= True bytes= 658
+source-inputs.json exists= True absolute= True bytes= 216
+configPathAbsolute= True
+runId= rel-2026.09.08.65000-c85f17ea

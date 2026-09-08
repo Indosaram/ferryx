@@ -1,0 +1,3 @@
+Tampered file caught by verify: Checksum mismatch for published file Ferryx_universal.dmg: expected be19442eab175f61f3f26aad9754f10d0d48f018263ef35b50394279802ba154, got 400435c4e3609e278e9e24342753e14f50c43a133276819ab3b4b8e1a6464873
+ADV-COORD-07 VERIFIED PASS
+Exit: 0

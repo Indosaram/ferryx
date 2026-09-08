@@ -1,0 +1,32 @@
+COMMAND: node scripts/build-latest-json.mjs --plan <nsisPlan> ...
+EXIT_CODE: 0
+STDOUT:
+Successfully assembled release v2026.09.08.1 (20 publish files staged in /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-GgfZCT/publish-nsis)
+
+STDERR:
+
+PUBLISHED_FILES: [Ferryx.app.tar.gz, Ferryx.app.tar.gz.sig, Ferryx_2026.908.1.0_x64.msix, Ferryx_2026.908.1_amd64.AppImage, Ferryx_2026.908.1_amd64.AppImage.sig, Ferryx_2026.908.1_amd64.deb, Ferryx_2026.908.1_universal.dmg, Ferryx_2026.908.1_x64-setup.exe, Ferryx_2026.908.1_x64-setup.exe.sig, Ferryx_amd64.AppImage, Ferryx_amd64.AppImage.sig, Ferryx_amd64.deb, Ferryx_universal.app.tar.gz, Ferryx_universal.app.tar.gz.sig, Ferryx_universal.dmg, Ferryx_x64-setup.exe, Ferryx_x64-setup.exe.sig, Ferryx_x64.msix, SHA256SUMS.txt, latest.json]
+LATEST_JSON:
+{
+  "version": "2026.908.1",
+  "notes": "Ferryx 2026.908.1",
+  "pub_date": "2026-09-08T12:00:00.000Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "untrusted comment: signature from test key\nRUQTbfY1Ccn5LqyI3OJMm7w5x0fzpZWxLNPzrPz5VjHlAo068TPnCLXcOze0INKRiDpY1V64V4xiV3Mr47xIjvtJSxL2p+XB1gs=\ntrusted comment: test comment\nq8fmfWB+EueY9vgSiyQFwdp5h2NIiYFrz5W+y0/jjneywV2QGVE27HuOVpVZJAvUl14Me7FLVVc8wHszsm4rDw==",
+      "url": "https://github.com/Indosaram/ferryx/releases/download/v2026.09.08.1/Ferryx.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "untrusted comment: signature from test key\nRUQTbfY1Ccn5LqyI3OJMm7w5x0fzpZWxLNPzrPz5VjHlAo068TPnCLXcOze0INKRiDpY1V64V4xiV3Mr47xIjvtJSxL2p+XB1gs=\ntrusted comment: test comment\nq8fmfWB+EueY9vgSiyQFwdp5h2NIiYFrz5W+y0/jjneywV2QGVE27HuOVpVZJAvUl14Me7FLVVc8wHszsm4rDw==",
+      "url": "https://github.com/Indosaram/ferryx/releases/download/v2026.09.08.1/Ferryx.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "untrusted comment: signature from test key\nRUQTbfY1Ccn5Luvq7qFPQbUWIHdCMvyQ+hWaPmrvVvhwtKPwhnEuu2ct4i8NS7S8QBrB55a6GuxV7S/a8Wjd41NZwCwe5l+0IwU=\ntrusted comment: test comment\nzR/HSCbn6IsXd6hGYIsyMGSDSuKK7fmi5u9GmgtBI7aLTnzUZD3elbVX84m5YMAjJoBD/+UcBGyZbBJBzZTfDA==",
+      "url": "https://github.com/Indosaram/ferryx/releases/download/v2026.09.08.1/Ferryx_2026.908.1_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "untrusted comment: signature from test key\nRUQTbfY1Ccn5Lo0PN5ntpgNAAi4mawy+e07F3ykJ4olNrJh1FV11bYueuKuHeg6szNo86GzxRAoD9UURuA1gwa2AJJ7zEOj9DAI=\ntrusted comment: test comment\n6cjBuggbS7EidZvMWBLKFxFETuNV/I6qk2sJ9FIRNvVZ4y7G/IJzoNS3neOwHGN6dfumCP37hptYNEVZ/9XEDQ==",
+      "url": "https://github.com/Indosaram/ferryx/releases/download/v2026.09.08.1/Ferryx_2026.908.1_amd64.AppImage"
+    }
+  }
+}

@@ -1,0 +1,153 @@
+{
+  "ok": false,
+  "hosts": {
+    "macbook": {
+      "host": "macbook",
+      "platform": "darwin",
+      "reachable": true,
+      "disk": {
+        "requiredBytes": 32212254720,
+        "availableBytes": 7312072704,
+        "ok": false
+      },
+      "os": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "ok": true
+      },
+      "tools": {
+        "bun": {
+          "version": "1.4.0",
+          "ok": true
+        },
+        "zig": {
+          "version": "0.16.0",
+          "ok": true
+        },
+        "rust": {
+          "version": "1.92.0",
+          "ok": true
+        },
+        "cargo": {
+          "version": "1.92.0",
+          "ok": true
+        },
+        "tauri": {
+          "version": "2.10.1",
+          "ok": true
+        },
+        "node": {
+          "version": "22.22.3",
+          "ok": true
+        }
+      },
+      "signing": {
+        "hasSigningIdentity": true,
+        "hasNotaryProfile": false
+      },
+      "ok": false,
+      "failures": [
+        "Insufficient disk space on macbook: required 32212254720 bytes, available 7312072704 bytes",
+        "Notary profile 'FerryxNotary' not found in keychain"
+      ]
+    },
+    "omaki": {
+      "host": "omaki",
+      "platform": "linux",
+      "reachable": true,
+      "disk": {
+        "requiredBytes": 21474836480,
+        "availableBytes": 728805322752,
+        "ok": true
+      },
+      "os": {
+        "platform": "linux",
+        "arch": "x86_64",
+        "ok": true
+      },
+      "tools": {
+        "bun": {
+          "version": "1.4.0",
+          "ok": true
+        },
+        "zig": {
+          "version": null,
+          "ok": false
+        },
+        "rust": {
+          "version": "1.98.0",
+          "ok": true
+        },
+        "cargo": {
+          "version": "1.98.0",
+          "ok": true
+        },
+        "node": {
+          "version": "v26.8.1",
+          "ok": true
+        }
+      },
+      "packages": {
+        "webkit2gtk": {
+          "version": "2.52.6",
+          "ok": true
+        },
+        "gtk3": {
+          "version": "3.24.52",
+          "ok": true
+        },
+        "alsa": {
+          "version": "1.2.16.1",
+          "ok": true
+        }
+      },
+      "signing": {},
+      "ok": false,
+      "failures": [
+        "Required tool 'zig' is missing on omaki"
+      ]
+    },
+    "maho-win": {
+      "host": "maho-win",
+      "platform": "win32",
+      "reachable": true,
+      "disk": {
+        "requiredBytes": 21474836480,
+        "availableBytes": 331094175744,
+        "ok": true
+      },
+      "os": {
+        "platform": "win32",
+        "arch": "x64",
+        "ok": true
+      },
+      "tools": {
+        "bun": {
+          "version": "1.4.0",
+          "ok": true
+        },
+        "zig": {
+          "version": "0.16.0",
+          "ok": true
+        },
+        "rust": {
+          "version": "1.97.0",
+          "ok": true
+        },
+        "cargo": {
+          "version": "1.97.0",
+          "ok": true
+        }
+      },
+      "windowsTools": {
+        "hasVswhere": true,
+        "hasLinker": true,
+        "hasMakeAppx": true
+      },
+      "signing": {},
+      "ok": true,
+      "failures": []
+    }
+  }
+}
+Exit: 1

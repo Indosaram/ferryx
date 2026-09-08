@@ -1,0 +1,238 @@
+TAP version 13
+# Subtest: a universal macOS bundle maps to both darwin targets with its real signature
+ok 1 - a universal macOS bundle maps to both darwin targets with its real signature
+  ---
+  duration_ms: 34.399584
+  type: 'test'
+  ...
+# Subtest: windows and linux updater bundles land on their own targets
+ok 2 - windows and linux updater bundles land on their own targets
+  ---
+  duration_ms: 29.982125
+  type: 'test'
+  ...
+# Subtest: Tauri v2 NSIS and AppImage artifacts land on their own targets
+ok 3 - Tauri v2 NSIS and AppImage artifacts land on their own targets
+  ---
+  duration_ms: 30.066
+  type: 'test'
+  ...
+# Subtest: an architecture-specific macOS bundle claims only its own target
+ok 4 - an architecture-specific macOS bundle claims only its own target
+  ---
+  duration_ms: 29.484958
+  type: 'test'
+  ...
+# Subtest: an unsigned artifact is skipped with a warning instead of shipping unverifiable
+ok 5 - an unsigned artifact is skipped with a warning instead of shipping unverifiable
+  ---
+  duration_ms: 26.997708
+  type: 'test'
+  ...
+# Subtest: release notes are carried through when supplied
+ok 6 - release notes are carried through when supplied
+  ---
+  duration_ms: 29.734917
+  type: 'test'
+  ...
+# Subtest: a directory with no signed updater artifact fails instead of publishing an empty manifest
+ok 7 - a directory with no signed updater artifact fails instead of publishing an empty manifest
+  ---
+  duration_ms: 27.127875
+  type: 'test'
+  ...
+# Subtest: actual current producer fixture is rejected by parsed-policy validator
+ok 8 - actual current producer fixture is rejected by parsed-policy validator
+  ---
+  duration_ms: 18.636792
+  type: 'test'
+  ...
+# Subtest: manual release producer fixture (workflow_dispatch) is rejected
+ok 9 - manual release producer fixture (workflow_dispatch) is rejected
+  ---
+  duration_ms: 17.552167
+  type: 'test'
+  ...
+# Subtest: tag release producer fixture (push.tags) is rejected
+ok 10 - tag release producer fixture (push.tags) is rejected
+  ---
+  duration_ms: 13.139708
+  type: 'test'
+  ...
+# Subtest: callable release producer fixture (workflow_call) is rejected
+ok 11 - callable release producer fixture (workflow_call) is rejected
+  ---
+  duration_ms: 15.157333
+  type: 'test'
+  ...
+# Subtest: reusable release producer fixture (workflow_call with release signing secrets) is rejected
+ok 12 - reusable release producer fixture (workflow_call with release signing secrets) is rejected
+  ---
+  duration_ms: 14.793167
+  type: 'test'
+  ...
+# Subtest: PR check workflow (.github/workflows/build-test.yml) complies with release policy
+ok 13 - PR check workflow (.github/workflows/build-test.yml) complies with release policy
+  ---
+  duration_ms: 14.948791
+  type: 'test'
+  ...
+# Subtest: Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+ok 14 - Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+  ---
+  duration_ms: 12.196959
+  type: 'test'
+  ...
+# Subtest: PR check workflow wires the release workflow policy check
+ok 15 - PR check workflow wires the release workflow policy check
+  ---
+  duration_ms: 0.219084
+  type: 'test'
+  ...
+# Subtest: Windows CI links the native binary before a release tag
+ok 16 - Windows CI links the native binary before a release tag
+  ---
+  duration_ms: 0.174833
+  type: 'test'
+  ...
+# Subtest: hosted release producer .github/workflows/release.yml is absent from disk
+ok 17 - hosted release producer .github/workflows/release.yml is absent from disk
+  ---
+  duration_ms: 0.150125
+  type: 'test'
+  ...
+# Subtest: live repository .github/workflows directory complies fully with policy
+ok 18 - live repository .github/workflows directory complies fully with policy
+  ---
+  duration_ms: 14.389875
+  type: 'test'
+  ...
+# Subtest: a date tag maps to monotonic semver and leaves dependency versions untouched
+ok 19 - a date tag maps to monotonic semver and leaves dependency versions untouched
+  ---
+  duration_ms: 35.210917
+  type: 'test'
+  ...
+# Subtest: the JSON manifest keeps key order and a trailing newline
+ok 20 - the JSON manifest keeps key order and a trailing newline
+  ---
+  duration_ms: 30.894375
+  type: 'test'
+  ...
+# Subtest: running twice with the same tag is idempotent
+ok 21 - running twice with the same tag is idempotent
+  ---
+  duration_ms: 55.696416
+  type: 'test'
+  ...
+# Subtest: a semver tag is accepted
+ok 22 - a semver tag is accepted
+  ---
+  duration_ms: 30.49475
+  type: 'test'
+  ...
+# Subtest: date mapping is strictly monotonic across a revision, day, month, and year boundary
+ok 23 - date mapping is strictly monotonic across a revision, day, month, and year boundary
+  ---
+  duration_ms: 145.772
+  type: 'test'
+  ...
+# Subtest: a malformed tag fails loudly and leaves both manifests unchanged
+ok 24 - a malformed tag fails loudly and leaves both manifests unchanged
+  ---
+  duration_ms: 30.959458
+  type: 'test'
+  ...
+# Subtest: a missing tag reports usage instead of guessing
+ok 25 - a missing tag reports usage instead of guessing
+  ---
+  duration_ms: 26.33675
+  type: 'test'
+  ...
+# Subtest: importing sync-version.mjs has no side effects and exports canonical API
+ok 26 - importing sync-version.mjs has no side effects and exports canonical API
+  ---
+  duration_ms: 2.344584
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag handles valid CalVer tags with or without revision and leading v
+ok 27 - parseReleaseTag handles valid CalVer tags with or without revision and leading v
+  ---
+  duration_ms: 0.559959
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+ok 28 - parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+  ---
+  duration_ms: 0.616292
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+ok 29 - parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+  ---
+  duration_ms: 0.1395
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag enforces boundaries and leading zero rules
+ok 30 - parseReleaseTag enforces boundaries and leading zero rules
+  ---
+  duration_ms: 0.173666
+  type: 'test'
+  ...
+# Subtest: toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+ok 31 - toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+  ---
+  duration_ms: 0.493
+  type: 'test'
+  ...
+# Subtest: syncVersion supports dryRun and returns version pair without modifying files
+ok 32 - syncVersion supports dryRun and returns version pair without modifying files
+  ---
+  duration_ms: 0.995166
+  type: 'test'
+  ...
+# Subtest: syncVersion writes atomically using sibling temp files and preserves dependencies
+ok 33 - syncVersion writes atomically using sibling temp files and preserves dependencies
+  ---
+  duration_ms: 1.134208
+  type: 'test'
+  ...
+# Subtest: syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+ok 34 - syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+  ---
+  duration_ms: 0.770833
+  type: 'test'
+  ...
+# Subtest: syncVersion rolls back first file replacement on synchronous second file failure
+ok 35 - syncVersion rolls back first file replacement on synchronous second file failure
+  ---
+  duration_ms: 1.129458
+  type: 'test'
+  ...
+# Subtest: CLI rejects invalid calendar dates and impossible inputs
+ok 36 - CLI rejects invalid calendar dates and impossible inputs
+  ---
+  duration_ms: 84.507792
+  type: 'test'
+  ...
+# Subtest: rejects updater archives containing a top-level AppleDouble entry
+ok 37 - rejects updater archives containing a top-level AppleDouble entry
+  ---
+  duration_ms: 45.107583
+  type: 'test'
+  ...
+# Subtest: accepts updater archives whose entries are rooted in the app bundle
+ok 38 - accepts updater archives whose entries are rooted in the app bundle
+  ---
+  duration_ms: 35.279292
+  type: 'test'
+  ...
+1..38
+# tests 38
+# suites 0
+# pass 38
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 495.526083

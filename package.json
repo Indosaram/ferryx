@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "tauri": "cargo tauri",
     "dev": "cargo tauri dev",
     "build": "cargo tauri build",
+    "tauri": "cargo tauri",
+    "release:local": "node scripts/release-local.mjs",
     "ui:dev": "bun run --cwd ui dev",
-    "ui:test": "bun run --cwd ui test",
-    "ui:build": "bun run --cwd ui build"
+    "ui:build": "bun run --cwd ui build",
+    "ui:test": "bun run --cwd ui test"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

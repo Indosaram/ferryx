@@ -1,0 +1,4 @@
+SCENARIO-06 Minisign CLI Oracle Crosscheck:
+nodeVerify=true
+cliOutput=Signature and comment signature verified
+Trusted comment: oracle comment

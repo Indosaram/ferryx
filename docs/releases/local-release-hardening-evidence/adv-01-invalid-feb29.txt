@@ -1,0 +1,2 @@
+exitCode: 1
+stderr: Invalid calendar date in release tag "v2026.02.29": 2026 is not a leap year (February has 28 days)

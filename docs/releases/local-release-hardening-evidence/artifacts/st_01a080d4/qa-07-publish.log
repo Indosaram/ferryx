@@ -1,0 +1,12 @@
+--- Testing Publish Approval Gate ---
+Rejection without flag: Publication requires explicit --approve-publish flag
+Rejection without env: Publication requires FERRYX_APPROVE_PUBLISH=1 environment variable
+--- Executing Approved Publish Flow ---
+Publish result: {
+  "published": true,
+  "tag": "v2026.09.08.1",
+  "runId": "rel-2026.09.08.1-assemble-qa"
+}
+Final GitHub State: draft created, assets uploaded (12), undrafted=true
+PUBLISH_GATE_VERIFIED_SUCCESS
+Exit: 0

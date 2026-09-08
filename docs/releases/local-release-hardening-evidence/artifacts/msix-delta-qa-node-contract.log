@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+ok 1 - build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+  ---
+  duration_ms: 0.529084
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+ok 2 - build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+  ---
+  duration_ms: 0.509541
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: verifies binary version against expected app version
+ok 3 - build-msix.ps1: verifies binary version against expected app version
+  ---
+  duration_ms: 0.116875
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces isolated fresh staging and fails closed if output already exists
+ok 4 - build-msix.ps1: enforces isolated fresh staging and fails closed if output already exists
+  ---
+  duration_ms: 0.258792
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+ok 5 - build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+  ---
+  duration_ms: 0.207958
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+ok 6 - build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+  ---
+  duration_ms: 0.105625
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+ok 7 - build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+  ---
+  duration_ms: 0.127042
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, Publisher, ProcessorArchitecture=x64)
+ok 8 - build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, Publisher, ProcessorArchitecture=x64)
+  ---
+  duration_ms: 0.276208
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 46.772084

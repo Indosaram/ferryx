@@ -1,0 +1,6 @@
+ATTEMPT: Assembling with duplicate artifact kind msix
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: duplicate artifact kind 'msix' in receipt for host 'maho-win'
+
+OUTDIR_EXISTS: false

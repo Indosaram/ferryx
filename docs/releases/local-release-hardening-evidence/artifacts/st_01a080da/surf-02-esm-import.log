@@ -1,0 +1,12 @@
+Exported functions and types:
+{
+  "prepareRelease": "function",
+  "preflightRelease": "function",
+  "buildRelease": "function",
+  "assembleReleaseRun": "function",
+  "verifyReleaseRun": "function",
+  "publishRelease": "function",
+  "verifyRemoteRelease": "function"
+}
+All required coordinator functions exported as functions: true
+Exit: 0

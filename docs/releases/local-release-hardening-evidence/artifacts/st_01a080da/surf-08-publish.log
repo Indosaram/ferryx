@@ -1,0 +1,9 @@
+Approval Gate 1 (missing flag): Publication requires explicit --approve-publish flag
+Approval Gate 2 (missing env): Publication requires FERRYX_APPROVE_PUBLISH=1 environment variable
+Publish result: {
+  "published": true,
+  "tag": "v2026.09.08.1",
+  "runId": "rel-2026.09.08.1-surf08"
+}
+Final GitHub state: isDraft = false assets count = 3
+Exit: 0

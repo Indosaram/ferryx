@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "repository": "/Users/indo/code/project/orca-lite",
+  "ghosttyRepository": "/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty",
+  "repo": "Indosaram/ferryx",
+  "hosts": {
+    "macbook": {
+      "ssh": null,
+      "platform": "darwin",
+      "root": "/Users/indo/ferryx-release-builds",
+      "minFreeBytes": 32212254720,
+      "notaryProfile": "FerryxNotary",
+      "signingIdentity": "Developer ID Application: Indo Yoon (5DUM8WPB4C)"
+    },
+    "omaki": {
+      "ssh": "indo@100.91.254.71",
+      "platform": "linux",
+      "root": "/home/indo/ferryx-releases",
+      "minFreeBytes": 21474836480
+    },
+    "maho-win": {
+      "ssh": "maho-win",
+      "platform": "win32",
+      "root": "C:/Users/sook/ferryx-releases",
+      "minFreeBytes": 21474836480
+    }
+  }
+}

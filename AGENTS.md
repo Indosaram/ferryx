@@ -100,6 +100,14 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 cargo run --manifest-path src-tauri/Cargo.toml -- --daemon
 ```
 
+## LOCAL RELEASES
+- Releases are local-only: GitHub Actions may run pull-request checks and deploy Pages, but must
+  never build, sign, assemble, or publish release artifacts. This boundary is enforced from
+  source by `scripts/release-workflow-policy.mjs`.
+- Use [`docs/releases/LOCAL_RELEASE_RUNBOOK.md`](docs/releases/LOCAL_RELEASE_RUNBOOK.md) as the
+  canonical CLI and safety procedure. Never substitute a tag-triggered or manually dispatched
+  hosted release workflow.
+
 ## NOTES
 - Headless daemon UDS socket lives at `/tmp/rorca-{uid}/daemon.sock` locked with `flock`.
 - PTY ring buffer overflow emits `ReplayGap` to signal terminal re-sync requirements.

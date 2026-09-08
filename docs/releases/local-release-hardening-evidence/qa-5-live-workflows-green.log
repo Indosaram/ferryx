@@ -1,0 +1,2 @@
+[release-workflow-policy] PASS: All evaluated workflows comply with local-release-only policy.
+  - workflows: valid

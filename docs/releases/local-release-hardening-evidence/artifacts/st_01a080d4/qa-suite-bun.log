@@ -1,0 +1,29 @@
+bun test v1.4.0 (34cbb9a40)
+
+scripts/release-local.test.mjs:
+(pass) release-local CLI: --help outputs usage and exits 0 [33.91ms]
+(pass) release-local: importing module has no side effects [12.99ms]
+(pass) release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true [246.28ms]
+(pass) prepare: rejects invalid calendar date tags and revision overflow [152.90ms]
+(pass) prepare: creates deterministic plan, prepare-state, and fails closed on clobber [137.41ms]
+(pass) preflight: exits non-zero and reports failure when disk budget is unmet [1546.66ms]
+(pass) verify: detects tampered artifacts and altered receipts [1.40ms]
+(pass) publish: enforces double approval gate and rejects unapproved invocation [0.32ms]
+(pass) publish: full pipeline with fake gh executable and byte verification [780.34ms]
+(pass) verify-remote: verifies release availability against local HTTP server [7.32ms]
+
+scripts/release-platforms.test.mjs:
+(pass) release-platforms: exports required APIs [0.03ms]
+(pass) probeMacbook: correctly inspects disk budget and detects insufficiency [169.91ms]
+(pass) probeMacbook: passes disk check when budget is conservative [168.03ms]
+Cloning into '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bundle-test-oTfIqh/clone-test'...
+(pass) createGitBundles: produces valid standalone git bundles and sha256 digests [389.32ms]
+(pass) createBuildReceipt: creates valid receipt conforming to release contract [0.23ms]
+(pass) buildHost: rejects unknown host or missing run directory [0.14ms]
+(pass) buildHost: fails closed if workspace already exists on host [1.01ms]
+(pass) buildHost: executes builder fixture, stages artifacts, and writes valid receipt [4.53ms]
+
+ 18 pass
+ 0 fail
+Ran 18 tests across 2 files. [6.26s]
+Exit: 0

@@ -1,0 +1,5 @@
+ADV-4 exit: 1
+[release-workflow-policy] FAIL: Release policy violations detected!
+  - Hosted release producer workflow "release.yml" is forbidden in /Users/indo/code/project/orca-lite/.github/workflows; releases are source-enforced local-only
+  - [release.yml] File name "release.yml" is forbidden: hosted release producer workflows are retired
+

@@ -1,0 +1,15 @@
+$ node --check scripts/release-local.mjs
+$ node --check scripts/lib/release-platforms.mjs
+$ node scripts/release-local.mjs --help
+
+Usage: release-local <subcommand> [options]
+
+Subcommands:
+  prepare --config <json> --tag <date> --commit <sha-or-ref> --out <new-run-dir> [--nsis-migration]
+  preflight --config <json> [--plan <path>]
+  build --config <json> --run <dir> --host macbook|omaki|maho-win [--approve-notarization]
+  assemble --run <dir> [--pubkey <fixture-key>]
+  verify --run <dir> [--pubkey <fixture-key>]
+  publish --run <dir> --approve-publish
+  verify-remote --run <dir>
+

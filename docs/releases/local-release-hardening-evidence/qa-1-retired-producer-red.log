@@ -1,0 +1,9 @@
+Exit code: 1
+[release-workflow-policy] FAIL: Release policy violations detected!
+  - Trigger 'push.tags' is forbidden: hosted tag-triggered release workflows are retired
+  - Disallowed permission in workflow-level permissions: contents: write
+  - step #2 in job "build" contains forbidden release build command @tauri-apps/cli build (Tauri release bundle build)
+  - Disallowed release secret reference in step #2 in job "build" env: TAURI_SIGNING_PRIVATE_KEY
+  - step #1 in job "publish" uses forbidden action action-gh-release (GitHub release publication action (softprops/action-gh-release)): softprops/action-gh-release@v2
+  - Disallowed release secret reference: TAURI_SIGNING_PRIVATE_KEY
+

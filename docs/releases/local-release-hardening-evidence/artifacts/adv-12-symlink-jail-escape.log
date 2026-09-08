@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Symlink realpath jail escape
+ERROR_THROWN: Artifact path escapes artifacts directory: darwin/escaped.dmg

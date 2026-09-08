@@ -1,7 +1,7 @@
 
 [package]
 name = "ferryx"
-version = "2026.902.2"
+version = "2026.908.1"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
 authors = ["Ferryx Contributors"]
 license = "MIT OR Apache-2.0"

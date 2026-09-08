@@ -1,0 +1,91 @@
+# Baseline RED test run for node --test scripts/build-msix.test.mjs against unhardened scripts/build-msix.ps1
+# Invocation: node --test scripts/build-msix.test.mjs
+
+TAP version 13
+# Subtest: build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+not ok 1 - build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+  ---
+  duration_ms: 1.156
+  failureType: 'testCodeFailure'
+  error: 'build-msix.ps1 must declare [Parameter(Mandatory = $true)] [string]$ExePath'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+not ok 2 - build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+  ---
+  duration_ms: 0.452
+  failureType: 'testCodeFailure'
+  error: 'Script must explicitly enforce that the 4th quad component is 0 for Store packages'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: build-msix.ps1: verifies binary version against expected app version
+not ok 3 - build-msix.ps1: verifies binary version against expected app version
+  ---
+  duration_ms: 0.389
+  failureType: 'testCodeFailure'
+  error: 'Script must inspect binary FileVersionInfo'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: build-msix.ps1: enforces isolated fresh staging and removes stale output before packing
+not ok 4 - build-msix.ps1: enforces isolated fresh staging and removes stale output before packing
+  ---
+  duration_ms: 0.312
+  failureType: 'testCodeFailure'
+  error: 'Script must create a fresh isolated staging directory per build'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+not ok 5 - build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+  ---
+  duration_ms: 0.543
+  failureType: 'testCodeFailure'
+  error: 'Script must check $LASTEXITCODE immediately after MakeAppx execution'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+not ok 6 - build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+  ---
+  duration_ms: 0.066
+  failureType: 'testCodeFailure'
+  error: 'Script must not auto-generate self-signed certificates'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+not ok 7 - build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+  ---
+  duration_ms: 0.125
+  failureType: 'testCodeFailure'
+  error: 'Script must accept optional -CertThumbprint parameter'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: build-msix.ps1: validates packaged MSIX manifest version and name after pack
+not ok 8 - build-msix.ps1: validates packaged MSIX manifest version and name after pack
+  ---
+  duration_ms: 0.080
+  failureType: 'testCodeFailure'
+  error: 'Script must inspect packaged MSIX archive directly'
+  code: 'ERR_ASSERTION'
+  ...
+# Subtest: version contract: maps date tags, semver, and quad versions correctly
+ok 9 - version contract: maps date tags, semver, and quad versions correctly
+  ---
+  duration_ms: 0.519
+  ...
+# Subtest: version contract: rejects non-zero 4th quad component for Store submission
+ok 10 - version contract: rejects non-zero 4th quad component for Store submission
+  ---
+  duration_ms: 0.396
+  ...
+# Subtest: version contract: rejects invalid calendar dates
+ok 11 - version contract: rejects invalid calendar dates
+  ---
+  duration_ms: 0.127
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 3
+# fail 8
+# cancelled 0
+# skipped 0
+# todo 0

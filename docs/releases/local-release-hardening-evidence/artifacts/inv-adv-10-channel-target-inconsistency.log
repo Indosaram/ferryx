@@ -1,0 +1,6 @@
+ATTEMPT: Assembling plan with channels.nsisMigration=false but windows-x86_64 in requiredTargets
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: target 'windows-x86_64' requires channels.nsisMigration to be true
+
+OUTDIR_EXISTS: false

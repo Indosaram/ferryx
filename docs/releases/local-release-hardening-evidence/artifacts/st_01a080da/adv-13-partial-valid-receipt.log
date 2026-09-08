@@ -1,0 +1,8 @@
+Receipt generated for partial build:
+Host:                macbook
+ExitCode:            0
+Artifacts count:     1
+Artifact kinds:      [ 'dmg' ]
+Missing kind:        macos-updater
+CRITICAL DEFECT: buildHost emitted and validated a partial receipt missing macos-updater with exitCode 0: true
+Exit: 0

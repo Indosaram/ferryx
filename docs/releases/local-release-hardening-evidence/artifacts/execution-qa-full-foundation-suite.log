@@ -1,0 +1,785 @@
+TAP version 13
+# Subtest: legacy CLI invocation fails closed with clear migration instructions
+ok 1 - legacy CLI invocation fails closed with clear migration instructions
+  ---
+  duration_ms: 233.087166
+  type: 'test'
+  ...
+# Subtest: assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+ok 2 - assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+  ---
+  duration_ms: 665.466834
+  type: 'test'
+  ...
+# Subtest: assembleRelease supports NSIS migration channel with windows updater target
+ok 3 - assembleRelease supports NSIS migration channel with windows updater target
+  ---
+  duration_ms: 703.77425
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if outDir already exists
+ok 4 - assembleRelease fails closed if outDir already exists
+  ---
+  duration_ms: 354.131083
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on signature verification failure
+ok 5 - assembleRelease fails closed and leaves no partial output on signature verification failure
+  ---
+  duration_ms: 241.903208
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+ok 6 - assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+  ---
+  duration_ms: 190.03
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+ok 7 - assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+  ---
+  duration_ms: 145.879333
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if receipts directory contains unexpected files
+ok 8 - assembleRelease fails closed if receipts directory contains unexpected files
+  ---
+  duration_ms: 164.561041
+  type: 'test'
+  ...
+# Subtest: assembleRelease rejects path traversal and symlink escape outside artifacts root
+ok 9 - assembleRelease rejects path traversal and symlink escape outside artifacts root
+  ---
+  duration_ms: 237.632709
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if macos-updater archive layout is invalid
+ok 10 - assembleRelease fails closed if macos-updater archive layout is invalid
+  ---
+  duration_ms: 425.030459
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+ok 11 - assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+  ---
+  duration_ms: 468.995916
+  type: 'test'
+  ...
+# Subtest: assembleRelease CLI execution works end-to-end via subprocess
+ok 12 - assembleRelease CLI execution works end-to-end via subprocess
+  ---
+  duration_ms: 766.845917
+  type: 'test'
+  ...
+# Subtest: real repo signed archive verifies against checked-in Tauri public key
+ok 13 - real repo signed archive verifies against checked-in Tauri public key
+  ---
+  duration_ms: 3.682375
+  type: 'test'
+  ...
+# Subtest: signature mutation during staging cannot publish a mismatched signature file
+ok 14 - signature mutation during staging cannot publish a mismatched signature file
+  ---
+  duration_ms: 344.530333
+  type: 'test'
+  ...
+# Subtest: archive layout is checked against staged bytes rather than a mutable source
+ok 15 - archive layout is checked against staged bytes rather than a mutable source
+  ---
+  duration_ms: 501.369958
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+ok 16 - build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+  ---
+  duration_ms: 1.570917
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+ok 17 - build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+  ---
+  duration_ms: 3.69775
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: verifies binary version against expected app version
+ok 18 - build-msix.ps1: verifies binary version against expected app version
+  ---
+  duration_ms: 0.249166
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces isolated fresh staging and fails closed if output already exists
+ok 19 - build-msix.ps1: enforces isolated fresh staging and fails closed if output already exists
+  ---
+  duration_ms: 1.100583
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+ok 20 - build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+  ---
+  duration_ms: 0.750916
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+ok 21 - build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+  ---
+  duration_ms: 0.289292
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+ok 22 - build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+  ---
+  duration_ms: 0.426458
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, Publisher, ProcessorArchitecture=x64)
+ok 23 - build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, Publisher, ProcessorArchitecture=x64)
+  ---
+  duration_ms: 1.044541
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid standard plan without NSIS migration
+ok 24 - parsePlan accepts valid standard plan without NSIS migration
+  ---
+  duration_ms: 38.935542
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+ok 25 - parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+  ---
+  duration_ms: 0.389542
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects unknown top-level properties and schema URLs
+ok 26 - parsePlan rejects unknown top-level properties and schema URLs
+  ---
+  duration_ms: 63.684958
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects missing required plan properties
+ok 27 - parsePlan rejects missing required plan properties
+  ---
+  duration_ms: 0.310959
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects schemaVersion other than 1
+ok 28 - parsePlan rejects schemaVersion other than 1
+  ---
+  duration_ms: 0.351125
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects non-canonical or invalid calendar tags
+ok 29 - parsePlan rejects non-canonical or invalid calendar tags
+  ---
+  duration_ms: 0.412333
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects appVersion or msixVersion mismatch with tag
+ok 30 - parsePlan rejects appVersion or msixVersion mismatch with tag
+  ---
+  duration_ms: 0.468708
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects target/channel inconsistency
+ok 31 - parsePlan rejects target/channel inconsistency
+  ---
+  duration_ms: 0.433542
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects duplicate targets in requiredTargets
+ok 32 - parsePlan rejects duplicate targets in requiredTargets
+  ---
+  duration_ms: 0.907041
+  type: 'test'
+  ...
+# Subtest: parsePlan validates toolchains strict keys
+ok 33 - parsePlan validates toolchains strict keys
+  ---
+  duration_ms: 1.106708
+  type: 'test'
+  ...
+# Subtest: parsePlan validates sourceDateEpoch and createdAt
+ok 34 - parsePlan validates sourceDateEpoch and createdAt
+  ---
+  duration_ms: 1.241416
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns standard 5 kinds without NSIS migration
+ok 35 - requiredKinds returns standard 5 kinds without NSIS migration
+  ---
+  duration_ms: 0.226084
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns 6 kinds when nsisMigration is true
+ok 36 - requiredKinds returns 6 kinds when nsisMigration is true
+  ---
+  duration_ms: 0.144042
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts valid host receipts bound to plan
+ok 37 - parseReceipt accepts valid host receipts bound to plan
+  ---
+  duration_ms: 1.30925
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown receipt properties or schema URLs
+ok 38 - parseReceipt rejects unknown receipt properties or schema URLs
+  ---
+  duration_ms: 0.339583
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects non-zero exitCode
+ok 39 - parseReceipt rejects non-zero exitCode
+  ---
+  duration_ms: 0.1355
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+ok 40 - parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+  ---
+  duration_ms: 0.241583
+  type: 'test'
+  ...
+# Subtest: parseReceipt enforces host-to-kind bindings
+ok 41 - parseReceipt enforces host-to-kind bindings
+  ---
+  duration_ms: 0.634083
+  type: 'test'
+  ...
+# Subtest: parseReceipt validates targets against artifact kind
+ok 42 - parseReceipt validates targets against artifact kind
+  ---
+  duration_ms: 0.438875
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unsafe relative paths and path traversal
+ok 43 - parseReceipt rejects unsafe relative paths and path traversal
+  ---
+  duration_ms: 0.353833
+  type: 'test'
+  ...
+# Subtest: parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+ok 44 - parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+  ---
+  duration_ms: 1.621708
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects duplicate artifact kinds within a receipt
+ok 45 - parseReceipt rejects duplicate artifact kinds within a receipt
+  ---
+  duration_ms: 0.243166
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts optional valid toolchains in receipt
+ok 46 - parseReceipt accepts optional valid toolchains in receipt
+  ---
+  duration_ms: 0.16075
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown toolchains property or credentials in receipt
+ok 47 - parseReceipt rejects unknown toolchains property or credentials in receipt
+  ---
+  duration_ms: 0.176375
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects invalid toolchain field types in receipt
+ok 48 - parseReceipt rejects invalid toolchain field types in receipt
+  ---
+  duration_ms: 0.149
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: accepts canonical valid host config
+ok 49 - validateHostConfig: accepts canonical valid host config
+  ---
+  duration_ms: 6.983458
+  type: 'test'
+  ...
+# Subtest: loadHostConfig: successfully loads and parses example config file
+ok 50 - loadHostConfig: successfully loads and parses example config file
+  ---
+  duration_ms: 1.060917
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects non-object configs
+ok 51 - validateHostConfig: rejects non-object configs
+  ---
+  duration_ms: 1.279583
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects missing or invalid schemaVersion
+ok 52 - validateHostConfig: rejects missing or invalid schemaVersion
+  ---
+  duration_ms: 0.194916
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects invalid repo
+ok 53 - validateHostConfig: rejects invalid repo
+  ---
+  duration_ms: 0.487208
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects relative repository or ghosttyRepository paths
+ok 54 - validateHostConfig: rejects relative repository or ghosttyRepository paths
+  ---
+  duration_ms: 0.808916
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects missing required hosts or unknown hosts
+ok 55 - validateHostConfig: rejects missing required hosts or unknown hosts
+  ---
+  duration_ms: 2.796459
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects unknown root properties
+ok 56 - validateHostConfig: rejects unknown root properties
+  ---
+  duration_ms: 0.188667
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects secrets, tokens, or credential fields in keys and values
+ok 57 - validateHostConfig: rejects secrets, tokens, or credential fields in keys and values
+  ---
+  duration_ms: 0.985666
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: enforces ssh null on macbook and non-empty destination on remotes
+ok 58 - validateHostConfig: enforces ssh null on macbook and non-empty destination on remotes
+  ---
+  duration_ms: 0.847542
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: enforces platform match per host
+ok 59 - validateHostConfig: enforces platform match per host
+  ---
+  duration_ms: 0.343
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: validates build root path rules
+ok 60 - validateHostConfig: validates build root path rules
+  ---
+  duration_ms: 0.261542
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: enforces positive integer minFreeBytes
+ok 61 - validateHostConfig: enforces positive integer minFreeBytes
+  ---
+  duration_ms: 0.246917
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: rejects notaryProfile and signingIdentity on non-darwin hosts
+ok 62 - validateHostConfig: rejects notaryProfile and signingIdentity on non-darwin hosts
+  ---
+  duration_ms: 0.238875
+  type: 'test'
+  ...
+# Subtest: validateHostConfig: validates expectedTools schema
+ok 63 - validateHostConfig: validates expectedTools schema
+  ---
+  duration_ms: 0.278416
+  type: 'test'
+  ...
+# Subtest: quoteSh: correctly handles POSIX quoting edge cases
+ok 64 - quoteSh: correctly handles POSIX quoting edge cases
+  ---
+  duration_ms: 0.119125
+  type: 'test'
+  ...
+# Subtest: quotePowerShell: correctly handles PowerShell quoting without JS backslash escapes
+ok 65 - quotePowerShell: correctly handles PowerShell quoting without JS backslash escapes
+  ---
+  duration_ms: 0.083792
+  type: 'test'
+  ...
+# Subtest: runProcess: captures stdout and stderr on clean exit
+ok 66 - runProcess: captures stdout and stderr on clean exit
+  ---
+  duration_ms: 280.333042
+  type: 'test'
+  ...
+# Subtest: runProcess: passes stdin input to child process
+ok 67 - runProcess: passes stdin input to child process
+  ---
+  duration_ms: 356.486958
+  type: 'test'
+  ...
+# Subtest: runProcess: subscribes to error/exit BEFORE writing input
+ok 68 - runProcess: subscribes to error/exit BEFORE writing input
+  ---
+  duration_ms: 248.828375
+  type: 'test'
+  ...
+# Subtest: runProcess: rejects non-zero exit with ProcessExecutionError and does not echo env secrets
+ok 69 - runProcess: rejects non-zero exit with ProcessExecutionError and does not echo env secrets
+  ---
+  duration_ms: 408.374833
+  type: 'test'
+  ...
+# Subtest: runProcess: enforces bounded timeout and terminates hanging child process tree
+ok 70 - runProcess: enforces bounded timeout and terminates hanging child process tree
+  ---
+  duration_ms: 379.831125
+  type: 'test'
+  ...
+# Subtest: runHostScript: macbook runs locally via bash -s and uname succeeds
+ok 71 - runHostScript: macbook runs locally via bash -s and uname succeeds
+  ---
+  duration_ms: 155.2045
+  type: 'test'
+  ...
+# Subtest: runHostScript: macbook fails closed on script non-zero exit
+ok 72 - runHostScript: macbook fails closed on script non-zero exit
+  ---
+  duration_ms: 47.837583
+  type: 'test'
+  ...
+# Subtest: runHostScript: omaki Linux SSH transport invokes BatchMode and bash -s via executable SSH fixture
+ok 73 - runHostScript: omaki Linux SSH transport invokes BatchMode and bash -s via executable SSH fixture
+  ---
+  duration_ms: 592.228042
+  type: 'test'
+  ...
+# Subtest: runHostScript: maho-win Windows SSH transport invokes base64 UTF16LE EncodedCommand via executable SSH fixture
+ok 74 - runHostScript: maho-win Windows SSH transport invokes base64 UTF16LE EncodedCommand via executable SSH fixture
+  ---
+  duration_ms: 931.650875
+  type: 'test'
+  ...
+# Subtest: runHostScript: rejects invalid script requests for host platform
+ok 75 - runHostScript: rejects invalid script requests for host platform
+  ---
+  duration_ms: 0.780917
+  type: 'test'
+  ...
+# Subtest: runHostScript: live read-only remote smoke probe (if available)
+ok 76 - runHostScript: live read-only remote smoke probe (if available)
+  ---
+  duration_ms: 3670.642792
+  type: 'test'
+  ...
+# Subtest: release-local CLI: --help outputs usage and exits 0
+ok 77 - release-local CLI: --help outputs usage and exits 0
+  ---
+  duration_ms: 370.261166
+  type: 'test'
+  ...
+# Subtest: release-local: importing module has no side effects
+ok 78 - release-local: importing module has no side effects
+  ---
+  duration_ms: 11.073167
+  type: 'test'
+  ...
+# Subtest: release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+ok 79 - release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+  ---
+  duration_ms: 4028.756709
+  type: 'test'
+  ...
+# Subtest: prepare: rejects invalid calendar date tags and revision overflow
+ok 80 - prepare: rejects invalid calendar date tags and revision overflow
+  ---
+  duration_ms: 1573.643416
+  type: 'test'
+  ...
+# Subtest: prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+ok 81 - prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+  ---
+  duration_ms: 1585.170041
+  type: 'test'
+  ...
+# Subtest: preflight: exits non-zero and reports failure when disk budget is unmet
+ok 82 - preflight: exits non-zero and reports failure when disk budget is unmet
+  ---
+  duration_ms: 4162.441958
+  type: 'test'
+  ...
+# Subtest: verify: detects tampered artifacts and altered receipts
+ok 83 - verify: detects tampered artifacts and altered receipts
+  ---
+  duration_ms: 8.036875
+  type: 'test'
+  ...
+# Subtest: publish: enforces double approval gate and rejects unapproved invocation
+ok 84 - publish: enforces double approval gate and rejects unapproved invocation
+  ---
+  duration_ms: 3.11725
+  type: 'test'
+  ...
+# Subtest: publish: full pipeline with fake gh executable and byte verification
+ok 85 - publish: full pipeline with fake gh executable and byte verification
+  ---
+  duration_ms: 1501.753375
+  type: 'test'
+  ...
+# Subtest: verify-remote: verifies release availability against local HTTP server
+ok 86 - verify-remote: verifies release availability against local HTTP server
+  ---
+  duration_ms: 126.762083
+  type: 'test'
+  ...
+# Cloning into '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bundle-test-oRBErG/clone-test'...
+# Subtest: release-platforms: exports required APIs
+ok 87 - release-platforms: exports required APIs
+  ---
+  duration_ms: 0.936292
+  type: 'test'
+  ...
+# Subtest: probeMacbook: correctly inspects disk budget and detects insufficiency
+ok 88 - probeMacbook: correctly inspects disk budget and detects insufficiency
+  ---
+  duration_ms: 2572.190458
+  type: 'test'
+  ...
+# Subtest: probeMacbook: passes disk check when budget is conservative
+ok 89 - probeMacbook: passes disk check when budget is conservative
+  ---
+  duration_ms: 2207.975458
+  type: 'test'
+  ...
+# Subtest: createGitBundles: produces valid standalone git bundles and sha256 digests
+ok 90 - createGitBundles: produces valid standalone git bundles and sha256 digests
+  ---
+  duration_ms: 3108.032375
+  type: 'test'
+  ...
+# Subtest: createBuildReceipt: creates valid receipt conforming to release contract
+ok 91 - createBuildReceipt: creates valid receipt conforming to release contract
+  ---
+  duration_ms: 3.685291
+  type: 'test'
+  ...
+# Subtest: buildHost: rejects unknown host or missing run directory
+ok 92 - buildHost: rejects unknown host or missing run directory
+  ---
+  duration_ms: 0.883
+  type: 'test'
+  ...
+# Subtest: buildHost: fails closed if workspace already exists on host
+ok 93 - buildHost: fails closed if workspace already exists on host
+  ---
+  duration_ms: 5.633167
+  type: 'test'
+  ...
+# Subtest: buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+ok 94 - buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+  ---
+  duration_ms: 5.772291
+  type: 'test'
+  ...
+# Subtest: actual current producer fixture is rejected by parsed-policy validator
+ok 95 - actual current producer fixture is rejected by parsed-policy validator
+  ---
+  duration_ms: 247.742667
+  type: 'test'
+  ...
+# Subtest: manual release producer fixture (workflow_dispatch) is rejected
+ok 96 - manual release producer fixture (workflow_dispatch) is rejected
+  ---
+  duration_ms: 49.426
+  type: 'test'
+  ...
+# Subtest: tag release producer fixture (push.tags) is rejected
+ok 97 - tag release producer fixture (push.tags) is rejected
+  ---
+  duration_ms: 165.729125
+  type: 'test'
+  ...
+# Subtest: callable release producer fixture (workflow_call) is rejected
+ok 98 - callable release producer fixture (workflow_call) is rejected
+  ---
+  duration_ms: 93.626708
+  type: 'test'
+  ...
+# Subtest: reusable release producer fixture (workflow_call with release signing secrets) is rejected
+ok 99 - reusable release producer fixture (workflow_call with release signing secrets) is rejected
+  ---
+  duration_ms: 108.2885
+  type: 'test'
+  ...
+# Subtest: rejects 'bun tauri build' release entry point fixture
+ok 100 - rejects 'bun tauri build' release entry point fixture
+  ---
+  duration_ms: 188.241166
+  type: 'test'
+  ...
+# Subtest: rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+ok 101 - rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+  ---
+  duration_ms: 57.870041
+  type: 'test'
+  ...
+# Subtest: rejects 'tauri-apps/tauri-action' action in step uses
+ok 102 - rejects 'tauri-apps/tauri-action' action in step uses
+  ---
+  duration_ms: 73.901084
+  type: 'test'
+  ...
+# Subtest: rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+ok 103 - rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+  ---
+  duration_ms: 303.740708
+  type: 'test'
+  ...
+# Subtest: rejects reusable job uses of release workflows and secrets: inherit
+ok 104 - rejects reusable job uses of release workflows and secrets: inherit
+  ---
+  duration_ms: 236.539458
+  type: 'test'
+  ...
+# Subtest: PR check workflow (.github/workflows/build-test.yml) complies with release policy
+ok 105 - PR check workflow (.github/workflows/build-test.yml) complies with release policy
+  ---
+  duration_ms: 246.53375
+  type: 'test'
+  ...
+# Subtest: Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+ok 106 - Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+  ---
+  duration_ms: 160.768916
+  type: 'test'
+  ...
+# Subtest: PR check workflow wires the release workflow policy check
+ok 107 - PR check workflow wires the release workflow policy check
+  ---
+  duration_ms: 0.452584
+  type: 'test'
+  ...
+# Subtest: Windows CI links the native binary before a release tag
+ok 108 - Windows CI links the native binary before a release tag
+  ---
+  duration_ms: 0.232541
+  type: 'test'
+  ...
+# Subtest: hosted release producer .github/workflows/release.yml is absent from disk
+ok 109 - hosted release producer .github/workflows/release.yml is absent from disk
+  ---
+  duration_ms: 0.081708
+  type: 'test'
+  ...
+# Subtest: live repository .github/workflows directory complies fully with policy
+ok 110 - live repository .github/workflows directory complies fully with policy
+  ---
+  duration_ms: 156.584875
+  type: 'test'
+  ...
+# Subtest: a date tag maps to monotonic semver and leaves dependency versions untouched
+ok 111 - a date tag maps to monotonic semver and leaves dependency versions untouched
+  ---
+  duration_ms: 432.289417
+  type: 'test'
+  ...
+# Subtest: the JSON manifest keeps key order and a trailing newline
+ok 112 - the JSON manifest keeps key order and a trailing newline
+  ---
+  duration_ms: 365.806833
+  type: 'test'
+  ...
+# Subtest: running twice with the same tag is idempotent
+ok 113 - running twice with the same tag is idempotent
+  ---
+  duration_ms: 1356.491041
+  type: 'test'
+  ...
+# Subtest: a semver tag is accepted
+ok 114 - a semver tag is accepted
+  ---
+  duration_ms: 402.783458
+  type: 'test'
+  ...
+# Subtest: date mapping is strictly monotonic across a revision, day, month, and year boundary
+ok 115 - date mapping is strictly monotonic across a revision, day, month, and year boundary
+  ---
+  duration_ms: 2014.077959
+  type: 'test'
+  ...
+# Subtest: a malformed tag fails loudly and leaves both manifests unchanged
+ok 116 - a malformed tag fails loudly and leaves both manifests unchanged
+  ---
+  duration_ms: 474.528917
+  type: 'test'
+  ...
+# Subtest: a missing tag reports usage instead of guessing
+ok 117 - a missing tag reports usage instead of guessing
+  ---
+  duration_ms: 405.084542
+  type: 'test'
+  ...
+# Subtest: importing sync-version.mjs has no side effects and exports canonical API
+ok 118 - importing sync-version.mjs has no side effects and exports canonical API
+  ---
+  duration_ms: 6.866125
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag handles valid CalVer tags with or without revision and leading v
+ok 119 - parseReleaseTag handles valid CalVer tags with or without revision and leading v
+  ---
+  duration_ms: 1.250042
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+ok 120 - parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+  ---
+  duration_ms: 1.318125
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+ok 121 - parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+  ---
+  duration_ms: 0.282417
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag enforces boundaries and leading zero rules
+ok 122 - parseReleaseTag enforces boundaries and leading zero rules
+  ---
+  duration_ms: 16.365292
+  type: 'test'
+  ...
+# Subtest: toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+ok 123 - toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+  ---
+  duration_ms: 1.744334
+  type: 'test'
+  ...
+# Subtest: syncVersion supports dryRun and returns version pair without modifying files
+ok 124 - syncVersion supports dryRun and returns version pair without modifying files
+  ---
+  duration_ms: 11.632041
+  type: 'test'
+  ...
+# Subtest: syncVersion writes atomically using sibling temp files and preserves dependencies
+ok 125 - syncVersion writes atomically using sibling temp files and preserves dependencies
+  ---
+  duration_ms: 3.558333
+  type: 'test'
+  ...
+# Subtest: syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+ok 126 - syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+  ---
+  duration_ms: 2.279042
+  type: 'test'
+  ...
+# Subtest: syncVersion rolls back first file replacement on synchronous second file failure
+ok 127 - syncVersion rolls back first file replacement on synchronous second file failure
+  ---
+  duration_ms: 8.529417
+  type: 'test'
+  ...
+# Subtest: syncVersion surfaces AggregateError with original and rollback failures when rollback fails
+ok 128 - syncVersion surfaces AggregateError with original and rollback failures when rollback fails
+  ---
+  duration_ms: 3.556541
+  type: 'test'
+  ...
+# Subtest: CLI rejects invalid calendar dates and impossible inputs
+ok 129 - CLI rejects invalid calendar dates and impossible inputs
+  ---
+  duration_ms: 663.883458
+  type: 'test'
+  ...
+1..129
+# tests 129
+# suites 0
+# pass 129
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 14436.661875

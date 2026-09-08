@@ -1,0 +1,13 @@
+RECEIPT_HOST: macbook
+TOOLCHAINS_OBSERVED: {
+  "node": "22.22.0",
+  "bun": "1.4.0",
+  "zig": "0.14.0",
+  "rust": "1.82.0",
+  "tauri": "2.3.0"
+}
+NODE: 22.22.0
+BUN: 1.4.0
+ZIG: 0.14.0
+RUST: 1.82.0
+TAURI: 2.3.0

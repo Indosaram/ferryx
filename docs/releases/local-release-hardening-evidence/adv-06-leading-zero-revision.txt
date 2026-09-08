@@ -1,0 +1,2 @@
+exitCode: 1
+stderr: Invalid release tag "v2026.09.08.01": leading zeros are not allowed in revision

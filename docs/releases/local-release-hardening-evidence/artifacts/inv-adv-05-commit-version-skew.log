@@ -1,0 +1,6 @@
+ATTEMPT: Receipt with skewed commitSha
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: commitSha mismatch: expected '5d5499806a1b207849778f488b4e3e7b821a751b', got '1111111111111111111111111111111111111111'
+
+OUTDIR_EXISTS: false

@@ -1,0 +1,3 @@
+ADVERSARIAL_TEST: Pre-existing destination directory
+ERROR_THROWN: Output directory already exists: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-adv-vqSQV3/pre-existing-out
+UNTOUCHABLE_EXISTS: true

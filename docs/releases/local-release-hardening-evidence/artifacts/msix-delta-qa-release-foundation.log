@@ -1,0 +1,382 @@
+TAP version 13
+# Subtest: build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+ok 1 - build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+  ---
+  duration_ms: 0.511584
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+ok 2 - build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+  ---
+  duration_ms: 0.534417
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: verifies binary version against expected app version
+ok 3 - build-msix.ps1: verifies binary version against expected app version
+  ---
+  duration_ms: 0.118916
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces isolated fresh staging and fails closed if output already exists
+ok 4 - build-msix.ps1: enforces isolated fresh staging and fails closed if output already exists
+  ---
+  duration_ms: 0.25975
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+ok 5 - build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+  ---
+  duration_ms: 0.218375
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+ok 6 - build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+  ---
+  duration_ms: 0.103833
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+ok 7 - build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+  ---
+  duration_ms: 0.132417
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, Publisher, ProcessorArchitecture=x64)
+ok 8 - build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, Publisher, ProcessorArchitecture=x64)
+  ---
+  duration_ms: 0.151709
+  type: 'test'
+  ...
+# Subtest: verifies authentic repo archive fixture with configured updater public key (Tauri base64 wrapped)
+ok 9 - verifies authentic repo archive fixture with configured updater public key (Tauri base64 wrapped)
+  ---
+  duration_ms: 2.958917
+  type: 'test'
+  ...
+# Subtest: verifies authentic repo archive fixture with raw un-wrapped Minisign text format
+ok 10 - verifies authentic repo archive fixture with raw un-wrapped Minisign text format
+  ---
+  duration_ms: 0.470167
+  type: 'test'
+  ...
+# Subtest: verifies authentic repo archive fixture with single-line base64 public key (56-char minisign -P format)
+ok 11 - verifies authentic repo archive fixture with single-line base64 public key (56-char minisign -P format)
+  ---
+  duration_ms: 0.3705
+  type: 'test'
+  ...
+# Subtest: supports data passed as Uint8Array or utf8 string
+ok 12 - supports data passed as Uint8Array or utf8 string
+  ---
+  duration_ms: 1.71525
+  type: 'test'
+  ...
+# Subtest: verifies independent ED (Blake2b-512 prehash) signatures across wrapped, text, and single-line formats
+ok 13 - verifies independent ED (Blake2b-512 prehash) signatures across wrapped, text, and single-line formats
+  ---
+  duration_ms: 0.78275
+  type: 'test'
+  ...
+# Subtest: verifies independent Ed (raw legacy Ed25519) signatures across wrapped, text, and single-line formats
+ok 14 - verifies independent Ed (raw legacy Ed25519) signatures across wrapped, text, and single-line formats
+  ---
+  duration_ms: 0.71675
+  type: 'test'
+  ...
+# Subtest: minisign CLI oracle validates independent Node-generated fixtures, and verifyMinisign validates CLI fixtures
+ok 15 - minisign CLI oracle validates independent Node-generated fixtures, and verifyMinisign validates CLI fixtures
+  ---
+  duration_ms: 19.370333
+  type: 'test'
+  ...
+# Subtest: rejects tampered data (single bit flip, truncation, appending)
+ok 16 - rejects tampered data (single bit flip, truncation, appending)
+  ---
+  duration_ms: 0.761625
+  type: 'test'
+  ...
+# Subtest: rejects tampered authentic repo archive fixture data
+ok 17 - rejects tampered authentic repo archive fixture data
+  ---
+  duration_ms: 0.566291
+  type: 'test'
+  ...
+# Subtest: rejects tampered payload signature bytes in line 2
+ok 18 - rejects tampered payload signature bytes in line 2
+  ---
+  duration_ms: 0.49475
+  type: 'test'
+  ...
+# Subtest: rejects tampered global/trusted comment signature bytes in line 4
+ok 19 - rejects tampered global/trusted comment signature bytes in line 4
+  ---
+  duration_ms: 0.35275
+  type: 'test'
+  ...
+# Subtest: rejects tampered key ID in signature (mismatched key ID)
+ok 20 - rejects tampered key ID in signature (mismatched key ID)
+  ---
+  duration_ms: 0.198084
+  type: 'test'
+  ...
+# Subtest: rejects tampered key ID in public key (mismatched key ID)
+ok 21 - rejects tampered key ID in public key (mismatched key ID)
+  ---
+  duration_ms: 0.282833
+  type: 'test'
+  ...
+# Subtest: rejects tampered trusted comment text in signature
+ok 22 - rejects tampered trusted comment text in signature
+  ---
+  duration_ms: 0.291
+  type: 'test'
+  ...
+# Subtest: strictly rejects arbitrary base64 strings (no arbitrary base64 acceptance)
+ok 23 - strictly rejects arbitrary base64 strings (no arbitrary base64 acceptance)
+  ---
+  duration_ms: 0.332875
+  type: 'test'
+  ...
+# Subtest: strictly rejects invalid or unsupported algorithms in public key and signature
+ok 24 - strictly rejects invalid or unsupported algorithms in public key and signature
+  ---
+  duration_ms: 0.247042
+  type: 'test'
+  ...
+# Subtest: strictly rejects invalid byte lengths for public key, payload signature, and global signature
+ok 25 - strictly rejects invalid byte lengths for public key, payload signature, and global signature
+  ---
+  duration_ms: 0.217334
+  type: 'test'
+  ...
+# Subtest: rejects malformed base64 encoding (invalid characters, invalid padding)
+ok 26 - rejects malformed base64 encoding (invalid characters, invalid padding)
+  ---
+  duration_ms: 0.526167
+  type: 'test'
+  ...
+# Subtest: rejects missing headers, truncated lines, or malformed input types
+ok 27 - rejects missing headers, truncated lines, or malformed input types
+  ---
+  duration_ms: 0.297459
+  type: 'test'
+  ...
+# Subtest: actual current producer fixture is rejected by parsed-policy validator
+ok 28 - actual current producer fixture is rejected by parsed-policy validator
+  ---
+  duration_ms: 15.585292
+  type: 'test'
+  ...
+# Subtest: manual release producer fixture (workflow_dispatch) is rejected
+ok 29 - manual release producer fixture (workflow_dispatch) is rejected
+  ---
+  duration_ms: 13.317459
+  type: 'test'
+  ...
+# Subtest: tag release producer fixture (push.tags) is rejected
+ok 30 - tag release producer fixture (push.tags) is rejected
+  ---
+  duration_ms: 13.027416
+  type: 'test'
+  ...
+# Subtest: callable release producer fixture (workflow_call) is rejected
+ok 31 - callable release producer fixture (workflow_call) is rejected
+  ---
+  duration_ms: 13.869
+  type: 'test'
+  ...
+# Subtest: reusable release producer fixture (workflow_call with release signing secrets) is rejected
+ok 32 - reusable release producer fixture (workflow_call with release signing secrets) is rejected
+  ---
+  duration_ms: 13.001
+  type: 'test'
+  ...
+# Subtest: rejects 'bun tauri build' release entry point fixture
+ok 33 - rejects 'bun tauri build' release entry point fixture
+  ---
+  duration_ms: 12.617375
+  type: 'test'
+  ...
+# Subtest: rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+ok 34 - rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+  ---
+  duration_ms: 12.958709
+  type: 'test'
+  ...
+# Subtest: rejects 'tauri-apps/tauri-action' action in step uses
+ok 35 - rejects 'tauri-apps/tauri-action' action in step uses
+  ---
+  duration_ms: 12.193417
+  type: 'test'
+  ...
+# Subtest: rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+ok 36 - rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+  ---
+  duration_ms: 14.224834
+  type: 'test'
+  ...
+# Subtest: rejects reusable job uses of release workflows and secrets: inherit
+ok 37 - rejects reusable job uses of release workflows and secrets: inherit
+  ---
+  duration_ms: 12.394583
+  type: 'test'
+  ...
+# Subtest: PR check workflow (.github/workflows/build-test.yml) complies with release policy
+ok 38 - PR check workflow (.github/workflows/build-test.yml) complies with release policy
+  ---
+  duration_ms: 13.563166
+  type: 'test'
+  ...
+# Subtest: Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+ok 39 - Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+  ---
+  duration_ms: 15.323541
+  type: 'test'
+  ...
+# Subtest: PR check workflow wires the release workflow policy check
+ok 40 - PR check workflow wires the release workflow policy check
+  ---
+  duration_ms: 0.241459
+  type: 'test'
+  ...
+# Subtest: Windows CI links the native binary before a release tag
+ok 41 - Windows CI links the native binary before a release tag
+  ---
+  duration_ms: 0.148042
+  type: 'test'
+  ...
+# Subtest: hosted release producer .github/workflows/release.yml is absent from disk
+ok 42 - hosted release producer .github/workflows/release.yml is absent from disk
+  ---
+  duration_ms: 0.054666
+  type: 'test'
+  ...
+# Subtest: live repository .github/workflows directory complies fully with policy
+ok 43 - live repository .github/workflows directory complies fully with policy
+  ---
+  duration_ms: 13.204542
+  type: 'test'
+  ...
+# Subtest: a date tag maps to monotonic semver and leaves dependency versions untouched
+ok 44 - a date tag maps to monotonic semver and leaves dependency versions untouched
+  ---
+  duration_ms: 30.471958
+  type: 'test'
+  ...
+# Subtest: the JSON manifest keeps key order and a trailing newline
+ok 45 - the JSON manifest keeps key order and a trailing newline
+  ---
+  duration_ms: 31.071709
+  type: 'test'
+  ...
+# Subtest: running twice with the same tag is idempotent
+ok 46 - running twice with the same tag is idempotent
+  ---
+  duration_ms: 56.367541
+  type: 'test'
+  ...
+# Subtest: a semver tag is accepted
+ok 47 - a semver tag is accepted
+  ---
+  duration_ms: 32.690875
+  type: 'test'
+  ...
+# Subtest: date mapping is strictly monotonic across a revision, day, month, and year boundary
+ok 48 - date mapping is strictly monotonic across a revision, day, month, and year boundary
+  ---
+  duration_ms: 151.013333
+  type: 'test'
+  ...
+# Subtest: a malformed tag fails loudly and leaves both manifests unchanged
+ok 49 - a malformed tag fails loudly and leaves both manifests unchanged
+  ---
+  duration_ms: 28.970875
+  type: 'test'
+  ...
+# Subtest: a missing tag reports usage instead of guessing
+ok 50 - a missing tag reports usage instead of guessing
+  ---
+  duration_ms: 27.773833
+  type: 'test'
+  ...
+# Subtest: importing sync-version.mjs has no side effects and exports canonical API
+ok 51 - importing sync-version.mjs has no side effects and exports canonical API
+  ---
+  duration_ms: 1.9
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag handles valid CalVer tags with or without revision and leading v
+ok 52 - parseReleaseTag handles valid CalVer tags with or without revision and leading v
+  ---
+  duration_ms: 0.494833
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+ok 53 - parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+  ---
+  duration_ms: 0.613125
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+ok 54 - parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+  ---
+  duration_ms: 0.184458
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag enforces boundaries and leading zero rules
+ok 55 - parseReleaseTag enforces boundaries and leading zero rules
+  ---
+  duration_ms: 0.234667
+  type: 'test'
+  ...
+# Subtest: toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+ok 56 - toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+  ---
+  duration_ms: 0.349417
+  type: 'test'
+  ...
+# Subtest: syncVersion supports dryRun and returns version pair without modifying files
+ok 57 - syncVersion supports dryRun and returns version pair without modifying files
+  ---
+  duration_ms: 0.993
+  type: 'test'
+  ...
+# Subtest: syncVersion writes atomically using sibling temp files and preserves dependencies
+ok 58 - syncVersion writes atomically using sibling temp files and preserves dependencies
+  ---
+  duration_ms: 1.120916
+  type: 'test'
+  ...
+# Subtest: syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+ok 59 - syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+  ---
+  duration_ms: 1.411625
+  type: 'test'
+  ...
+# Subtest: syncVersion rolls back first file replacement on synchronous second file failure
+ok 60 - syncVersion rolls back first file replacement on synchronous second file failure
+  ---
+  duration_ms: 1.542792
+  type: 'test'
+  ...
+# Subtest: syncVersion surfaces AggregateError with original and rollback failures when rollback fails
+ok 61 - syncVersion surfaces AggregateError with original and rollback failures when rollback fails
+  ---
+  duration_ms: 1.198791
+  type: 'test'
+  ...
+# Subtest: CLI rejects invalid calendar dates and impossible inputs
+ok 62 - CLI rejects invalid calendar dates and impossible inputs
+  ---
+  duration_ms: 84.217333
+  type: 'test'
+  ...
+1..62
+# tests 62
+# suites 0
+# pass 62
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 500.952292

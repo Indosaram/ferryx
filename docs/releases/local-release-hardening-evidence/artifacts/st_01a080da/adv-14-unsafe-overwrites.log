@@ -1,0 +1,3 @@
+Canary prior receipt overwritten without error: true
+CRITICAL DEFECT: buildHost silently clobbered existing build-receipt-macbook.json
+Exit: 0

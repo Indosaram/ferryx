@@ -1,0 +1,39 @@
+COMMAND: shasum -a 256 -c SHA256SUMS.txt (in /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-fIbljw/publish-shasum)
+EXIT_CODE: 0
+STDOUT:
+Ferryx.app.tar.gz: OK
+Ferryx.app.tar.gz.sig: OK
+Ferryx_2026.908.1.0_x64.msix: OK
+Ferryx_2026.908.1_amd64.AppImage: OK
+Ferryx_2026.908.1_amd64.AppImage.sig: OK
+Ferryx_2026.908.1_amd64.deb: OK
+Ferryx_2026.908.1_universal.dmg: OK
+Ferryx_amd64.AppImage: OK
+Ferryx_amd64.AppImage.sig: OK
+Ferryx_amd64.deb: OK
+Ferryx_universal.app.tar.gz: OK
+Ferryx_universal.app.tar.gz.sig: OK
+Ferryx_universal.dmg: OK
+Ferryx_x64.msix: OK
+latest.json: OK
+
+STDERR:
+
+SHA256SUMS_CONTENT:
+bca16faf693fb677bb102a43642b12010154ad63e1bbfdbeae41df0774ba9ca9  Ferryx.app.tar.gz
+51dc24ff4857e04c9ce91fbc11508b20f530c07e035ac7ee7dd422f1ef872bc8  Ferryx.app.tar.gz.sig
+a3e91594dfe0995827f85eff4119fface3a9a3b54af312675607d0cb500925f2  Ferryx_2026.908.1.0_x64.msix
+6b1b9aaf27ab983de8b6ab048da6de556c5306a3b30d20b735ffa70c19b51c78  Ferryx_2026.908.1_amd64.AppImage
+ee8b8cea50f45d16b302baa9b4ab4e279c4d64338f140d2d5e42a315d0083d00  Ferryx_2026.908.1_amd64.AppImage.sig
+c4cc801778a3f6730fcc532fe654dd6d7e1150c17719b5f7ab92ca636a552805  Ferryx_2026.908.1_amd64.deb
+2ec0f6a24c891411d617ca6d19b0d904a713b962fb6df052b9145711e7c14868  Ferryx_2026.908.1_universal.dmg
+6b1b9aaf27ab983de8b6ab048da6de556c5306a3b30d20b735ffa70c19b51c78  Ferryx_amd64.AppImage
+ee8b8cea50f45d16b302baa9b4ab4e279c4d64338f140d2d5e42a315d0083d00  Ferryx_amd64.AppImage.sig
+c4cc801778a3f6730fcc532fe654dd6d7e1150c17719b5f7ab92ca636a552805  Ferryx_amd64.deb
+bca16faf693fb677bb102a43642b12010154ad63e1bbfdbeae41df0774ba9ca9  Ferryx_universal.app.tar.gz
+51dc24ff4857e04c9ce91fbc11508b20f530c07e035ac7ee7dd422f1ef872bc8  Ferryx_universal.app.tar.gz.sig
+2ec0f6a24c891411d617ca6d19b0d904a713b962fb6df052b9145711e7c14868  Ferryx_universal.dmg
+a3e91594dfe0995827f85eff4119fface3a9a3b54af312675607d0cb500925f2  Ferryx_x64.msix
+f5598b62c9e399328ef94a27cbb2a05fefeddca2201be8451aa89a512289d4eb  latest.json
+
+LATEST_JSON_INCLUDED: true

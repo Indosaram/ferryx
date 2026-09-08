@@ -1,0 +1,4 @@
+No flag, no env: Publication requires explicit --approve-publish flag
+With flag, no env: Publication requires FERRYX_APPROVE_PUBLISH=1 environment variable
+No flag, with env: Publication requires explicit --approve-publish flag
+Exit: 0

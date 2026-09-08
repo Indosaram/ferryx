@@ -1,0 +1,7 @@
+Incoming HTTP request: GET /releases/download/v2026.09.08.1/latest.json
+Incoming HTTP request: GET /releases/download/v2026.09.08.1/SHA256SUMS.txt
+verifyRemoteRelease result: {
+  "ok": true,
+  "tag": "v2026.09.08.1"
+}
+Exit: 0

@@ -1,0 +1,53 @@
+bun test v1.4.0 (34cbb9a40)
+
+scripts/release-local.test.mjs:
+(pass) release-local CLI: --help outputs usage and exits 0 [266.23ms]
+(pass) release-local: importing module has no side effects [55.49ms]
+(pass) release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true [2216.82ms]
+(pass) prepare: rejects invalid calendar date tags and revision overflow [1210.20ms]
+(pass) prepare: creates deterministic plan, prepare-state, and fails closed on clobber [1144.17ms]
+killed 1 dangling process
+175 |     const res = spawnSync("node", [SCRIPT_PATH, "preflight", "--config", configPath], {
+176 |       encoding: "utf8",
+177 |     });
+178 | 
+179 |     assert.notEqual(res.status, 0);
+180 |     assert.match(res.stdout, /"ok":\s*false/);
+                 ^
+AssertionError: The input did not match the regular expression /"ok":\s*false/. Input:
+
+''
+
+ generatedMessage: true,
+     actual: "",
+   expected: /"ok":\s*false/,
+   operator: "match",
+       diff: "simple",
+       code: "ERR_ASSERTION"
+
+      at /Users/indo/code/project/orca-lite/scripts/release-local.test.mjs:180:12
+      at run (node:async_hooks:99:29)
+      at node:test:1445:26
+      at executeTestNode (node:test:1448:45)
+      at node:test:1591:20
+(fail) preflight: exits non-zero and reports failure when disk budget is unmet [5022.26ms]
+  ^ this test timed out after 5000ms, before its done callback was called. If a done callback was not intended, remove the last parameter from the test callback function
+(pass) verify: detects tampered artifacts and altered receipts [5.00ms]
+(pass) publish: enforces double approval gate and rejects unapproved invocation [2.13ms]
+(pass) publish: full pipeline with fake gh executable and byte verification [1842.61ms]
+(pass) verify-remote: verifies release availability against local HTTP server [37.02ms]
+
+scripts/release-platforms.test.mjs:
+(pass) release-platforms: exports required APIs [0.11ms]
+(pass) probeMacbook: correctly inspects disk budget and detects insufficiency [2019.12ms]
+(pass) probeMacbook: passes disk check when budget is conservative [2252.53ms]
+Cloning into '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bundle-test-8XsnF9/clone-test'...
+(pass) createGitBundles: produces valid standalone git bundles and sha256 digests [3667.26ms]
+(pass) createBuildReceipt: creates valid receipt conforming to release contract [0.66ms]
+(pass) buildHost: rejects unknown host or missing run directory [0.34ms]
+(pass) buildHost: fails closed if workspace already exists on host [2.51ms]
+(pass) buildHost: executes builder fixture, stages artifacts, and writes valid receipt [11.69ms]
+
+ 17 pass
+ 1 fail
+Ran 18 tests across 2 files. [24.73s]

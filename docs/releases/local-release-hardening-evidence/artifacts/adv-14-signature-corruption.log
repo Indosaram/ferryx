@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Updater signature corruption
+ERROR_THROWN: Minisign verification failed for updater artifact 'Ferryx.app.tar.gz': Invalid signature line 2: expected 74 bytes, got 3

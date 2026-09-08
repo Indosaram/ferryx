@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Target platform collision / invalid target for host
+ERROR_THROWN: invalid target 'linux-x86_64' for kind 'macos-updater' (expected subset of [darwin-aarch64, darwin-x86_64])

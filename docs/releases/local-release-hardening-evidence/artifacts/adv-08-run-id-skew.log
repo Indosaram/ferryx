@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Receipt runId skew
+ERROR_THROWN: runId mismatch: expected 'rel-20260908-1', got 'rel-skewed-run-99'

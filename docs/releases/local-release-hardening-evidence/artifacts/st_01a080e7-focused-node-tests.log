@@ -1,0 +1,122 @@
+$ node --test scripts/release-local.test.mjs scripts/release-platforms.test.mjs
+TAP version 13
+# Subtest: release-local CLI: --help outputs usage and exits 0
+ok 1 - release-local CLI: --help outputs usage and exits 0
+  ---
+  duration_ms: 33.71925
+  type: 'test'
+  ...
+# Subtest: release-local: importing module has no side effects
+ok 2 - release-local: importing module has no side effects
+  ---
+  duration_ms: 2.4545
+  type: 'test'
+  ...
+# Subtest: release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+ok 3 - release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+  ---
+  duration_ms: 261.905125
+  type: 'test'
+  ...
+# Subtest: prepare: rejects invalid calendar date tags and revision overflow
+ok 4 - prepare: rejects invalid calendar date tags and revision overflow
+  ---
+  duration_ms: 156.640375
+  type: 'test'
+  ...
+# Subtest: prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+ok 5 - prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+  ---
+  duration_ms: 145.012583
+  type: 'test'
+  ...
+# Subtest: preflight: exits non-zero and reports failure when disk budget is unmet
+ok 6 - preflight: exits non-zero and reports failure when disk budget is unmet
+  ---
+  duration_ms: 1631.3575
+  type: 'test'
+  ...
+# Subtest: verify: detects tampered artifacts and altered receipts
+ok 7 - verify: detects tampered artifacts and altered receipts
+  ---
+  duration_ms: 2.444583
+  type: 'test'
+  ...
+# Subtest: publish: enforces double approval gate and rejects unapproved invocation
+ok 8 - publish: enforces double approval gate and rejects unapproved invocation
+  ---
+  duration_ms: 0.929958
+  type: 'test'
+  ...
+# Subtest: publish: full pipeline with fake gh executable and byte verification
+ok 9 - publish: full pipeline with fake gh executable and byte verification
+  ---
+  duration_ms: 517.780041
+  type: 'test'
+  ...
+# Subtest: verify-remote: verifies release availability against local HTTP server
+ok 10 - verify-remote: verifies release availability against local HTTP server
+  ---
+  duration_ms: 23.469833
+  type: 'test'
+  ...
+# Cloning into '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bundle-test-i5pI1r/clone-test'...
+# Subtest: release-platforms: exports required APIs
+ok 11 - release-platforms: exports required APIs
+  ---
+  duration_ms: 0.403292
+  type: 'test'
+  ...
+# Subtest: probeMacbook: correctly inspects disk budget and detects insufficiency
+ok 12 - probeMacbook: correctly inspects disk budget and detects insufficiency
+  ---
+  duration_ms: 736.9435
+  type: 'test'
+  ...
+# Subtest: probeMacbook: passes disk check when budget is conservative
+ok 13 - probeMacbook: passes disk check when budget is conservative
+  ---
+  duration_ms: 183.797291
+  type: 'test'
+  ...
+# Subtest: createGitBundles: produces valid standalone git bundles and sha256 digests
+ok 14 - createGitBundles: produces valid standalone git bundles and sha256 digests
+  ---
+  duration_ms: 655.000666
+  type: 'test'
+  ...
+# Subtest: createBuildReceipt: creates valid receipt conforming to release contract
+ok 15 - createBuildReceipt: creates valid receipt conforming to release contract
+  ---
+  duration_ms: 1.197541
+  type: 'test'
+  ...
+# Subtest: buildHost: rejects unknown host or missing run directory
+ok 16 - buildHost: rejects unknown host or missing run directory
+  ---
+  duration_ms: 0.391458
+  type: 'test'
+  ...
+# Subtest: buildHost: fails closed if workspace already exists on host
+ok 17 - buildHost: fails closed if workspace already exists on host
+  ---
+  duration_ms: 2.1405
+  type: 'test'
+  ...
+# Subtest: buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+ok 18 - buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+  ---
+  duration_ms: 3.906042
+  type: 'test'
+  ...
+1..18
+# tests 18
+# suites 0
+# pass 18
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2827.863916
+
+EXIT_STATUS=0

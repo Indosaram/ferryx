@@ -1,0 +1,8 @@
+ADV-1a exit: 1
+[release-workflow-policy] FAIL: Release policy violations detected!
+  - Disallowed permission in workflow-level permissions: write-all
+
+ADV-1b exit: 1
+[release-workflow-policy] FAIL: Release policy violations detected!
+  - Disallowed permission in job "check" permissions: contents: write
+

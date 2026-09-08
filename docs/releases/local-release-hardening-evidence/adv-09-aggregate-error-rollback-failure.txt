@@ -1,0 +1,4 @@
+isAggregateError: true
+errorCount: 2
+error0Code: EIO
+error1Code: EACCES

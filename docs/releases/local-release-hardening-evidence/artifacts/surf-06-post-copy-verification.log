@@ -1,0 +1,17 @@
+STAGED_COPY_COUNT: 14
+STAGED_COPIES:
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx.app.tar.gz: 424d69aab9fb28cdad52773e7612db8f384e6a13994f87bf95c971bdfeb31477 (396 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx.app.tar.gz.sig: 20024f3d4552c877ce78d90f9af6f2957cb0504a0aea13b55b512fe8f09dd13a (268 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_universal.app.tar.gz: 424d69aab9fb28cdad52773e7612db8f384e6a13994f87bf95c971bdfeb31477 (396 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_universal.app.tar.gz.sig: 20024f3d4552c877ce78d90f9af6f2957cb0504a0aea13b55b512fe8f09dd13a (268 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_2026.908.1_universal.dmg: 2ec0f6a24c891411d617ca6d19b0d904a713b962fb6df052b9145711e7c14868 (31 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_universal.dmg: 2ec0f6a24c891411d617ca6d19b0d904a713b962fb6df052b9145711e7c14868 (31 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_2026.908.1.0_x64.msix: a3e91594dfe0995827f85eff4119fface3a9a3b54af312675607d0cb500925f2 (36 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_x64.msix: a3e91594dfe0995827f85eff4119fface3a9a3b54af312675607d0cb500925f2 (36 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_2026.908.1_amd64.AppImage: 6b1b9aaf27ab983de8b6ab048da6de556c5306a3b30d20b735ffa70c19b51c78 (37 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_2026.908.1_amd64.AppImage.sig: 8e12e0554a730eabb8640b5e787e0487c9cae48abb8116af44087eb1cb15b09a (269 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_amd64.AppImage: 6b1b9aaf27ab983de8b6ab048da6de556c5306a3b30d20b735ffa70c19b51c78 (37 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_amd64.AppImage.sig: 8e12e0554a730eabb8640b5e787e0487c9cae48abb8116af44087eb1cb15b09a (269 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_2026.908.1_amd64.deb: c4cc801778a3f6730fcc532fe654dd6d7e1150c17719b5f7ab92ca636a552805 (34 bytes)
+/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-UpJDsz/.staging-publish-post-copy-check-abad6206d8e35ef7/Ferryx_amd64.deb: c4cc801778a3f6730fcc532fe654dd6d7e1150c17719b5f7ab92ca636a552805 (34 bytes)
+OUTDIR_EXISTS: true

@@ -1,0 +1,4 @@
+ADVERSARIAL_TEST: Fault injection at copy boundary
+ERROR_THROWN: Post-copy checksum verification failed for staged file 'Ferryx_2026.908.1_universal.dmg': expected 2ec0f6a24c891411d617ca6d19b0d904a713b962fb6df052b9145711e7c14868, got 0be2a7b41738f5c7bbf98bbe771705e86aacb47b7e2c99da32f323524b1c7ec8
+OUTDIR_EXISTS: false
+STAGING_DIR_LEAK: false

@@ -1,0 +1,5 @@
+prepare in CI rejected: Mutating release stage 'prepare' is forbidden under CI / GitHub Actions environment.
+assemble in CI rejected: Mutating release stage 'assemble' is forbidden under CI / GitHub Actions environment.
+publish in CI rejected: Mutating release stage 'publish' is forbidden under CI / GitHub Actions environment.
+ADV-COORD-01 VERIFIED PASS
+Exit: 0

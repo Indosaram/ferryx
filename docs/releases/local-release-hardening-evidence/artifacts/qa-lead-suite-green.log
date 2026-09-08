@@ -1,0 +1,238 @@
+TAP version 13
+# Subtest: legacy CLI invocation fails closed with clear migration instructions
+ok 1 - legacy CLI invocation fails closed with clear migration instructions
+  ---
+  duration_ms: 30.01075
+  type: 'test'
+  ...
+# Subtest: assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+ok 2 - assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+  ---
+  duration_ms: 49.711334
+  type: 'test'
+  ...
+# Subtest: assembleRelease supports NSIS migration channel with windows updater target
+ok 3 - assembleRelease supports NSIS migration channel with windows updater target
+  ---
+  duration_ms: 44.563042
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if outDir already exists
+ok 4 - assembleRelease fails closed if outDir already exists
+  ---
+  duration_ms: 10.35975
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on signature verification failure
+ok 5 - assembleRelease fails closed and leaves no partial output on signature verification failure
+  ---
+  duration_ms: 10.570667
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+ok 6 - assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+  ---
+  duration_ms: 10.235833
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+ok 7 - assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+  ---
+  duration_ms: 9.488667
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if receipts directory contains unexpected files
+ok 8 - assembleRelease fails closed if receipts directory contains unexpected files
+  ---
+  duration_ms: 9.67825
+  type: 'test'
+  ...
+# Subtest: assembleRelease rejects path traversal and symlink escape outside artifacts root
+ok 9 - assembleRelease rejects path traversal and symlink escape outside artifacts root
+  ---
+  duration_ms: 41.59625
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if macos-updater archive layout is invalid
+ok 10 - assembleRelease fails closed if macos-updater archive layout is invalid
+  ---
+  duration_ms: 37.569958
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+ok 11 - assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+  ---
+  duration_ms: 44.486
+  type: 'test'
+  ...
+# Subtest: assembleRelease CLI execution works end-to-end via subprocess
+ok 12 - assembleRelease CLI execution works end-to-end via subprocess
+  ---
+  duration_ms: 85.17225
+  type: 'test'
+  ...
+# Subtest: real repo signed archive verifies against checked-in Tauri public key
+ok 13 - real repo signed archive verifies against checked-in Tauri public key
+  ---
+  duration_ms: 0.56325
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid standard plan without NSIS migration
+ok 14 - parsePlan accepts valid standard plan without NSIS migration
+  ---
+  duration_ms: 1.214208
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+ok 15 - parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+  ---
+  duration_ms: 0.543709
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects unknown top-level properties and schema URLs
+ok 16 - parsePlan rejects unknown top-level properties and schema URLs
+  ---
+  duration_ms: 0.285916
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects missing required plan properties
+ok 17 - parsePlan rejects missing required plan properties
+  ---
+  duration_ms: 0.078959
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects schemaVersion other than 1
+ok 18 - parsePlan rejects schemaVersion other than 1
+  ---
+  duration_ms: 0.102208
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects non-canonical or invalid calendar tags
+ok 19 - parsePlan rejects non-canonical or invalid calendar tags
+  ---
+  duration_ms: 0.125792
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects appVersion or msixVersion mismatch with tag
+ok 20 - parsePlan rejects appVersion or msixVersion mismatch with tag
+  ---
+  duration_ms: 0.178208
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects target/channel inconsistency
+ok 21 - parsePlan rejects target/channel inconsistency
+  ---
+  duration_ms: 0.156916
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects duplicate targets in requiredTargets
+ok 22 - parsePlan rejects duplicate targets in requiredTargets
+  ---
+  duration_ms: 0.233375
+  type: 'test'
+  ...
+# Subtest: parsePlan validates toolchains strict keys
+ok 23 - parsePlan validates toolchains strict keys
+  ---
+  duration_ms: 0.425166
+  type: 'test'
+  ...
+# Subtest: parsePlan validates sourceDateEpoch and createdAt
+ok 24 - parsePlan validates sourceDateEpoch and createdAt
+  ---
+  duration_ms: 0.289667
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns standard 5 kinds without NSIS migration
+ok 25 - requiredKinds returns standard 5 kinds without NSIS migration
+  ---
+  duration_ms: 0.065958
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns 6 kinds when nsisMigration is true
+ok 26 - requiredKinds returns 6 kinds when nsisMigration is true
+  ---
+  duration_ms: 0.03725
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts valid host receipts bound to plan
+ok 27 - parseReceipt accepts valid host receipts bound to plan
+  ---
+  duration_ms: 0.493958
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown receipt properties or schema URLs
+ok 28 - parseReceipt rejects unknown receipt properties or schema URLs
+  ---
+  duration_ms: 0.112125
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects non-zero exitCode
+ok 29 - parseReceipt rejects non-zero exitCode
+  ---
+  duration_ms: 0.066667
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+ok 30 - parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+  ---
+  duration_ms: 0.108375
+  type: 'test'
+  ...
+# Subtest: parseReceipt enforces host-to-kind bindings
+ok 31 - parseReceipt enforces host-to-kind bindings
+  ---
+  duration_ms: 0.115834
+  type: 'test'
+  ...
+# Subtest: parseReceipt validates targets against artifact kind
+ok 32 - parseReceipt validates targets against artifact kind
+  ---
+  duration_ms: 0.131541
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unsafe relative paths and path traversal
+ok 33 - parseReceipt rejects unsafe relative paths and path traversal
+  ---
+  duration_ms: 0.10525
+  type: 'test'
+  ...
+# Subtest: parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+ok 34 - parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+  ---
+  duration_ms: 0.068125
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects duplicate artifact kinds within a receipt
+ok 35 - parseReceipt rejects duplicate artifact kinds within a receipt
+  ---
+  duration_ms: 0.064042
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts optional valid toolchains in receipt
+ok 36 - parseReceipt accepts optional valid toolchains in receipt
+  ---
+  duration_ms: 0.055334
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown toolchains property or credentials in receipt
+ok 37 - parseReceipt rejects unknown toolchains property or credentials in receipt
+  ---
+  duration_ms: 0.059167
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects invalid toolchain field types in receipt
+ok 38 - parseReceipt rejects invalid toolchain field types in receipt
+  ---
+  duration_ms: 0.062708
+  type: 'test'
+  ...
+1..38
+# tests 38
+# suites 0
+# pass 38
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 432.6755

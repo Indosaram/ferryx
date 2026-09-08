@@ -1,0 +1,234 @@
+$ nl -ba scripts/lib/release-platforms.mjs | ...
+   650	    });
+   651	  }
+   652	
+   653	  let toolchains = null;
+   654	  let exitCode = 0;
+   655	
+   656	  if (runner) {
+   657	    mkdirSync(workspaceDir, { recursive: true });
+   658	    const runResult = await runner({
+   659	      hostName,
+   660	      hostConfig,
+   661	      workspaceDir,
+   662	      artifactsOutDir,
+   663	      plan,
+   664	      approveNotarization,
+   665	    });
+   666	    exitCode = runResult?.exitCode ?? 0;
+   667	    toolchains = runResult?.toolchains ?? null;
+   668	  } else {
+   669	    // Real build dispatch
+   670	    if (hostName === "macbook") {
+   671	      mkdirSync(workspaceDir, { recursive: true });
+   672	      const isolatedSource = join(workspaceDir, "source");
+   673	      const isolatedGhostty = join(workspaceDir, "ghostty");
+   674	
+   675	      // Clone source & ghostty
+   676	      execFileSync("git", ["clone", sourceBundlePath, isolatedSource], { stdio: "pipe" });
+   677	      execFileSync("git", ["checkout", plan.commitSha], { cwd: isolatedSource, stdio: "pipe" });
+   678	      execFileSync("git", ["clone", ghosttyBundlePath, isolatedGhostty], { stdio: "pipe" });
+   679	
+   680	      const ghosttyTargetDir = join(isolatedSource, "src-tauri", "vendor", "ghostty");
+   681	      mkdirSync(dirname(ghosttyTargetDir), { recursive: true });
+   682	      execFileSync("cp", ["-R", isolatedGhostty, ghosttyTargetDir]);
+   683	
+   684	      // Stamp versions
+   685	      execFileSync("node", ["scripts/sync-version.mjs", "--tag", plan.tag], {
+   686	        cwd: isolatedSource,
+   687	        stdio: "pipe",
+   688	      });
+   689	
+   690	      // Frozen UI install
+   691	      execFileSync("bun", ["install", "--cwd", "ui", "--frozen-lockfile"], {
+   692	        cwd: isolatedSource,
+   693	        stdio: "pipe",
+   694	      });
+   695	
+   696	      // Build Darwin universal
+   697	      const buildEnv = {
+   698	        ...process.env,
+   699	        CARGO_TARGET_DIR: join(workspaceDir, "cargo-target"),
+   700	        SOURCE_DATE_EPOCH: String(plan.sourceDateEpoch),
+   701	      };
+   702	      if (hostConfig.signingIdentity) {
+   703	        buildEnv.APPLE_SIGNING_IDENTITY = hostConfig.signingIdentity;
+   704	      }
+   705	
+   706	      execFileSync(
+   707	        "bun",
+   708	        ["tauri", "build", "--target", "universal-apple-darwin", "--bundles", "dmg,app"],
+   709	        {
+   710	          cwd: isolatedSource,
+   711	          env: buildEnv,
+   712	          stdio: "pipe",
+   713	          timeout: timeoutMs,
+   714	        },
+   715	      );
+   716	
+   717	      // Collect artifacts into artifactsOutDir
+   718	      const bundleDir = join(
+   719	        workspaceDir,
+   720	        "cargo-target",
+   721	        "universal-apple-darwin",
+   722	        "release",
+   723	        "bundle",
+   724	      );
+   725	      const dmgDir = join(bundleDir, "dmg");
+   726	      if (existsSync(dmgDir)) {
+   727	        for (const file of readdirSync(dmgDir)) {
+   728	          if (file.endsWith(".dmg")) {
+   729	            execFileSync("cp", [join(dmgDir, file), artifactsOutDir]);
+   730	          }
+   731	        }
+   732	      }
+   733	      const macosDir = join(bundleDir, "macos");
+   734	      if (existsSync(macosDir)) {
+   735	        for (const file of readdirSync(macosDir)) {
+   736	          if (file.endsWith(".app.tar.gz") || file.endsWith(".app.tar.gz.sig")) {
+   737	            execFileSync("cp", [join(macosDir, file), artifactsOutDir]);
+   738	          }
+   739	        }
+   740	      }
+   741	    } else {
+   742	      throw new Error(`Real build for remote host '${hostName}' must be initiated by release coordinator.`);
+   743	    }
+   744	  }
+   745	
+   746	  if (exitCode !== 0) {
+   747	    throw new Error(`Build on host '${hostName}' failed with exit code ${exitCode}`);
+   748	  }
+
+$ nl -ba scripts/release-local.mjs | ...
+   250	  const resolvedRunDir = resolve(runDir);
+   251	
+   252	  // Validate run directory integrity
+   253	  const planFile = join(resolvedRunDir, "plan.json");
+   254	  const stateFile = join(resolvedRunDir, "prepare-state.json");
+   255	  if (!existsSync(planFile) || !existsSync(stateFile)) {
+   256	    throw new Error(`Run directory missing plan.json or prepare-state.json: ${runDir}`);
+   257	  }
+   258	
+   259	  const plan = parsePlan(readFileSync(planFile, "utf8"));
+   260	  const state = JSON.parse(readFileSync(stateFile, "utf8"));
+   261	
+   262	  const planDigest = createHash("sha256").update(readFileSync(planFile)).digest("hex");
+   263	  if (planDigest !== state.planDigest) {
+   264	    throw new Error("plan.json digest does not match prepare-state.json: plan was tampered with");
+   265	  }
+   266	
+   267	  return buildHost({
+   268	    hostName: host,
+   269	    config,
+   270	    runDir: resolvedRunDir,
+   271	    approveNotarization,
+   272	    runner,
+   273	  });
+   274	}
+   275	
+   276	/**
+   277	 * Assembles and verifies release manifest, deterministic aliases, and SHA256SUMS.txt.
+   278	 */
+   279	export function assembleReleaseRun({ runDir, pubkey = null }) {
+   280	  assertNotInCI("assemble");
+   281	
+   282	  if (!runDir) throw new Error("Missing required argument: --run");
+   283	  const resolvedRunDir = resolve(runDir);
+   284	
+   285	  const planPath = join(resolvedRunDir, "plan.json");
+   286	  const receiptsDir = join(resolvedRunDir, "receipts");
+   287	  const artifactsDir = join(resolvedRunDir, "artifacts");
+   288	  const outDir = join(resolvedRunDir, "publish");
+   289	
+   290	  return assembleRelease({
+   291	    planPath,
+   292	    receiptsDir,
+   293	    artifactsDir,
+   294	    outDir,
+   295	    publicKey: pubkey,
+   296	  });
+   297	}
+   298	
+   299	/**
+   300	 * Verifies assembled release inventory byte-for-byte against independent temp derivation.
+   301	 */
+   302	export async function verifyReleaseRun({ runDir, pubkey = null }) {
+   303	  if (!runDir) throw new Error("Missing required argument: --run");
+   304	  const resolvedRunDir = resolve(runDir);
+   305	
+   306	  const planPath = join(resolvedRunDir, "plan.json");
+   307	  if (!existsSync(planPath)) {
+   308	    throw new Error(`plan.json not found in run directory: ${runDir}`);
+   309	  }
+   310	  const plan = parsePlan(readFileSync(planPath, "utf8"));
+   360	    const origFiles = readdirSync(publishDir).sort();
+   361	    const tempFiles = readdirSync(tempPublish).sort();
+   362	    if (origFiles.length !== tempFiles.length) {
+   363	      throw new Error(
+   364	        `Published inventory length mismatch with fresh re-derivation: ${origFiles.length} vs ${tempFiles.length}`,
+   365	      );
+   366	    }
+   367	
+   368	    for (let i = 0; i < origFiles.length; i += 1) {
+   369	      const origName = origFiles[i];
+   370	      const tempName = tempFiles[i];
+   371	      if (origName !== tempName) {
+   372	        throw new Error(`Inventory file mismatch: '${origName}' vs '${tempName}'`);
+   373	      }
+   374	      const origBuf = readFileSync(join(publishDir, origName));
+   375	      const tempBuf = readFileSync(join(tempPublish, tempName));
+   376	      if (!origBuf.equals(tempBuf)) {
+   377	        throw new Error(`Byte-for-byte mismatch between published file and fresh derivation: ${origName}`);
+   378	      }
+   379	    }
+   380	  } finally {
+   381	    rmSync(tempDir, { recursive: true, force: true });
+   382	  }
+   383	
+   384	  return { ok: true, plan, files: Array.from(sumsMap.keys()) };
+   385	}
+   386	
+   387	/**
+   388	 * Publishes release assets to GitHub Release as draft, verifies bytes, and undrafts.
+   389	 */
+   390	export async function publishRelease({
+   391	  runDir,
+   392	  approvePublish = false,
+   393	  ghCommand = "gh",
+   394	  lsRemoteFn = null,
+   395	  env = process.env,
+   396	}) {
+   397	  assertNotInCI("publish");
+   398	
+   399	  if (!approvePublish) {
+   400	    throw new Error("Publication requires explicit --approve-publish flag");
+   401	  }
+   402	  if (env.FERRYX_APPROVE_PUBLISH !== "1") {
+   403	    throw new Error("Publication requires FERRYX_APPROVE_PUBLISH=1 environment variable");
+   404	  }
+   405	
+   406	  const resolvedRunDir = resolve(runDir);
+   407	  const planPath = join(resolvedRunDir, "plan.json");
+   408	  if (!existsSync(planPath)) {
+   409	    throw new Error(`plan.json not found in run directory: ${runDir}`);
+   410	  }
+   411	  const plan = parsePlan(readFileSync(planPath, "utf8"));
+   412	  const publishDir = join(resolvedRunDir, "publish");
+   413	  if (!existsSync(publishDir)) {
+   414	    throw new Error(`publish directory not found in run directory: ${runDir}`);
+   415	  }
+   416	
+   417	  // 1. Verify remote tag matches plan commitSha
+   418	  let lsRemoteOut = "";
+   419	  if (lsRemoteFn) {
+   420	    lsRemoteOut = await lsRemoteFn();
+   421	  } else {
+   422	    try {
+   423	      lsRemoteOut = execFileSync("git", ["ls-remote", "--tags", "origin", `refs/tags/${plan.tag}`], {
+   424	        encoding: "utf8",
+   425	      });
+   426	    } catch (err) {
+   427	      throw new Error(`Failed to query remote tags from origin: ${err.message}`);
+   428	    }
+   429	  }
+   430	

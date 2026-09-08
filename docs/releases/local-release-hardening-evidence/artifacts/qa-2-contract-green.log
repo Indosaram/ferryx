@@ -1,0 +1,142 @@
+TAP version 13
+# Subtest: parsePlan accepts valid standard plan without NSIS migration
+ok 1 - parsePlan accepts valid standard plan without NSIS migration
+  ---
+  duration_ms: 1.199166
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+ok 2 - parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+  ---
+  duration_ms: 0.137083
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects unknown top-level properties and schema URLs
+ok 3 - parsePlan rejects unknown top-level properties and schema URLs
+  ---
+  duration_ms: 0.739292
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects missing required plan properties
+ok 4 - parsePlan rejects missing required plan properties
+  ---
+  duration_ms: 0.139958
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects schemaVersion other than 1
+ok 5 - parsePlan rejects schemaVersion other than 1
+  ---
+  duration_ms: 0.180958
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects non-canonical or invalid calendar tags
+ok 6 - parsePlan rejects non-canonical or invalid calendar tags
+  ---
+  duration_ms: 0.206541
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects appVersion or msixVersion mismatch with tag
+ok 7 - parsePlan rejects appVersion or msixVersion mismatch with tag
+  ---
+  duration_ms: 0.212958
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects target/channel inconsistency
+ok 8 - parsePlan rejects target/channel inconsistency
+  ---
+  duration_ms: 0.174625
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects duplicate targets in requiredTargets
+ok 9 - parsePlan rejects duplicate targets in requiredTargets
+  ---
+  duration_ms: 0.22475
+  type: 'test'
+  ...
+# Subtest: parsePlan validates toolchains strict keys
+ok 10 - parsePlan validates toolchains strict keys
+  ---
+  duration_ms: 0.324
+  type: 'test'
+  ...
+# Subtest: parsePlan validates sourceDateEpoch and createdAt
+ok 11 - parsePlan validates sourceDateEpoch and createdAt
+  ---
+  duration_ms: 0.208833
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns standard 5 kinds without NSIS migration
+ok 12 - requiredKinds returns standard 5 kinds without NSIS migration
+  ---
+  duration_ms: 0.062875
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns 6 kinds when nsisMigration is true
+ok 13 - requiredKinds returns 6 kinds when nsisMigration is true
+  ---
+  duration_ms: 0.032791
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts valid host receipts bound to plan
+ok 14 - parseReceipt accepts valid host receipts bound to plan
+  ---
+  duration_ms: 0.453375
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown receipt properties or schema URLs
+ok 15 - parseReceipt rejects unknown receipt properties or schema URLs
+  ---
+  duration_ms: 0.096833
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects non-zero exitCode
+ok 16 - parseReceipt rejects non-zero exitCode
+  ---
+  duration_ms: 0.056
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+ok 17 - parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+  ---
+  duration_ms: 0.114375
+  type: 'test'
+  ...
+# Subtest: parseReceipt enforces host-to-kind bindings
+ok 18 - parseReceipt enforces host-to-kind bindings
+  ---
+  duration_ms: 0.110917
+  type: 'test'
+  ...
+# Subtest: parseReceipt validates targets against artifact kind
+ok 19 - parseReceipt validates targets against artifact kind
+  ---
+  duration_ms: 0.118416
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unsafe relative paths and path traversal
+ok 20 - parseReceipt rejects unsafe relative paths and path traversal
+  ---
+  duration_ms: 0.089875
+  type: 'test'
+  ...
+# Subtest: parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+ok 21 - parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+  ---
+  duration_ms: 0.057458
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects duplicate artifact kinds within a receipt
+ok 22 - parseReceipt rejects duplicate artifact kinds within a receipt
+  ---
+  duration_ms: 0.057666
+  type: 'test'
+  ...
+1..22
+# tests 22
+# suites 0
+# pass 22
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 52.933083

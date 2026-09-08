@@ -1,0 +1,42 @@
+COMMAND: node --test scripts/*.test.mjs
+EXIT_CODE: 0
+SUMMARY: # tests 98; # pass 98; # fail 0
+OUTPUT_SNIPPET:
+TAP version 13
+# Subtest: legacy CLI invocation fails closed with clear migration instructions
+ok 1 - legacy CLI invocation fails closed with clear migration instructions
+  ---
+  duration_ms: 32.353125
+  type: 'test'
+  ...
+# Subtest: assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+ok 2 - assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+  ---
+  duration_ms: 16.703208
+  type: 'test'
+  ...
+# Subtest: assembleRelease supports NSIS migration channel with windows updater target
+ok 3 - assembleRelease supports NSIS migration channel with windows updater target
+  ---
+  duration_ms: 9.080416
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if outDir already exists
+ok 4 - assembleRelease fails closed if outDir already exists
+  ---
+  duration_ms: 4.561417
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on signature verification failure
+ok 5 - assembleRelease fails closed and leaves no partial output on signature verification failure
+  ---
+  duration_ms: 5.822459
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+ok 6 - assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+  ---
+  duration_ms: 3.74925
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if a receipt has mismatched commitSha or

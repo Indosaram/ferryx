@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Updater payload tampering
+ERROR_THROWN: Artifact size mismatch for 'Ferryx.app.tar.gz': expected 400 bytes, found 407 bytes

@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Receipt non-zero exitCode
+ERROR_THROWN: exitCode must be 0, got 1

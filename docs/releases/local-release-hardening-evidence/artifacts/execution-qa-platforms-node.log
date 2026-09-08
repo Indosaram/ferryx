@@ -1,0 +1,59 @@
+TAP version 13
+# Cloning into '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bundle-test-HlWGYd/clone-test'...
+# Subtest: release-platforms: exports required APIs
+ok 1 - release-platforms: exports required APIs
+  ---
+  duration_ms: 0.917541
+  type: 'test'
+  ...
+# Subtest: probeMacbook: correctly inspects disk budget and detects insufficiency
+ok 2 - probeMacbook: correctly inspects disk budget and detects insufficiency
+  ---
+  duration_ms: 2187.352833
+  type: 'test'
+  ...
+# Subtest: probeMacbook: passes disk check when budget is conservative
+ok 3 - probeMacbook: passes disk check when budget is conservative
+  ---
+  duration_ms: 2581.453291
+  type: 'test'
+  ...
+# Subtest: createGitBundles: produces valid standalone git bundles and sha256 digests
+ok 4 - createGitBundles: produces valid standalone git bundles and sha256 digests
+  ---
+  duration_ms: 3599.106458
+  type: 'test'
+  ...
+# Subtest: createBuildReceipt: creates valid receipt conforming to release contract
+ok 5 - createBuildReceipt: creates valid receipt conforming to release contract
+  ---
+  duration_ms: 33.155125
+  type: 'test'
+  ...
+# Subtest: buildHost: rejects unknown host or missing run directory
+ok 6 - buildHost: rejects unknown host or missing run directory
+  ---
+  duration_ms: 0.917375
+  type: 'test'
+  ...
+# Subtest: buildHost: fails closed if workspace already exists on host
+ok 7 - buildHost: fails closed if workspace already exists on host
+  ---
+  duration_ms: 11.563875
+  type: 'test'
+  ...
+# Subtest: buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+ok 8 - buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+  ---
+  duration_ms: 23.1325
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 8982.5275

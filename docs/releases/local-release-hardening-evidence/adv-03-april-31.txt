@@ -1,0 +1,2 @@
+exitCode: 1
+stderr: Invalid calendar date in release tag "v2026.04.31": month 4 has 30 days, got day 31

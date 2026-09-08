@@ -1,0 +1,59 @@
+# Baseline RED test run for scripts/test-build-msix.ps1 on maho-win against unhardened scripts/build-msix.ps1
+# Executed on maho-win via SSH in isolated scratch directory C:\Users\sook\AppData\Local\Temp\ferryx-test-0e16508b9dab4c60bf5dab722d687ec5
+
+--- Test 1: Missing mandatory -ExePath parameter fails ---
+RESULT: FAIL - Expected error matching 'ExePath', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+
+--- Test 2: Non-existent -ExePath fails ---
+RESULT: PASS
+
+--- Test 3: Version quad with non-zero 4th component is rejected ---
+RESULT: FAIL - Expected error matching '4th quad component to be 0', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+
+--- Test 4: Invalid calendar date tag is rejected ---
+RESULT: FAIL - Expected error matching 'Invalid release day', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+
+--- Test 5: Binary version mismatch against expected app version fails ---
+RESULT: FAIL - Expected error matching 'Binary version.*does not match', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+
+--- Test 6: Stale output file is cleaned before packaging ---
+RESULT: FAIL - Stale output MSIX was NOT cleaned up before packaging!
+
+--- Test 7: Omitted -SkipSigning without -CertThumbprint fails ---
+RESULT: FAIL - Expected error matching 'Signing requested but no -CertThumbprint provided', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+
+--- Test 8: Unavailable certificate thumbprint fails ---
+RESULT: FAIL - Expected error matching 'not found in Cert:', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+
+--- Test 9: MakeAppx failure exit code is detected and reported ---
+RESULT: FAIL - Expected error matching 'MakeAppx.*failed with exit code', but caught: 'Exception calling "GetFullPath" with "1" argument(s): "The given path\'s format is not supported."'
+
+--- Test 10: Small valid fixture packs MSIX and validates packaged manifest ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Target Version : v2026.09.08.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-57dbd1b7f180402c93e00a81b586fa36\pack_out
+=======================================================
+[1/6] Normalized MSIX Quad Version: 2026.9.8.1
+[2/6] Found Windows SDK tools: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+RESULT: FAIL - build-msix.ps1 exited with non-zero exit code 1
+
+=======================================================
+Test Run Summary: Total=10, Passed=1, Failed=9
+=======================================================
+Failed Tests:
+ - Missing mandatory -ExePath parameter fails : Expected error matching 'ExePath', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+ - Version quad with non-zero 4th component is rejected : Expected error matching '4th quad component to be 0', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+ - Invalid calendar date tag is rejected : Expected error matching 'Invalid release day', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+ - Binary version mismatch against expected app version fails : Expected error matching 'Binary version.*does not match', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+ - Stale output file is cleaned before packaging : Stale output MSIX was NOT cleaned up before packaging!
+ - Omitted -SkipSigning without -CertThumbprint fails : Expected error matching 'Signing requested but no -CertThumbprint provided', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+ - Unavailable certificate thumbprint fails : Expected error matching 'not found in Cert:', but caught: 'ERROR: ferryx.exe not found in build targets. Run cargo build --release first.'
+ - MakeAppx failure exit code is detected and reported : Expected error matching 'MakeAppx.*failed with exit code', but caught: 'Exception calling "GetFullPath" with "1" argument(s): "The given path\'s format is not supported."'
+ - Small valid fixture packs MSIX and validates packaged manifest : build-msix.ps1 exited with non-zero exit code 1
+
+EXIT CODE: 1
+Cleaned up remote scratch dir.

@@ -1,0 +1,6 @@
+ATTEMPT: Assembling with unwhitelisted file in receipts directory
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Unexpected file in receipts directory: 'rogue-file.txt'
+
+OUTDIR_EXISTS: false

@@ -57,7 +57,7 @@ test("build-msix.ps1: verifies binary version against expected app version", () 
   );
 });
 
-test("build-msix.ps1: enforces isolated fresh staging and removes stale output before packing", () => {
+test("build-msix.ps1: enforces isolated fresh staging and fails closed if output already exists", () => {
   assert.match(
     scriptContent,
     /NewGuid\(\)|ferryx-msix-staging/i,
@@ -65,8 +65,13 @@ test("build-msix.ps1: enforces isolated fresh staging and removes stale output b
   );
   assert.match(
     scriptContent,
+    /Test-Path\s+(-Path\s+)?\$msixOutputFile[\s\S]*?(throw|Output package already exists|Refusing to overwrite)/i,
+    "Script must check if output MSIX exists and throw/fail closed instead of deleting it",
+  );
+  assert.doesNotMatch(
+    scriptContent,
     /Remove-Item\s+(-Path\s+)?\$msixOutputFile/i,
-    "Script must remove any pre-existing output MSIX before packing to prevent stale success",
+    "Script must not delete pre-existing output MSIX",
   );
 });
 
@@ -119,7 +124,7 @@ test("build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThu
   );
 });
 
-test("build-msix.ps1: validates packaged MSIX manifest version and name after pack", () => {
+test("build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, Publisher, ProcessorArchitecture=x64)", () => {
   assert.match(
     scriptContent,
     /System\.IO\.Compression\.ZipFile|OpenRead/i,
@@ -133,116 +138,16 @@ test("build-msix.ps1: validates packaged MSIX manifest version and name after pa
   assert.match(
     scriptContent,
     /\.Identity|\.Package\.Identity/i,
-    "Script must validate Identity Name and Version in the packaged manifest",
+    "Script must inspect Identity node in the packaged manifest",
   );
-});
-
-// Canonical version normalization contract test suite
-function canonicalizeVersion(raw) {
-  if (!raw || typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error("Version string cannot be empty.");
-  }
-  let v = raw.trim();
-  if (v.startsWith("v") || v.startsWith("V")) {
-    v = v.slice(1);
-  }
-
-  const dateMatch = v.match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:\.(\d+))?$/);
-  if (dateMatch) {
-    const year = Number(dateMatch[1]);
-    const month = Number(dateMatch[2]);
-    const day = Number(dateMatch[3]);
-    const rev = dateMatch[4] !== undefined ? Number(dateMatch[4]) : 0;
-
-    if (year < 2026) {
-      throw new Error(`Invalid release year: ${year}. Year must be >= 2026.`);
-    }
-    if (month < 1 || month > 12) {
-      throw new Error(`Invalid release month: ${month}.`);
-    }
-    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    if (day < 1 || day > daysInMonth) {
-      throw new Error(`Invalid release day: ${day} for month ${month} in year ${year}.`);
-    }
-    if (rev < 0 || rev > 65535) {
-      throw new Error(`Revision ${rev} out of range (0..65535).`);
-    }
-    const appMinor = month * 100 + day;
-    return {
-      appVersion: `${year}.${appMinor}.${rev}`,
-      msixVersion: `${year}.${appMinor}.${rev}.0`,
-    };
-  }
-
-  const parts = v.split(".");
-  if (parts.length === 4) {
-    for (const p of parts) {
-      if (!/^\d+$/.test(p)) throw new Error(`Version part '${p}' is not numeric.`);
-      const num = Number(p);
-      if (num < 0 || num > 65535) throw new Error(`Version part ${num} out of range (0..65535).`);
-    }
-    const [p0, p1, p2, p3] = parts.map(Number);
-    if (p3 !== 0) {
-      throw new Error(`MSIX Store packages require the 4th quad component to be 0 for Store ingestion (got revision ${p3}).`);
-    }
-    return {
-      appVersion: `${p0}.${p1}.${p2}`,
-      msixVersion: `${p0}.${p1}.${p2}.0`,
-    };
-  }
-
-  if (parts.length === 3) {
-    for (const p of parts) {
-      if (!/^\d+$/.test(p)) throw new Error(`Version part '${p}' is not numeric.`);
-      const num = Number(p);
-      if (num < 0 || num > 65535) throw new Error(`Version part ${num} out of range (0..65535).`);
-    }
-    const [p0, p1, p2] = parts.map(Number);
-    return {
-      appVersion: `${p0}.${p1}.${p2}`,
-      msixVersion: `${p0}.${p1}.${p2}.0`,
-    };
-  }
-
-  throw new Error(`Invalid version format '${raw}'.`);
-}
-
-test("version contract: maps date tags, semver, and quad versions correctly", () => {
-  const t1 = canonicalizeVersion("v2026.09.08.1");
-  assert.equal(t1.appVersion, "2026.908.1");
-  assert.equal(t1.msixVersion, "2026.908.1.0");
-
-  const t2 = canonicalizeVersion("v2026.09.08");
-  assert.equal(t2.appVersion, "2026.908.0");
-  assert.equal(t2.msixVersion, "2026.908.0.0");
-
-  const t3 = canonicalizeVersion("2026.908.1");
-  assert.equal(t3.appVersion, "2026.908.1");
-  assert.equal(t3.msixVersion, "2026.908.1.0");
-
-  const t4 = canonicalizeVersion("2026.908.1.0");
-  assert.equal(t4.appVersion, "2026.908.1");
-  assert.equal(t4.msixVersion, "2026.908.1.0");
-
-  const t5 = canonicalizeVersion("v2028.02.29");
-  assert.equal(t5.appVersion, "2028.229.0");
-  assert.equal(t5.msixVersion, "2028.229.0.0");
-});
-
-test("version contract: rejects non-zero 4th quad component for Store submission", () => {
-  assert.throws(
-    () => canonicalizeVersion("2026.908.1.5"),
-    /MSIX Store packages require the 4th quad component to be 0/,
+  assert.match(
+    scriptContent,
+    /Publisher/i,
+    "Script must validate Identity Publisher in the packaged manifest",
   );
-  assert.throws(
-    () => canonicalizeVersion("1.0.0.1"),
-    /MSIX Store packages require the 4th quad component to be 0/,
+  assert.match(
+    scriptContent,
+    /ProcessorArchitecture.*x64|x64.*ProcessorArchitecture/i,
+    "Script must validate Identity ProcessorArchitecture is x64 in the packaged manifest",
   );
-});
-
-test("version contract: rejects invalid calendar dates", () => {
-  assert.throws(() => canonicalizeVersion("v2026.02.29"), /Invalid release day/);
-  assert.throws(() => canonicalizeVersion("v2026.04.31"), /Invalid release day/);
-  assert.throws(() => canonicalizeVersion("v2026.13.01"), /Invalid release month/);
-  assert.throws(() => canonicalizeVersion("v2025.12.01"), /Year must be >= 2026/);
 });

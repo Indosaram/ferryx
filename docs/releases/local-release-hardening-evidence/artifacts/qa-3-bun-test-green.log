@@ -1,0 +1,19 @@
+bun test v1.4.0 (34cbb9a40)
+
+
+scripts/build-msix.test.mjs:
+(pass) build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing [3.26ms]
+(pass) build-msix.ps1: enforces canonical Store quad version contract (4th component = 0) [0.05ms]
+(pass) build-msix.ps1: verifies binary version against expected app version [0.33ms]
+(pass) build-msix.ps1: enforces isolated fresh staging and removes stale output before packing [0.04ms]
+(pass) build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool [0.03ms]
+(pass) build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback [0.04ms]
+(pass) build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload [0.02ms]
+(pass) build-msix.ps1: validates packaged MSIX manifest version and name after pack [0.43ms]
+(pass) version contract: maps date tags, semver, and quad versions correctly [0.57ms]
+(pass) version contract: rejects non-zero 4th quad component for Store submission [0.20ms]
+(pass) version contract: rejects invalid calendar dates [0.04ms]
+
+ 11 pass
+ 0 fail
+Ran 11 tests across 1 file. [328.00ms]

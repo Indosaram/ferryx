@@ -1,0 +1,3 @@
+SCENARIO-04 Independent ED Prehash:
+algorithm=ED
+result=true

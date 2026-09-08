@@ -1,0 +1,4 @@
+$ env -u CI -u GITHUB_ACTIONS node --input-type=module < assemble-tampered-digest recheck harness
+REJECTION=Missing expected build receipt file: 'build-receipt-macbook.json'
+DIGEST_REJECTED_FIRST=false
+EXIT_STATUS=0

@@ -1,0 +1,4 @@
+COMMAND: node scripts/assert-updater-archive-layout.mjs /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/qa-archive-check-7CqSPt/Ferryx.app.tar.gz
+EXIT_CODE: 0
+STDOUT: updater archive layout OK: 6 entries
+STDERR: 

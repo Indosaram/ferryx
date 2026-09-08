@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Updater forged trusted comment
+ERROR_THROWN: Minisign verification failed for updater artifact 'Ferryx.app.tar.gz': Minisign trusted comment signature verification failed

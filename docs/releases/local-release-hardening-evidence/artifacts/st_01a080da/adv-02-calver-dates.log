@@ -1,0 +1,6 @@
+Tag v2026.02.29 rejected with code 1: Error in prepare: Invalid calendar date in release tag "v2026.02.29": 2026 is not a leap year (February has 28 days)
+Tag v2026.13.01 rejected with code 1: Error in prepare: Invalid release tag "v2026.13.01": month must be 1..12, got 13
+Tag v2026.04.31 rejected with code 1: Error in prepare: Invalid calendar date in release tag "v2026.04.31": month 4 has 30 days, got day 31
+Tag v2025.12.31 rejected with code 1: Error in prepare: Invalid release tag "v2025.12.31": year must be >= 2026, got 2025
+Tag v2026.09.08.65536 rejected with code 1: Error in prepare: Invalid release tag "v2026.09.08.65536": revision must be 0..65535, got 65536
+Exit: 0

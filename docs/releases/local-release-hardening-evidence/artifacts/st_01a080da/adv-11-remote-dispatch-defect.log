@@ -1,0 +1,5 @@
+=== Testing buildRelease for host: omaki ===
+Omaki build result: Real build for remote host 'omaki' must be initiated by release coordinator.
+=== Testing buildRelease for host: maho-win ===
+Maho-win build result: Real build for remote host 'maho-win' must be initiated by release coordinator.
+Exit: 0

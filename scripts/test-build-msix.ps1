@@ -169,27 +169,60 @@ try {
     }
 
     # -------------------------------------------------------------
-    # Test 6: Stale output file is removed before packing
+    # Test 6: Existing OutputDir .msix fails closed preserving exact bytes
     # -------------------------------------------------------------
-    Run-Test "Stale output file is cleaned before packaging" {
+    Run-Test "Pre-existing output package fails closed and preserves existing file bytes" {
         $matchExe = Join-Path $scratchDir "match.exe"
         New-FakeExecutable -Path $matchExe -AssemblyVersion "2026.908.1.0" -FileVersion "2026.908.1.0" -ProductVersion "2026.908.1"
-        $outDir = Join-Path $scratchDir "out_stale"
+        $outDir = Join-Path $scratchDir "out_collision"
         New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-        $staleMsix = Join-Path $outDir "Ferryx_2026.908.1_x64.msix"
-        [System.IO.File]::WriteAllText($staleMsix, "stale garbage content")
+        $existingMsix = Join-Path $outDir "Ferryx_2026.908.1_x64.msix"
+        $originalBytes = [System.Text.Encoding]::UTF8.GetBytes("PREEXISTING_NONZERO_MSIX_PAYLOAD_BYTES_PRESERVED_EXACTLY_1234567890")
+        [System.IO.File]::WriteAllBytes($existingMsix, $originalBytes)
 
-        $bogusTemplate = Join-Path $scratchDir "bogus_manifest.xml"
-        [System.IO.File]::WriteAllText($bogusTemplate, "<InvalidXml")
+        $dummyTemplate = Join-Path $scratchDir "dummy_template_collision.xml"
+        [System.IO.File]::WriteAllText($dummyTemplate, @"
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="ProjectMaho.Ferryx" Publisher="CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36" Version="0.1.0.0" ProcessorArchitecture="x64" />
+</Package>
+"@)
 
+        $threw = $false
+        $capturedError = ""
         try {
-            & powershell.exe -NoProfile -NonInteractive -Command "& '$buildMsixScript' -ExePath '$matchExe' -Version '2026.908.1' -OutputDir '$outDir' -ManifestTemplate '$bogusTemplate' -SkipSigning" 2>&1 | Out-Null
-        } catch {}
+            $procOutput = & powershell.exe -NoProfile -NonInteractive -Command "& '$buildMsixScript' -ExePath '$matchExe' -Version '2026.908.1' -OutputDir '$outDir' -ManifestTemplate '$dummyTemplate' -SkipSigning" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $threw = $true
+                $capturedError = ($procOutput -join " ")
+            }
+        } catch {
+            $threw = $true
+            $capturedError = $_.Exception.Message
+            if (-not $capturedError -and $procOutput) {
+                $capturedError = ($procOutput -join " ")
+            }
+        }
 
-        if (Test-Path $staleMsix) {
-            $content = [System.IO.File]::ReadAllText($staleMsix)
-            if ($content -eq "stale garbage content") {
-                throw "Stale output MSIX was NOT cleaned up before packaging!"
+        if (-not $threw) {
+            throw "Expected script to fail on pre-existing output package, but it succeeded with exit code 0."
+        }
+        if ($capturedError -notmatch "Output package already exists|Refusing to overwrite") {
+            throw "Expected failure class matching 'Output package already exists', but caught: '$capturedError'"
+        }
+        if (-not (Test-Path -Path $existingMsix -PathType Leaf)) {
+            throw "Existing MSIX package was deleted! It must be preserved."
+        }
+        $currentBytes = [System.IO.File]::ReadAllBytes($existingMsix)
+        if ($currentBytes.Length -eq 0) {
+            throw "Existing MSIX package was truncated to 0 bytes!"
+        }
+        if ($currentBytes.Length -ne $originalBytes.Length) {
+            throw "Existing MSIX package byte length changed: expected $($originalBytes.Length), got $($currentBytes.Length)"
+        }
+        for ($i = 0; $i -lt $originalBytes.Length; $i++) {
+            if ($currentBytes[$i] -ne $originalBytes[$i]) {
+                throw "Existing MSIX package content changed at byte offset $i!"
             }
         }
     }
@@ -248,9 +281,9 @@ try {
     }
 
     # -------------------------------------------------------------
-    # Test 10: Real MakeAppx pack and zip manifest validation
+    # Test 10: Real MakeAppx pack and zip manifest validation (Name, Version, Publisher, ProcessorArchitecture)
     # -------------------------------------------------------------
-    Run-Test "Small valid fixture packs MSIX and validates packaged manifest" {
+    Run-Test "Small valid fixture packs MSIX and validates packaged manifest identity" {
         $validExe = Join-Path $scratchDir "ferryx.exe"
         New-FakeExecutable -Path $validExe -AssemblyVersion "2026.908.1.0" -FileVersion "2026.908.1.0" -ProductVersion "2026.908.1"
 
@@ -344,7 +377,117 @@ try {
         if ($id.Version -ne "2026.908.1.0") {
             throw "Expected Identity Version='2026.908.1.0', got '$($id.Version)'"
         }
-        Write-Host "MSIX successfully validated: $($id.Name) $($id.Version)"
+        if ($id.Publisher -ne "CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36") {
+            throw "Expected Identity Publisher='CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36', got '$($id.Publisher)'"
+        }
+        if ($id.ProcessorArchitecture -ne "x64") {
+            throw "Expected Identity ProcessorArchitecture='x64', got '$($id.ProcessorArchitecture)'"
+        }
+        Write-Host "MSIX successfully validated: $($id.Name) $($id.Version) $($id.Publisher) $($id.ProcessorArchitecture)"
+    }
+
+    # -------------------------------------------------------------
+    # Test 11: Packaged manifest with wrong Publisher fails closed
+    # -------------------------------------------------------------
+    Run-Test "Packaged manifest with wrong Publisher fails closed" {
+        $validExe = Join-Path $scratchDir "ferryx_wrong_pub.exe"
+        New-FakeExecutable -Path $validExe -AssemblyVersion "2026.908.1.0" -FileVersion "2026.908.1.0" -ProductVersion "2026.908.1"
+
+        $iconsDir = Join-Path $scratchDir "icons"
+
+        $manifestXml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+  <Identity Name="ProjectMaho.Ferryx" Publisher="CN=WRONG-UNAUTHORIZED-PUBLISHER" Version="0.1.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Ferryx</DisplayName>
+    <PublisherDisplayName>Project Maho</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+  <Resources><Resource Language="en-US" /></Resources>
+  <Applications>
+    <Application Id="Ferryx" Executable="ferryx.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Ferryx" Description="Ferryx" BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Square310x310Logo.png" Square310x310Logo="Assets\Square310x310Logo.png" Square71x71Logo="Assets\Square71x71Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+</Package>
+"@
+        $templatePath = Join-Path $scratchDir "AppxManifest_WrongPub.xml"
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($templatePath, $manifestXml, $utf8NoBom)
+
+        $packOutDir = Join-Path $scratchDir "pack_out_wrong_pub"
+        New-Item -ItemType Directory -Force -Path $packOutDir | Out-Null
+
+        Assert-Throws {
+            $output = & powershell.exe -NoProfile -NonInteractive -Command "& '$buildMsixScript' -ExePath '$validExe' -Version 'v2026.09.08.1' -OutputDir '$packOutDir' -ManifestTemplate '$templatePath' -IconsDir '$iconsDir' -SkipSigning" 2>&1
+            if ($LASTEXITCODE -eq 0) { throw "Expected non-zero exit code when packaged manifest has wrong Publisher" }
+            $fullErr = ($output -join " ")
+            throw "$fullErr"
+        } "Packaged manifest Identity Publisher.*does not match expected"
+    }
+
+    # -------------------------------------------------------------
+    # Test 12: Packaged manifest with wrong ProcessorArchitecture (arm64) fails closed
+    # -------------------------------------------------------------
+    Run-Test "Packaged manifest with wrong ProcessorArchitecture (arm64) fails closed" {
+        $validExe = Join-Path $scratchDir "ferryx_arm64.exe"
+        New-FakeExecutable -Path $validExe -AssemblyVersion "2026.908.1.0" -FileVersion "2026.908.1.0" -ProductVersion "2026.908.1"
+
+        $iconsDir = Join-Path $scratchDir "icons"
+
+        $manifestXml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+  <Identity Name="ProjectMaho.Ferryx" Publisher="CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36" Version="0.1.0.0" ProcessorArchitecture="arm64" />
+  <Properties>
+    <DisplayName>Ferryx</DisplayName>
+    <PublisherDisplayName>Project Maho</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+  <Resources><Resource Language="en-US" /></Resources>
+  <Applications>
+    <Application Id="Ferryx" Executable="ferryx.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Ferryx" Description="Ferryx" BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Square310x310Logo.png" Square310x310Logo="Assets\Square310x310Logo.png" Square71x71Logo="Assets\Square71x71Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+</Package>
+"@
+        $templatePath = Join-Path $scratchDir "AppxManifest_Arm64.xml"
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($templatePath, $manifestXml, $utf8NoBom)
+
+        $packOutDir = Join-Path $scratchDir "pack_out_arm64"
+        New-Item -ItemType Directory -Force -Path $packOutDir | Out-Null
+
+        Assert-Throws {
+            $output = & powershell.exe -NoProfile -NonInteractive -Command "& '$buildMsixScript' -ExePath '$validExe' -Version 'v2026.09.08.1' -OutputDir '$packOutDir' -ManifestTemplate '$templatePath' -IconsDir '$iconsDir' -SkipSigning" 2>&1
+            if ($LASTEXITCODE -eq 0) { throw "Expected non-zero exit code when packaged manifest has arm64 ProcessorArchitecture" }
+            $fullErr = ($output -join " ")
+            throw "$fullErr"
+        } "Packaged manifest Identity ProcessorArchitecture.*does not match expected 'x64'"
     }
 
 } finally {

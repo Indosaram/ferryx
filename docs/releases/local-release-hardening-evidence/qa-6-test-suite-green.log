@@ -1,0 +1,106 @@
+TAP version 13
+# Subtest: actual current producer fixture is rejected by parsed-policy validator
+ok 1 - actual current producer fixture is rejected by parsed-policy validator
+  ---
+  duration_ms: 14.143041
+  type: 'test'
+  ...
+# Subtest: manual release producer fixture (workflow_dispatch) is rejected
+ok 2 - manual release producer fixture (workflow_dispatch) is rejected
+  ---
+  duration_ms: 13.111291
+  type: 'test'
+  ...
+# Subtest: tag release producer fixture (push.tags) is rejected
+ok 3 - tag release producer fixture (push.tags) is rejected
+  ---
+  duration_ms: 12.479375
+  type: 'test'
+  ...
+# Subtest: callable release producer fixture (workflow_call) is rejected
+ok 4 - callable release producer fixture (workflow_call) is rejected
+  ---
+  duration_ms: 13.403208
+  type: 'test'
+  ...
+# Subtest: reusable release producer fixture (workflow_call with release signing secrets) is rejected
+ok 5 - reusable release producer fixture (workflow_call with release signing secrets) is rejected
+  ---
+  duration_ms: 15.694334
+  type: 'test'
+  ...
+# Subtest: rejects 'bun tauri build' release entry point fixture
+ok 6 - rejects 'bun tauri build' release entry point fixture
+  ---
+  duration_ms: 14.18575
+  type: 'test'
+  ...
+# Subtest: rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+ok 7 - rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+  ---
+  duration_ms: 14.435708
+  type: 'test'
+  ...
+# Subtest: rejects 'tauri-apps/tauri-action' action in step uses
+ok 8 - rejects 'tauri-apps/tauri-action' action in step uses
+  ---
+  duration_ms: 14.576875
+  type: 'test'
+  ...
+# Subtest: rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+ok 9 - rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+  ---
+  duration_ms: 14.080625
+  type: 'test'
+  ...
+# Subtest: rejects reusable job uses of release workflows and secrets: inherit
+ok 10 - rejects reusable job uses of release workflows and secrets: inherit
+  ---
+  duration_ms: 13.808875
+  type: 'test'
+  ...
+# Subtest: PR check workflow (.github/workflows/build-test.yml) complies with release policy
+ok 11 - PR check workflow (.github/workflows/build-test.yml) complies with release policy
+  ---
+  duration_ms: 11.982542
+  type: 'test'
+  ...
+# Subtest: Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+ok 12 - Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+  ---
+  duration_ms: 12.523958
+  type: 'test'
+  ...
+# Subtest: PR check workflow wires the release workflow policy check
+ok 13 - PR check workflow wires the release workflow policy check
+  ---
+  duration_ms: 0.215458
+  type: 'test'
+  ...
+# Subtest: Windows CI links the native binary before a release tag
+ok 14 - Windows CI links the native binary before a release tag
+  ---
+  duration_ms: 0.102292
+  type: 'test'
+  ...
+# Subtest: hosted release producer .github/workflows/release.yml is absent from disk
+ok 15 - hosted release producer .github/workflows/release.yml is absent from disk
+  ---
+  duration_ms: 0.03925
+  type: 'test'
+  ...
+# Subtest: live repository .github/workflows directory complies fully with policy
+ok 16 - live repository .github/workflows directory complies fully with policy
+  ---
+  duration_ms: 12.06925
+  type: 'test'
+  ...
+1..16
+# tests 16
+# suites 0
+# pass 16
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 224.180917

@@ -1,0 +1,83 @@
+Release run prepared successfully at /tmp/ferryx-surf03-zFHVpS/run-prepare
+{
+  "schemaVersion": 1,
+  "runId": "rel-2026.09.08.1-3a19bdf7",
+  "repo": "Indosaram/ferryx",
+  "commitSha": "3a19bdf727870fd28a75866123ac06f80e443076",
+  "tag": "v2026.09.08.1",
+  "appVersion": "2026.908.1",
+  "msixVersion": "2026.908.1.0",
+  "channels": {
+    "store": true,
+    "nsisMigration": false
+  },
+  "requiredTargets": [
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "linux-x86_64"
+  ],
+  "toolchains": {
+    "node": ">=22.0.0",
+    "bun": ">=1.4.0",
+    "zig": "0.16.0"
+  },
+  "sourceDateEpoch": 1788849930,
+  "createdAt": "2026-09-08T06:45:30.000Z"
+}
+Exit: 0
+=== Generated Run Files ===
+total 24
+drwxr-xr-x@ 9 indo  wheel  288 Sep  8 20:53 .
+drwx------@ 3 indo  wheel   96 Sep  8 20:53 ..
+drwxr-xr-x@ 5 indo  wheel  160 Sep  8 20:53 artifacts
+drwxr-xr-x@ 2 indo  wheel   64 Sep  8 20:53 bundles
+drwxr-xr-x@ 2 indo  wheel   64 Sep  8 20:53 logs
+-rw-r--r--@ 1 indo  wheel  565 Sep  8 20:53 plan.json
+-rw-r--r--@ 1 indo  wheel  654 Sep  8 20:53 prepare-state.json
+drwxr-xr-x@ 2 indo  wheel   64 Sep  8 20:53 receipts
+-rw-r--r--@ 1 indo  wheel  216 Sep  8 20:53 source-inputs.json
+=== plan.json ===
+{
+  "schemaVersion": 1,
+  "runId": "rel-2026.09.08.1-3a19bdf7",
+  "repo": "Indosaram/ferryx",
+  "commitSha": "3a19bdf727870fd28a75866123ac06f80e443076",
+  "tag": "v2026.09.08.1",
+  "appVersion": "2026.908.1",
+  "msixVersion": "2026.908.1.0",
+  "channels": {
+    "store": true,
+    "nsisMigration": false
+  },
+  "requiredTargets": [
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "linux-x86_64"
+  ],
+  "toolchains": {
+    "node": ">=22.0.0",
+    "bun": ">=1.4.0",
+    "zig": "0.16.0"
+  },
+  "sourceDateEpoch": 1788849930,
+  "createdAt": "2026-09-08T06:45:30.000Z"
+}
+=== prepare-state.json ===
+{
+  "schemaVersion": 1,
+  "runId": "rel-2026.09.08.1-3a19bdf7",
+  "planDigest": "2eaaf2c339b5e541ed8eb6580712e44a5db8e6ef68d6982f4828c004cb246d04",
+  "configDigest": "974abae3b11455f62c1580a0a86230c9839d9caf5664f321f9241302a1ba301a",
+  "configPath": "/Users/indo/code/project/orca-lite/scripts/release-hosts.example.json",
+  "commitSha": "3a19bdf727870fd28a75866123ac06f80e443076",
+  "sourceDateEpoch": 1788849930,
+  "ghosttyPin": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "updaterPublicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEwQzk5REI1QzI1QzY3Q0IKUldUTFoxekN0WjNKRU8zWGhqWlo2VXEzclF0RXoyRmJCY2Z4eGwvK2FGbE5LSmVwcW9RTmoyWm0K"
+}
+=== source-inputs.json ===
+{
+  "commitSha": "3a19bdf727870fd28a75866123ac06f80e443076",
+  "sourceDateEpoch": 1788849930,
+  "ghosttyPin": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "ghosttyHead": "6a508fd5e34c7e222c052a6d00bb3891ff3feace"
+}

@@ -1,0 +1,118 @@
+TAP version 13
+# Subtest: legacy CLI invocation fails closed with clear migration instructions
+ok 1 - legacy CLI invocation fails closed with clear migration instructions
+  ---
+  duration_ms: 30.773916
+  type: 'test'
+  ...
+# Subtest: assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+ok 2 - assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+  ---
+  duration_ms: 20.862
+  type: 'test'
+  ...
+# Subtest: assembleRelease supports NSIS migration channel with windows updater target
+ok 3 - assembleRelease supports NSIS migration channel with windows updater target
+  ---
+  duration_ms: 16.742583
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if outDir already exists
+ok 4 - assembleRelease fails closed if outDir already exists
+  ---
+  duration_ms: 10.412667
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on signature verification failure
+ok 5 - assembleRelease fails closed and leaves no partial output on signature verification failure
+  ---
+  duration_ms: 10.381333
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+ok 6 - assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+  ---
+  duration_ms: 9.761417
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+ok 7 - assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+  ---
+  duration_ms: 9.504125
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if receipts directory contains unexpected files
+ok 8 - assembleRelease fails closed if receipts directory contains unexpected files
+  ---
+  duration_ms: 10.009166
+  type: 'test'
+  ...
+# Subtest: assembleRelease rejects path traversal and symlink escape outside artifacts root
+ok 9 - assembleRelease rejects path traversal and symlink escape outside artifacts root
+  ---
+  duration_ms: 11.463666
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if macos-updater archive layout is invalid
+not ok 10 - assembleRelease fails closed if macos-updater archive layout is invalid
+  ---
+  duration_ms: 18.606667
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:580:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected exception.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  operator: 'throws'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:597:12)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+not ok 11 - assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+  ---
+  duration_ms: 13.964917
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:614:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected exception.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  operator: 'throws'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:627:12)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: assembleRelease CLI execution works end-to-end via subprocess
+ok 12 - assembleRelease CLI execution works end-to-end via subprocess
+  ---
+  duration_ms: 46.985625
+  type: 'test'
+  ...
+# Subtest: real repo signed archive verifies against checked-in Tauri public key
+ok 13 - real repo signed archive verifies against checked-in Tauri public key
+  ---
+  duration_ms: 0.527083
+  type: 'test'
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 11
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 256.392125

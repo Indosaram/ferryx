@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "runId": "rel-2026.09.08.65000-c85f17ea",
+  "planDigest": "6a60ae3b8231d003e2a4c07ae985796201b4fab13811bc03bfaf13a83695b4ca",
+  "configDigest": "974abae3b11455f62c1580a0a86230c9839d9caf5664f321f9241302a1ba301a",
+  "configPath": "/Users/indo/code/project/orca-lite/scripts/release-hosts.example.json",
+  "commitSha": "c85f17ea8737beca3998b3d92bce0408501c6ef3",
+  "sourceDateEpoch": 1788869082,
+  "ghosttyPin": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "updaterPublicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEwQzk5REI1QzI1QzY3Q0IKUldUTFoxekN0WjNKRU8zWGhqWlo2VXEzclF0RXoyRmJCY2Z4eGwvK2FGbE5LSmVwcW9RTmoyWm0K"
+}

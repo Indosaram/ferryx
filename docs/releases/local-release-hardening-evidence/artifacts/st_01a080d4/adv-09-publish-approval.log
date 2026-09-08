@@ -1,0 +1,4 @@
+Missing flag caught: Publication requires explicit --approve-publish flag
+Missing env var caught: Publication requires FERRYX_APPROVE_PUBLISH=1 environment variable
+ADV-COORD-09 VERIFIED PASS
+Exit: 0

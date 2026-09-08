@@ -1,0 +1,4 @@
+ACTION: Attempt assembleRelease into pre-existing directory: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-KEOaWm/existing-dir
+ERROR_THROWN: Output directory already exists: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-KEOaWm/existing-dir
+CANARY_FILE_INTACT: true
+NO_TEMP_STAGING_REMAINING: true

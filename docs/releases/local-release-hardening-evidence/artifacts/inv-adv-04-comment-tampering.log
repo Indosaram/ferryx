@@ -1,0 +1,6 @@
+ATTEMPT: Tampering trusted comment line in Minisign signature
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Minisign verification failed for updater artifact 'Ferryx.app.tar.gz': Minisign trusted comment signature verification failed
+
+OUTDIR_EXISTS: false

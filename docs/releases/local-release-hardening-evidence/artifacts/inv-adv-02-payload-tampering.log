@@ -1,0 +1,6 @@
+ATTEMPT: Assembling with modified artifact content
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Artifact size mismatch for 'Ferryx.app.tar.gz': expected 31 bytes, found 22 bytes
+
+OUTDIR_EXISTS: false

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "runId": "rel-2026.09.08.65000-c85f17ea",
+  "repo": "Indosaram/ferryx",
+  "commitSha": "c85f17ea8737beca3998b3d92bce0408501c6ef3",
+  "tag": "v2026.09.08.65000",
+  "appVersion": "2026.908.65000",
+  "msixVersion": "2026.908.65000.0",
+  "channels": {
+    "store": true,
+    "nsisMigration": false
+  },
+  "requiredTargets": [
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "linux-x86_64"
+  ],
+  "toolchains": {
+    "node": ">=22.0.0",
+    "bun": ">=1.4.0",
+    "zig": "0.16.0"
+  },
+  "sourceDateEpoch": 1788869082,
+  "createdAt": "2026-09-08T12:04:42.000Z"
+}

@@ -1,0 +1,44 @@
+=== assemble CLI execution ===
+Status: 0
+Stdout:
+Release assembled successfully with 16 files
+=== Published Files Inventory (16 files) ===
+ - Ferryx.app.tar.gz
+ - Ferryx.app.tar.gz.sig
+ - Ferryx_2026.908.1_amd64.AppImage
+ - Ferryx_2026.908.1_amd64.AppImage.sig
+ - Ferryx_2026.908.1_amd64.deb
+ - Ferryx_2026.908.1_universal.dmg
+ - Ferryx_2026.908.1_x64.msix
+ - Ferryx_amd64.AppImage
+ - Ferryx_amd64.AppImage.sig
+ - Ferryx_amd64.deb
+ - Ferryx_universal.app.tar.gz
+ - Ferryx_universal.app.tar.gz.sig
+ - Ferryx_universal.dmg
+ - Ferryx_x64.msix
+ - SHA256SUMS.txt
+ - latest.json
+=== shasum -c verification ===
+Status: 0
+Output:
+Ferryx.app.tar.gz: OK
+Ferryx.app.tar.gz.sig: OK
+Ferryx_2026.908.1_amd64.AppImage: OK
+Ferryx_2026.908.1_amd64.AppImage.sig: OK
+Ferryx_2026.908.1_amd64.deb: OK
+Ferryx_2026.908.1_universal.dmg: OK
+Ferryx_2026.908.1_x64.msix: OK
+Ferryx_amd64.AppImage: OK
+Ferryx_amd64.AppImage.sig: OK
+Ferryx_amd64.deb: OK
+Ferryx_universal.app.tar.gz: OK
+Ferryx_universal.app.tar.gz.sig: OK
+Ferryx_universal.dmg: OK
+Ferryx_x64.msix: OK
+latest.json: OK
+=== verify CLI execution ===
+Status: 0
+Stdout:
+Release verified successfully against 15 files
+Exit: 0

@@ -1,0 +1,1 @@
+rejected with error: Invalid release tag "2026.908.1.0": month and day must be 2 digits (MM.DD)

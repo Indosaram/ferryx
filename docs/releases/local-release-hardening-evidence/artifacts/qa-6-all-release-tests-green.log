@@ -1,0 +1,340 @@
+TAP version 13
+# Subtest: a universal macOS bundle maps to both darwin targets with its real signature
+ok 1 - a universal macOS bundle maps to both darwin targets with its real signature
+  ---
+  duration_ms: 63.171208
+  type: 'test'
+  ...
+# Subtest: windows and linux updater bundles land on their own targets
+ok 2 - windows and linux updater bundles land on their own targets
+  ---
+  duration_ms: 65.125
+  type: 'test'
+  ...
+# Subtest: Tauri v2 NSIS and AppImage artifacts land on their own targets
+ok 3 - Tauri v2 NSIS and AppImage artifacts land on their own targets
+  ---
+  duration_ms: 71.86025
+  type: 'test'
+  ...
+# Subtest: an architecture-specific macOS bundle claims only its own target
+ok 4 - an architecture-specific macOS bundle claims only its own target
+  ---
+  duration_ms: 66.247083
+  type: 'test'
+  ...
+# Subtest: an unsigned artifact is skipped with a warning instead of shipping unverifiable
+ok 5 - an unsigned artifact is skipped with a warning instead of shipping unverifiable
+  ---
+  duration_ms: 73.34675
+  type: 'test'
+  ...
+# Subtest: release notes are carried through when supplied
+ok 6 - release notes are carried through when supplied
+  ---
+  duration_ms: 46.906583
+  type: 'test'
+  ...
+# Subtest: a directory with no signed updater artifact fails instead of publishing an empty manifest
+ok 7 - a directory with no signed updater artifact fails instead of publishing an empty manifest
+  ---
+  duration_ms: 65.72925
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+ok 8 - build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+  ---
+  duration_ms: 3.475
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+ok 9 - build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+  ---
+  duration_ms: 0.243125
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: verifies binary version against expected app version
+ok 10 - build-msix.ps1: verifies binary version against expected app version
+  ---
+  duration_ms: 0.118291
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces isolated fresh staging and removes stale output before packing
+ok 11 - build-msix.ps1: enforces isolated fresh staging and removes stale output before packing
+  ---
+  duration_ms: 0.09825
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+ok 12 - build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+  ---
+  duration_ms: 0.247583
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+ok 13 - build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+  ---
+  duration_ms: 0.1025
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+ok 14 - build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+  ---
+  duration_ms: 0.180292
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: validates packaged MSIX manifest version and name after pack
+ok 15 - build-msix.ps1: validates packaged MSIX manifest version and name after pack
+  ---
+  duration_ms: 0.095292
+  type: 'test'
+  ...
+# Subtest: version contract: maps date tags, semver, and quad versions correctly
+ok 16 - version contract: maps date tags, semver, and quad versions correctly
+  ---
+  duration_ms: 0.658458
+  type: 'test'
+  ...
+# Subtest: version contract: rejects non-zero 4th quad component for Store submission
+ok 17 - version contract: rejects non-zero 4th quad component for Store submission
+  ---
+  duration_ms: 0.418083
+  type: 'test'
+  ...
+# Subtest: version contract: rejects invalid calendar dates
+ok 18 - version contract: rejects invalid calendar dates
+  ---
+  duration_ms: 0.130625
+  type: 'test'
+  ...
+# Subtest: actual current producer fixture is rejected by parsed-policy validator
+ok 19 - actual current producer fixture is rejected by parsed-policy validator
+  ---
+  duration_ms: 59.88525
+  type: 'test'
+  ...
+# Subtest: manual release producer fixture (workflow_dispatch) is rejected
+ok 20 - manual release producer fixture (workflow_dispatch) is rejected
+  ---
+  duration_ms: 47.699834
+  type: 'test'
+  ...
+# Subtest: tag release producer fixture (push.tags) is rejected
+ok 21 - tag release producer fixture (push.tags) is rejected
+  ---
+  duration_ms: 47.494291
+  type: 'test'
+  ...
+# Subtest: callable release producer fixture (workflow_call) is rejected
+ok 22 - callable release producer fixture (workflow_call) is rejected
+  ---
+  duration_ms: 45.724584
+  type: 'test'
+  ...
+# Subtest: reusable release producer fixture (workflow_call with release signing secrets) is rejected
+ok 23 - reusable release producer fixture (workflow_call with release signing secrets) is rejected
+  ---
+  duration_ms: 38.332584
+  type: 'test'
+  ...
+# Subtest: rejects 'bun tauri build' release entry point fixture
+ok 24 - rejects 'bun tauri build' release entry point fixture
+  ---
+  duration_ms: 63.099708
+  type: 'test'
+  ...
+# Subtest: rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+ok 25 - rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+  ---
+  duration_ms: 36.924
+  type: 'test'
+  ...
+# Subtest: rejects 'tauri-apps/tauri-action' action in step uses
+ok 26 - rejects 'tauri-apps/tauri-action' action in step uses
+  ---
+  duration_ms: 40.809041
+  type: 'test'
+  ...
+# Subtest: rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+ok 27 - rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+  ---
+  duration_ms: 40.75225
+  type: 'test'
+  ...
+# Subtest: rejects reusable job uses of release workflows and secrets: inherit
+ok 28 - rejects reusable job uses of release workflows and secrets: inherit
+  ---
+  duration_ms: 42.393625
+  type: 'test'
+  ...
+# Subtest: PR check workflow (.github/workflows/build-test.yml) complies with release policy
+ok 29 - PR check workflow (.github/workflows/build-test.yml) complies with release policy
+  ---
+  duration_ms: 46.748166
+  type: 'test'
+  ...
+# Subtest: Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+ok 30 - Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+  ---
+  duration_ms: 58.876292
+  type: 'test'
+  ...
+# Subtest: PR check workflow wires the release workflow policy check
+ok 31 - PR check workflow wires the release workflow policy check
+  ---
+  duration_ms: 0.287833
+  type: 'test'
+  ...
+# Subtest: Windows CI links the native binary before a release tag
+ok 32 - Windows CI links the native binary before a release tag
+  ---
+  duration_ms: 0.101791
+  type: 'test'
+  ...
+# Subtest: hosted release producer .github/workflows/release.yml is absent from disk
+ok 33 - hosted release producer .github/workflows/release.yml is absent from disk
+  ---
+  duration_ms: 0.036708
+  type: 'test'
+  ...
+# Subtest: live repository .github/workflows directory complies fully with policy
+ok 34 - live repository .github/workflows directory complies fully with policy
+  ---
+  duration_ms: 51.75175
+  type: 'test'
+  ...
+# Subtest: a date tag maps to monotonic semver and leaves dependency versions untouched
+ok 35 - a date tag maps to monotonic semver and leaves dependency versions untouched
+  ---
+  duration_ms: 60.175833
+  type: 'test'
+  ...
+# Subtest: the JSON manifest keeps key order and a trailing newline
+ok 36 - the JSON manifest keeps key order and a trailing newline
+  ---
+  duration_ms: 64.487875
+  type: 'test'
+  ...
+# Subtest: running twice with the same tag is idempotent
+ok 37 - running twice with the same tag is idempotent
+  ---
+  duration_ms: 119.80675
+  type: 'test'
+  ...
+# Subtest: a semver tag is accepted
+ok 38 - a semver tag is accepted
+  ---
+  duration_ms: 76.576
+  type: 'test'
+  ...
+# Subtest: date mapping is strictly monotonic across a revision, day, month, and year boundary
+ok 39 - date mapping is strictly monotonic across a revision, day, month, and year boundary
+  ---
+  duration_ms: 263.58775
+  type: 'test'
+  ...
+# Subtest: a malformed tag fails loudly and leaves both manifests unchanged
+ok 40 - a malformed tag fails loudly and leaves both manifests unchanged
+  ---
+  duration_ms: 74.059291
+  type: 'test'
+  ...
+# Subtest: a missing tag reports usage instead of guessing
+ok 41 - a missing tag reports usage instead of guessing
+  ---
+  duration_ms: 54.738
+  type: 'test'
+  ...
+# Subtest: importing sync-version.mjs has no side effects and exports canonical API
+ok 42 - importing sync-version.mjs has no side effects and exports canonical API
+  ---
+  duration_ms: 5.825375
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag handles valid CalVer tags with or without revision and leading v
+ok 43 - parseReleaseTag handles valid CalVer tags with or without revision and leading v
+  ---
+  duration_ms: 3.648292
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+ok 44 - parseReleaseTag strictly rejects impossible calendar dates (Feb 29 non-leap, month 13, day 32)
+  ---
+  duration_ms: 2.011584
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+ok 45 - parseReleaseTag accepts leap year Feb 29 (e.g. 2028.02.29)
+  ---
+  duration_ms: 0.16
+  type: 'test'
+  ...
+# Subtest: parseReleaseTag enforces boundaries and leading zero rules
+ok 46 - parseReleaseTag enforces boundaries and leading zero rules
+  ---
+  duration_ms: 0.182875
+  type: 'test'
+  ...
+# Subtest: toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+ok 47 - toAppVersion and toMsixVersion map CalVer tags and legacy SemVer correctly
+  ---
+  duration_ms: 0.347208
+  type: 'test'
+  ...
+# Subtest: syncVersion supports dryRun and returns version pair without modifying files
+ok 48 - syncVersion supports dryRun and returns version pair without modifying files
+  ---
+  duration_ms: 1.087375
+  type: 'test'
+  ...
+# Subtest: syncVersion writes atomically using sibling temp files and preserves dependencies
+ok 49 - syncVersion writes atomically using sibling temp files and preserves dependencies
+  ---
+  duration_ms: 8.629625
+  type: 'test'
+  ...
+# Subtest: syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+ok 50 - syncVersion validates both inputs before writing (second input invalid leaves first unchanged)
+  ---
+  duration_ms: 1.986625
+  type: 'test'
+  ...
+# Subtest: syncVersion rolls back first file replacement on synchronous second file failure
+ok 51 - syncVersion rolls back first file replacement on synchronous second file failure
+  ---
+  duration_ms: 3.720375
+  type: 'test'
+  ...
+# Subtest: syncVersion surfaces AggregateError with original and rollback failures when rollback fails
+ok 52 - syncVersion surfaces AggregateError with original and rollback failures when rollback fails
+  ---
+  duration_ms: 3.438375
+  type: 'test'
+  ...
+# Subtest: CLI rejects invalid calendar dates and impossible inputs
+ok 53 - CLI rejects invalid calendar dates and impossible inputs
+  ---
+  duration_ms: 201.61325
+  type: 'test'
+  ...
+# Subtest: rejects updater archives containing a top-level AppleDouble entry
+ok 54 - rejects updater archives containing a top-level AppleDouble entry
+  ---
+  duration_ms: 112.925458
+  type: 'test'
+  ...
+# Subtest: accepts updater archives whose entries are rooted in the app bundle
+ok 55 - accepts updater archives whose entries are rooted in the app bundle
+  ---
+  duration_ms: 78.863417
+  type: 'test'
+  ...
+1..55
+# tests 55
+# suites 0
+# pass 55
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1053.692708

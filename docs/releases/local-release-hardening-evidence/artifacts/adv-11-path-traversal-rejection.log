@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Artifact safe relative path traversal
+ERROR_THROWN: artifact[0].relPath must be a safe relative path, got "../../etc/passwd"

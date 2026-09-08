@@ -1,0 +1,80 @@
+--- Test 1: Missing mandatory -ExePath parameter fails ---
+RESULT: PASS
+
+--- Test 2: Non-existent -ExePath fails ---
+RESULT: PASS
+
+--- Test 3: Version quad with non-zero 4th component is rejected ---
+RESULT: PASS
+
+--- Test 4: Invalid calendar date tag is rejected ---
+RESULT: PASS
+
+--- Test 5: Binary version mismatch against expected app version fails ---
+RESULT: PASS
+
+--- Test 6: Pre-existing output package fails closed and preserves existing file bytes ---
+RESULT: PASS
+
+--- Test 7: Omitted -SkipSigning without -CertThumbprint fails ---
+RESULT: PASS
+
+--- Test 8: Unavailable certificate thumbprint fails ---
+RESULT: PASS
+
+--- Test 9: MakeAppx failure exit code is detected and reported ---
+RESULT: PASS
+
+--- Test 10: Small valid fixture packs MSIX and validates packaged manifest identity ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-4d82e90008e248118817154ffe41a36c\ferryx.exe
+Target Version : v2026.09.08.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-4d82e90008e248118817154ffe41a36c\pack_out
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+Copying assets from: C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-4d82e90008e248118817154ffe41a36c\icons
+[4/6] Generated AppxManifest.xml with version 2026.908.1.0
+[5/6] Packing MSIX package to: C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-4d82e90008e248118817154ffe41a36c\pack_out\Ferryx_2026.908.1_x64.msix
+Microsoft (R) MakeAppx Tool
+Copyright (C) 2013 Microsoft.  All rights reserved.
+
+The path (/p) parameter is: "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-4d82e90008e248118817154ffe41a36c\pack_out\Ferryx_2026.908.1_x64.msix"
+The content directory (/d) parameter is: "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f"
+Enumerating files from directory "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f"
+Packing 7 file(s) in "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f" (content directory) to "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-4d82e90008e248118817154ffe41a36c\pack_out\Ferryx_2026.908.1_x64.msix" (output file name).
+Memory limit defaulting to 16973283328 bytes.
+Using "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f\AppxManifest.xml" as the manifest for the package.
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f\ferryx.exe" as a payload file.  Its path in the package will be "ferryx.exe".
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f\Assets\StoreLogo.png" as a payload file.  Its path in the package will be "Assets\StoreLogo.png".
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f\Assets\Square44x44Logo.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.png".
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f\Assets\Square150x150Logo.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.png".
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f\Assets\Square71x71Logo.png" as a payload file.  Its path in the package will be "Assets\Square71x71Logo.png".
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-8098e76790b84213b553d62967f17e6f\Assets\Square310x310Logo.png" as a payload file.  Its path in the package will be "Assets\Square310x310Logo.png".
+Package creation succeeded.
+[6/6] Validating packaged MSIX manifest from archive...
+Packaged manifest verified: Name='ProjectMaho.Ferryx', Version='2026.908.1.0', Publisher='CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36', ProcessorArchitecture='x64'
+=======================================================
+ MSIX BUILD SUCCESSFUL: C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-4d82e90008e248118817154ffe41a36c\pack_out\Ferryx_2026.908.1_x64.msix
+=======================================================
+MSIX successfully validated: ProjectMaho.Ferryx 2026.908.1.0 CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36 x64
+RESULT: PASS
+
+--- Test 11: Packaged manifest with wrong Publisher fails closed ---
+RESULT: PASS
+
+--- Test 12: Packaged manifest with wrong ProcessorArchitecture (arm64) fails closed ---
+RESULT: PASS
+
+=======================================================
+Test Run Summary: Total=12, Passed=12, Failed=0
+=======================================================
+All tests passed!
+QA_GREEN_CLEANUP_OK

@@ -1,0 +1,238 @@
+TAP version 13
+# Subtest: parsePlan accepts valid standard plan without NSIS migration
+ok 1 - parsePlan accepts valid standard plan without NSIS migration
+  ---
+  duration_ms: 1.187958
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+ok 2 - parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+  ---
+  duration_ms: 0.56175
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects unknown top-level properties and schema URLs
+ok 3 - parsePlan rejects unknown top-level properties and schema URLs
+  ---
+  duration_ms: 0.395125
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects missing required plan properties
+ok 4 - parsePlan rejects missing required plan properties
+  ---
+  duration_ms: 0.090709
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects schemaVersion other than 1
+ok 5 - parsePlan rejects schemaVersion other than 1
+  ---
+  duration_ms: 0.112667
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects non-canonical or invalid calendar tags
+ok 6 - parsePlan rejects non-canonical or invalid calendar tags
+  ---
+  duration_ms: 0.135792
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects appVersion or msixVersion mismatch with tag
+ok 7 - parsePlan rejects appVersion or msixVersion mismatch with tag
+  ---
+  duration_ms: 0.188292
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects target/channel inconsistency
+ok 8 - parsePlan rejects target/channel inconsistency
+  ---
+  duration_ms: 0.163458
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects duplicate targets in requiredTargets
+ok 9 - parsePlan rejects duplicate targets in requiredTargets
+  ---
+  duration_ms: 0.231459
+  type: 'test'
+  ...
+# Subtest: parsePlan validates toolchains strict keys
+ok 10 - parsePlan validates toolchains strict keys
+  ---
+  duration_ms: 0.328834
+  type: 'test'
+  ...
+# Subtest: parsePlan validates sourceDateEpoch and createdAt
+ok 11 - parsePlan validates sourceDateEpoch and createdAt
+  ---
+  duration_ms: 0.204292
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns standard 5 kinds without NSIS migration
+ok 12 - requiredKinds returns standard 5 kinds without NSIS migration
+  ---
+  duration_ms: 0.054625
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns 6 kinds when nsisMigration is true
+ok 13 - requiredKinds returns 6 kinds when nsisMigration is true
+  ---
+  duration_ms: 0.035
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts valid host receipts bound to plan
+ok 14 - parseReceipt accepts valid host receipts bound to plan
+  ---
+  duration_ms: 0.452375
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown receipt properties or schema URLs
+ok 15 - parseReceipt rejects unknown receipt properties or schema URLs
+  ---
+  duration_ms: 0.0815
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects non-zero exitCode
+ok 16 - parseReceipt rejects non-zero exitCode
+  ---
+  duration_ms: 0.048792
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+ok 17 - parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+  ---
+  duration_ms: 0.090583
+  type: 'test'
+  ...
+# Subtest: parseReceipt enforces host-to-kind bindings
+ok 18 - parseReceipt enforces host-to-kind bindings
+  ---
+  duration_ms: 0.095459
+  type: 'test'
+  ...
+# Subtest: parseReceipt validates targets against artifact kind
+ok 19 - parseReceipt validates targets against artifact kind
+  ---
+  duration_ms: 0.108
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unsafe relative paths and path traversal
+ok 20 - parseReceipt rejects unsafe relative paths and path traversal
+  ---
+  duration_ms: 0.087458
+  type: 'test'
+  ...
+# Subtest: parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+ok 21 - parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+  ---
+  duration_ms: 0.063
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects duplicate artifact kinds within a receipt
+ok 22 - parseReceipt rejects duplicate artifact kinds within a receipt
+  ---
+  duration_ms: 0.057666
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts optional valid toolchains in receipt
+not ok 23 - parseReceipt accepts optional valid toolchains in receipt
+  ---
+  duration_ms: 0.075834
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:525:1'
+  failureType: 'testCodeFailure'
+  error: 'Receipt contains unexpected property: toolchains'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:527:19)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: parseReceipt rejects unknown toolchains property or credentials in receipt
+not ok 24 - parseReceipt rejects unknown toolchains property or credentials in receipt
+  ---
+  duration_ms: 0.280375
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:543:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /unexpected toolchain property: apiToken/i. Input:
+    
+    'Error: Receipt contains unexpected property: toolchains'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'Receipt contains unexpected property: toolchains'
+  stack: |-
+    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
+    file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:547:7
+    getActual (node:assert:609:5)
+    Function.throws (node:assert:757:24)
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:545:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+  operator: 'throws'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:545:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: parseReceipt rejects invalid toolchain field types in receipt
+not ok 25 - parseReceipt rejects invalid toolchain field types in receipt
+  ---
+  duration_ms: 0.098708
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:560:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /toolchains\.node must be a non-empty string/i. Input:
+    
+    'Error: Receipt contains unexpected property: toolchains'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+  error: 'Receipt contains unexpected property: toolchains'
+  stack: |-
+    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
+    file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:564:7
+    getActual (node:assert:609:5)
+    Function.throws (node:assert:757:24)
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:562:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+  operator: 'throws'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:562:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..25
+# tests 25
+# suites 0
+# pass 22
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 53.339

@@ -1,0 +1,6 @@
+ATTEMPT: Assembling artifact pointing through symlink to /secret.key outside artifactsDir
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Artifact path escapes artifacts directory: darwin/symlink.dmg
+
+OUTDIR_EXISTS: false

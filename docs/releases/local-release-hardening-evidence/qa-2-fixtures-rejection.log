@@ -1,0 +1,76 @@
+TAP version 13
+# Subtest: actual current producer fixture is rejected by parsed-policy validator
+ok 1 - actual current producer fixture is rejected by parsed-policy validator
+  ---
+  duration_ms: 20.197875
+  type: 'test'
+  ...
+# Subtest: manual release producer fixture (workflow_dispatch) is rejected
+ok 2 - manual release producer fixture (workflow_dispatch) is rejected
+  ---
+  duration_ms: 13.871125
+  type: 'test'
+  ...
+# Subtest: tag release producer fixture (push.tags) is rejected
+ok 3 - tag release producer fixture (push.tags) is rejected
+  ---
+  duration_ms: 13.783542
+  type: 'test'
+  ...
+# Subtest: callable release producer fixture (workflow_call) is rejected
+ok 4 - callable release producer fixture (workflow_call) is rejected
+  ---
+  duration_ms: 13.316666
+  type: 'test'
+  ...
+# Subtest: reusable release producer fixture (workflow_call with release signing secrets) is rejected
+ok 5 - reusable release producer fixture (workflow_call with release signing secrets) is rejected
+  ---
+  duration_ms: 15.290709
+  type: 'test'
+  ...
+# Subtest: rejects 'bun tauri build' release entry point fixture
+ok 6 - rejects 'bun tauri build' release entry point fixture
+  ---
+  duration_ms: 13.249292
+  type: 'test'
+  ...
+# Subtest: rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+ok 7 - rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+  ---
+  duration_ms: 12.301416
+  type: 'test'
+  ...
+# Subtest: rejects 'tauri-apps/tauri-action' action in step uses
+ok 8 - rejects 'tauri-apps/tauri-action' action in step uses
+  ---
+  duration_ms: 13.244709
+  type: 'test'
+  ...
+# Subtest: rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+ok 9 - rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+  ---
+  duration_ms: 13.309083
+  type: 'test'
+  ...
+# Subtest: rejects reusable job uses of release workflows and secrets: inherit
+ok 10 - rejects reusable job uses of release workflows and secrets: inherit
+  ---
+  duration_ms: 12.98275
+  type: 'test'
+  ...
+# Subtest: PR check workflow (.github/workflows/build-test.yml) complies with release policy
+ok 11 - PR check workflow (.github/workflows/build-test.yml) complies with release policy
+  ---
+  duration_ms: 12.823458
+  type: 'test'
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 11
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 197.122041

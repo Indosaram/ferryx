@@ -1,0 +1,137 @@
+TAP version 13
+# Subtest: release-local CLI: --help outputs usage and exits 0
+ok 1 - release-local CLI: --help outputs usage and exits 0
+  ---
+  duration_ms: 165.904667
+  type: 'test'
+  ...
+# Subtest: release-local: importing module has no side effects
+ok 2 - release-local: importing module has no side effects
+  ---
+  duration_ms: 9.406667
+  type: 'test'
+  ...
+# Subtest: release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+ok 3 - release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true
+  ---
+  duration_ms: 1053.474666
+  type: 'test'
+  ...
+# Subtest: prepare: rejects invalid calendar date tags and revision overflow
+ok 4 - prepare: rejects invalid calendar date tags and revision overflow
+  ---
+  duration_ms: 570.971541
+  type: 'test'
+  ...
+# Subtest: prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+ok 5 - prepare: creates deterministic plan, prepare-state, and fails closed on clobber
+  ---
+  duration_ms: 1819.906791
+  type: 'test'
+  ...
+# Subtest: build: accepts an untouched prepared plan digest
+ok 6 - build: accepts an untouched prepared plan digest
+  ---
+  duration_ms: 33072.447458
+  type: 'test'
+  ...
+# Subtest: preflight: exits non-zero and reports failure when disk budget is unmet
+ok 7 - preflight: exits non-zero and reports failure when disk budget is unmet
+  ---
+  duration_ms: 4818.840834
+  type: 'test'
+  ...
+# Subtest: verify: detects tampered artifacts and altered receipts
+ok 8 - verify: detects tampered artifacts and altered receipts
+  ---
+  duration_ms: 8.671
+  type: 'test'
+  ...
+# Subtest: publish: enforces double approval gate and rejects unapproved invocation
+ok 9 - publish: enforces double approval gate and rejects unapproved invocation
+  ---
+  duration_ms: 3.437709
+  type: 'test'
+  ...
+# Subtest: publish: full pipeline with fake gh executable and byte verification
+ok 10 - publish: full pipeline with fake gh executable and byte verification
+  ---
+  duration_ms: 2491.823916
+  type: 'test'
+  ...
+# Subtest: verify-remote: verifies release availability against local HTTP server
+ok 11 - verify-remote: verifies release availability against local HTTP server
+  ---
+  duration_ms: 261.582125
+  type: 'test'
+  ...
+# Cloning into '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bundle-test-UwaPSq/clone-test'...
+# Subtest: release-platforms: exports required APIs
+ok 12 - release-platforms: exports required APIs
+  ---
+  duration_ms: 0.517834
+  type: 'test'
+  ...
+# Subtest: probeMacbook: correctly inspects disk budget and detects insufficiency
+ok 13 - probeMacbook: correctly inspects disk budget and detects insufficiency
+  ---
+  duration_ms: 4484.1755
+  type: 'test'
+  ...
+# Subtest: probeMacbook: passes disk check when budget is conservative
+ok 14 - probeMacbook: passes disk check when budget is conservative
+  ---
+  duration_ms: 1209.544625
+  type: 'test'
+  ...
+# Subtest: createGitBundles: produces valid standalone git bundles and sha256 digests
+ok 15 - createGitBundles: produces valid standalone git bundles and sha256 digests
+  ---
+  duration_ms: 1816.094416
+  type: 'test'
+  ...
+# Subtest: createBuildReceipt: creates valid receipt conforming to release contract
+ok 16 - createBuildReceipt: creates valid receipt conforming to release contract
+  ---
+  duration_ms: 9.644917
+  type: 'test'
+  ...
+# Subtest: remote builders: generated scripts enforce exact isolated build and artifact contracts
+ok 17 - remote builders: generated scripts enforce exact isolated build and artifact contracts
+  ---
+  duration_ms: 0.242917
+  type: 'test'
+  ...
+# Subtest: buildHost: fails closed when a custom runner returns no result
+ok 18 - buildHost: fails closed when a custom runner returns no result
+  ---
+  duration_ms: 8.398875
+  type: 'test'
+  ...
+# Subtest: buildHost: rejects unknown host or missing run directory
+ok 19 - buildHost: rejects unknown host or missing run directory
+  ---
+  duration_ms: 1.849875
+  type: 'test'
+  ...
+# Subtest: buildHost: fails closed if workspace already exists on host
+ok 20 - buildHost: fails closed if workspace already exists on host
+  ---
+  duration_ms: 3.309958
+  type: 'test'
+  ...
+# Subtest: buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+ok 21 - buildHost: executes builder fixture, stages artifacts, and writes valid receipt
+  ---
+  duration_ms: 31.253916
+  type: 'test'
+  ...
+1..21
+# tests 21
+# suites 0
+# pass 21
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 44664.157042

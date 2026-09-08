@@ -251,15 +251,14 @@ if ($SkipSigning) {
 }
 
 # -------------------------------------------------------------
-# 6. Prepare isolated fresh staging directory & clean stale output
+# 6. Prepare isolated fresh staging directory & fail if output exists
 # -------------------------------------------------------------
 $resolvedOutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 
 $msixOutputFile = Join-Path $resolvedOutputDir "Ferryx_${appVersion}_x64.msix"
-if (Test-Path -Path $msixOutputFile) {
-    Write-Host "Removing pre-existing output MSIX before packaging: $msixOutputFile"
-    Remove-Item -Path $msixOutputFile -Force
+if (Test-Path -Path $msixOutputFile -PathType Leaf) {
+    throw "ERROR: Output package already exists at '$msixOutputFile'. Refusing to overwrite existing package."
 }
 
 $stagingDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ferryx-msix-staging-" + [System.Guid]::NewGuid().ToString("N"))
@@ -320,8 +319,6 @@ try {
         throw "ERROR: <Identity> element not found in manifest template"
     }
     $newIdentity = $identityMatch.Value `
-        -replace 'Name="[^"]*"', "Name=""$PackageName""" `
-        -replace 'Publisher="[^"]*"', "Publisher=""$Publisher""" `
         -replace 'Version="[0-9.]*"', "Version=""$msixVersion"""
     $manifestContent = $manifestContent.Substring(0, $identityMatch.Index) + $newIdentity + $manifestContent.Substring($identityMatch.Index + $identityMatch.Length)
 
@@ -345,37 +342,72 @@ try {
     # -------------------------------------------------------------
     # 8. Validate packaged manifest from archive
     # -------------------------------------------------------------
-    Write-Host "[6/6] Validating packaged MSIX manifest from archive..."
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($msixOutputFile)
-    try {
-        $manifestEntry = $zip.GetEntry("AppxManifest.xml")
-        if (-not $manifestEntry) {
-            throw "ERROR: Packaged MSIX does not contain AppxManifest.xml: $msixOutputFile"
+    function Validate-PackagedManifest {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$PackagePath,
+
+            [Parameter(Mandatory = $true)]
+            [string]$ExpectedName,
+
+            [Parameter(Mandatory = $true)]
+            [string]$ExpectedVersion,
+
+            [Parameter(Mandatory = $true)]
+            [string]$ExpectedPublisher,
+
+            [string]$ExpectedProcessorArchitecture = "x64"
+        )
+
+        if (-not (Test-Path -Path $PackagePath -PathType Leaf)) {
+            throw "ERROR: Package file not found: $PackagePath"
         }
-        $stream = $manifestEntry.Open()
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
         try {
-            $reader = New-Object System.IO.StreamReader($stream)
-            $xmlText = $reader.ReadToEnd()
+            $manifestEntry = $zip.GetEntry("AppxManifest.xml")
+            if (-not $manifestEntry) {
+                throw "ERROR: Packaged MSIX does not contain AppxManifest.xml: $PackagePath"
+            }
+            $stream = $manifestEntry.Open()
+            try {
+                $reader = New-Object System.IO.StreamReader($stream)
+                $xmlText = $reader.ReadToEnd()
+            } finally {
+                $stream.Dispose()
+            }
         } finally {
-            $stream.Dispose()
+            $zip.Dispose()
         }
-    } finally {
-        $zip.Dispose()
+
+        $manifestXml = [xml]$xmlText
+        $idNode = $manifestXml.Package.Identity
+        if (-not $idNode) {
+            throw "ERROR: Packaged AppxManifest.xml missing <Identity> element"
+        }
+        if ($idNode.Name -ne $ExpectedName) {
+            throw "ERROR: Packaged manifest Identity Name '$($idNode.Name)' does not match expected '$ExpectedName'"
+        }
+        if ($idNode.Version -ne $ExpectedVersion) {
+            throw "ERROR: Packaged manifest Identity Version '$($idNode.Version)' does not match expected '$ExpectedVersion'"
+        }
+        if ($idNode.Publisher -ne $ExpectedPublisher) {
+            throw "ERROR: Packaged manifest Identity Publisher '$($idNode.Publisher)' does not match expected '$ExpectedPublisher'"
+        }
+        if ($idNode.ProcessorArchitecture -ne $ExpectedProcessorArchitecture) {
+            throw "ERROR: Packaged manifest Identity ProcessorArchitecture '$($idNode.ProcessorArchitecture)' does not match expected '$ExpectedProcessorArchitecture'"
+        }
+        Write-Host "Packaged manifest verified: Name='$($idNode.Name)', Version='$($idNode.Version)', Publisher='$($idNode.Publisher)', ProcessorArchitecture='$($idNode.ProcessorArchitecture)'"
     }
 
-    $manifestXml = [xml]$xmlText
-    $idNode = $manifestXml.Package.Identity
-    if (-not $idNode) {
-        throw "ERROR: Packaged AppxManifest.xml missing <Identity> element"
-    }
-    if ($idNode.Name -ne $PackageName) {
-        throw "ERROR: Packaged manifest Identity Name '$($idNode.Name)' does not match expected '$PackageName'"
-    }
-    if ($idNode.Version -ne $msixVersion) {
-        throw "ERROR: Packaged manifest Identity Version '$($idNode.Version)' does not match expected '$msixVersion'"
-    }
-    Write-Host "Packaged manifest verified: Name='$($idNode.Name)', Version='$($idNode.Version)'"
+    Write-Host "[6/6] Validating packaged MSIX manifest from archive..."
+    Validate-PackagedManifest `
+        -PackagePath $msixOutputFile `
+        -ExpectedName $PackageName `
+        -ExpectedVersion $msixVersion `
+        -ExpectedPublisher $Publisher `
+        -ExpectedProcessorArchitecture "x64"
 
     # -------------------------------------------------------------
     # 9. Execute Sideload signing if enabled

@@ -1,0 +1,430 @@
+TAP version 13
+# Subtest: legacy CLI invocation fails closed with clear migration instructions
+ok 1 - legacy CLI invocation fails closed with clear migration instructions
+  ---
+  duration_ms: 43.964709
+  type: 'test'
+  ...
+# Subtest: assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+ok 2 - assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure
+  ---
+  duration_ms: 73.047417
+  type: 'test'
+  ...
+# Subtest: assembleRelease supports NSIS migration channel with windows updater target
+ok 3 - assembleRelease supports NSIS migration channel with windows updater target
+  ---
+  duration_ms: 54.018291
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if outDir already exists
+ok 4 - assembleRelease fails closed if outDir already exists
+  ---
+  duration_ms: 12.877708
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on signature verification failure
+ok 5 - assembleRelease fails closed and leaves no partial output on signature verification failure
+  ---
+  duration_ms: 12.699125
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+ok 6 - assembleRelease fails closed and leaves no partial output on artifact content / hash tampering
+  ---
+  duration_ms: 10.62525
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+ok 7 - assembleRelease fails closed if a receipt has mismatched commitSha or appVersion
+  ---
+  duration_ms: 14.280417
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if receipts directory contains unexpected files
+ok 8 - assembleRelease fails closed if receipts directory contains unexpected files
+  ---
+  duration_ms: 13.430708
+  type: 'test'
+  ...
+# Subtest: assembleRelease rejects path traversal and symlink escape outside artifacts root
+ok 9 - assembleRelease rejects path traversal and symlink escape outside artifacts root
+  ---
+  duration_ms: 38.462459
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed if macos-updater archive layout is invalid
+ok 10 - assembleRelease fails closed if macos-updater archive layout is invalid
+  ---
+  duration_ms: 43.858917
+  type: 'test'
+  ...
+# Subtest: assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+ok 11 - assembleRelease fails closed and leaves no publishable output if data changes at copy boundary
+  ---
+  duration_ms: 44.29425
+  type: 'test'
+  ...
+# Subtest: assembleRelease CLI execution works end-to-end via subprocess
+ok 12 - assembleRelease CLI execution works end-to-end via subprocess
+  ---
+  duration_ms: 80.135708
+  type: 'test'
+  ...
+# Subtest: real repo signed archive verifies against checked-in Tauri public key
+ok 13 - real repo signed archive verifies against checked-in Tauri public key
+  ---
+  duration_ms: 0.562791
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+ok 14 - build-msix.ps1: requires explicit -ExePath parameter and removes candidate guessing
+  ---
+  duration_ms: 1.38
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+ok 15 - build-msix.ps1: enforces canonical Store quad version contract (4th component = 0)
+  ---
+  duration_ms: 0.2175
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: verifies binary version against expected app version
+ok 16 - build-msix.ps1: verifies binary version against expected app version
+  ---
+  duration_ms: 0.120041
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: enforces isolated fresh staging and removes stale output before packing
+ok 17 - build-msix.ps1: enforces isolated fresh staging and removes stale output before packing
+  ---
+  duration_ms: 0.107292
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+ok 18 - build-msix.ps1: checks native tool exit codes after MakeAppx and SignTool
+  ---
+  duration_ms: 0.254917
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+ok 19 - build-msix.ps1: removes auto-generated cert, hardcoded password, and silent fallback
+  ---
+  duration_ms: 0.106333
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+ok 20 - build-msix.ps1: supports explicit -SkipSigning and requires valid -CertThumbprint for sideload
+  ---
+  duration_ms: 0.170584
+  type: 'test'
+  ...
+# Subtest: build-msix.ps1: validates packaged MSIX manifest version and name after pack
+ok 21 - build-msix.ps1: validates packaged MSIX manifest version and name after pack
+  ---
+  duration_ms: 0.096042
+  type: 'test'
+  ...
+# Subtest: version contract: maps date tags, semver, and quad versions correctly
+ok 22 - version contract: maps date tags, semver, and quad versions correctly
+  ---
+  duration_ms: 0.443416
+  type: 'test'
+  ...
+# Subtest: version contract: rejects non-zero 4th quad component for Store submission
+ok 23 - version contract: rejects non-zero 4th quad component for Store submission
+  ---
+  duration_ms: 0.409167
+  type: 'test'
+  ...
+# Subtest: version contract: rejects invalid calendar dates
+ok 24 - version contract: rejects invalid calendar dates
+  ---
+  duration_ms: 0.1305
+  type: 'test'
+  ...
+# Subtest: verifies authentic repo archive fixture with configured updater public key (Tauri base64 wrapped)
+ok 25 - verifies authentic repo archive fixture with configured updater public key (Tauri base64 wrapped)
+  ---
+  duration_ms: 2.643792
+  type: 'test'
+  ...
+# Subtest: verifies authentic repo archive fixture with raw un-wrapped Minisign text format
+ok 26 - verifies authentic repo archive fixture with raw un-wrapped Minisign text format
+  ---
+  duration_ms: 0.52525
+  type: 'test'
+  ...
+# Subtest: verifies authentic repo archive fixture with single-line base64 public key (56-char minisign -P format)
+ok 27 - verifies authentic repo archive fixture with single-line base64 public key (56-char minisign -P format)
+  ---
+  duration_ms: 0.395125
+  type: 'test'
+  ...
+# Subtest: supports data passed as Uint8Array or utf8 string
+ok 28 - supports data passed as Uint8Array or utf8 string
+  ---
+  duration_ms: 1.195834
+  type: 'test'
+  ...
+# Subtest: verifies independent ED (Blake2b-512 prehash) signatures across wrapped, text, and single-line formats
+ok 29 - verifies independent ED (Blake2b-512 prehash) signatures across wrapped, text, and single-line formats
+  ---
+  duration_ms: 3.669208
+  type: 'test'
+  ...
+# Subtest: verifies independent Ed (raw legacy Ed25519) signatures across wrapped, text, and single-line formats
+ok 30 - verifies independent Ed (raw legacy Ed25519) signatures across wrapped, text, and single-line formats
+  ---
+  duration_ms: 1.18925
+  type: 'test'
+  ...
+# Subtest: minisign CLI oracle validates independent Node-generated fixtures, and verifyMinisign validates CLI fixtures
+ok 31 - minisign CLI oracle validates independent Node-generated fixtures, and verifyMinisign validates CLI fixtures
+  ---
+  duration_ms: 66.626334
+  type: 'test'
+  ...
+# Subtest: rejects tampered data (single bit flip, truncation, appending)
+ok 32 - rejects tampered data (single bit flip, truncation, appending)
+  ---
+  duration_ms: 0.844208
+  type: 'test'
+  ...
+# Subtest: rejects tampered authentic repo archive fixture data
+ok 33 - rejects tampered authentic repo archive fixture data
+  ---
+  duration_ms: 0.5785
+  type: 'test'
+  ...
+# Subtest: rejects tampered payload signature bytes in line 2
+ok 34 - rejects tampered payload signature bytes in line 2
+  ---
+  duration_ms: 0.52625
+  type: 'test'
+  ...
+# Subtest: rejects tampered global/trusted comment signature bytes in line 4
+ok 35 - rejects tampered global/trusted comment signature bytes in line 4
+  ---
+  duration_ms: 0.381833
+  type: 'test'
+  ...
+# Subtest: rejects tampered key ID in signature (mismatched key ID)
+ok 36 - rejects tampered key ID in signature (mismatched key ID)
+  ---
+  duration_ms: 0.207834
+  type: 'test'
+  ...
+# Subtest: rejects tampered key ID in public key (mismatched key ID)
+ok 37 - rejects tampered key ID in public key (mismatched key ID)
+  ---
+  duration_ms: 0.294625
+  type: 'test'
+  ...
+# Subtest: rejects tampered trusted comment text in signature
+ok 38 - rejects tampered trusted comment text in signature
+  ---
+  duration_ms: 0.293541
+  type: 'test'
+  ...
+# Subtest: strictly rejects arbitrary base64 strings (no arbitrary base64 acceptance)
+ok 39 - strictly rejects arbitrary base64 strings (no arbitrary base64 acceptance)
+  ---
+  duration_ms: 0.692208
+  type: 'test'
+  ...
+# Subtest: strictly rejects invalid or unsupported algorithms in public key and signature
+ok 40 - strictly rejects invalid or unsupported algorithms in public key and signature
+  ---
+  duration_ms: 0.371583
+  type: 'test'
+  ...
+# Subtest: strictly rejects invalid byte lengths for public key, payload signature, and global signature
+ok 41 - strictly rejects invalid byte lengths for public key, payload signature, and global signature
+  ---
+  duration_ms: 0.269125
+  type: 'test'
+  ...
+# Subtest: rejects malformed base64 encoding (invalid characters, invalid padding)
+ok 42 - rejects malformed base64 encoding (invalid characters, invalid padding)
+  ---
+  duration_ms: 0.202167
+  type: 'test'
+  ...
+# Subtest: rejects missing headers, truncated lines, or malformed input types
+ok 43 - rejects missing headers, truncated lines, or malformed input types
+  ---
+  duration_ms: 0.954417
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid standard plan without NSIS migration
+ok 44 - parsePlan accepts valid standard plan without NSIS migration
+  ---
+  duration_ms: 1.354375
+  type: 'test'
+  ...
+# Subtest: parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+ok 45 - parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
+  ---
+  duration_ms: 0.53825
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects unknown top-level properties and schema URLs
+ok 46 - parsePlan rejects unknown top-level properties and schema URLs
+  ---
+  duration_ms: 2.304917
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects missing required plan properties
+ok 47 - parsePlan rejects missing required plan properties
+  ---
+  duration_ms: 0.608083
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects schemaVersion other than 1
+ok 48 - parsePlan rejects schemaVersion other than 1
+  ---
+  duration_ms: 0.402041
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects non-canonical or invalid calendar tags
+ok 49 - parsePlan rejects non-canonical or invalid calendar tags
+  ---
+  duration_ms: 0.193959
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects appVersion or msixVersion mismatch with tag
+ok 50 - parsePlan rejects appVersion or msixVersion mismatch with tag
+  ---
+  duration_ms: 0.432541
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects target/channel inconsistency
+ok 51 - parsePlan rejects target/channel inconsistency
+  ---
+  duration_ms: 0.22125
+  type: 'test'
+  ...
+# Subtest: parsePlan rejects duplicate targets in requiredTargets
+ok 52 - parsePlan rejects duplicate targets in requiredTargets
+  ---
+  duration_ms: 0.252083
+  type: 'test'
+  ...
+# Subtest: parsePlan validates toolchains strict keys
+ok 53 - parsePlan validates toolchains strict keys
+  ---
+  duration_ms: 0.349708
+  type: 'test'
+  ...
+# Subtest: parsePlan validates sourceDateEpoch and createdAt
+ok 54 - parsePlan validates sourceDateEpoch and createdAt
+  ---
+  duration_ms: 0.256417
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns standard 5 kinds without NSIS migration
+ok 55 - requiredKinds returns standard 5 kinds without NSIS migration
+  ---
+  duration_ms: 0.06325
+  type: 'test'
+  ...
+# Subtest: requiredKinds returns 6 kinds when nsisMigration is true
+ok 56 - requiredKinds returns 6 kinds when nsisMigration is true
+  ---
+  duration_ms: 0.0345
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts valid host receipts bound to plan
+ok 57 - parseReceipt accepts valid host receipts bound to plan
+  ---
+  duration_ms: 0.472459
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown receipt properties or schema URLs
+ok 58 - parseReceipt rejects unknown receipt properties or schema URLs
+  ---
+  duration_ms: 0.098375
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects non-zero exitCode
+ok 59 - parseReceipt rejects non-zero exitCode
+  ---
+  duration_ms: 0.055292
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+ok 60 - parseReceipt rejects mismatched runId, commitSha, or appVersion against plan
+  ---
+  duration_ms: 0.106084
+  type: 'test'
+  ...
+# Subtest: parseReceipt enforces host-to-kind bindings
+ok 61 - parseReceipt enforces host-to-kind bindings
+  ---
+  duration_ms: 0.113417
+  type: 'test'
+  ...
+# Subtest: parseReceipt validates targets against artifact kind
+ok 62 - parseReceipt validates targets against artifact kind
+  ---
+  duration_ms: 0.121792
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unsafe relative paths and path traversal
+ok 63 - parseReceipt rejects unsafe relative paths and path traversal
+  ---
+  duration_ms: 0.0965
+  type: 'test'
+  ...
+# Subtest: parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+ok 64 - parseReceipt requires signatureRelPath for updater kinds and permits null for installers
+  ---
+  duration_ms: 0.062792
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects duplicate artifact kinds within a receipt
+ok 65 - parseReceipt rejects duplicate artifact kinds within a receipt
+  ---
+  duration_ms: 0.064083
+  type: 'test'
+  ...
+# Subtest: parseReceipt accepts optional valid toolchains in receipt
+ok 66 - parseReceipt accepts optional valid toolchains in receipt
+  ---
+  duration_ms: 0.044959
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects unknown toolchains property or credentials in receipt
+ok 67 - parseReceipt rejects unknown toolchains property or credentials in receipt
+  ---
+  duration_ms: 0.057375
+  type: 'test'
+  ...
+# Subtest: parseReceipt rejects invalid toolchain field types in receipt
+ok 68 - parseReceipt rejects invalid toolchain field types in receipt
+  ---
+  duration_ms: 0.05575
+  type: 'test'
+  ...
+# Subtest: rejects updater archives containing a top-level AppleDouble entry
+ok 69 - rejects updater archives containing a top-level AppleDouble entry
+  ---
+  duration_ms: 74.627333
+  type: 'test'
+  ...
+# Subtest: accepts updater archives whose entries are rooted in the app bundle
+ok 70 - accepts updater archives whose entries are rooted in the app bundle
+  ---
+  duration_ms: 37.879166
+  type: 'test'
+  ...
+1..70
+# tests 70
+# suites 0
+# pass 70
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 501.974167

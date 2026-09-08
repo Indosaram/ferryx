@@ -1,0 +1,6 @@
+ATTEMPT: Assembling plan with unknown property $schema
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Plan contains unexpected property: $schema
+
+OUTDIR_EXISTS: false

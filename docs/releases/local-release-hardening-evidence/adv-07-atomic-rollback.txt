@@ -1,0 +1,4 @@
+firstTargetHadNewVersionBeforeRollback: true
+errorCaughtCode: EIO
+confRestoredToOriginal: true
+noTempFilesLeft: ["Cargo.toml","tauri.conf.json"]

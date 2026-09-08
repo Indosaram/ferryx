@@ -1,0 +1,3 @@
+$ node --input-type=module < real-omaki-transport harness
+BUILD_REJECTED=Real build for remote host 'omaki' must be initiated by release coordinator.
+EXIT_STATUS=0

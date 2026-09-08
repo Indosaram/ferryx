@@ -1,0 +1,8 @@
+COMMAND: node scripts/build-latest-json.mjs --plan /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-ALBDfO/release-plan.json --receipts-dir /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-ALBDfO/receipts --artifacts-dir /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-ALBDfO/artifacts --out-dir /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-ALBDfO/cli-out-std --pubkey <wrapped>
+EXIT_CODE: 0
+STDOUT:
+Successfully assembled release v2026.09.08.1 (16 publish files staged in /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-fixture-ALBDfO/cli-out-std)
+
+STDERR:
+
+FILES_STAGED: 16 files: Ferryx.app.tar.gz, Ferryx.app.tar.gz.sig, Ferryx_2026.908.1.0_x64.msix, Ferryx_2026.908.1_amd64.AppImage, Ferryx_2026.908.1_amd64.AppImage.sig, Ferryx_2026.908.1_amd64.deb, Ferryx_2026.908.1_universal.dmg, Ferryx_amd64.AppImage, Ferryx_amd64.AppImage.sig, Ferryx_amd64.deb, Ferryx_universal.app.tar.gz, Ferryx_universal.app.tar.gz.sig, Ferryx_universal.dmg, Ferryx_x64.msix, SHA256SUMS.txt, latest.json

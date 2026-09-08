@@ -1,0 +1,4 @@
+ADV-5 exit: 1
+[release-workflow-policy] FAIL: Release policy violations detected!
+  - step #1 in job "stealth" contains forbidden release build command build-msix.ps1 (Windows MSIX packaging script)
+

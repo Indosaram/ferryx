@@ -1,0 +1,4 @@
+Pages exit: 0 [release-workflow-policy] PASS: All evaluated workflows comply with local-release-only policy.
+  - temp-pages.yml: valid
+Release exit: 1 [release-workflow-policy] FAIL: Release policy violations detected!
+  - step #1 in job "publish" uses forbidden action action-gh-release (GitHub release publication action (softprops/action-gh-release)): softprops/action-gh-release@v2

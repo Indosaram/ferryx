@@ -1,0 +1,5 @@
+CHECK: verifyMinisign on checked-in repo archive scripts/fixtures/updater/Ferryx.app.tar.gz
+PUBLIC_KEY_SOURCE: src-tauri/tauri.conf.json (pubkey length 152)
+ARCHIVE_BYTES: 33
+SIGNATURE_LINES: 1
+VERIFIED: true

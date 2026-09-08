@@ -1,0 +1,47 @@
+bun test v1.4.0 (34cbb9a40)
+
+scripts/release-contract.test.mjs:
+(pass) parsePlan accepts valid standard plan without NSIS migration [1.36ms]
+(pass) parsePlan accepts valid plan with NSIS migration and windows-x86_64 target [0.10ms]
+(pass) parsePlan rejects unknown top-level properties and schema URLs [0.29ms]
+(pass) parsePlan rejects missing required plan properties [0.04ms]
+(pass) parsePlan rejects schemaVersion other than 1 [0.04ms]
+(pass) parsePlan rejects non-canonical or invalid calendar tags [0.15ms]
+(pass) parsePlan rejects appVersion or msixVersion mismatch with tag [0.06ms]
+(pass) parsePlan rejects target/channel inconsistency [0.06ms]
+(pass) parsePlan rejects duplicate targets in requiredTargets [0.04ms]
+(pass) parsePlan validates toolchains strict keys [0.10ms]
+(pass) parsePlan validates sourceDateEpoch and createdAt [0.08ms]
+(pass) requiredKinds returns standard 5 kinds without NSIS migration [0.03ms]
+(pass) requiredKinds returns 6 kinds when nsisMigration is true [0.01ms]
+(pass) parseReceipt accepts valid host receipts bound to plan [0.36ms]
+(pass) parseReceipt rejects unknown receipt properties or schema URLs [0.05ms]
+(pass) parseReceipt rejects non-zero exitCode [0.03ms]
+(pass) parseReceipt rejects mismatched runId, commitSha, or appVersion against plan [0.05ms]
+(pass) parseReceipt enforces host-to-kind bindings [0.06ms]
+(pass) parseReceipt validates targets against artifact kind [0.19ms]
+(pass) parseReceipt rejects unsafe relative paths and path traversal [0.05ms]
+(pass) parseReceipt requires signatureRelPath for updater kinds and permits null for installers [0.03ms]
+(pass) parseReceipt rejects duplicate artifact kinds within a receipt [0.03ms]
+(pass) parseReceipt accepts optional valid toolchains in receipt [0.03ms]
+(pass) parseReceipt rejects unknown toolchains property or credentials in receipt [0.06ms]
+(pass) parseReceipt rejects invalid toolchain field types in receipt [0.03ms]
+
+scripts/build-latest-json.test.mjs:
+(pass) legacy CLI invocation fails closed with clear migration instructions [30.40ms]
+(pass) assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure [75.36ms]
+(pass) assembleRelease supports NSIS migration channel with windows updater target [46.61ms]
+(pass) assembleRelease fails closed if outDir already exists [8.81ms]
+(pass) assembleRelease fails closed and leaves no partial output on signature verification failure [12.07ms]
+(pass) assembleRelease fails closed and leaves no partial output on artifact content / hash tampering [10.55ms]
+(pass) assembleRelease fails closed if a receipt has mismatched commitSha or appVersion [15.54ms]
+(pass) assembleRelease fails closed if receipts directory contains unexpected files [15.51ms]
+(pass) assembleRelease rejects path traversal and symlink escape outside artifacts root [28.23ms]
+(pass) assembleRelease fails closed if macos-updater archive layout is invalid [24.83ms]
+(pass) assembleRelease fails closed and leaves no publishable output if data changes at copy boundary [26.38ms]
+(pass) assembleRelease CLI execution works end-to-end via subprocess [44.85ms]
+(pass) real repo signed archive verifies against checked-in Tauri public key [0.36ms]
+
+ 38 pass
+ 0 fail
+Ran 38 tests across 2 files. [1119.00ms]

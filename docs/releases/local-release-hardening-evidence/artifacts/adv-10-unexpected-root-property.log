@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Receipt unexpected property privateKey
+ERROR_THROWN: Receipt contains unexpected property: privateKey

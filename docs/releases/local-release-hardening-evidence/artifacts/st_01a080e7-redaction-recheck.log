@@ -1,0 +1,7 @@
+$ node --input-type=module < redaction harness
+DIRECT_MASKED=true
+ERROR_MASKED=true
+EXIT_CODE=7
+STDOUT=out:[REDACTED]
+STDERR=err:[REDACTED]
+EXIT_STATUS=0

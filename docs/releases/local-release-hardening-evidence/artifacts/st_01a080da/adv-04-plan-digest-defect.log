@@ -1,0 +1,16 @@
+--- 1. Testing Fresh Untouched Run Directory with build CLI ---
+Exit status: 1
+Error output:
+Error in build: plan.json digest does not match prepare-state.json: plan was tampered with
+
+--- 2. Demonstrating Root Cause: Newline byte in plan.json vs planDigest ---
+prepare-state.json planDigest:  2eaaf2c339b5e541ed8eb6580712e44a5db8e6ef68d6982f4828c004cb246d04
+Actual on-disk plan.json SHA:    eade1d4ebf36ce7e900d783363ee61db36185254ca3d70181b99fb91144e2f10
+Trimmed plan.json SHA:           2eaaf2c339b5e541ed8eb6580712e44a5db8e6ef68d6982f4828c004cb246d04
+Trailing byte hex:               7d0a
+
+--- 3. Testing Intentional Tampering on Patched Digest ---
+Tampered plan build exit status: 1
+Tampered plan error output:
+Error in build: appVersion does not match tag: expected '2026.908.1', got '9999.999.999'
+Exit: 0

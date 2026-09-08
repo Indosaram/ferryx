@@ -1,0 +1,3 @@
+Altered receipt caught by verify re-derivation: commitSha mismatch: expected '3a19bdf727870fd28a75866123ac06f80e443076', got '0000000000000000000000000000000000000000'
+ADV-COORD-08 VERIFIED PASS
+Exit: 0

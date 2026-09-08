@@ -1,0 +1,2 @@
+ADVERSARIAL_TEST: Toolchains non-string type rejection
+ERROR_THROWN: toolchains.node must be a non-empty string

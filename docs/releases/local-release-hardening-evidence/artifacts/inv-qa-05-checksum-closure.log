@@ -1,0 +1,45 @@
+CHECKSUM_FILE:
+a0cb4e2a6b91503a9cd3beefe0d220cc775fbb5afe5c16ac9217d8313d98f540  Ferryx.app.tar.gz
+4c2483406ddcca489950cd1ebb4c53614564bdded3c01997560759dee0907b78  Ferryx.app.tar.gz.sig
+7018fc151e3e2e1a0b02db74071026e2f02eab7bc01c73281043989e846cefad  Ferryx_2026.908.1.0_x64.msix
+ca7893669c97d4dc4d02fc6e80e97a156229987be4f6c7cce5b4bf060a3e84a1  Ferryx_2026.908.1_amd64.AppImage
+334d2e033b32d9b1433a221c7df161738b9b943faf21133f58c77a9ddd63edd1  Ferryx_2026.908.1_amd64.AppImage.sig
+3f48aa9228eda857f662149946f83a7d0440b8759ca1114cd226a6938eb3e0df  Ferryx_2026.908.1_amd64.deb
+cd9e3cc5e31c88ccaa13e022f33c82989e66793b0edb966a8f5ac1bb38e80adb  Ferryx_2026.908.1_universal.dmg
+e3b7f64e2e8a4180727a81b7e8b9fb8565398e1c6c5976c885d297d3dfe5da56  Ferryx_2026.908.1_x64-setup.exe
+196cc4019678e531640bd374f651afffda45e66c39becd6835ea599202441346  Ferryx_2026.908.1_x64-setup.exe.sig
+ca7893669c97d4dc4d02fc6e80e97a156229987be4f6c7cce5b4bf060a3e84a1  Ferryx_amd64.AppImage
+334d2e033b32d9b1433a221c7df161738b9b943faf21133f58c77a9ddd63edd1  Ferryx_amd64.AppImage.sig
+3f48aa9228eda857f662149946f83a7d0440b8759ca1114cd226a6938eb3e0df  Ferryx_amd64.deb
+a0cb4e2a6b91503a9cd3beefe0d220cc775fbb5afe5c16ac9217d8313d98f540  Ferryx_universal.app.tar.gz
+4c2483406ddcca489950cd1ebb4c53614564bdded3c01997560759dee0907b78  Ferryx_universal.app.tar.gz.sig
+cd9e3cc5e31c88ccaa13e022f33c82989e66793b0edb966a8f5ac1bb38e80adb  Ferryx_universal.dmg
+e3b7f64e2e8a4180727a81b7e8b9fb8565398e1c6c5976c885d297d3dfe5da56  Ferryx_x64-setup.exe
+196cc4019678e531640bd374f651afffda45e66c39becd6835ea599202441346  Ferryx_x64-setup.exe.sig
+7018fc151e3e2e1a0b02db74071026e2f02eab7bc01c73281043989e846cefad  Ferryx_x64.msix
+3dae5f5ea114140c68ec924538223f97f7e5856e70bfbf95bb1446b23c7fe8ff  latest.json
+
+VERIFICATION_TOOL: shasum -a 256 -c SHA256SUMS.txt
+EXIT_CODE: 0
+STDOUT:
+Ferryx.app.tar.gz: OK
+Ferryx.app.tar.gz.sig: OK
+Ferryx_2026.908.1.0_x64.msix: OK
+Ferryx_2026.908.1_amd64.AppImage: OK
+Ferryx_2026.908.1_amd64.AppImage.sig: OK
+Ferryx_2026.908.1_amd64.deb: OK
+Ferryx_2026.908.1_universal.dmg: OK
+Ferryx_2026.908.1_x64-setup.exe: OK
+Ferryx_2026.908.1_x64-setup.exe.sig: OK
+Ferryx_amd64.AppImage: OK
+Ferryx_amd64.AppImage.sig: OK
+Ferryx_amd64.deb: OK
+Ferryx_universal.app.tar.gz: OK
+Ferryx_universal.app.tar.gz.sig: OK
+Ferryx_universal.dmg: OK
+Ferryx_x64-setup.exe: OK
+Ferryx_x64-setup.exe.sig: OK
+Ferryx_x64.msix: OK
+latest.json: OK
+
+STDERR:

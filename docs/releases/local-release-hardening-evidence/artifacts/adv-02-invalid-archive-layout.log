@@ -1,0 +1,22 @@
+ADVERSARIAL_TEST: macOS updater archive layout validation
+ERROR_THROWN: macOS updater archive layout validation failed for 'Ferryx.app.tar.gz': node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+
+Error: incorrect header check
+    at genericNodeError (node:internal/errors:983:15)
+    at wrappedFn (node:internal/errors:537:14)
+    at Zlib.zlibOnError [as onerror] (node:zlib:191:17)
+    at processChunkSync (node:zlib:430:12)
+    at zlibBufferSync (node:zlib:180:12)
+    at syncBufferWrapper (node:zlib:790:14)
+    at entries (file:///Users/indo/code/project/orca-lite/scripts/assert-updater-archive-layout.mjs:24:19)
+    at main (file:///Users/indo/code/project/orca-lite/scripts/assert-updater-archive-layout.mjs:54:26)
+    at file:///Users/indo/code/project/orca-lite/scripts/assert-updater-archive-layout.mjs:72:14
+    at ModuleJob.run (node:internal/modules/esm/module_job:343:25) {
+  errno: -3,
+  code: 'Z_DATA_ERROR'
+}
+
+Node.js v22.22.3
+OUTDIR_EXISTS: false

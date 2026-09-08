@@ -1,0 +1,5 @@
+exitCode: 0
+stdout: version=2026.908.2
+conf.version: 2026.908.2
+cargo contains serde_json 1.0: true
+cargo package version: 2026.908.2

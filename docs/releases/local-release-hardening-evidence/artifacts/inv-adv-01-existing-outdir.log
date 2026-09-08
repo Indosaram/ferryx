@@ -1,0 +1,4 @@
+ATTEMPT: Writing to pre-existing outDir: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-e1HRRt/already-exists
+EXIT_CODE: 1
+STDERR:
+assembleRelease error: Output directory already exists: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-qa-e1HRRt/already-exists
