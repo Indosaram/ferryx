@@ -10,7 +10,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { registerRemoteProject, toRegisteredProject } from "../lib/remoteProject";
 import { formatSshTarget, useSshHosts } from "../lib/sshHosts";
@@ -23,6 +23,7 @@ import {
   type RegisteredProject,
 } from "../lib/tauri";
 import type { Worktree } from "../lib/types";
+import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
 
 const fieldClass =
   "h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring";
@@ -70,6 +71,7 @@ export type AddProjectDialogProps = {
   onClose: () => void;
   onRegistered: (project: RegisteredProject) => void;
   onOpenSettings?: (section: "ssh") => void;
+  initialHostId?: string;
 };
 
 type AddProjectStep =
@@ -84,8 +86,9 @@ export function AddProjectDialog({
   onClose,
   onRegistered,
   onOpenSettings,
+  initialHostId,
 }: AddProjectDialogProps) {
-  const [step, setStep] = useState<AddProjectStep>("choose-location");
+  const [step, setStep] = useState<AddProjectStep>(initialHostId ? "remote-form" : "choose-location");
   const [workspaceId, setWorkspaceId] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -95,10 +98,14 @@ export function AddProjectDialog({
   // Remote flow state
   const { hosts, loading: hostsLoading, error: hostsLoadError, refresh: refreshHosts } = useSshHosts();
   const enabledHosts = hosts.filter((h) => !h.disabled);
-  const [selectedHostId, setSelectedHostId] = useState<string>("");
-  const [remoteRepoPath, setRemoteRepoPath] = useState("");
-  const [remoteWorkspaceId, setRemoteWorkspaceId] = useState("");
-  const [remoteIdEdited, setRemoteIdEdited] = useState(false);
+  const [selectedHostId, setSelectedHostId] = useState(initialHostId ?? "");
+  const selectedHost = enabledHosts.find((host) => host.id === selectedHostId);
+  const hostKey = selectedHost ? JSON.stringify(selectedHost) : "";
+  const [remoteSelection, setRemoteSelection] = useState<{ hostKey: string; path: string } | null>(null);
+  const remoteRepoPath = remoteSelection?.hostKey === hostKey ? remoteSelection.path : "";
+  const handleRemoteSelect = useCallback((path: string | null) => {
+    setRemoteSelection(path === null ? null : { hostKey, path });
+  }, [hostKey]);
   const [remoteError, setRemoteError] = useState<string | null>(null);
 
   const onCloseRef = useRef(onClose);
@@ -113,7 +120,7 @@ export function AddProjectDialog({
   const pickerOpenedRef = useRef(false);
   const dismissedRef = useRef(false);
   const isMountedRef = useRef(false);
-  const hasHadSelectionRef = useRef(false);
+  const hasHadSelectionRef = useRef(Boolean(initialHostId));
   const isTauri = checkIsTauri();
 
   useEffect(() => {
@@ -125,6 +132,7 @@ export function AddProjectDialog({
 
   // Sync selectedHostId with available enabled hosts
   useEffect(() => {
+    if (hostsLoading) return;
     if (enabledHosts.length === 0) {
       setSelectedHostId("");
       return;
@@ -144,7 +152,7 @@ export function AddProjectDialog({
       }
       return "";
     });
-  }, [enabledHosts]);
+  }, [enabledHosts, hostsLoading]);
 
   const handleDismiss = () => {
     dismissedRef.current = true;
@@ -234,8 +242,8 @@ export function AddProjectDialog({
 
   const handleRemoteSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    const trimmedWorkspaceId = remoteWorkspaceId.trim();
-    const trimmedPath = remoteRepoPath.trim();
+    const trimmedWorkspaceId = deriveWorkspaceId(remoteRepoPath, projectsRef.current);
+    const trimmedPath = remoteRepoPath;
     const hostId = selectedHostId;
     if (!trimmedWorkspaceId || !trimmedPath || !hostId || submitting) return;
 
@@ -258,6 +266,12 @@ export function AddProjectDialog({
     const host = authoritativeHosts.find((h) => h.id === hostId);
     if (!host || host.disabled) {
       setRemoteError("The selected SSH machine is no longer available or has been disabled.");
+      setSubmitting(false);
+      return;
+    }
+    if (JSON.stringify(host) !== hostKey) {
+      setRemoteSelection(null);
+      setRemoteError("The SSH machine changed. Open the folder again before adding it.");
       setSubmitting(false);
       return;
     }
@@ -463,7 +477,7 @@ export function AddProjectDialog({
         <form
           role="dialog"
           aria-label="Add Project"
-          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          className="flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
           onSubmit={handleRemoteSubmit}
         >
           <div className="flex h-9 items-center border-b border-border px-3">
@@ -492,8 +506,8 @@ export function AddProjectDialog({
             </button>
           </div>
 
-          <div className="space-y-3 p-3">
-            {hostsLoading ? (
+          <div className="min-h-0 space-y-3 overflow-y-auto p-3">
+            {hostsLoading && hosts.length === 0 ? (
               <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
                 <LoaderCircle className="size-3.5 animate-spin" />
                 <span>Loading SSH machines...</span>
@@ -532,7 +546,11 @@ export function AddProjectDialog({
                     className={fieldClass}
                     value={selectedHostId}
                     disabled={submitting}
-                    onChange={(event) => setSelectedHostId(event.target.value)}
+                    onChange={(event) => {
+                      setRemoteSelection(null);
+                      setRemoteError(null);
+                      setSelectedHostId(event.target.value);
+                    }}
                   >
                     {!selectedHostId ? (
                       <option value="" disabled>
@@ -547,50 +565,30 @@ export function AddProjectDialog({
                   </select>
                 </label>
 
-                <label className="block space-y-1 text-[11px] text-muted-foreground" htmlFor="remote-repo-path">
-                  <span>Remote repository path</span>
-                  <input
-                    id="remote-repo-path"
-                    aria-label="Remote repository path"
-                    data-testid="remote-repo-path-input"
-                    className={fieldClass}
-                    value={remoteRepoPath}
-                    disabled={submitting}
-                    onChange={(event) => {
-                      const val = event.target.value;
-                      setRemoteRepoPath(val);
-                      if (!remoteIdEdited) {
-                        setRemoteWorkspaceId(deriveWorkspaceId(val, projectsRef.current));
-                      }
-                    }}
-                    placeholder="/home/ubuntu/my-app"
-                    autoFocus
-                  />
-                </label>
-
-                <label className="block space-y-1 text-[11px] text-muted-foreground" htmlFor="remote-workspace-id">
-                  <span>Workspace id</span>
-                  <input
-                    id="remote-workspace-id"
-                    aria-label="Workspace id"
-                    data-testid="remote-workspace-id-input"
-                    className={fieldClass}
-                    value={remoteWorkspaceId}
-                    disabled={submitting}
-                    onChange={(event) => {
-                      setRemoteIdEdited(true);
-                      setRemoteWorkspaceId(event.target.value);
-                    }}
-                    placeholder="my-app"
-                  />
-                </label>
+                {onOpenSettings ? (
+                  <button type="button" disabled={submitting}
+                    className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                    onClick={() => {
+                      onOpenSettingsRef.current?.("ssh");
+                      handleDismiss();
+                    }}>Add or manage SSH machines</button>
+                ) : null}
+                {selectedHost ? (
+                  <RemoteDirectoryPicker key={hostKey} hostId={selectedHost.id}
+                    disabled={submitting} onSelect={handleRemoteSelect} />
+                ) : null}
+                {remoteRepoPath ? (
+                  <p className="break-all font-mono text-[11px] text-muted-foreground" aria-label="Selected remote folder">
+                    {remoteRepoPath}
+                  </p>
+                ) : null}
 
                 {remoteError ? <p className="text-[11px] text-destructive">{remoteError}</p> : null}
               </>
             )}
           </div>
 
-          <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
+          <div className="flex shrink-0 justify-end gap-2 border-t border-border px-3 py-2">
             <button
               type="button"
               disabled={submitting}
@@ -616,8 +614,7 @@ export function AddProjectDialog({
                 submitting ||
                 enabledHosts.length === 0 ||
                 !selectedHostId ||
-                !remoteRepoPath.trim() ||
-                !remoteWorkspaceId.trim()
+                !remoteRepoPath
               }
               className="inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
             >
@@ -626,7 +623,7 @@ export function AddProjectDialog({
               ) : (
                 <FolderPlus className="size-3.5" />
               )}
-              Add Project
+              Add this folder
             </button>
           </div>
         </form>

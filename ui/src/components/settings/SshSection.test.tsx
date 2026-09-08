@@ -61,6 +61,19 @@ describe("SshSection Settings Component", () => {
 
   afterEach(cleanup);
 
+  it("opens a project on the chosen enabled host without installing integration", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_list_hosts") return [mockHost1, mockHost2];
+      if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, rawText: "", hosts: [] };
+      throw new Error(`Unexpected command ${command}`);
+    });
+    const onOpenProject = vi.fn();
+    await act(async () => { render(<SshSection onOpenProject={onOpenProject} />); });
+    fireEvent.click(screen.getByRole("button", { name: "Open project on Dev Server" }));
+    expect(onOpenProject).toHaveBeenCalledWith("host-1");
+    expect(screen.getByRole("button", { name: "Open project on Bastion Box" })).toBeDisabled();
+    expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_prepare_integration", expect.anything());
+  });
 
   it("shows the detected runtime and prepares integration only on explicit action", async () => {
     const environment = { platform: "windows", executor: "powershell", version: "5.1", home: "C:\\Users\\qa", temp: "C:\\Temp", git: false };

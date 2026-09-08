@@ -31,6 +31,7 @@ export type SettingsDialogProps = {
   open: boolean;
   onClose: () => void;
   initialSection?: SectionId;
+  onOpenSshProject?: (hostId: string) => void;
 };
 
 export function SettingsDialog({
@@ -63,7 +64,7 @@ function sanitizeSectionId(candidate: unknown): SectionId {
   return "general";
 }
 
-function SettingsDialogBody({ onClose, initialSection }: SettingsDialogBodyProps) {
+function SettingsDialogBody({ onClose, initialSection, onOpenSshProject }: SettingsDialogBodyProps) {
   const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
   const [section, setSection] = useState<SectionId>(sanitizeSectionId(initialSection));
   const isMac = isMacShortcutPlatform();
@@ -180,7 +181,7 @@ function SettingsDialogBody({ onClose, initialSection }: SettingsDialogBodyProps
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "permissions" ? <PermissionsSection /> : null}
           {section === "remote" ? <RemoteAccessSection /> : null}
-          {section === "ssh" ? <SshSection /> : null}
+          {section === "ssh" ? <SshSection onOpenProject={onOpenSshProject} /> : null}
         </div>
       </main>
     </div>

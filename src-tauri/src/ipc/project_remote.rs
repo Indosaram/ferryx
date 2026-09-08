@@ -91,6 +91,15 @@ pub async fn cmd_project_register_remote<R: Runtime>(
     register_remote_project(path, request).await
 }
 
+#[tauri::command]
+pub async fn cmd_ssh_list_directories<R: Runtime>(
+    app: AppHandle<R>,
+    request: crate::ssh::browse::ListDirectoriesRequest,
+) -> Result<crate::ssh::browse::DirectoryListing, IpcError> {
+    let path = super::ssh::get_ssh_store_path(&app)?;
+    crate::ssh::browse::list_directories(path, request).await
+}
+
 #[cfg(test)]
 #[path = "project_remote_tests.rs"]
 mod tests;

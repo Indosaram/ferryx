@@ -1070,6 +1070,7 @@ function WorkspaceApp({
   ]);
 
   const [isAddProjectOpen, setIsAddProjectOpen] = useState(false);
+  const [addProjectHostId, setAddProjectHostId] = useState<string | undefined>(undefined);
   const [createTargetProject, setCreateTargetProject] = useState<RegisteredProject | null>(null);
   const [pendingProjectRemove, setPendingProjectRemove] = useState<RegisteredProject | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -1695,7 +1696,16 @@ function WorkspaceApp({
     [handleSelectTerminalTab],
   );
 
-  const handleOpenAddProject = useCallback(() => setIsAddProjectOpen(true), []);
+  const handleOpenAddProject = useCallback(() => {
+    setAddProjectHostId(undefined);
+    setIsAddProjectOpen(true);
+  }, []);
+  const handleOpenSshProject = useCallback((hostId: string) => {
+    setIsSettingsOpen(false);
+    setSettingsInitialSection(undefined);
+    setAddProjectHostId(hostId);
+    setIsAddProjectOpen(true);
+  }, []);
   const handleCloseAddProject = useCallback(() => setIsAddProjectOpen(false), []);
   const handleOpenCreateWorktree = useCallback((project?: RegisteredProject) => {
     const target = project ?? activeProjectRef.current;
@@ -2104,7 +2114,8 @@ function WorkspaceApp({
             </div>
           }
         >
-          <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings} />
+          <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
+            onOpenSshProject={handleOpenSshProject} />
         </Suspense>
       ) : null}
       {isOnboardingOpen ? (
@@ -2115,6 +2126,7 @@ function WorkspaceApp({
       {isAddProjectOpen ? (
         <AddProjectDialog
           projects={projects}
+          initialHostId={addProjectHostId}
           onClose={handleCloseAddProject}
           onRegistered={handleRegisteredProject}
           onOpenSettings={handleOpenSshSettings}

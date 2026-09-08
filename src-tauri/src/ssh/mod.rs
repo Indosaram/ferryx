@@ -1,3 +1,4 @@
+pub mod browse;
 pub mod config;
 pub mod direct;
 pub mod exec;

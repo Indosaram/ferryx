@@ -1,0 +1,258 @@
+[
+  {
+    "name": "mobile",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "dialog": {
+      "x": 24,
+      "y": 115,
+      "width": 342,
+      "height": 614,
+      "top": 115,
+      "right": 366,
+      "bottom": 729,
+      "left": 24
+    },
+    "button": {
+      "x": 226.078125,
+      "y": 692,
+      "width": 126.921875,
+      "height": 28,
+      "top": 692,
+      "right": 353,
+      "bottom": 720,
+      "left": 226.078125
+    },
+    "disabled": false
+  },
+  {
+    "name": "mobile-hidden",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "dialog": {
+      "x": 24,
+      "y": 115,
+      "width": 342,
+      "height": 614,
+      "top": 115,
+      "right": 366,
+      "bottom": 729,
+      "left": 24
+    },
+    "button": {
+      "x": 226.078125,
+      "y": 692,
+      "width": 126.921875,
+      "height": 28,
+      "top": 692,
+      "right": 353,
+      "bottom": 720,
+      "left": 226.078125
+    },
+    "disabled": false
+  },
+  {
+    "name": "desktop-projects",
+    "width": 1100,
+    "height": 800,
+    "scrollWidth": 1100,
+    "dialog": {
+      "x": 262,
+      "y": 93,
+      "width": 576,
+      "height": 614,
+      "top": 93,
+      "right": 838,
+      "bottom": 707,
+      "left": 262
+    },
+    "button": {
+      "x": 698.078125,
+      "y": 670,
+      "width": 126.921875,
+      "height": 28,
+      "top": 670,
+      "right": 825,
+      "bottom": 698,
+      "left": 698.078125
+    },
+    "disabled": false
+  },
+  {
+    "name": "mobile-error",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "dialog": {
+      "x": 24,
+      "y": 129,
+      "width": 342,
+      "height": 586,
+      "top": 129,
+      "right": 366,
+      "bottom": 715,
+      "left": 24
+    },
+    "button": {
+      "x": 226.078125,
+      "y": 678,
+      "width": 126.921875,
+      "height": 28,
+      "top": 678,
+      "right": 353,
+      "bottom": 706,
+      "left": 226.078125
+    },
+    "disabled": true,
+    "error": "Permission denied. Choose another folder or retry.Retry"
+  },
+  {
+    "name": "desktop-settings",
+    "width": 1100,
+    "height": 800,
+    "scrollWidth": 1100
+  },
+  {
+    "name": "mobile-loading",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "dialog": {
+      "x": 24,
+      "y": 129,
+      "width": 342,
+      "height": 586,
+      "top": 129,
+      "right": 366,
+      "bottom": 715,
+      "left": 24
+    },
+    "button": {
+      "x": 226.078125,
+      "y": 678,
+      "width": 126.921875,
+      "height": 28,
+      "top": 678,
+      "right": 353,
+      "bottom": 706,
+      "left": 226.078125
+    },
+    "disabled": true
+  },
+  {
+    "name": "mobile-empty",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "dialog": {
+      "x": 24,
+      "y": 115,
+      "width": 342,
+      "height": 614,
+      "top": 115,
+      "right": 366,
+      "bottom": 729,
+      "left": 24
+    },
+    "button": {
+      "x": 226.078125,
+      "y": 692,
+      "width": 126.921875,
+      "height": 28,
+      "top": 692,
+      "right": 353,
+      "bottom": 720,
+      "left": 226.078125
+    },
+    "disabled": false
+  },
+  {
+    "name": "mobile-truncated",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "dialog": {
+      "x": 24,
+      "y": 93,
+      "width": 342,
+      "height": 658,
+      "top": 93,
+      "right": 366,
+      "bottom": 751,
+      "left": 24
+    },
+    "button": {
+      "x": 226.078125,
+      "y": 714,
+      "width": 126.921875,
+      "height": 28,
+      "top": 714,
+      "right": 353,
+      "bottom": 742,
+      "left": 226.078125
+    },
+    "disabled": false
+  },
+  {
+    "name": "desktop-windows",
+    "width": 1100,
+    "height": 800,
+    "scrollWidth": 1100,
+    "dialog": {
+      "x": 262,
+      "y": 93,
+      "width": 576,
+      "height": 614,
+      "top": 93,
+      "right": 838,
+      "bottom": 707,
+      "left": 262
+    },
+    "button": {
+      "x": 698.078125,
+      "y": 670,
+      "width": 126.921875,
+      "height": 28,
+      "top": 670,
+      "right": 825,
+      "bottom": 698,
+      "left": 698.078125
+    },
+    "disabled": false
+  },
+  {
+    "name": "mobile-settings",
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390
+  },
+  {
+    "name": "short-window",
+    "width": 390,
+    "height": 480,
+    "scrollWidth": 390,
+    "dialog": {
+      "x": 24,
+      "y": 24,
+      "width": 342,
+      "height": 432,
+      "top": 24,
+      "right": 366,
+      "bottom": 456,
+      "left": 24
+    },
+    "button": {
+      "x": 226.078125,
+      "y": 419,
+      "width": 126.921875,
+      "height": 28,
+      "top": 419,
+      "right": 353,
+      "bottom": 447,
+      "left": 226.078125
+    },
+    "disabled": false
+  }
+]

@@ -41,7 +41,12 @@ const ssh = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../lib/tauri", () => native);
+vi.mock("../lib/tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/tauri")>();
+  return { ...native, toIpcError: actual.toIpcError };
+});
+const directories = vi.hoisted(() => ({ listRemoteDirectories: vi.fn() }));
+vi.mock("../lib/remoteDirectories", () => directories);
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 vi.mock("../lib/remoteProject", () => remote);
 vi.mock("../lib/sshHosts", () => ssh);
@@ -54,6 +59,14 @@ import {
 } from "./ProjectDialogs";
 import type { RegisteredProject } from "../lib/tauri";
 import type { SshHost } from "../lib/sshHosts";
+import type { RemoteDirectoryListing } from "../lib/remoteDirectories";
+
+async function openRemotePath(path: string) {
+  await act(async () => {
+    fireEvent.change(screen.getByTestId("remote-repo-path-input"), { target: { value: path } });
+    fireEvent.click(screen.getByRole("button", { name: "Go" }));
+  });
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -97,6 +110,14 @@ beforeEach(() => {
   dialog.open.mockReset();
   remote.registerRemoteProject.mockReset();
   ssh.useSshHosts.mockReset();
+  directories.listRemoteDirectories.mockReset();
+  directories.listRemoteDirectories.mockImplementation(async (_host: string, path: string | null): Promise<RemoteDirectoryListing> => ({
+    path: path ?? "/home/ubuntu",
+    parentPath: "/",
+    homePath: "/home/ubuntu",
+    entries: [],
+    truncated: false,
+  }));
 
   ssh.useSshHosts.mockReturnValue({
     hosts: [mockHost1],
@@ -519,6 +540,162 @@ describe("AddProjectDialog non-Tauri fallback flow", () => {
 });
 
 describe("AddProjectDialog Remote flow", () => {
+  it("keeps the settings-selected host while its inventory loads", async () => {
+    ssh.useSshHosts.mockReturnValue({ hosts: [], loading: true, error: null, refresh: vi.fn() });
+    const props = { initialHostId: "host-1", onClose: vi.fn(), onRegistered: vi.fn() };
+    const { rerender } = render(<AddProjectDialog {...props} />);
+    ssh.useSshHosts.mockReturnValue({ hosts: [mockHost1], loading: false, error: null, refresh: vi.fn() });
+    await act(async () => { rerender(<AddProjectDialog {...props} />); });
+    expect(directories.listRemoteDirectories).toHaveBeenCalledWith("host-1", null);
+    expect(screen.getByTestId("remote-host-select")).toHaveValue("host-1");
+  });
+
+  it("navigates nested folders and registers the canonical selected path", async () => {
+    const home: RemoteDirectoryListing = {
+      path: "/home/ubuntu", homePath: "/home/ubuntu", parentPath: "/home", truncated: false,
+      entries: [{ name: "projects", path: "/home/ubuntu/projects", hidden: false }],
+    };
+    directories.listRemoteDirectories.mockResolvedValueOnce(home).mockResolvedValueOnce({
+      ...home, path: "/srv/projects", parentPath: "/srv",
+      entries: [{ name: "My App", path: "/srv/projects/My App", hidden: false }],
+    }).mockResolvedValueOnce({ ...home, path: "/srv/projects/My App", parentPath: "/srv/projects", entries: [] });
+    const onRegistered = vi.fn();
+    remote.registerRemoteProject.mockResolvedValue({
+      workspaceId: "ssh:canonical", hostId: "host-1", repoRoot: "/srv/projects/My App", gitRoot: null,
+    });
+    await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={onRegistered} />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "projects" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "My App" })); });
+    await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-remote")); });
+    expect(remote.registerRemoteProject).toHaveBeenCalledWith({
+      workspaceId: "My-App", hostId: "host-1", repoPath: "/srv/projects/My App",
+    });
+    expect(onRegistered).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ssh:canonical" }));
+  });
+
+  it("ignores an older folder response after a newer keyboard navigation", async () => {
+    const slow = deferred<RemoteDirectoryListing>();
+    const fast = deferred<RemoteDirectoryListing>();
+    await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />); });
+    directories.listRemoteDirectories.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
+    const input = screen.getByTestId("remote-repo-path-input");
+    fireEvent.change(input, { target: { value: "/slow" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
+    fireEvent.change(input, { target: { value: "/fast" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    const result = { path: "/fast", parentPath: "/", homePath: "/home/ubuntu", entries: [], truncated: false };
+    await act(async () => { fast.resolve(result); });
+    await act(async () => { slow.resolve({ ...result, path: "/slow" }); });
+    expect(input).toHaveValue("/fast");
+    expect(screen.getByLabelText("Selected remote folder")).toHaveTextContent("/fast");
+    expect(remote.registerRemoteProject).not.toHaveBeenCalled();
+  });
+
+  it("discards old host responses and caches when the selected host changes", async () => {
+    const slow = deferred<RemoteDirectoryListing>();
+    directories.listRemoteDirectories.mockReturnValueOnce(slow.promise);
+    ssh.useSshHosts.mockReturnValue({
+      hosts: [mockHost1, { ...mockHost2, disabled: false }], loading: false, error: null, refresh: vi.fn(),
+    });
+    render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />);
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("remote-host-select"), { target: { value: "host-2" } });
+    });
+    await act(async () => {
+      slow.resolve({ path: "/old-host", parentPath: "/", homePath: "/old-host", entries: [], truncated: false });
+    });
+    expect(directories.listRemoteDirectories).toHaveBeenCalledWith("host-2", null);
+    expect(screen.getByTestId("remote-repo-path-input")).toHaveValue("/home/ubuntu");
+    expect(screen.queryByText("/old-host")).not.toBeInTheDocument();
+  });
+
+  it("filters hidden folders locally and refreshes cached directory data", async () => {
+    directories.listRemoteDirectories.mockResolvedValue({
+      path: "/home/ubuntu", parentPath: "/home", homePath: "/home/ubuntu", truncated: true,
+      entries: [
+        { name: "projects", path: "/home/ubuntu/projects", hidden: false },
+        { name: ".config", path: "/home/ubuntu/.config", hidden: true },
+      ],
+    });
+    await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />); });
+    expect(screen.queryByRole("button", { name: ".config" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Hidden folders" }));
+    expect(screen.getByRole("button", { name: ".config" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Filter folders" }), { target: { value: ".con" } });
+    expect(screen.queryByRole("button", { name: "projects" })).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remote home" })); });
+    expect(directories.listRemoteDirectories).toHaveBeenCalledTimes(1);
+    directories.listRemoteDirectories.mockResolvedValueOnce({
+      path: "/home/ubuntu", parentPath: "/home", homePath: "/home/ubuntu", truncated: false,
+      entries: [{ name: "new-project", path: "/home/ubuntu/new-project", hidden: false }],
+    });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh folders" })); });
+    expect(directories.listRemoteDirectories).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "new-project" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "projects" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: ".config" })).not.toBeInTheDocument();
+  });
+
+  it("invalidates cached and pending selections when the same host ID changes configuration", async () => {
+    const props = { initialHostId: "host-1", onClose: vi.fn(), onRegistered: vi.fn() };
+    const initial = deferred<RemoteDirectoryListing>();
+    directories.listRemoteDirectories.mockReturnValueOnce(initial.promise);
+    const rendered = render(<AddProjectDialog {...props} />);
+    await act(async () => {
+      initial.resolve({ path: "/home/ubuntu", parentPath: "/home", homePath: "/home/ubuntu", entries: [], truncated: false });
+    });
+    const oldRequest = deferred<RemoteDirectoryListing>();
+    const newRequest = deferred<RemoteDirectoryListing>();
+    directories.listRemoteDirectories.mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(newRequest.promise);
+    await openRemotePath("/old-pending");
+    const changedHost = { ...mockHost1, hostname: "replacement.internal" };
+    ssh.useSshHosts.mockReturnValue({
+      hosts: [changedHost], loading: false, error: null, refresh: vi.fn().mockResolvedValue([changedHost]),
+    });
+    await act(async () => { rendered.rerender(<AddProjectDialog {...props} />); });
+    expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
+    const result = { path: "/new-host", parentPath: "/", homePath: "/new-host", entries: [], truncated: false };
+    await act(async () => { newRequest.resolve(result); });
+    await act(async () => { oldRequest.resolve({ ...result, path: "/old-pending" }); });
+    expect(directories.listRemoteDirectories).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId("remote-repo-path-input")).toHaveValue("/new-host");
+    expect(screen.getByLabelText("Selected remote folder")).toHaveTextContent("/new-host");
+  });
+
+  it("invalidates selection on errors and enables it only after retry succeeds", async () => {
+    directories.listRemoteDirectories.mockRejectedValueOnce({ code: "IO_ERROR", message: "Permission denied" });
+    await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Permission denied");
+    expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("add-project-confirm-remote")).toBeEnabled();
+  });
+
+  it("shows the attempted child path when navigation fails and retries that path", async () => {
+    const home = {
+      path: "/home/ubuntu", parentPath: "/home", homePath: "/home/ubuntu", truncated: false,
+      entries: [{ name: "denied", path: "/home/ubuntu/denied", hidden: false }],
+    };
+    directories.listRemoteDirectories.mockResolvedValueOnce(home)
+      .mockRejectedValueOnce({ code: "IO_ERROR", message: "Permission denied" });
+    await act(async () => { render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={vi.fn()} />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "denied" })); });
+    expect(screen.getByTestId("remote-repo-path-input")).toHaveValue("/home/ubuntu/denied");
+    expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
+    expect(directories.listRemoteDirectories).toHaveBeenLastCalledWith("host-1", "/home/ubuntu/denied");
+  });
+
+  it("opens a remote folder browser after choosing SSH", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    render(<AddProjectDialog onClose={vi.fn()} onRegistered={vi.fn()} />);
+    await act(async () => { fireEvent.click(screen.getByTestId("project-type-remote")); });
+    expect(screen.getByRole("button", { name: "Remote home" })).toBeInTheDocument();
+    expect(directories.listRemoteDirectories).toHaveBeenCalledWith("host-1", null);
+  });
+
   it("renders empty state and Settings CTA button when 0 active hosts exist and makes zero native picker calls", () => {
     native.isTauriRuntime.mockReturnValue(true);
     ssh.useSshHosts.mockReturnValue({
@@ -605,23 +782,23 @@ describe("AddProjectDialog Remote flow", () => {
     expect(screen.getByTestId("project-type-local")).toBeInTheDocument();
   });
 
-  it("auto-derives workspace id from remote repo path and allows manual override", () => {
+  it("requires browsing the typed path and derives the internal id on registration", async () => {
     native.isTauriRuntime.mockReturnValue(true);
 
     render(<AddProjectDialog onClose={vi.fn()} onRegistered={vi.fn()} />);
 
-    fireEvent.click(screen.getByTestId("project-type-remote"));
+    await act(async () => { fireEvent.click(screen.getByTestId("project-type-remote")); });
 
     const pathInput = screen.getByTestId("remote-repo-path-input");
-    const wsInput = screen.getByTestId("remote-workspace-id-input");
-
     fireEvent.change(pathInput, { target: { value: "/srv/apps/cool-service" } });
-    expect(wsInput).toHaveValue("cool-service");
-
-    // Manual edit decouples auto-derive
-    fireEvent.change(wsInput, { target: { value: "custom-slug" } });
-    fireEvent.change(pathInput, { target: { value: "/srv/apps/another-dir" } });
-    expect(wsInput).toHaveValue("custom-slug");
+    expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
+    expect(screen.queryByTestId("remote-workspace-id-input")).not.toBeInTheDocument();
+    await openRemotePath("/srv/apps/cool-service");
+    remote.registerRemoteProject.mockReturnValue(new Promise(() => {}));
+    await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-remote")); });
+    expect(remote.registerRemoteProject).toHaveBeenCalledWith({
+      workspaceId: "cool-service", hostId: "host-1", repoPath: "/srv/apps/cool-service",
+    });
   });
 
   it("registers remote project successfully and maps identity to RegisteredProject target { kind: 'ssh', hostId }", async () => {
@@ -646,10 +823,7 @@ describe("AddProjectDialog Remote flow", () => {
     const hostSelect = screen.getByTestId("remote-host-select");
     expect(hostSelect).toHaveValue("host-1");
 
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), {
-      target: { value: "/srv/apps/my-repo" },
-    });
-    expect(screen.getByTestId("remote-workspace-id-input")).toHaveValue("my-repo");
+    await openRemotePath("/srv/apps/my-repo");
 
     fireEvent.click(screen.getByTestId("add-project-confirm-remote"));
 
@@ -707,9 +881,7 @@ describe("AddProjectDialog Remote flow", () => {
     render(<AddProjectDialog onClose={onClose} onRegistered={vi.fn()} />);
 
     fireEvent.click(screen.getByTestId("project-type-remote"));
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), {
-      target: { value: "/srv/apps/my-repo" },
-    });
+    await openRemotePath("/srv/apps/my-repo");
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("add-project-confirm-remote"));
@@ -785,9 +957,7 @@ describe("AddProjectDialog Remote flow", () => {
     const { unmount } = render(<AddProjectDialog onClose={onClose} onRegistered={onRegistered} />);
 
     fireEvent.click(screen.getByTestId("project-type-remote"));
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), {
-      target: { value: "/srv/repo" },
-    });
+    await openRemotePath("/srv/repo");
 
     fireEvent.click(screen.getByTestId("add-project-confirm-remote"));
 
@@ -832,9 +1002,7 @@ describe("AddProjectDialog Remote flow", () => {
     render(<AddProjectDialog onClose={onClose} onRegistered={vi.fn()} />);
 
     fireEvent.click(screen.getByTestId("project-type-remote"));
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), {
-      target: { value: "/srv/apps/repo" },
-    });
+    await openRemotePath("/srv/apps/repo");
 
     fireEvent.click(screen.getByTestId("add-project-confirm-remote"));
 
@@ -869,9 +1037,7 @@ describe("AddProjectDialog Remote flow", () => {
     render(<AddProjectDialog onClose={onClose} onRegistered={vi.fn()} />);
 
     fireEvent.click(screen.getByTestId("project-type-remote"));
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), {
-      target: { value: "/srv/bad-path" },
-    });
+    await openRemotePath("/srv/bad-path");
 
     fireEvent.click(screen.getByTestId("add-project-confirm-remote"));
 
@@ -917,9 +1083,7 @@ describe("AddProjectDialog Remote flow", () => {
     render(<AddProjectDialog onClose={onClose} onRegistered={onRegistered} />);
 
     fireEvent.click(screen.getByTestId("project-type-remote"));
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), {
-      target: { value: "/srv/repo" },
-    });
+    await openRemotePath("/srv/repo");
 
     fireEvent.click(screen.getByTestId("add-project-confirm-remote"));
 

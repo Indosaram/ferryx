@@ -86,7 +86,7 @@ function sameConnection(left: SshHost, right: SshHost): boolean {
     left.authMethod === right.authMethod && left.disabled === right.disabled;
 }
 
-export function SshSection() {
+export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string) => void }) {
   const { hosts, loading, error: loadError } = useSshHosts();
   const hostsRef = useRef(hosts);
 
@@ -1002,7 +1002,16 @@ export function SshSection() {
                     ) : null}
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {onOpenProject ? (
+                      <Button type="button" size="sm" variant="outline"
+                        disabled={!!host.disabled || isBusy || test?.testing || isFormOpen}
+                        onClick={() => onOpenProject(host.id)}
+                        aria-label={`Open project on ${host.label}`}>
+                        <FolderOpen className="size-3.5" />
+                        Open Project
+                      </Button>
+                    ) : null}
                     <div className="flex items-center mr-1">
                       <Switch
                         id={`ssh-toggle-${host.id}`}
