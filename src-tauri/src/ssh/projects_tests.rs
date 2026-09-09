@@ -232,7 +232,8 @@ fn persisted_resolve_and_enabled_host_succeeds_with_legacy_keys_mixed_keys_and_u
             {
                 "id": "mixed-1",
                 "label": "CanonicalBox",
-                "name": "LegacyBox",
+                "name": { "display": "old metadata" },
+                "user": 999,
                 "hostname": "127.0.0.1",
                 "authMethod": "agent"
             }

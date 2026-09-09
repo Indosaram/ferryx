@@ -34,6 +34,17 @@ pub struct SshHost {
     pub disabled: Option<bool>,
 }
 
+fn deserialize_optional_string_lenient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match val {
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        _ => Ok(None),
+    }
+}
+
 impl<'de> Deserialize<'de> for SshHost {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -45,14 +56,19 @@ impl<'de> Deserialize<'de> for SshHost {
             id: Option<String>,
 
             label: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             name: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             alias: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             title: Option<String>,
 
             hostname: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             host: Option<String>,
 
             username: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             user: Option<String>,
 
             port: Option<u16>,
@@ -60,12 +76,15 @@ impl<'de> Deserialize<'de> for SshHost {
             identity_file: Option<String>,
             #[serde(rename = "identity_file")]
             identity_file_snake: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             key: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             key_path: Option<String>,
 
             jump_host: Option<String>,
             #[serde(rename = "jump_host")]
             jump_host_snake: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             proxy_jump: Option<String>,
 
             source: Option<SshHostSource>,
@@ -383,5 +402,28 @@ mod tests {
         assert_eq!(host.jump_host.as_deref(), Some("bastion.example.com"));
         assert_eq!(host.source, SshHostSource::Config);
         assert_eq!(host.auth_method, SshAuthMethod::Key);
+    }
+
+    #[test]
+    fn serde_resilient_canonical_host_with_non_string_legacy_fields() {
+        // A valid canonical host must never fail because legacy/extension keys contain non-string values
+        let json = serde_json::json!({
+            "id": "stable",
+            "label": "Box",
+            "hostname": "example.com",
+            "source": "manual",
+            "authMethod": "agent",
+            "name": { "display": "old metadata" },
+            "host": ["old", "hosts"],
+            "user": 12345,
+            "key": false,
+            "proxyJump": null
+        });
+        let host: SshHost = serde_json::from_value(json).expect("deserialize canonical host with non-string legacy fields");
+        assert_eq!(host.id, "stable");
+        assert_eq!(host.label, "Box");
+        assert_eq!(host.hostname, "example.com");
+        assert_eq!(host.source, SshHostSource::Manual);
+        assert_eq!(host.auth_method, SshAuthMethod::Agent);
     }
 }
