@@ -67,6 +67,41 @@ export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | 
 
 export type ReconnectLifecycle = "idle" | "validating" | "spawning" | "binding" | "failed";
 
+export type RemoteConnectionState = "connected" | "reconnecting" | "disconnected" | "expired";
+export type RemoteFailure = {
+  kind: "transport" | "authentication" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
+  message: string;
+};
+export type RemoteReplayGap = { requestedAfterCursor: string; availableFromCursor: string };
+export type TerminalRemoteStatus = {
+  sessionId: string;
+  state: RemoteConnectionState;
+  generation: number;
+  failure: RemoteFailure | null;
+  replayGap: RemoteReplayGap | null;
+};
+export type RemoteSessionDetails = Omit<TerminalRemoteStatus, "sessionId"> & {
+  descriptor: {
+    backendSessionId: string;
+    target: import("./scopedContracts").TargetRef;
+    config: Record<string, unknown>;
+    clientRequestId: string;
+    remoteCursor: string;
+    cols: number;
+    rows: number;
+  };
+  attempts: number;
+  pid: number | null;
+};
+export type RemoteSessionStatusResponse = {
+  type: "remoteSessionDetailsOk";
+  details: RemoteSessionDetails | null;
+  legacyDirectSsh: boolean;
+};
+export type SshRecoveryStatus = Omit<TerminalRemoteStatus, "state"> & {
+  state: RemoteConnectionState | "missing" | "legacyLost";
+};
+
 export type TerminalSession = {
   /** Frontend-local stable identity used by pane leaves and terminal renderer ownership. */
   id: string;
@@ -93,6 +128,11 @@ export type TerminalSession = {
   /** Transient structured error when reconnect fails. Never persisted. */
   reconnectError?: StructuredIpcError | null;
   reconnectRequestId?: string | null;
+  /** Transient SSH transport state, separate from process lifecycle. Never persisted. */
+  remoteConnectionState?: SshRecoveryStatus["state"];
+  remoteGeneration?: number | null;
+  remoteFailure?: RemoteFailure | null;
+  remoteReplayGap?: RemoteReplayGap | null;
 };
 
 export type TerminalTab = {

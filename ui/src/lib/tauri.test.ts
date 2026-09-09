@@ -41,9 +41,32 @@ import {
   normalizeBadgeCount,
   setBadgeCount,
   toIpcError,
+  getTerminalRemoteStatus,
+  retryTerminalRemoteSession,
+  writeTerminalRemote,
+  resizeTerminalRemote,
+  onTerminalRemoteStatus,
 } from "./tauri";
 
 describe("Tauri IPC wrapper contract", () => {
+  it("routes remote status, retry and generation-fenced control without remapping arguments", async () => {
+    core.invoke.mockResolvedValue({ type: "retryRemoteSessionOk" });
+    await getTerminalRemoteStatus("stable");
+    await retryTerminalRemoteSession("stable");
+    await writeTerminalRemote({ sessionId: "stable", generation: 7, data: "input" });
+    await resizeTerminalRemote({ sessionId: "stable", generation: 7, cols: 80, rows: 24 });
+    expect(core.invoke.mock.calls).toEqual([
+      ["cmd_terminal_remote_status", { sessionId: "stable" }],
+      ["cmd_terminal_remote_retry", { sessionId: "stable" }],
+      ["cmd_terminal_remote_write", { sessionId: "stable", generation: 7, data: "input" }],
+      ["cmd_terminal_remote_resize", { sessionId: "stable", generation: 7, cols: 80, rows: 24 }],
+    ]);
+    const handler = vi.fn();
+    await onTerminalRemoteStatus(handler);
+    expect(events.listen.mock.calls[0][0]).toBe("terminal_remote_status");
+    events.listen.mock.calls[0][1]({ payload: { sessionId: "stable", state: "reconnecting" } });
+    expect(handler).toHaveBeenCalledWith({ sessionId: "stable", state: "reconnecting" });
+  });
   beforeEach(() => {
     core.invoke.mockReset();
     events.listen.mockReset();

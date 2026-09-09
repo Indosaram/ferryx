@@ -15,9 +15,11 @@ import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getT
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
+import { isRemoteWorkspaceId } from "../lib/remoteProject";
+import { startSshRecovery } from "../lib/sshRecovery";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
-import { worktreeIdentity } from "../lib/types";
+import { createBrowserPaneContent, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
   ActiveAgent,
@@ -111,7 +113,7 @@ export type WorkspaceAction =
       tabId: string;
       replacement?: { tab: WorkspaceTab; session?: TerminalSession };
     }
-  | { type: "UPDATE_BROWSER_TAB"; tabId: string; updates: Partial<BrowserTab> }
+  | { type: "UPDATE_BROWSER_TAB"; tabId: string; browserId?: string; updates: Partial<BrowserTab> }
   | { type: "ACTIVATE_TAB"; tabId: string }
   | { type: "REORDER_TAB"; tabId: string; targetIndex: number }
   | { type: "RENAME_TAB"; tabId: string; label: string }
@@ -167,6 +169,7 @@ export type WorkspaceAction =
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
+  | { type: "SESSION_REMOTE_STATUS"; status: import("../lib/types").SshRecoveryStatus; daemonEpoch?: string | null }
   | {
       type: "SET_RECONNECT_LIFECYCLE";
       sessionId: string;
@@ -562,11 +565,26 @@ export function useWorkspaceStore({
     [createSpawnedTab, dispatch, services, workspaceId],
   );
 
+  const sshRecoveryKey = Object.values(renderedState.sessions)
+    .filter(session => isRemoteWorkspaceId(session.workspaceId))
+    .map(session => `${session.id}:${session.backendSessionId}:${session.remoteConnectionState ?? ""}`).join("|");
+  useEffect(() => {
+    if (!tauriIpc.isTauriRuntime() || !sshRecoveryKey) return;
+    const recovery = startSshRecovery({
+      sessions: Object.values(stateRef.current.sessions).filter(session => isRemoteWorkspaceId(session.workspaceId)),
+      dispatch,
+      onError: error => console.error("SSH session reconciliation failed:", error),
+    });
+    void recovery.ready.catch(error => console.error("SSH status subscription failed:", error));
+    return recovery.stop;
+  }, [sshRecoveryKey, dispatch]);
+
   const ensureSessionBackends = useCallback(
     async (sessionIds: string[]) => {
       const targets = sessionIds.filter((sessionId) => {
         const session = stateRef.current.sessions[sessionId];
         if (!session || session.backendSessionId != null) return false;
+        if (isRemoteWorkspaceId(session.workspaceId)) return false;
         if (session.lifecycle === "exited" && (session.agentType || session.providerSession || session.agentSessionId)) {
           return false;
         }
@@ -1172,32 +1190,28 @@ export function useWorkspaceStore({
   );
 
   const navigateBrowserTabAction = useCallback(
-    async (tabId: string, url: string) => {
-      const tab = stateRef.current.layout.tabs.find((candidate) => candidate.id === tabId);
-      if (!tab || tab.kind !== "browser") return;
-      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { url, loading: true } });
+    async (tabId: string, url: string, paneBrowserId?: string) => {
+      const browserId = getBrowserIdForTab(stateRef.current.layout, tabId, paneBrowserId);
+      if (!browserId) return;
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId, updates: { url, loading: true } });
       try {
-        await navigateBrowser(tab.browserId, url);
+        await navigateBrowser(browserId, url);
       } finally {
-        if (stateRef.current.layout.tabs.some((candidate) => candidate.id === tabId)) {
-          dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { loading: false } });
-        }
+        dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId, updates: { loading: false } });
       }
     },
     [dispatch],
   );
 
   const reloadBrowserTabAction = useCallback(
-    async (tabId: string) => {
-      const tab = stateRef.current.layout.tabs.find((candidate) => candidate.id === tabId);
-      if (!tab || tab.kind !== "browser") return;
-      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { loading: true } });
+    async (tabId: string, paneBrowserId?: string) => {
+      const browserId = getBrowserIdForTab(stateRef.current.layout, tabId, paneBrowserId);
+      if (!browserId) return;
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId, updates: { loading: true } });
       try {
-        await reloadBrowser(tab.browserId);
+        await reloadBrowser(browserId);
       } finally {
-        if (stateRef.current.layout.tabs.some((candidate) => candidate.id === tabId)) {
-          dispatch({ type: "UPDATE_BROWSER_TAB", tabId, updates: { loading: false } });
-        }
+        dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId, updates: { loading: false } });
       }
     },
     [dispatch],
@@ -1611,23 +1625,43 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
     }
     case "UPDATE_BROWSER_TAB": {
-      const inActive = state.layout.tabs.some((tab) => tab.id === action.tabId && tab.kind === "browser");
-      if (inActive) {
-        const tabs = state.layout.tabs.map((tab) => {
-          if (tab.id === action.tabId && tab.kind === "browser") return { ...tab, ...action.updates };
-          return tab;
-        });
-        return { ...state, layout: { ...state.layout, tabs } };
-      }
+      const updateLayout = (layout: LayoutState): LayoutState => {
+        const browserId = getBrowserIdForTab(layout, action.tabId, action.browserId);
+        if (!browserId) return layout;
+        const tabs = layout.tabs.map((tab) =>
+          tab.id === action.tabId && tab.kind === "browser" && tab.browserId === browserId
+            ? { ...tab, ...action.updates }
+            : tab,
+        );
+        const tabLayout = layout.layoutsByTabId[action.tabId];
+        if (!tabLayout?.contentsByLeafId) return { ...layout, tabs };
+        const contentsByLeafId = { ...tabLayout.contentsByLeafId };
+        for (const [leafId, content] of Object.entries(contentsByLeafId)) {
+          if (content.kind === "browser" && (content.browser?.browserId ?? content.browserId) === browserId) {
+            const { kind: _kind, browser, ...legacyBrowser } = content;
+            contentsByLeafId[leafId] = createBrowserPaneContent({
+              ...legacyBrowser,
+              ...browser,
+              browserId,
+              url: browser?.url ?? content.url ?? "about:blank",
+              ...action.updates,
+            });
+          }
+        }
+        return {
+          ...layout,
+          tabs,
+          layoutsByTabId: {
+            ...layout.layoutsByTabId,
+            [action.tabId]: { ...tabLayout, contentsByLeafId },
+          },
+        };
+      };
+      const layout = updateLayout(state.layout);
+      if (layout !== state.layout) return { ...state, layout };
       const worktreeLayouts = { ...(state.worktreeLayouts ?? {}) };
       for (const [wtPath, parkedLayout] of Object.entries(worktreeLayouts)) {
-        if (parkedLayout.tabs.some((tab) => tab.id === action.tabId && tab.kind === "browser")) {
-          const tabs = parkedLayout.tabs.map((tab) => {
-            if (tab.id === action.tabId && tab.kind === "browser") return { ...tab, ...action.updates };
-            return tab;
-          });
-          worktreeLayouts[wtPath] = { ...parkedLayout, tabs };
-        }
+        worktreeLayouts[wtPath] = updateLayout(parkedLayout);
       }
       return { ...state, worktreeLayouts };
     }
@@ -1966,11 +2000,33 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         },
       };
     }
+    case "SESSION_REMOTE_STATUS": {
+      const sessions = { ...state.sessions };
+      for (const [id, session] of Object.entries(sessions)) {
+        if (session.backendSessionId !== action.status.sessionId || !isRemoteWorkspaceId(session.workspaceId)) continue;
+        const lost = ["missing", "expired", "legacyLost"].includes(action.status.state);
+        const epochChanged = action.daemonEpoch != null && action.daemonEpoch !== session.daemonEpoch;
+        sessions[id] = {
+          ...session,
+          remoteConnectionState: action.status.state,
+          remoteGeneration: action.status.generation,
+          remoteFailure: action.status.failure,
+          remoteReplayGap: action.status.replayGap,
+          lifecycle: lost ? "exited" : action.status.state === "connected" ? "running" : session.lifecycle,
+          ...(action.daemonEpoch != null ? { daemonEpoch: action.daemonEpoch } : {}),
+          ...(epochChanged ? { lastOutputSequence: null } : {}),
+        };
+      }
+      return { ...state, sessions };
+    }
     case "SESSION_LIFECYCLE": {
       const matchedSessionIds: string[] = [];
       const sessions = Object.fromEntries(
         Object.entries(state.sessions).map(([id, session]) => {
           if (session.backendSessionId !== action.backendSessionId) return [id, session];
+          if (isRemoteWorkspaceId(session.workspaceId) && action.lifecycle === "exited") {
+            return [id, { ...session, remoteConnectionState: "reconnecting", remoteGeneration: null }];
+          }
           matchedSessionIds.push(id);
           return [
             id,
@@ -2034,8 +2090,12 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "REBIND_SESSION_BACKEND": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
+      const isSshSession = isRemoteWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
+      const activityBySessionId = { ...state.activityBySessionId };
+      if (isSshSession) delete activityBySessionId[action.sessionId];
       return {
         ...state,
+        ...(isSshSession ? { activityBySessionId } : {}),
         sessions: {
           ...state.sessions,
           [action.sessionId]: {
@@ -2048,6 +2108,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             reconnectLifecycle: "idle",
             reconnectError: null,
             reconnectRequestId: null,
+            ...(isSshSession ? { agentType: null, agentSessionId: null, providerSession: null } : {}),
           },
         },
       };
@@ -2371,6 +2432,17 @@ function isSessionReferencedOutsideTab(state: WorkspaceState, sessionId: string,
 
 function isSessionReferenced(state: WorkspaceState, sessionId: string): boolean {
   return getAllTabs(state).some((tab) => getTabSessionIds(state, tab.id).has(sessionId));
+}
+
+function getBrowserIdForTab(layout: LayoutState, tabId: string, paneBrowserId?: string): string | undefined {
+  const tab = layout.tabs.find((candidate) => candidate.id === tabId);
+  if (!tab) return undefined;
+  if (paneBrowserId === undefined) return tab.kind === "browser" ? tab.browserId : undefined;
+  if (tab.kind === "browser" && tab.browserId === paneBrowserId) return paneBrowserId;
+  const contents = layout.layoutsByTabId[tabId]?.contentsByLeafId ?? {};
+  return Object.values(contents).some(
+    (content) => content.kind === "browser" && (content.browser?.browserId ?? content.browserId) === paneBrowserId,
+  ) ? paneBrowserId : undefined;
 }
 
 function isBrowserIdReferenced(state: WorkspaceState, browserId: string): boolean {

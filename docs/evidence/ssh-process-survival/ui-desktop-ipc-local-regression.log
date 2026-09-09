@@ -1,0 +1,9 @@
+dyld[90610]: Library not loaded: @rpath/libghostty-vt.dylib
+  Referenced from: <729A5448-F908-3A90-939E-84215B47F379> /Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/ferryx_lib-65ba3c6eeb84e06e
+  Reason: no LC_RPATH's found
+dyld[90612]: Library not loaded: @rpath/libghostty-vt.dylib
+  Referenced from: <729A5448-F908-3A90-939E-84215B47F379> /Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/ferryx_lib-65ba3c6eeb84e06e
+  Reason: no LC_RPATH's found
+dyld[90613]: Library not loaded: @rpath/libghostty-vt.dylib
+  Referenced from: <729A5448-F908-3A90-939E-84215B47F379> /Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/ferryx_lib-65ba3c6eeb84e06e
+  Reason: no LC_RPATH's found

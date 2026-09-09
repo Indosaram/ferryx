@@ -1,5 +1,26 @@
 use crate::terminal::{PtySessionState, SessionAttachment, TerminalService, TerminalSignal};
 use futures_util::future::BoxFuture;
+use futures_util::stream::BoxStream;
+use crate::terminal::remote::RemoteConnectionState;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRecoveryStatus {
+    pub state: RemoteConnectionState,
+    pub generation: u64,
+}
+
+pub type RecoveryStream = BoxStream<'static, RemoteRecoveryStatus>;
+
+pub(crate) fn recovery_stream(rx: tokio::sync::watch::Receiver<crate::terminal::remote::RemoteSessionDetails>) -> RecoveryStream {
+    Box::pin(futures_util::stream::unfold((rx, true), |(mut rx, initial)| async move {
+        if !initial && rx.changed().await.is_err() { return None; }
+        let status = {
+            let details = rx.borrow_and_update();
+            RemoteRecoveryStatus { state: details.state, generation: details.generation }
+        };
+        Some((status, (rx, false)))
+    }))
+}
 use std::path::PathBuf;
 
 /// Minimal details of a terminal session required by Remote Gateway routing.
@@ -16,6 +37,16 @@ pub struct RemoteSessionDetails {
 
 /// Object-safe abstraction for session routing across local and legacy daemon backends.
 pub trait RemoteSessionBackend: Send + Sync {
+    /// None identifies a local PTY. Errors must never downgrade SSH to local input.
+    fn recovery<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn write_generation<'a>(&'a self, _id: &'a str, _generation: u64, _data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("Generation input unsupported".into()) })
+    }
+    fn resize_generation<'a>(&'a self, _id: &'a str, _generation: u64, _cols: u16, _rows: u16) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("Generation resize unsupported".into()) })
+    }
     fn list_sessions(&self) -> BoxFuture<'_, Vec<String>>;
     fn describe_session<'a>(
         &'a self,
@@ -45,6 +76,22 @@ pub trait RemoteSessionBackend: Send + Sync {
 }
 
 impl RemoteSessionBackend for TerminalService {
+    fn recovery<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
+        Box::pin(async move {
+            if !self.remote().contains(id) { return Ok(None); }
+            self.remote().subscribe(id).map(recovery_stream).map(Some).map_err(|e| e.to_string())
+        })
+    }
+    fn write_generation<'a>(&'a self, id: &'a str, generation: u64, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.write_input_operation(id, generation, data.to_vec()).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
+        })
+    }
+    fn resize_generation<'a>(&'a self, id: &'a str, generation: u64, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.resize_operation(id, generation, cols, rows).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
+        })
+    }
     fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
         let sessions = TerminalService::list_sessions(self);
         Box::pin(async move { sessions })

@@ -148,6 +148,8 @@ pub struct RemoteDeleteWorktreeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientControlMessage {
+    RemoteWrite { generation: String, data: String },
+    RemoteResize { generation: String, cols: u16, rows: u16 },
     Resize { cols: u16, rows: u16 },
     Signal { signal: String },
     Ping,
@@ -157,6 +159,7 @@ pub enum ClientControlMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerControlMessage {
+    RemoteStatus { state: crate::terminal::remote::RemoteConnectionState, generation: String },
     Pong,
     Error { message: String },
 }

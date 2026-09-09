@@ -488,6 +488,29 @@ export async function listTerminalSessions() {
   return invokeCommand<TerminalSessionSummary[]>("cmd_terminal_list");
 }
 
+export async function getTerminalRemoteStatus(sessionId: string): Promise<import("./types").RemoteSessionStatusResponse> {
+  return invokeCommand("cmd_terminal_remote_status", { sessionId });
+}
+
+export async function retryTerminalRemoteSession(sessionId: string): Promise<
+  { type: "retryRemoteSessionOk" } | { type: "remoteSessionError"; failure: import("./types").RemoteFailure }
+> {
+  return invokeCommand("cmd_terminal_remote_retry", { sessionId });
+}
+
+export async function writeTerminalRemote(request: { sessionId: string; generation: number; data: string }): Promise<void> {
+  return invokeCommand("cmd_terminal_remote_write", request);
+}
+
+export async function resizeTerminalRemote(request: { sessionId: string; generation: number; cols: number; rows: number }): Promise<void> {
+  return invokeCommand("cmd_terminal_remote_resize", request);
+}
+
+export async function onTerminalRemoteStatus(handler: (status: import("./types").TerminalRemoteStatus) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<import("./types").TerminalRemoteStatus>("terminal_remote_status", event => handler(event.payload));
+}
+
 export async function onTerminalOutput(handler: (payload: TerminalOutputPayload) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<TerminalOutputPayload>("terminal_output", (event) => handler(event.payload));

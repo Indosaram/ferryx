@@ -3818,6 +3818,16 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                             write_half.write_all(resp.as_bytes()).await.unwrap();
                             write_half.flush().await.unwrap();
                         }
+                        DaemonRequest::RemoteSessionDetails { session_id: _ } => {
+                            let resp = serde_json::to_string(&DaemonResponse::RemoteSessionDetailsOk {
+                                details: None,
+                                legacy_direct_ssh: false,
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
                         DaemonRequest::DescribeSession { session_id } => {
                             let resp = serde_json::to_string(&DaemonResponse::DescribeSessionOk {
                                 session: DaemonSessionDetails {

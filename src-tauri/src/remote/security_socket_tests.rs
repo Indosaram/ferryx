@@ -30,6 +30,7 @@ impl Gate {
 /// Only the PTY boundary is replaced: real auth, router, TCP/WebSocket framing,
 /// output replay/broadcast hub and (feature-on) Ghostty mirror run unchanged.
 struct SocketBackend {
+    recovery_tx: Option<tokio::sync::watch::Sender<crate::remote::backend::RemoteRecoveryStatus>>,
     hub: TerminalOutputHub,
     attach_gate: Option<Arc<Gate>>,
     input_gate: Arc<Gate>,
@@ -42,6 +43,7 @@ impl SocketBackend {
         hub.register_session("session");
         hub.publish("session", b"READY".to_vec()).unwrap();
         Arc::new(Self {
+            recovery_tx: None,
             hub,
             attach_gate,
             input_gate: Arc::new(Gate::default()),
@@ -51,6 +53,27 @@ impl SocketBackend {
 }
 
 impl RemoteSessionBackend for SocketBackend {
+    fn recovery<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Option<crate::remote::backend::RecoveryStream>, String>> {
+        Box::pin(async move {
+            Ok(self.recovery_tx.as_ref().map(|tx| {
+                Box::pin(futures_util::stream::unfold((tx.subscribe(), true), |(mut rx, initial)| async move {
+                    if !initial && rx.changed().await.is_err() { return None; }
+                    let value = rx.borrow_and_update().clone();
+                    Some((value, (rx, false)))
+                })) as crate::remote::backend::RecoveryStream
+            }))
+        })
+    }
+    fn write_generation<'a>(&'a self, _: &'a str, generation: u64, bytes: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let status = self.recovery_tx.as_ref().unwrap().borrow();
+            if status.generation == generation && status.state == crate::terminal::remote::RemoteConnectionState::Connected {
+                self.hub.publish("session", bytes.to_vec()).unwrap();
+                self.completed_inputs.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
     fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
         Box::pin(async { vec!["session".into()] })
     }
@@ -117,6 +140,99 @@ async fn frame(stream: &mut tokio::net::TcpStream) -> ServerWebSocketFrame {
     tokio::time::timeout(DEADLINE, read_server_ws_frame(stream))
         .await
         .expect("bounded socket frame/close")
+}
+
+#[tokio::test]
+async fn ssh_reconnect_safety_web_raw_gap_order() {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(backend.clone());
+    let (token, _) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(state).await;
+    let mut socket = open_ws_stream(server.addr, "/api/v1/terminal/session", Some(&token)).await;
+    assert!(matches!(frame(&mut socket).await, ServerWebSocketFrame::Binary(_)));
+    backend.hub.publish_gap("session").unwrap();
+    backend.hub.publish("session", b"RECOVERED".to_vec()).unwrap();
+    let ServerWebSocketFrame::Binary(gap) = frame(&mut socket).await else { panic!("gap frame") };
+    let metadata: serde_json::Value = serde_json::from_slice(&gap[b"\x1b]777;ferryx;".len()..gap.iter().position(|b| *b == 7).unwrap()]).unwrap();
+    assert_eq!(metadata["kind"], "replayGap");
+    assert!(gap.ends_with(b"\x1bc"));
+    let ServerWebSocketFrame::Binary(output) = frame(&mut socket).await else { panic!("output frame") };
+    assert!(output.ends_with(b"RECOVERED"));
+    drop(socket);
+    server.stop().await;
+}
+
+#[cfg(feature = "native-terminal")]
+#[tokio::test]
+async fn ssh_reconnect_safety_web_grid_gap_order() {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(backend.clone());
+    let (token, _) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(state).await;
+    let mut socket = open_ws_stream(server.addr, "/api/v1/terminal/session?render=grid", Some(&token)).await;
+    assert!(matches!(frame(&mut socket).await, ServerWebSocketFrame::Text(_)));
+    backend.hub.publish("session", b"OLD".to_vec()).unwrap();
+    backend.hub.publish_gap("session").unwrap();
+    backend.hub.publish("session", b"RECOVERED".to_vec()).unwrap();
+    let ServerWebSocketFrame::Text(reset) = frame(&mut socket).await else { panic!("reset grid") };
+    let reset: serde_json::Value = serde_json::from_str(&reset).unwrap();
+    assert_eq!(reset["type"], "grid");
+    assert!(!reset.to_string().contains("OLD"));
+    assert!(!reset.to_string().contains("READY"));
+    let ServerWebSocketFrame::Text(output) = frame(&mut socket).await else { panic!("recovered grid") };
+    assert!(output.contains("RECOVERED"));
+    drop(socket);
+    server.stop().await;
+}
+
+async fn recovery_status(socket: &mut tokio::net::TcpStream, expected: &str, generation: &str) {
+    let ServerWebSocketFrame::Text(text) = frame(socket).await else { panic!("status frame") };
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value, serde_json::json!({"type":"remoteStatus","state":expected,"generation":generation}));
+}
+
+async fn ssh_input_probe(path: &str) {
+    use crate::remote::backend::RemoteRecoveryStatus;
+    use crate::terminal::remote::RemoteConnectionState::*;
+    let mut backend = SocketBackend::new(None);
+    let (tx, _) = tokio::sync::watch::channel(RemoteRecoveryStatus { state: Connected, generation: 7 });
+    Arc::get_mut(&mut backend).unwrap().recovery_tx = Some(tx.clone());
+    let state = socket_state(backend.clone());
+    let (token, _) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(state).await;
+    let mut socket = open_ws_stream(server.addr, path, Some(&token)).await;
+    recovery_status(&mut socket, "connected", "7").await;
+    frame(&mut socket).await;
+    tx.send_replace(RemoteRecoveryStatus { state: Reconnecting, generation: 8 });
+    recovery_status(&mut socket, "reconnecting", "8").await;
+    write_client_ws_frame(&mut socket, 2, b"unsafe-binary").await;
+    write_client_ws_frame(&mut socket, 1, br#"{"type":"remoteWrite","generation":"8","data":"outage"}"#).await;
+    // Ordered input barrier: the following close control is not required; a
+    // current-generation write after recovery provides the backend completion signal.
+    tx.send_replace(RemoteRecoveryStatus { state: Disconnected, generation: 9 });
+    recovery_status(&mut socket, "disconnected", "9").await;
+    tx.send_replace(RemoteRecoveryStatus { state: Connected, generation: 10 });
+    recovery_status(&mut socket, "connected", "10").await;
+    write_client_ws_frame(&mut socket, 1, br#"{"type":"remoteWrite","generation":"7","data":"stale"}"#).await;
+    write_client_ws_frame(&mut socket, 1, br#"{"type":"remoteWrite","generation":"10","data":"FRESH"}"#).await;
+    let output = match frame(&mut socket).await { ServerWebSocketFrame::Text(s) => s, ServerWebSocketFrame::Binary(b) => String::from_utf8(b).unwrap(), _ => panic!("fresh output") };
+    assert!(output.contains("FRESH"));
+    assert_eq!(backend.completed_inputs.load(Ordering::SeqCst), 1);
+    tx.send_replace(RemoteRecoveryStatus { state: Expired, generation: 11 });
+    recovery_status(&mut socket, "expired", "11").await;
+    drop(socket);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn ssh_reconnect_safety_web_raw_status_input_probe() {
+    ssh_input_probe("/api/v1/terminal/session").await;
+}
+
+#[cfg(feature = "native-terminal")]
+#[tokio::test]
+async fn ssh_reconnect_safety_web_grid_status_input_probe() {
+    ssh_input_probe("/api/v1/terminal/session?render=grid").await;
 }
 
 async fn revocation_closes_device_sockets(path: &str) {

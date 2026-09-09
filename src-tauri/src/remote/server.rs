@@ -1,5 +1,5 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
-use crate::remote::backend::RemoteSessionBackend;
+use crate::remote::backend::{RemoteSessionBackend, RecoveryStream, RemoteRecoveryStatus};
 #[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
 #[cfg(feature = "native-terminal")]
@@ -63,15 +63,15 @@ pub(crate) struct RemoteTerminalFrameMetadata {
 pub(crate) fn encode_remote_terminal_output_frame(chunk: &OutputChunk) -> Vec<u8> {
     encode_remote_terminal_frame(
         RemoteTerminalFrameMetadata {
-            kind: "output".into(),
+            kind: if chunk.replay_gap.is_some() { "replayGap" } else { "output" }.into(),
             sequence: Some(chunk.sequence.to_string()),
-            requested_after_sequence: None,
-            available_from_sequence: None,
+            requested_after_sequence: chunk.replay_gap.as_ref().map(|gap| gap.requested_after_sequence.to_string()),
+            available_from_sequence: chunk.replay_gap.as_ref().map(|gap| gap.available_from_sequence.to_string()),
             start_sequence: None,
             end_sequence: None,
         },
         &chunk.bytes,
-        false,
+        chunk.replay_gap.is_some(),
     )
 }
 
@@ -976,8 +976,10 @@ async fn ws_terminal_handler(
     }
 
     let attachment = while_device_authorized(&mut revocation, async {
-        if let Some((cols, rows)) = requested_geometry {
+        if let Some((cols, rows)) = requested_geometry.filter(|_| device.permission == DevicePermission::Control) {
+            if state.session_backend.recovery(&session_id).await?.is_none() {
             state.session_backend.resize(&session_id, cols, rows).await?;
+            }
         }
         state
             .session_backend
@@ -998,17 +1000,28 @@ async fn ws_terminal_handler(
 }
 
 async fn handle_terminal_socket(
-    socket: WebSocket,
+    mut socket: WebSocket,
     session_id: String,
     attachment: SessionAttachment,
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
     render_grid: bool,
 ) {
+    let recovery_state = Arc::new(parking_lot::RwLock::new(None));
+    let mut recovery = match state.session_backend.recovery(&session_id).await {
+        Ok(recovery) => recovery,
+        Err(_) => return,
+    };
+    let is_ssh = recovery.is_some();
+    if let Some(stream) = recovery.as_mut() {
+        let Some(status) = stream.next().await else { return; };
+        *recovery_state.write() = Some(status.clone());
+        if socket.send(recovery_message(status)).await.is_err() { return; }
+    }
     if render_grid {
         #[cfg(feature = "native-terminal")]
         {
-            handle_terminal_grid_socket(socket, session_id, attachment, device, state).await;
+            handle_terminal_grid_socket(socket, session_id, attachment, device, state, recovery, recovery_state).await;
             return;
         }
         #[cfg(not(feature = "native-terminal"))]
@@ -1035,11 +1048,21 @@ async fn handle_terminal_socket(
 
     let session_backend = Arc::clone(&state.session_backend);
     let send_session_id = session_id.clone();
+    let send_recovery_state = Arc::clone(&recovery_state);
     let mut send_task = std::pin::pin!(async move {
         loop {
-            match output_rx.recv().await {
+            let output = tokio::select! {
+                status = next_recovery(&mut recovery) => {
+                    let Some(status) = status else { break; };
+                    *send_recovery_state.write() = Some(status.clone());
+                    if sender.send(recovery_message(status)).await.is_err() { break; }
+                    continue;
+                }
+                output = output_rx.recv() => output,
+            };
+            match output {
                 Ok(chunk) => {
-                    if last_emitted_sequence.is_some_and(|last| chunk.sequence <= last) {
+                    if chunk.replay_gap.is_none() && last_emitted_sequence.is_some_and(|last| chunk.sequence <= last) {
                         continue;
                     }
                     let frame = encode_remote_terminal_output_frame(&chunk);
@@ -1077,18 +1100,32 @@ async fn handle_terminal_socket(
     let session_backend = Arc::clone(&state.session_backend);
     let session_id_clone = session_id.clone();
     let can_control = device.permission == DevicePermission::Control;
+    let recv_recovery_state = Arc::clone(&recovery_state);
 
     let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Binary(bytes) => {
-                    if can_control {
+                    let is_outage = recv_recovery_state.read().as_ref().is_some_and(|status| {
+                        matches!(
+                            status.state,
+                            crate::terminal::remote::RemoteConnectionState::Reconnecting
+                                | crate::terminal::remote::RemoteConnectionState::Disconnected
+                                | crate::terminal::remote::RemoteConnectionState::Expired
+                        )
+                    });
+                    if can_control && !is_outage {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
+                        if is_ssh {
+                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control).await;
+                            if !matches!(ctrl, ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping) { continue; }
+                        }
                         match ctrl {
+                            ClientControlMessage::RemoteWrite { .. } | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
@@ -1134,6 +1171,38 @@ async fn handle_terminal_socket(
     };
 }
 
+fn recovery_message(status: RemoteRecoveryStatus) -> Message {
+    Message::Text(serde_json::to_string(&crate::remote::protocol::ServerControlMessage::RemoteStatus {
+        state: status.state, generation: status.generation.to_string(),
+    }).expect("recovery status serializes").into())
+}
+
+async fn next_recovery(stream: &mut Option<RecoveryStream>) -> Option<RemoteRecoveryStatus> {
+    match stream {
+        Some(stream) => stream.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// SSH input always carries the generation chosen by the client, never one sampled
+/// by the gateway after buffering or recovery. The runtime performs atomic admission.
+async fn ssh_control(backend: &Arc<dyn RemoteSessionBackend>, id: &str, control: &ClientControlMessage, can_control: bool) {
+    if !can_control { return; }
+    match control {
+        ClientControlMessage::RemoteWrite { generation, data } => {
+            if let Ok(generation) = generation.parse::<u64>() {
+                let _ = backend.write_generation(id, generation, data.as_bytes()).await;
+            }
+        }
+        ClientControlMessage::RemoteResize { generation, cols, rows } => {
+            if let (Ok(generation), Some((cols, rows))) = (generation.parse::<u64>(), validated_grid_geometry(*cols, *rows)) {
+                let _ = backend.resize_generation(id, generation, cols, rows).await;
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(feature = "native-terminal")]
 fn grid_text_message(frame: RemoteGridFrame) -> Message {
     let text = serde_json::to_string(&frame).expect("remote grid frame serializes");
@@ -1163,7 +1232,10 @@ async fn handle_terminal_grid_socket(
     attachment: SessionAttachment,
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
+    mut recovery: Option<RecoveryStream>,
+    recovery_state: Arc<parking_lot::RwLock<Option<RemoteRecoveryStatus>>>,
 ) {
+    let is_ssh = recovery_state.read().is_some();
     let (mut sender, mut receiver) = socket.split();
     let SessionAttachment {
         snapshot,
@@ -1204,6 +1276,14 @@ async fn handle_terminal_grid_socket(
     let mut last_emitted_sequence = snapshot.history_end_sequence;
 
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
+    let status_tx = outbound_tx.clone();
+    let status_recovery_state = Arc::clone(&recovery_state);
+    let mut status_task = std::pin::pin!(async move {
+        while let Some(status) = next_recovery(&mut recovery).await {
+            *status_recovery_state.write() = Some(status.clone());
+            if status_tx.send(recovery_message(status)).is_err() { break; }
+        }
+    });
     let mut writer_task = std::pin::pin!(async move {
         while let Some(message) = outbound_rx.recv().await {
             if sender.send(message).await.is_err() {
@@ -1250,6 +1330,20 @@ async fn handle_terminal_grid_socket(
             match received {
                 Ok(chunk) => {
                     let latest_sequence = pending_end_sequence.or(last_emitted_sequence);
+                    if chunk.replay_gap.is_some() {
+                        // A gap invalidates even bytes waiting for the next grid tick.
+                        pending_bytes.clear();
+                        pending_end_sequence = None;
+                        if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| {
+                            let (cols, rows) = mirror.dimensions()?;
+                            *mirror = RemoteTerminalMirror::new(cols, rows)?;
+                            mirror.full_frame()
+                        }) {
+                            break;
+                        }
+                        last_emitted_sequence = Some(chunk.sequence);
+                        continue;
+                    }
                     if latest_sequence.is_some_and(|last| chunk.sequence <= last) {
                         continue;
                     }
@@ -1347,18 +1441,32 @@ async fn handle_terminal_grid_socket(
     let can_control = device.permission == DevicePermission::Control;
     let recv_mirror = Arc::clone(&mirror);
     let recv_tx = outbound_tx.clone();
+    let recv_recovery_state = Arc::clone(&recovery_state);
 
     let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Binary(bytes) => {
-                    if can_control {
+                    let is_outage = recv_recovery_state.read().as_ref().is_some_and(|status| {
+                        matches!(
+                            status.state,
+                            crate::terminal::remote::RemoteConnectionState::Reconnecting
+                                | crate::terminal::remote::RemoteConnectionState::Disconnected
+                                | crate::terminal::remote::RemoteConnectionState::Expired
+                        )
+                    });
+                    if can_control && !is_outage {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
+                        if is_ssh {
+                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control).await;
+                            if !matches!(ctrl, ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping) { continue; }
+                        }
                         match ctrl {
+                            ClientControlMessage::RemoteWrite { .. } | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
@@ -1419,6 +1527,7 @@ async fn handle_terminal_grid_socket(
         _ = &mut send_task => {},
         _ = &mut recv_task => {},
         _ = &mut writer_task => {},
+        _ = &mut status_task => {},
     };
 }
 

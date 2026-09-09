@@ -117,7 +117,13 @@ export async function preloadWorkspaceSnapshots(
     }
     return;
   }
-  const liveBackendIds = await listLiveBackendSessionIdsFn();
+  let liveBackendIds;
+  try { liveBackendIds = await listLiveBackendSessionIdsFn(); }
+  catch (error) {
+    if (!workspaceIds.every(id => id.startsWith("ssh:"))) throw error;
+    console.warn("SSH restore deferred daemon reconciliation:", error);
+    liveBackendIds = null;
+  }
   switchDebug("workspace.preload.loaded", {
     workspaceIds,
     persistedWorkspaceIds: Object.keys(persistedSession.workspaces ?? {}),
@@ -253,7 +259,13 @@ export function useWorkspaceRestore({
           return;
         }
 
-        const liveBackendIds = await listLiveBackendSessionIdsFn();
+        let liveBackendIds;
+        try { liveBackendIds = await listLiveBackendSessionIdsFn(); }
+        catch (error) {
+          if (!workspaceId.startsWith("ssh:")) throw error;
+          console.warn("SSH restore deferred daemon reconciliation:", error);
+          liveBackendIds = null;
+        }
         if (cancelled) return;
         switchDebug("workspace.restore.loaded", {
           workspaceId,

@@ -1,0 +1,514 @@
+=== Native Verification Start: 2026-09-09 04:07:01 UTC ===
+--- 1. Cargo test: ssh_helper_setup ---
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:54:11
+   |
+54 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 16 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-65ba3c6eeb84e06e)
+
+running 14 tests
+test ssh::helper_setup::tests::ssh_helper_setup_default_location_rejects_invalid_home ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_ensure_started_exit_code_126_maps_to_unsupported_permissions ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_ensure_started_exit_code_127_maps_to_missing_helper ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_default_location_windows ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_default_location_posix ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_readiness_parser_rejects_malformed_json ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_host_id_collision_resistance ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_ensure_started_rejects_invalid_paths ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_readiness_parser_rejects_missing_ready_event ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_readiness_parser_valid_ready ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_location_serde_round_trip ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_install_rejects_missing_local_binary ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_install_rejects_empty_local_binary ... ok
+test ssh::helper_setup::tests::ssh_helper_setup_process_start_rejects_symlink_root_without_writing_log ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 805 filtered out; finished in 0.00s
+
+EXIT_CODE: 0
+--- 2. Cargo test: ssh_bridge ---
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:54:11
+   |
+54 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 16 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-65ba3c6eeb84e06e)
+
+running 11 tests
+test ssh::bridge::tests::ssh_bridge_handshake_independently_validates_configured_host_and_target_identity ... ok
+test ssh::bridge::tests::ssh_bridge_remote_pid_does_not_expose_signal_target ... ok
+test ssh::direct::tests::ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys ... ok
+test ssh::bridge::tests::ssh_bridge_frame_framing_roundtrip_and_size_bounds ... ok
+{"event":"ready","protocol":1}
+{"event":"ready","protocol":1}
+{"event":"ready","protocol":1}
+test ssh::bridge::tests::ssh_bridge_child_reaped_on_close_and_drop ... ok
+test ssh::bridge::tests::ssh_bridge_handshake_verifies_host_and_epoch ... ok
+{"event":"ready","protocol":1}
+{"event":"ready","protocol":1}
+{"event":"ready","protocol":1}
+test ssh::bridge::tests::ssh_bridge_target_expired_fails_explicitly_never_spawns ... ok
+test ssh::bridge::tests::ssh_bridge_single_attempt_write_does_not_queue ... ok
+test ssh::bridge::tests::ssh_bridge_independent_read_does_not_block_control ... ok
+test ssh::bridge::tests::ssh_bridge_spawn_retry_requires_matching_client_request_id ... ok
+{"event":"ready","protocol":1}
+test ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 808 filtered out; finished in 0.60s
+
+EXIT_CODE: 0
+--- 3. Cargo test: helper_runtime ---
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:54:11
+   |
+54 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 16 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-65ba3c6eeb84e06e)
+
+running 18 tests
+test ssh::helper_runtime::helper::helper_core_tests::ssh_reconnect_safety_rejects_shutdown_op ... ok
+test ssh::helper_runtime::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok
+test ssh::helper_runtime::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok
+test ssh::helper_runtime::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok
+test ssh::helper_runtime::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_canonical_decimal_cursor ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_concurrent_spawn_atomic_reservation ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_respects_cols_rows ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_reconnect_safety_auth_and_target_validation ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_ring_gap_detection ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_project_root_decoupled ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_frame_bounded_below_1mib ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_reconnect_safety_target_describe_and_list_metadata ... ok
+test ssh::helper_runtime::helper::helper_core_tests::ssh_process_survival_spawn_dedupe_and_conflict ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.20s
+
+EXIT_CODE: 0
+--- 4. Standalone remote-helper cargo test ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests ../src-tauri/src/ferryx_scope/ssh/standalone.rs (remote-helper/target/debug/deps/ferryx_remote_helper-24fb5d0aa7f640ae)
+
+running 23 tests
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_canonical_decimal_cursor ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_concurrent_spawn_atomic_reservation ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_frame_bounded_below_1mib ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_project_root_decoupled ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_respects_cols_rows ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_ring_gap_detection ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_spawn_dedupe_and_conflict ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_auth_and_target_validation ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_rejects_shutdown_op ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_target_describe_and_list_metadata ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+EXIT_CODE: 0
+--- 5. QA Script: ssh-helper-setup.mjs ---
+{"event":"fixture-created","fixture":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/f-setup-qa-3vfLD9","binDir":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/f-setup-qa-3vfLD9/bin","stateDir":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/f-setup-qa-3vfLD9/state","hostId":"qa-setup-d32d7313"}
+{"event":"helper-installed","path":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/f-setup-qa-3vfLD9/bin/ferryx-remote-helper"}
+{"event":"verified-missing-helper-rejection","exitCode":127}
+{"event":"ssh-startup-complete","sshPid":22504,"ready":{"event":"ready","protocol":1}}
+{"event":"verified-detached-daemon-alive","daemonPid":22511,"epoch":"12801428942804493432","hostId":"qa-setup-d32d7313"}
+{"event":"pty-spawned","ptyPid":22513,"target":{"backendSessionId":"738231cb-51fd-42e4-ad09-0aaa49b5ecf4","epoch":"12801428942804493432","hostId":"qa-setup-d32d7313","ownerId":"1c1ab158-623b-4c56-b318-c2d2233a6a38"}}
+{"event":"verified-step-1","ptyPid":22513}
+{"event":"verified-step-2-after-reconnect","ptyPid":22513}
+PASS: SSH detached helper startup, survival after SSH parent death, and idempotent preserve verified
+{"event":"pid-reaped","label":"helper-daemon","pid":22511}
+{"event":"cleanup-receipt","fixtureRemoved":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/f-setup-qa-3vfLD9","reapedDaemonPid":22511,"reapedPtyPid":22513}
+EXIT_CODE: 0
+--- 6. QA Script: ssh-bridge-survival.mjs ---
+{"event":"fixture-created","fixture":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bridge-qa-98rFi4","hostId":"qa-bridge-e6c41e7c","nonce":"nonce-a41af109-f8a","initialKnownHostsHash":"cf5b6b029f49021c02ceaddcf07945b5a80f641953ba5c3520fdbceadf53c076","initialSshConfigHash":"e388a32ee80dc7fe85819d9753aaca95cc586ec650808b3a35459af0cd5612b9"}
+{"event":"helper-installed","path":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bridge-qa-98rFi4/bin/ferryx-remote-helper"}
+{"event":"daemon-started-over-ssh","stdout":"{\"event\":\"ready\",\"protocol\":1}"}
+{"event":"endpoint-read","endpoint":"/private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-bridge-qa-98rFi4/state/helper.sock"}
+{"event":"bridge-conn-1-opened","sshPid":22545}
+{"event":"handshake-1-success","ownerId":"d647ca65-a12f-4641-9823-58e73695ae70","epoch":"4871161279523316395"}
+{"event":"pty-spawned","remotePid":22552,"target":{"backendSessionId":"74d70451-f6f5-408e-93be-bb4ece07e3d9","epoch":"4871161279523316395","hostId":"qa-bridge-e6c41e7c","ownerId":"d647ca65-a12f-4641-9823-58e73695ae70"}}
+{"event":"step-1-verified-on-conn-1","cursor":"1","output":"INIT:nonce-a41af109-f8a:1","remotePid":22552}
+{"event":"step-1-counter-2-verified","cursor":"3","output":"tick1\r\nACK:nonce-a41af109-f8a:2:tick1"}
+{"event":"severing-ssh-connection-1","sshPid":22545}
+{"event":"ssh-connection-1-closed-and-reaped","deadPid":22545}
+{"event":"bridge-conn-2-opened","sshPid":22556}
+{"event":"handshake-2-verified-identical","ownerId":"d647ca65-a12f-4641-9823-58e73695ae70","epoch":"4871161279523316395"}
+{"event":"pty-described-on-conn-2","remotePid":22552,"identicalPid":true,"exited":false,"cursor":"3"}
+{"event":"step-2-counter-3-verified-on-conn-2","cursor":"5","output":"tick2\r\nACK:nonce-a41af109-f8a:3:tick2","remotePid":22552,"identicalNonce":true,"identicalPid":true}
+{"event":"pty-stopped-cleanly"}
+{"event":"bridge-conn-2-closed"}
+{"event":"trust-hashes-preserved","knownHostsHash":"cf5b6b029f49021c02ceaddcf07945b5a80f641953ba5c3520fdbceadf53c076","sshConfigHash":"e388a32ee80dc7fe85819d9753aaca95cc586ec650808b3a35459af0cd5612b9"}
+PASS: SSH bridge survival verified with identical remote PID, nonce, and continuous counter
+EXIT_CODE: 0
+=== Native Verification End: 2026-09-09 04:07:06 UTC ===

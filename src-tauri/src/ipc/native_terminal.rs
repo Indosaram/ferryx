@@ -562,7 +562,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         },
     };
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
         .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
     let mut updates = state.subscribe_session_update(&session_id).map_err(IpcError::from)?;
     let mut detached = state.subscribe_session_detach(&session_id).map_err(IpcError::from)?;
@@ -614,7 +614,7 @@ pub async fn cmd_native_terminal_set_focus<R: Runtime>(
     session_id: String,
     focused: bool,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    let window = match app.get_webview_window("main") {
+    let window = match app.get_window("main") {
         Some(window) => window,
         None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
     };
@@ -648,7 +648,7 @@ pub async fn cmd_native_terminal_set_preedit<R: Runtime>(
     session_id: String,
     preedit: Option<String>,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    let window = match app.get_webview_window("main") {
+    let window = match app.get_window("main") {
         Some(window) => window,
         None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
     };
@@ -874,14 +874,15 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     input: NativeTerminalInput,
+    generation: Option<u64>,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
     let bytes = encode_attached_native_input(state.inner(), &session_id, &input)?;
     state.emit_scrollbar_if_changed(Some(&app), &session_id);
-    if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
+    if let Err(err) = daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await {
         return Err(err);
     }
 
-    let window = match app.get_webview_window("main") {
+    let window = match app.get_window("main") {
         Some(window) => window,
         None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
     };
@@ -915,6 +916,7 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
     behavior: NativeTerminalScrollBehavior,
+    generation: Option<u64>,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
     require_attached_surface(state.inner(), &session_id)
         .map_err(|err| IpcError::internal(err.to_string()))?;
@@ -946,7 +948,7 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
 
     match outcome {
         TerminalWheelOutcome::WritePty(bytes) => {
-            daemon_client.write_terminal(&session_id, bytes).await?;
+            daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await?;
         }
         TerminalWheelOutcome::ScrollViewport(v_behavior) => {
             if let Err(err) =
@@ -958,7 +960,7 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
         TerminalWheelOutcome::None => {}
     }
 
-    let window = match app.get_webview_window("main") {
+    let window = match app.get_window("main") {
         Some(window) => window,
         None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
     };
@@ -1020,7 +1022,7 @@ pub async fn cmd_native_terminal_set_scrollbar_overlay<R: Runtime>(
         return Err(IpcError::internal(err.to_string()));
     }
 
-    let window = match app.get_webview_window("main") {
+    let window = match app.get_window("main") {
         Some(window) => window,
         None => return Ok(()),
     };
@@ -1070,7 +1072,7 @@ pub async fn cmd_native_terminal_set_attention_frame<R: Runtime>(
         return Err(IpcError::internal(err.to_string()));
     }
 
-    let window = match app.get_webview_window("main") {
+    let window = match app.get_window("main") {
         Some(window) => window,
         None => return Ok(()),
     };
@@ -1172,17 +1174,18 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     text: String,
+    generation: Option<u64>,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
     let bytes = match encode_attached_native_paste(state.inner(), &session_id, &text) {
         Ok(bytes) => bytes,
         Err(err) => return Err(IpcError::internal(err.to_string())),
     };
     state.emit_scrollbar_if_changed(Some(&app), &session_id);
-    if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
+    if let Err(err) = daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await {
         return Err(err);
     }
 
-    let window = match app.get_webview_window("main") {
+    let window = match app.get_window("main") {
         Some(window) => window,
         None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
     };
@@ -1255,6 +1258,7 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     event: MouseEvent,
+    generation: Option<u64>,
 ) -> Result<NativeTerminalMouseReceipt, IpcError> {
     let bounds = state.session_logical_bounds(&session_id).ok_or_else(|| {
         IpcError::internal(format!(
@@ -1286,7 +1290,7 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
             Err(err) => return Err(IpcError::internal(err.to_string())),
         };
         if !bytes.is_empty() {
-            if let Err(err) = daemon_client.write_terminal(&session_id, bytes).await {
+            if let Err(err) = daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await {
                 return Err(err);
             }
         }
@@ -1374,7 +1378,7 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
         }
     }
 
-    let receipt = if let Some(window) = app.get_webview_window("main") {
+    let receipt = if let Some(window) = app.get_window("main") {
         let state_inner = state.inner().clone();
         let surface_window = window.clone();
         let (sender, receiver) = oneshot::channel();
@@ -1443,7 +1447,7 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
 ) -> Result<NativeTerminalClipboardContent, IpcError> {
     #[cfg(target_os = "macos")]
     {
-        let window = match app.get_webview_window("main") {
+        let window = match app.get_window("main") {
             Some(window) => window,
             None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
         };
@@ -1570,6 +1574,18 @@ mod tests {
     use super::*;
     use crate::native_terminal::{MouseButton, MousePosition, MouseRendererSize};
 
+    #[test]
+    fn ssh_reconnect_safety_desktop_native_command_generation_contract() {
+        // Compile-time contract: every PTY-producing native command accepts the
+        // generation captured by the producer, independently of platform modules.
+        let _ = cmd_native_terminal_send_input::<tauri::test::MockRuntime>;
+        let source = include_str!("native_terminal.rs");
+        for name in ["send_input", "paste", "mouse", "scroll"] {
+            let signature = source.split(&format!("pub async fn cmd_native_terminal_{name}<")).nth(1).unwrap().split(") ->").next().unwrap();
+            assert!(signature.contains("generation: Option<u64>"), "{name} must accept captured generation");
+        }
+    }
+
     #[tokio::test]
     async fn pty_resize_queue_keeps_latest_size_for_each_pane() {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -1679,7 +1695,7 @@ mod tests {
         let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .unwrap();
-        let receipt = state.get_receipt(&window, session_id).expect("session receipt");
+        let receipt = state.get_receipt(&window.as_ref().window(), session_id).expect("session receipt");
         let json = serde_json::to_value(into_ipc_receipt(session_id.into(), receipt)).unwrap();
         state.teardown();
 

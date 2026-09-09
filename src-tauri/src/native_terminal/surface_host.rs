@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use tauri::{Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
+use tauri::{Emitter, Manager, PhysicalSize, Runtime, Window};
 
 use super::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
@@ -324,7 +324,7 @@ pub struct NativeTerminalSurfaceHostState {
 }
 
 fn dispatch_scheduled_render<R: Runtime>(
-    window: WebviewWindow<R>,
+    window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
     sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
     session_id: String,
@@ -412,7 +412,7 @@ fn dispatch_scheduled_render<R: Runtime>(
 }
 
 fn defer_scheduled_render<R: Runtime>(
-    window: WebviewWindow<R>,
+    window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
     sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
     session_id: String,
@@ -431,7 +431,7 @@ fn defer_scheduled_render<R: Runtime>(
 }
 
 fn dispatch_render_on_main_thread<R: Runtime>(
-    window: &WebviewWindow<R>,
+    window: &Window<R>,
     task: impl FnOnce() + Send + 'static,
 ) -> tauri::Result<()> {
     #[cfg(test)]
@@ -1341,7 +1341,7 @@ impl NativeTerminalSurfaceHostState {
                 if render_coordinator.schedule_render() {
                     if let Some(window) = app_handle
                         .as_ref()
-                        .and_then(|app| app.get_webview_window("main"))
+                        .and_then(|app| app.get_window("main"))
                     {
                         dispatch_scheduled_render(
                             window,
@@ -1841,7 +1841,7 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn get_receipt<R: Runtime>(
         &self,
-        _window: &WebviewWindow<R>,
+        _window: &Window<R>,
         session_id: &str,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         validate_session_id(session_id)?;
@@ -1864,7 +1864,7 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn render<R: Runtime>(
         &self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         mut request: NativeTerminalBoundsRequest,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         let session_id = request.session_id.clone();
@@ -1925,7 +1925,7 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn set_focus<R: Runtime>(
         &self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         session_id: &str,
         focused: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
@@ -1934,7 +1934,7 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn render_current<R: Runtime>(
         &self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         session_id: &str,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         self.render_current_with_focus(window, session_id, None)
@@ -1942,7 +1942,7 @@ impl NativeTerminalSurfaceHostState {
 
     fn render_current_with_focus<R: Runtime>(
         &self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         session_id: &str,
         focused: Option<bool>,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
@@ -1991,7 +1991,7 @@ impl NativeTerminalSurfaceHostState {
 
     fn rearm_dropped_direct_frame<R: Runtime>(
         &self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         session_id: &str,
         receipt: NativeTerminalSurfaceReceipt,
     ) {
@@ -2019,7 +2019,7 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn set_preedit<R: Runtime>(
         &self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         session_id: &str,
         preedit: Option<String>,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
@@ -2073,7 +2073,7 @@ enum HostFrameTarget {
 
 impl NativeTerminalSurfaceHost {
     fn new<R: Runtime>(
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         scale_factor: f64,
     ) -> Result<Self, NativeTerminalError> {
         Ok(Self {
@@ -2128,7 +2128,7 @@ impl NativeTerminalSurfaceHost {
 
     fn render_snapshot<R: Runtime>(
         &mut self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
         selection: Option<&SelectionSnapshot>,
@@ -2219,7 +2219,7 @@ struct NativeSurfaceFrameTarget {
 
 impl NativeSurfaceFrameTarget {
     fn new<R: Runtime>(
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         scale_factor: f64,
     ) -> Result<Self, NativeTerminalError> {
         let target = PlatformCompositorTarget::new(window)?;
@@ -2254,7 +2254,7 @@ impl NativeSurfaceFrameTarget {
 
     fn render_snapshot<R: Runtime>(
         &mut self,
-        window: &WebviewWindow<R>,
+        window: &Window<R>,
         logical_bounds: Option<LogicalBounds>,
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
@@ -2462,7 +2462,7 @@ mod tests {
 
     struct DirectRenderHarness {
         state: NativeTerminalSurfaceHostState,
-        window: WebviewWindow<tauri::test::MockRuntime>,
+        window: Window<tauri::test::MockRuntime>,
         _app: tauri::App<tauri::test::MockRuntime>,
         _output: tokio::sync::mpsc::Sender<DaemonStreamMessage<'static>>,
         request: NativeTerminalBoundsRequest,
@@ -2548,7 +2548,7 @@ mod tests {
             assert!(!state.is_session_render_pending(&request.session_id));
             Self {
                 state,
-                window,
+                window: window.as_ref().window(),
                 _app: app,
                 _output: output,
                 request,
@@ -2636,6 +2636,61 @@ mod tests {
         assert_eq!(payload["state"], "reconnecting");
         assert_eq!(payload["generation"], 9);
         harness._app.unlisten(listener);
+    }
+
+    #[tokio::test]
+    async fn bounds_ipc_presents_when_browser_child_is_open() {
+        // Given: the shell and an embedded browser share the main native window.
+        let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        harness._app.manage(harness.state.clone());
+        let _browser = harness._app.get_window("main").unwrap().add_child(
+            tauri::webview::WebviewBuilder::new("browser-regression", tauri::WebviewUrl::default()),
+            tauri::LogicalPosition::new(0.0, 0.0),
+            tauri::LogicalSize::new(400.0, 300.0),
+        ).unwrap();
+        assert!(harness._app.get_webview_window("main").is_none());
+        let bounds = harness.request.bounds;
+
+        // When: the frontend updates an attached terminal's bounds.
+        let receipt = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            harness._app.handle().clone(),
+            harness._app.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+            },
+            bounds.scale_factor,
+        ).await.expect("browser child must not make the main terminal window unavailable");
+
+        // Then: the normal surface host presents the frame and acknowledges it.
+        assert!(receipt.presented);
+        assert!(!receipt.render_deferred);
+        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+    }
+
+    #[tokio::test]
+    async fn output_presents_when_browser_child_is_open() {
+        // Given: dispatch is subscribed before output and the browser is already open.
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
+        let _browser = harness._app.get_window("main").unwrap().add_child(
+            tauri::webview::WebviewBuilder::new("browser-regression", tauri::WebviewUrl::default()),
+            tauri::LogicalPosition::new(0.0, 0.0),
+            tauri::LogicalSize::new(400.0, 300.0),
+        ).unwrap();
+        assert!(harness._app.get_webview_window("main").is_none());
+
+        // When: the existing daemon attachment receives another output chunk.
+        harness._output.send(DaemonStreamMessage::Output {
+            session_id: harness.request.session_id.clone().into(),
+            sequence: 2,
+            data: b"browser coexistence\r\n".to_vec().into(),
+            metrics_read_unix_micros: None,
+        }).await.unwrap();
+        harness.execute_dispatched().await;
+
+        // Then: the output pump still schedules and presents a terminal frame.
+        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
     }
 
     #[tokio::test]
@@ -3551,7 +3606,7 @@ mod tests {
         let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .unwrap();
-        let receipt = state.get_receipt(&window, "receipt-scale").expect("session receipt");
+        let receipt = state.get_receipt(&window.as_ref().window(), "receipt-scale").expect("session receipt");
         assert_eq!(
             state.sessions.lock()["receipt-scale"].logical_bounds.unwrap().scale_factor,
             2.0,

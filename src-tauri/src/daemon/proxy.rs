@@ -470,6 +470,56 @@ impl LegacyPeer {
             receiver: rx,
         })
     }
+
+    async fn recovery(&self, id: &str) -> Result<Option<crate::remote::backend::RecoveryStream>, String> {
+        use crate::remote::backend::RemoteRecoveryStatus;
+        let details = match self.send_request(&DaemonRequest::RemoteSessionDetails { session_id: id.into() }).await? {
+            DaemonResponse::RemoteSessionDetailsOk { details, .. } => details,
+            // A pre-recovery daemon cannot own a preserved SSH target. Do not
+            // fall back on arbitrary errors: fail closed when classification fails.
+            _ => return Err("Remote recovery status unavailable".into()),
+        };
+        if details.is_none() { return Ok(None); }
+        let stream = self.connect_stream().await?;
+        let (read, mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        for request in [
+            DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION },
+            DaemonRequest::Attach { session_id: id.into(), after_sequence: None },
+        ] {
+            let mut wire = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+            wire.push(b'\n');
+            write.write_all(&wire).await.map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line)).await
+                .map_err(|_| "Recovery attach timed out")?.map_err(|e| e.to_string())?;
+            let response: DaemonResponse = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+            if !matches!((request, response),
+                (DaemonRequest::Handshake { .. }, DaemonResponse::HandshakeOk { .. }) |
+                (DaemonRequest::Attach { .. }, DaemonResponse::AttachOk { .. })) {
+                return Err("Recovery attach rejected".into());
+            }
+        }
+        // The attach stream supplies its own initial status, avoiding a stale
+        // independent Describe snapshot racing the subscription. Own both halves
+        // in the stream so socket cancellation closes the daemon subscription.
+        Ok(Some(Box::pin(futures_util::stream::unfold((reader, write), |(mut reader, write)| async move {
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => return None,
+                    Ok(_) => {}
+                }
+                match serde_json::from_str::<DaemonStreamMessage<'_>>(&line) {
+                    Ok(DaemonStreamMessage::RemoteStatus { state, generation, .. }) => {
+                        return Some((RemoteRecoveryStatus { state, generation }, (reader, write)));
+                    }
+                    Ok(DaemonStreamMessage::Exit { .. }) | Err(_) => return None,
+                    _ => {}
+                }
+            }
+        }))))
+    }
 }
 
 pub struct SessionRouter {
@@ -570,6 +620,44 @@ impl SessionRouter {
 }
 
 impl RemoteSessionBackend for SessionRouter {
+    fn recovery<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<crate::remote::backend::RecoveryStream>, String>> {
+        Box::pin(async move {
+            self.validate_ssh_workspace(id).await?;
+            if self.is_local_session(id) {
+                return RemoteSessionBackend::recovery(self.terminal_service.as_ref(), id).await;
+            }
+            if let Some(peer) = self.find_legacy_peer_for_session(id) {
+                return peer.recovery(id).await;
+            }
+            Err("Session unavailable".into())
+        })
+    }
+    fn write_generation<'a>(&'a self, id: &'a str, generation: u64, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.validate_ssh_workspace(id).await?;
+            if self.is_local_session(id) {
+                return RemoteSessionBackend::write_generation(self.terminal_service.as_ref(), id, generation, data).await;
+            }
+            let peer = self.find_legacy_peer_for_session(id).ok_or("Session unavailable")?;
+            match peer.send_request(&DaemonRequest::RemoteWrite { session_id: id.into(), generation, data: data.to_vec() }).await? {
+                DaemonResponse::WriteOk => Ok(()),
+                _ => Err("Remote input rejected".into()),
+            }
+        })
+    }
+    fn resize_generation<'a>(&'a self, id: &'a str, generation: u64, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.validate_ssh_workspace(id).await?;
+            if self.is_local_session(id) {
+                return RemoteSessionBackend::resize_generation(self.terminal_service.as_ref(), id, generation, cols, rows).await;
+            }
+            let peer = self.find_legacy_peer_for_session(id).ok_or("Session unavailable")?;
+            match peer.send_request(&DaemonRequest::RemoteResize { session_id: id.into(), generation, cols, rows }).await? {
+                DaemonResponse::ResizeOk => Ok(()),
+                _ => Err("Remote resize rejected".into()),
+            }
+        })
+    }
     fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
         Box::pin(async move { SessionRouter::list_sessions(self).await })
     }

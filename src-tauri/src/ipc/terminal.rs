@@ -1010,15 +1010,15 @@ pub async fn cmd_terminal_resize(
 
 #[tauri::command]
 pub async fn cmd_terminal_remote_write(daemon_client: State<'_, Arc<DaemonClient>>, session_id: String, generation: u64, data: String) -> Result<(), IpcError> {
-    remote_control_result(daemon_client.send_request(crate::daemon::protocol::DaemonRequest::RemoteWrite { session_id, generation, data: data.into_bytes() }).await?)
+    daemon_client.write_terminal_at_generation(&session_id, Some(generation), data.into_bytes()).await
 }
 
 #[tauri::command]
 pub async fn cmd_terminal_remote_resize(daemon_client: State<'_, Arc<DaemonClient>>, session_id: String, generation: u64, cols: u16, rows: u16) -> Result<(), IpcError> {
-    remote_control_result(daemon_client.send_request(crate::daemon::protocol::DaemonRequest::RemoteResize { session_id, generation, cols, rows }).await?)
+    daemon_client.resize_terminal_at_generation(&session_id, Some(generation), cols, rows).await
 }
 
-fn remote_control_result(reply: crate::daemon::protocol::DaemonResponse) -> Result<(), IpcError> {
+pub(crate) fn remote_control_result(reply: crate::daemon::protocol::DaemonResponse) -> Result<(), IpcError> {
     use crate::daemon::protocol::DaemonResponse;
     match reply {
         DaemonResponse::WriteOk | DaemonResponse::ResizeOk => Ok(()),

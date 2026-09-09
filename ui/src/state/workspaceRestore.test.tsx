@@ -602,6 +602,25 @@ describe("workspaceRestore coordinator", () => {
     await expect(defaultListLiveBackendSessionIds()).rejects.toThrow("daemon list unavailable");
   });
 
+  it("restores SSH pane identity while the daemon list is temporarily unavailable", async () => {
+    const workspaceId = "ssh:list-unavailable";
+    const persisted = persistedSingleTerminal(workspaceId, "stable", "old");
+    let complete!: () => void;
+    const restored = new Promise<void>(resolve => { complete = resolve; });
+    const restoreWorkspace = vi.fn((_state: WorkspaceState) => complete());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const loadSessionFn = async () => persisted;
+    const listLiveBackendSessionIdsFn = async () => { throw new Error("temporarily unavailable"); };
+    const hook = renderHook(() => useWorkspaceRestore({ workspaceId, recoveredFromHmr: false,
+      restoreWorkspace, loadSessionFn, listLiveBackendSessionIdsFn,
+    }));
+    await act(async () => { await restored; });
+    expect(restoreWorkspace.mock.calls[0][0].sessions["sess-1"].backendSessionId).toBe("stable");
+    expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    hook.unmount();
+    warn.mockRestore();
+  }, 1000);
+
   it("keeps persisted backend mappings untouched and fails restore when daemon listing fails", async () => {
     const workspaceId = "ws-list-fail";
     const persisted = persistedSingleTerminal(workspaceId, "backend-still-live", "epoch-500");

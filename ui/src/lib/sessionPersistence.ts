@@ -376,7 +376,15 @@ export function deserializeWorkspaceState(
     let lastOutputSequence: string | null = null;
     let lifecycle: TerminalLifecycle = "exited";
 
-    if (!hasLiveSessionQuery) {
+    const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
+    if (isSshSession && persistedBackendSessionId) {
+      // SSH backend IDs identify persisted remote targets across daemon epochs.
+      // List absence/running=false cannot establish remote process death; status can.
+      backendSessionId = persistedBackendSessionId;
+      daemonEpoch = liveSessionMap.get(persistedBackendSessionId)?.daemonEpoch ?? persistedEpoch;
+      lastOutputSequence = daemonEpoch === persistedEpoch ? persistedSequence : null;
+      lifecycle = "working";
+    } else if (!hasLiveSessionQuery) {
       const isLive = Boolean(persistedBackendSessionId);
       backendSessionId = isLive ? persistedBackendSessionId : null;
       daemonEpoch = isLive ? persistedEpoch : null;
@@ -449,6 +457,7 @@ export function deserializeWorkspaceState(
       reconnectLifecycle: "idle",
       reconnectError: null,
       reconnectRequestId: null,
+      ...(isSshSession ? { remoteConnectionState: persistedBackendSessionId ? "reconnecting" as const : "legacyLost" as const } : {}),
     };
   }
 

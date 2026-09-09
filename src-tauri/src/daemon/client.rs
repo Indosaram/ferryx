@@ -616,6 +616,24 @@ impl DaemonClient {
         &self,
         req: DaemonRequest,
     ) -> Result<DaemonResponse, IpcError> {
+        if matches!(req, DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. }) {
+            // Remote control must never wait in the local interactive queue or
+            // retry ambiguous delivery. The request retains the input generation.
+            let mut slot = self.interactive_connection.try_lock().map_err(|_| {
+                IpcError::internal("Remote control is busy; input was not queued")
+                    .with_details(serde_json::json!({"kind":"busy", "inputWritten":false}))
+            })?;
+            if slot.is_none() {
+                *slot = Some(self.connect_and_handshake().await?);
+            }
+            return match slot.as_mut().expect("connected").request(&req).await {
+                Ok(reply) => Ok(reply),
+                Err(error) => {
+                    *slot = None;
+                    Err(error.into_ipc_error(&req, true))
+                }
+            };
+        }
         self.send_on_connection(&self.interactive_connection, req)
             .await
     }
@@ -1133,7 +1151,40 @@ impl DaemonClient {
         self.send_request(DaemonRequest::RetryRemoteSession { session_id: session_id.into() }).await
     }
 
+    // Never infer a remote generation after an await. Generation-less platform
+    // callbacks are local-only; remote panes must supply their observed generation.
+    async fn require_local_control(&self, session_id: &str) -> Result<(), IpcError> {
+        match self.remote_session_status(session_id).await? {
+            DaemonResponse::RemoteSessionDetailsOk { details: None, .. } => Ok(()),
+            DaemonResponse::RemoteSessionDetailsOk { details: Some(_), .. } =>
+                Err(IpcError::internal("Remote input requires the generation observed at input time")
+                    .with_details(serde_json::json!({"kind":"staleGeneration", "inputWritten":false}))),
+            DaemonResponse::RemoteSessionError { failure } =>
+                Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure)
+                    .map_err(|error| IpcError::internal(error.to_string()))?)),
+            DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal("Unexpected remote session classification response")),
+        }
+    }
+
+    pub async fn write_terminal_at_generation(&self, session_id: &str, generation: Option<u64>, data: Vec<u8>) -> Result<(), IpcError> {
+        match generation {
+            Some(generation) => crate::ipc::terminal::remote_control_result(self.send_interactive_request(
+                DaemonRequest::RemoteWrite { session_id: session_id.into(), generation, data }).await?),
+            None => self.write_terminal(session_id, data).await,
+        }
+    }
+
+    pub async fn resize_terminal_at_generation(&self, session_id: &str, generation: Option<u64>, cols: u16, rows: u16) -> Result<(), IpcError> {
+        match generation {
+            Some(generation) => crate::ipc::terminal::remote_control_result(self.send_interactive_request(
+                DaemonRequest::RemoteResize { session_id: session_id.into(), generation, cols, rows }).await?),
+            None => self.resize_terminal(session_id, cols, rows).await,
+        }
+    }
+
     pub async fn write_terminal(&self, session_id: &str, data: Vec<u8>) -> Result<(), IpcError> {
+        self.require_local_control(session_id).await?;
         let resp = self
             .send_interactive_request(DaemonRequest::Write {
                 session_id: session_id.to_string(),
@@ -1159,6 +1210,7 @@ impl DaemonClient {
         cols: u16,
         rows: u16,
     ) -> Result<(), IpcError> {
+        self.require_local_control(session_id).await?;
         let resp = self
             .send_interactive_request(DaemonRequest::Resize {
                 session_id: session_id.to_string(),
@@ -1440,6 +1492,114 @@ mod tests {
     use tempfile::tempdir;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn ssh_reconnect_safety_desktop_missing_generation_never_uses_legacy_write() {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("desktop.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let reply = DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(), epoch: 1, binary_path: None,
+                binary_mtime_ms: None, daemon_version: None };
+            write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let request: DaemonRequest = serde_json::from_str(line.trim()).unwrap();
+            let reply = DaemonResponse::RemoteSessionError { failure: crate::terminal::remote::RemoteFailure {
+                kind: crate::terminal::remote::RemoteFailureKind::Disconnected, message: "offline".into() } };
+            write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+            request
+        });
+        let client = DaemonClient::new_with_socket(socket);
+        client.write_terminal("remote", b"never replay".to_vec()).await.expect_err("fail closed");
+        let request = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert!(matches!(request, DaemonRequest::RemoteSessionDetails { .. }), "must classify before legacy dispatch: {request:?}");
+    }
+
+    #[tokio::test]
+    async fn ssh_reconnect_safety_desktop_remote_control_is_not_queued() {
+        let client = DaemonClient::new_with_socket(std::path::PathBuf::from("/unused-desktop-test.sock"));
+        let _busy = client.interactive_connection.lock().await;
+        let error = tokio::time::timeout(Duration::from_secs(1),
+            client.write_terminal_at_generation("remote", Some(7), b"key".to_vec()))
+            .await.expect("remote input must reject immediately, not wait behind control").unwrap_err();
+        assert_eq!(error.details.unwrap()["kind"], "busy");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "native-terminal")]
+    async fn ssh_reconnect_safety_desktop_encoded_input_retains_generation_and_typed_failure() {
+        use crate::ipc::native_terminal::{encode_attached_native_input, encode_attached_native_paste, encode_attached_native_mouse};
+        use crate::native_terminal::{NativeTerminalInput, MouseEvent};
+        use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
+        let state = NativeTerminalSurfaceHostState::default();
+        let (_tx, rx) = mpsc::channel(4);
+        state.attach_daemon_attachment::<tauri::test::MockRuntime>("remote", DaemonAttachment {
+            session_id: "remote".into(), epoch: 1, start_sequence: None, end_sequence: None,
+            gap: None, history: b"\x1b[?1000h\x1b[?1006h".to_vec(), history_segments: vec![],
+            pty_cols: Some(80), pty_rows: Some(24), messages: rx,
+            stream_task: tokio::spawn(std::future::pending()),
+        }, None).unwrap();
+        let key = serde_json::from_value::<NativeTerminalInput>(serde_json::json!({"keyEvent":{
+            "key":"Enter","action":"Press","modifiers":{"shift":false,"ctrl":false,"alt":false,"superKey":false,"capsLock":false,"numLock":false},"utf8":null
+        }})).unwrap();
+        let mouse: MouseEvent = serde_json::from_value(serde_json::json!({
+            "action":"Press","button":"Right","position":{"x":10.0,"y":10.0},
+            "size":{"screenWidth":800,"screenHeight":480,"cellWidth":10,"cellHeight":20,"paddingTop":0,"paddingBottom":0,"paddingLeft":0,"paddingRight":0},
+            "modifiers":{"shift":false,"ctrl":false,"alt":false,"superKey":false,"capsLock":false,"numLock":false}
+        })).unwrap();
+        let payloads = vec![
+            encode_attached_native_input(&state, "remote", &NativeTerminalInput::Text { text: "IME commit".into() }).unwrap(),
+            encode_attached_native_input(&state, "remote", &key).unwrap(),
+            encode_attached_native_paste(&state, "remote", "paste\nline").unwrap(),
+            encode_attached_native_mouse(&state, "remote", &mouse).unwrap(),
+        ];
+        assert!(payloads.iter().all(|bytes| !bytes.is_empty()));
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("encoded.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let expected = payloads.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let handshake = DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(), epoch: 1, binary_path: None, binary_mtime_ms: None, daemon_version: None };
+            write.write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes()).await.unwrap();
+            for bytes in expected {
+                line.clear(); reader.read_line(&mut line).await.unwrap();
+                match serde_json::from_str::<DaemonRequest>(line.trim()).unwrap() {
+                    DaemonRequest::RemoteWrite { session_id, generation, data } => {
+                        assert_eq!(session_id, "remote"); assert_eq!(generation, 7); assert_eq!(data, bytes);
+                    }
+                    other => panic!("generation bypass: {other:?}"),
+                }
+                let reply = serde_json::json!({"type":"remoteSessionError","failure":{"kind":"staleGeneration","message":"generation is now 8"}});
+                write.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+            }
+            line.clear(); reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::RemoteResize { generation: 7, cols: 100, rows: 30, .. }));
+            write.write_all(b"{\"type\":\"remoteSessionError\",\"failure\":{\"kind\":\"disconnected\",\"message\":\"offline\"}}\n").await.unwrap();
+        });
+        let client = DaemonClient::new_with_socket(socket);
+        for bytes in payloads {
+            let error = client.write_terminal_at_generation("remote", Some(7), bytes).await.unwrap_err();
+            assert_eq!(error.details.unwrap()["kind"], "staleGeneration");
+        }
+        let error = client.resize_terminal_at_generation("remote", Some(7), 100, 30).await.unwrap_err();
+        assert_eq!(error.details.unwrap()["kind"], "disconnected");
+        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        state.close_session("remote");
+    }
 
     #[tokio::test]
     async fn test_daemon_readiness_requires_exact_stdout_token_without_polling() {

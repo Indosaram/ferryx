@@ -6,6 +6,8 @@ import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { agentDisplayNameForType } from "../lib/agentTitle";
 import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
+import { isRemoteWorkspaceId } from "../lib/remoteProject";
+import { toIpcError } from "../lib/tauri";
 import type { TerminalSession } from "../lib/types";
 import { NativeTerminalPane } from "./NativeTerminalPane";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
@@ -75,10 +77,19 @@ export function TerminalPane({
   onOpenNewShell,
 }: TerminalPaneProps) {
   const [pendingLocal, setPendingLocal] = useState(false);
+  const [replacementError, setReplacementError] = useState<string | null>(null);
   const titleId = useId();
   const descId = useId();
 
-  const isExited = session.backendSessionId === null || session.lifecycle === "exited";
+  const isSshSession = isRemoteWorkspaceId(session.workspaceId);
+  const remoteState = session.remoteConnectionState;
+  const isSshReconnecting = isSshSession && remoteState === "reconnecting";
+  const isSshDisconnected =
+    isSshSession && (remoteState === "disconnected" || (!remoteState && (session.backendSessionId === null || session.lifecycle === "exited")));
+  const isSshExpired = isSshSession && (remoteState === "expired" || remoteState === "missing");
+  const isSshLegacyLost = isSshSession && remoteState === "legacyLost";
+  const showSshOverlay = isSshSession && (isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
+  const isExited = isSshSession ? showSshOverlay : session.backendSessionId === null || session.lifecycle === "exited";
   const affordance = getAgentReconnectAffordance(session, sessions);
   const isAgentSession = Boolean(
     (session.agentType && session.agentType.trim().length > 0) ||
@@ -94,11 +105,26 @@ export function TerminalPane({
   const logo = resolveAgentLogo(effectiveAgentType);
   const isMonochrome = isMonochromeAgentLogo(effectiveAgentType);
 
-  const isPending = pendingLocal || affordance.isReconnecting;
-  const errorDescription = resolveAffordanceErrorDescription(affordance);
+  const isPending = pendingLocal || (isSshSession ? isSshReconnecting : affordance.isReconnecting);
+  const errorDescription =
+    replacementError ?? (isSshSession ? session.remoteFailure?.message ?? null : resolveAffordanceErrorDescription(affordance));
 
   const handleReconnect = async () => {
-    if (isPending || !affordance.canReconnect || !onReconnect) return;
+    if (isPending) return;
+    if (isSshSession) {
+      if (!onReconnect) return;
+      setPendingLocal(true);
+      setReplacementError(null);
+      try {
+        await onReconnect(session.id);
+      } catch (error) {
+        setReplacementError(toIpcError(error).message);
+      } finally {
+        setPendingLocal(false);
+      }
+      return;
+    }
+    if (!affordance.canReconnect || !onReconnect) return;
     setPendingLocal(true);
     try {
       await onReconnect(session.id);
@@ -110,8 +136,11 @@ export function TerminalPane({
   const handleOpenNewShell = async () => {
     if (isPending || !onOpenNewShell) return;
     setPendingLocal(true);
+    setReplacementError(null);
     try {
       await onOpenNewShell(session.id);
+    } catch (error) {
+      setReplacementError(toIpcError(error).message);
     } finally {
       setPendingLocal(false);
     }
@@ -171,7 +200,17 @@ export function TerminalPane({
             )}
 
             <h2 id={titleId} className="text-sm font-medium text-foreground">
-              {isAgentSession ? "Session disconnected" : "Shell exited"}
+              {isSshSession
+                ? isSshReconnecting
+                  ? "Reconnecting SSH..."
+                  : isSshExpired
+                    ? "Remote session expired"
+                    : isSshLegacyLost
+                      ? "Legacy SSH session lost"
+                      : "SSH disconnected"
+                : isAgentSession
+                  ? "Session disconnected"
+                  : "Shell exited"}
             </h2>
 
             {isAgentSession ? (
@@ -179,12 +218,48 @@ export function TerminalPane({
             ) : null}
 
             {errorDescription ? (
-              <p id={descId} className="mt-1 text-xs text-muted-foreground">
+              <p id={descId} role={replacementError ? "alert" : undefined} className="mt-1 break-words text-xs text-muted-foreground">
                 {errorDescription}
               </p>
             ) : null}
 
-            {isAgentSession ? (
+            {isSshSession ? (
+              <div className="mt-4 flex w-full flex-col items-center gap-2">
+                {isSshReconnecting ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
+                    <span>Reconnecting to remote session...</span>
+                  </div>
+                ) : isSshExpired ? (
+                  <p className="text-xs text-muted-foreground">
+                    The remote process has exited or is no longer available on the host.
+                  </p>
+                ) : isSshLegacyLost ? (
+                  <p className="text-xs text-muted-foreground">
+                    This session was started before process-preserving reconnection was supported and cannot be restored.
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      Remote connection lost. Retry to reattach to the running session.
+                    </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={isPending || !onReconnect}
+                      aria-busy={isPending}
+                      aria-label={isPending ? "Reconnecting SSH" : "Reconnect SSH"}
+                      onClick={handleReconnect}
+                      className="w-full max-w-[220px]"
+                    >
+                      {isPending ? <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : null}
+                      <span>{isPending ? "Reconnecting..." : "Reconnect SSH"}</span>
+                    </Button>
+                  </>
+                )}
+              </div>
+            ) : isAgentSession ? (
               <div className="mt-4 flex w-full flex-col items-center gap-2">
                 {affordance.canReconnect ? (
                   <Button

@@ -1,0 +1,52 @@
+$ vitest run --maxWorkers=1 src/state/workspaceStore.sshReattach.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/state/workspaceStore.sshReattach.test.ts (1 test | 1 failed) 6ms
+   × SSH same-process reattachment > preserves agent identity, activity and pane layout when the local backend is rebound 5ms
+     → expected { id: 'pane', …(14) } to match object { id: 'pane', …(7) }
+(7 matching properties omitted from actual)
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/workspaceStore.sshReattach.test.ts > SSH same-process reattachment > preserves agent identity, activity and pane layout when the local backend is rebound
+AssertionError: expected { id: 'pane', …(14) } to match object { id: 'pane', …(7) }
+(7 matching properties omitted from actual)
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "agentSessionId": "remote-agent-session",[39m
+[32m-   "agentType": "claude",[39m
+[31m+   "agentSessionId": null,[39m
+[31m+   "agentType": null,[39m
+[2m    "backendSessionId": "new-local-backend",[22m
+[2m    "daemonEpoch": "new-local-epoch",[22m
+[2m    "id": "pane",[22m
+[2m    "lastOutputSequence": null,[22m
+[2m    "lifecycle": "running",[22m
+[32m-   "providerSession": {[39m
+[32m-     "id": "remote-agent-session",[39m
+[32m-     "key": "session_id",[39m
+[32m-   },[39m
+[31m+   "providerSession": null,[39m
+[2m  }[22m
+
+ ❯ src/state/workspaceStore.sshReattach.test.ts:56:35
+     54|     });
+     55| 
+     56|     expect(rebound.sessions.pane).toMatchObject({
+       |                                   ^
+     57|       id: "pane",
+     58|       backendSessionId: "new-local-backend",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  11:03:57
+   Duration  874ms (transform 154ms, setup 153ms, collect 171ms, tests 6ms, environment 271ms, prepare 32ms)
+
+error: script "test" exited with code 1

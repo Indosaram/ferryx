@@ -377,7 +377,7 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                     }
                 }
                 if has_focused_terminal {
-                    if let Some(window) = app_handle.get_webview_window("main") {
+                    if let Some(window) = app_handle.get_window("main") {
                         let _ = window.emit(NATIVE_TERMINAL_COPY_OR_INTERRUPT_EVENT, ());
                     }
                     ptr::null_mut()
@@ -431,7 +431,7 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                 }
                 match action {
                     NativeTerminalPasteAction::EmitAndConsume => {
-                        if let Some(window) = app_handle.get_webview_window("main") {
+                        if let Some(window) = app_handle.get_window("main") {
                             let _ = window.emit("native_terminal_paste", ());
                         }
                         ptr::null_mut()
@@ -525,7 +525,7 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
         .clone();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
-        if let Some(window) = app_handle.get_webview_window("main") {
+        if let Some(window) = app_handle.get_window("main") {
             if let Ok(raw_window) = window.ns_window() {
                 if !raw_window.is_null() {
                     let ns_window = unsafe { &*(raw_window as *const NSWindow) };
@@ -574,7 +574,7 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
         .clone();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
-        if let Some(window) = app_handle.get_webview_window("main") {
+        if let Some(window) = app_handle.get_window("main") {
             if let Ok(raw_window) = window.ns_window() {
                 if !raw_window.is_null() {
                     let ns_window = unsafe { &*(raw_window as *const NSWindow) };
@@ -623,7 +623,9 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                             let daemon = daemon_client.clone();
                                             let sid = session_id.clone();
                                             tauri::async_runtime::spawn(async move {
-                                                let _ = daemon.write_terminal(&sid, bytes).await;
+                                                if let Err(error) = daemon.write_terminal(&sid, bytes).await {
+                                                    tracing::warn!(session_id = %sid, %error, "Native wheel input rejected");
+                                                }
                                             });
                                         }
                                         Ok(crate::native_terminal::TerminalWheelOutcome::ScrollViewport(behavior)) => {
@@ -917,6 +919,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_get_cwd,
         cmd_terminal_write,
         cmd_terminal_resize,
+        cmd_terminal_remote_status,
+        cmd_terminal_remote_retry,
+        cmd_terminal_remote_write,
+        cmd_terminal_remote_resize,
         cmd_terminal_signal,
         cmd_terminal_close,
         cmd_terminal_list,
@@ -962,6 +968,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_delete_host,
         ipc::ssh::cmd_ssh_test_connection,
         ipc::ssh::cmd_ssh_prepare_integration,
+        ipc::ssh::cmd_ssh_install_project_helper,
         ipc::ssh::cmd_ssh_paste_clipboard_image,
         ipc::ssh::cmd_ssh_list_remote_worktrees,
         ipc::ssh::cmd_ssh_create_remote_worktree,

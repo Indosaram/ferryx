@@ -1,0 +1,16 @@
+{"event":"verification-init","platform":"windows","remoteHost":"maho-win","hostId":"qa-win-eea5b3eb","remoteBase":"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-verify-f996754d-4b08-42ef-b302-85c9cf3b03ca","nonce":"nonce-f616be2c-c0e","timestamp":"2026-09-09T04:11:40.855Z"}
+{"event":"trust-hashes-before","hashes":"888E00A58A18439575BBE12C308182BD4053D1D9173A1DDEBF3A022BF9DDC67D C:\\ProgramData\\ssh\\administrators_authorized_keys\r\n2075C2BD83FE2340B07DB930B43649C2A8725E40994D368547BCB0FDFB71FAA8 C:\\Users\\sook\\.ssh\\known_hosts"}
+{"event":"uploading-artifacts-to-windows","archiveRemotePath":"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-verify-f996754d-4b08-42ef-b302-85c9cf3b03ca.tar","runnerRemotePath":"C:\\Users\\sook\\AppData\\Local\\Temp\\verify-remote-helper-f996754d-4b08-42ef-b302-85c9cf3b03ca.ps1"}
+{"event":"cleanup-start"}
+{"event":"remote-windows-fixtures-removed"}
+file:///private/tmp/run-bridge-verification-windows.mjs:28
+        timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
+                                        ^
+
+Error: upload: C:\Users\sook\AppData\Local\Temp\ferryx-verify-f996754d-4b08-42ef-b302-85c9cf3b03ca.tar: timed out after 60000ms
+    at Timeout.<anonymous> (file:///private/tmp/run-bridge-verification-windows.mjs:28:41)
+    at listOnTimeout (node:internal/timers:585:17)
+    at process.processTimers (node:internal/timers:521:7)
+
+Node.js v22.22.3
+WINDOWS_VERIFY_EXIT_CODE: 0

@@ -7,7 +7,12 @@ use std::{io::{Read, Write}, path::{Path, PathBuf}, sync::Arc};
 mod process_windows;
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct Endpoint { address: String, token: String }
+struct Endpoint {
+    address: String,
+    token: String,
+    #[serde(default)]
+    pid: Option<u32>,
+}
 
 fn reply(runtime: &Runtime, value: Value) -> Value {
     match serde_json::from_value::<Request>(value).map_err(|e|e.to_string()).and_then(|r|runtime.handle(r)) {
@@ -171,7 +176,7 @@ fn bind_runtime(root: &Path, host: String) -> Result<BoundRuntime, String> {
     let publication = (|| {
         let mut file = publish.open(&staged).map_err(|e| e.to_string())?;
         super::private_file(&staged)?;
-        file.write_all(&serde_json::to_vec(&Endpoint {address,token}).map_err(|e|e.to_string())?)
+        file.write_all(&serde_json::to_vec(&Endpoint { address, token, pid: Some(std::process::id()) }).map_err(|e|e.to_string())?)
             .and_then(|_|file.sync_all()).map_err(|e|e.to_string())?;
         drop(file);
         #[cfg(windows)]

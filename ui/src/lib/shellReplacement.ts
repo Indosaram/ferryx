@@ -1,6 +1,7 @@
 import { closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
 import type { SpawnTerminalResult } from "./tauri";
 import type { StructuredIpcError, TerminalSession } from "./types";
+import { isRemoteWorkspaceId } from "./remoteProject";
 
 type RebindAction = {
   type: "REBIND_SESSION_BACKEND";
@@ -36,7 +37,7 @@ export function replaceExitedShellSession(
     const initial = dependencies.getSessions()[localSessionId];
     let spawned: SpawnTerminalResult | null = null;
     try {
-      if (!initial || initial.backendSessionId !== null || initial.agentType) {
+      if (!initial || initial.backendSessionId !== null || initial.agentType || isRemoteWorkspaceId(initial.workspaceId)) {
         throw invalidReplacement("Terminal session cannot be replaced with a new shell");
       }
       spawned = await (dependencies.spawn ?? spawnTerminalDetailed)({
@@ -48,7 +49,7 @@ export function replaceExitedShellSession(
       });
       const requireCurrent = (): TerminalSession => {
         const current = dependencies.getSessions()[localSessionId];
-        if (!current || current.backendSessionId !== null || current.agentType || current.workspaceId !== initial.workspaceId) {
+        if (!current || current.backendSessionId !== null || current.agentType || isRemoteWorkspaceId(current.workspaceId) || current.workspaceId !== initial.workspaceId) {
           throw invalidReplacement("Terminal session changed while opening a new shell");
         }
         return current;

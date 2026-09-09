@@ -1,0 +1,192 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+error[E0004]: non-exhaustive patterns: `remote::protocol::ClientControlMessage::RemoteWrite { .. }` and `remote::protocol::ClientControlMessage::RemoteResize { .. }` not covered
+    --> src/remote/server.rs:1091:31
+     |
+1091 |                         match ctrl {
+     |                               ^^^^ patterns `remote::protocol::ClientControlMessage::RemoteWrite { .. }` and `remote::protocol::ClientControlMessage::RemoteResize { .. }` not covered
+     |
+note: `remote::protocol::ClientControlMessage` defined here
+    --> src/remote/protocol.rs:150:10
+     |
+ 150 | pub enum ClientControlMessage {
+     |          ^^^^^^^^^^^^^^^^^^^^
+ 151 |     RemoteWrite { generation: String, data: String },
+     |     ----------- not covered
+ 152 |     RemoteResize { generation: String, cols: u16, rows: u16 },
+     |     ------------ not covered
+     = note: the matched value is of type `remote::protocol::ClientControlMessage`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms
+     |
+1106 ~                             ClientControlMessage::Scroll { .. } => {},
+1107 +                             remote::protocol::ClientControlMessage::RemoteWrite { .. } | remote::protocol::ClientControlMessage::RemoteResize { .. } => todo!()
+     |
+
+warning: variable does not need to be mutable
+    --> src/remote/server.rs:1021:22
+     |
+1021 |     let (mut sender, mut receiver) = socket.split();
+     |                      ----^^^^^^^^
+     |                      |
+     |                      help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0004]: non-exhaustive patterns: `remote::protocol::ClientControlMessage::RemoteWrite { .. }` and `remote::protocol::ClientControlMessage::RemoteResize { .. }` not covered
+    --> src/remote/server.rs:1375:31
+     |
+1375 |                         match ctrl {
+     |                               ^^^^ patterns `remote::protocol::ClientControlMessage::RemoteWrite { .. }` and `remote::protocol::ClientControlMessage::RemoteResize { .. }` not covered
+     |
+note: `remote::protocol::ClientControlMessage` defined here
+    --> src/remote/protocol.rs:150:10
+     |
+ 150 | pub enum ClientControlMessage {
+     |          ^^^^^^^^^^^^^^^^^^^^
+ 151 |     RemoteWrite { generation: String, data: String },
+     |     ----------- not covered
+ 152 |     RemoteResize { generation: String, cols: u16, rows: u16 },
+     |     ------------ not covered
+     = note: the matched value is of type `remote::protocol::ClientControlMessage`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms
+     |
+1406 ~                             },
+1407 +                             remote::protocol::ClientControlMessage::RemoteWrite { .. } | remote::protocol::ClientControlMessage::RemoteResize { .. } => todo!()
+     |
+
+warning: variable does not need to be mutable
+    --> src/remote/server.rs:1167:22
+     |
+1167 |     let (mut sender, mut receiver) = socket.split();
+     |                      ----^^^^^^^^
+     |                      |
+     |                      help: remove this `mut`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `receiver`
+    --> src/remote/server.rs:1021:22
+     |
+1021 |     let (mut sender, mut receiver) = socket.split();
+     |                      ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: unused variable: `session_backend`
+    --> src/remote/server.rs:1077:9
+     |
+1077 |     let session_backend = Arc::clone(&state.session_backend);
+     |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_backend`
+
+warning: unused variable: `session_id_clone`
+    --> src/remote/server.rs:1078:9
+     |
+1078 |     let session_id_clone = session_id.clone();
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_id_clone`
+
+warning: unused variable: `can_control`
+    --> src/remote/server.rs:1079:9
+     |
+1079 |     let can_control = device.permission == DevicePermission::Control;
+     |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_can_control`
+
+warning: unused variable: `receiver`
+    --> src/remote/server.rs:1167:22
+     |
+1167 |     let (mut sender, mut receiver) = socket.split();
+     |                      ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+warning: unused variable: `session_backend`
+    --> src/remote/server.rs:1359:9
+     |
+1359 |     let session_backend = Arc::clone(&state.session_backend);
+     |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_backend`
+
+warning: unused variable: `session_id_clone`
+    --> src/remote/server.rs:1360:9
+     |
+1360 |     let session_id_clone = session_id.clone();
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_id_clone`
+
+warning: unused variable: `can_control`
+    --> src/remote/server.rs:1361:9
+     |
+1361 |     let can_control = device.permission == DevicePermission::Control;
+     |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_can_control`
+
+warning: unused variable: `recv_mirror`
+    --> src/remote/server.rs:1362:9
+     |
+1362 |     let recv_mirror = Arc::clone(&mirror);
+     |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_recv_mirror`
+
+warning: unused variable: `recv_tx`
+    --> src/remote/server.rs:1363:9
+     |
+1363 |     let recv_tx = outbound_tx.clone();
+     |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_recv_tx`
+
+For more information about this error, try `rustc --explain E0004`.
+warning: `ferryx` (lib test) generated 22 warnings
+error: could not compile `ferryx` (lib test) due to 2 previous errors; 22 warnings emitted

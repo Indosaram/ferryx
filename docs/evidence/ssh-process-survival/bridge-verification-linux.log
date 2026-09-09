@@ -1,0 +1,32 @@
+{"event":"verification-init","platform":"linux","remoteHost":"omarchy","hostId":"qa-linux-699c8941","remoteFixture":"/home/indo/.ferryx-qa-ferryx-qa-26532e35","nonce":"nonce-78c5b38e-6fe","timestamp":"2026-09-09T04:09:25.490Z"}
+{"event":"trust-hashes-before","hashes":"d348a9521d704d66be0b9909b537556545205de202a999c578cc3f7a15f980cd  /home/indo/.ssh/config\n40c27c5a133e38a3af63405dce12049b84cfa8d4063ec53d0fde36c40dda5369  /home/indo/.ssh/known_hosts"}
+{"event":"remote-fixture-created","remoteFixture":"/home/indo/.ferryx-qa-ferryx-qa-26532e35"}
+{"event":"uploading-source-archive","localArchive":"/tmp/ferryx-src-4c291694-1fe4-4d7e-ac1d-39f990bc54bd.tar.gz"}
+{"event":"archive-extracted-on-remote"}
+{"event":"running-remote-cargo-test"}
+{"event":"remote-cargo-test-success","passedCount":23,"outputSummary":"test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok | test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok | test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok | test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok | test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s"}
+{"event":"building-remote-debug-helper"}
+{"event":"remote-helper-built-and-staged","installedBinary":"/home/indo/.ferryx-qa-ferryx-qa-26532e35/bin/ferryx-remote-helper"}
+{"event":"verified-missing-helper-rejection","exitCode":127}
+{"event":"daemon-started-detached-over-ssh","stdout":"{\"event\":\"ready\",\"protocol\":1}","parentSshPid":23383}
+{"event":"bridge-conn-1-opened","sshPid":23387}
+{"event":"handshake-1-success","ownerId":"06d7491c-b047-4afc-8501-7200ae4f6c60","epoch":"16371515876092093434","os":"linux","arch":"x86_64"}
+{"event":"pty-spawned","remotePid":2996484,"target":{"backendSessionId":"d5808bc0-00d9-4416-bbe0-c7de72eb191a","epoch":"16371515876092093434","hostId":"qa-linux-699c8941","ownerId":"06d7491c-b047-4afc-8501-7200ae4f6c60"}}
+{"event":"step-1-verified-on-conn-1","cursor":"1","output":"INIT:nonce-78c5b38e-6fe:1","remotePid":2996484}
+{"event":"step-1-counter-2-verified","cursor":"3","output":"tick1\r\nACK:nonce-78c5b38e-6fe:2:tick1"}
+{"event":"SEVERING-REAL-OPENSSH-TRANSPORT","deadSshPid":23387}
+{"event":"ssh-connection-1-severed-and-reaped","deadSshPid":23387}
+{"event":"bridge-conn-2-opened","sshPid":23391}
+{"event":"handshake-2-verified-identical","ownerId":"06d7491c-b047-4afc-8501-7200ae4f6c60","epoch":"16371515876092093434"}
+{"event":"pty-described-on-conn-2","remotePid":2996484,"identicalPid":true,"exited":false,"cursor":"3"}
+{"event":"step-2-counter-3-verified-on-conn-2","cursor":"5","output":"tick2\r\nACK:nonce-78c5b38e-6fe:3:tick2","remotePid":2996484,"identicalNonce":true,"identicalPid":true,"counterIncremented":true}
+{"event":"verified-spawn-conflict","error":"REQUEST_CONFLICT: clientRequestId already used with different parameters"}
+{"event":"verified-stale-epoch-target","error":"TARGET_EXPIRED"}
+{"event":"verified-unknown-target","error":"NOT_FOUND"}
+{"event":"pty-stopped-cleanly"}
+{"event":"bridge-conn-2-closed"}
+{"event":"trust-hashes-preserved","hashes":"d348a9521d704d66be0b9909b537556545205de202a999c578cc3f7a15f980cd  /home/indo/.ssh/config\n40c27c5a133e38a3af63405dce12049b84cfa8d4063ec53d0fde36c40dda5369  /home/indo/.ssh/known_hosts"}
+PASS: Remote Linux OpenSSH bridge survival, PID/nonce/counter preservation, and contracts verified
+{"event":"cleanup-start"}
+{"event":"remote-fixture-removed","fixture":"/home/indo/.ferryx-qa-ferryx-qa-26532e35"}
+LINUX_VERIFY_EXIT_CODE: 0

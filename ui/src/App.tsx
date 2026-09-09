@@ -1079,6 +1079,7 @@ function WorkspaceApp({
     const pending = pendingAgentAutoResume;
     setPendingAgentAutoResume(null);
     if (pending.workspaceId !== activeProject.workspaceId) return;
+    if (activeProject.target?.kind === "ssh") return;
 
     activeAutoResumeCancelRef.current?.();
     activeAutoResumeCancelRef.current = scheduleAgentAutoResume({
@@ -1877,15 +1878,15 @@ function WorkspaceApp({
     [duplicateBrowserTab, reportRuntimeError],
   );
   const handleNavigateBrowserTab = useCallback(
-    (tabId: string, url: string) => {
-      void navigateBrowserTab(tabId, url).catch(reportRuntimeError);
+    (tabId: string, url: string, browserId?: string) => {
+      void navigateBrowserTab(tabId, url, browserId).catch(reportRuntimeError);
     },
     [navigateBrowserTab, reportRuntimeError],
   );
 
   const handleReloadBrowserTab = useCallback(
-    (tabId: string) => {
-      void reloadBrowserTab(tabId).catch(reportRuntimeError);
+    (tabId: string, browserId?: string) => {
+      void reloadBrowserTab(tabId, browserId).catch(reportRuntimeError);
     },
     [reloadBrowserTab, reportRuntimeError],
   );

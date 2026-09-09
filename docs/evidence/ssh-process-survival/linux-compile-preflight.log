@@ -1,0 +1,52 @@
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+LINUX_HELPER_CHECK /tmp/ferryx-helper-check.P3kXLC
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded zerocopy v0.8.57
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+    Checking cfg-if v1.0.4
+   Compiling zerocopy v0.8.57
+   Compiling cfg_aliases v0.1.1
+   Compiling thiserror v1.0.69
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling getrandom v0.4.3
+   Compiling anyhow v1.0.104
+    Checking bitflags v2.13.1
+   Compiling serde_json v1.0.151
+   Compiling nix v0.28.0
+   Compiling serde v1.0.229
+    Checking memchr v2.8.3
+    Checking downcast-rs v1.2.1
+    Checking shell-words v1.1.1
+    Checking log v0.4.34
+    Checking itoa v1.0.18
+    Checking base64 v0.22.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+    Checking getrandom v0.2.17
+    Checking serial2 v0.2.38
+    Checking rand_core v0.6.4
+    Checking uuid v1.26.0
+   Compiling serde_derive v1.0.229
+    Checking ppv-lite86 v0.2.21
+   Compiling thiserror-impl v1.0.69
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.8
+    Checking filedescriptor v0.8.3
+    Checking portable-pty v0.9.0
+    Checking ferryx-remote-helper v2026.908.1 (/tmp/ferryx-helper-check.P3kXLC/remote-helper)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.39s
+cleanup: removed Linux fixture /tmp/ferryx-helper-check.P3kXLC

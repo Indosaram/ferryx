@@ -794,9 +794,24 @@ export function NativeTerminalPane({
       return;
     }
 
+    const isRemote = isRemoteWorkspaceId(session?.workspaceId);
+    const isOutage = isRemote && (
+      session?.remoteConnectionState === "disconnected" ||
+      session?.remoteConnectionState === "reconnecting" ||
+      session?.remoteConnectionState === "expired"
+    );
+    if (isOutage) {
+      switchDebug("terminal.surface.input.dropped.outage", {
+        backendSessionId: targetSessionId,
+        state: session?.remoteConnectionState,
+      });
+      return;
+    }
+
     const currentSessionId = targetSessionId;
     const owner = surfaceOwnerRef.current;
     const isCurrentOwner = () => owner !== null && owner.sessionId === currentSessionId && surfaceOwnerRef.current === owner;
+    const generation = isRemote ? session?.remoteGeneration ?? null : null;
 
     const executeInput = async (isRetry = false): Promise<void> => {
       if (!isCurrentOwner()) return;
@@ -804,6 +819,7 @@ export function NativeTerminalPane({
         const receipt = await invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
           sessionId: currentSessionId,
           input,
+          ...(generation != null ? { generation } : {}),
         });
         if (!isCurrentOwner()) return;
         updateImeAnchor(receipt);
@@ -907,10 +923,21 @@ export function NativeTerminalPane({
       if (!visible || !isTauri() || !targetSessionId) {
         return;
       }
+      const isRemote = isRemoteWorkspaceId(session?.workspaceId);
+      const isOutage = isRemote && (
+        session?.remoteConnectionState === "disconnected" ||
+        session?.remoteConnectionState === "reconnecting" ||
+        session?.remoteConnectionState === "expired"
+      );
+      if (isOutage) {
+        return;
+      }
+      const generation = isRemote ? session?.remoteGeneration ?? null : null;
 
       void invoke<NativeTerminalReceipt>("cmd_native_terminal_paste", {
         sessionId: targetSessionId,
         text,
+        ...(generation != null ? { generation } : {}),
       })
         .then(updateImeAnchor)
         .catch((error: unknown) => {
@@ -1007,8 +1034,17 @@ export function NativeTerminalPane({
           ? performance.now()
           : 0) * 1_000_000,
     );
+    const isRemote = isRemoteWorkspaceId(session?.workspaceId);
+    const isOutage = isRemote && (
+      session?.remoteConnectionState === "disconnected" ||
+      session?.remoteConnectionState === "reconnecting" ||
+      session?.remoteConnectionState === "expired"
+    );
+    if (isOutage) return;
+    const generation = isRemote ? session?.remoteGeneration ?? null : null;
     void invoke<{ readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt }>("cmd_native_terminal_mouse", {
       sessionId: targetSessionId,
+      ...(generation != null ? { generation } : {}),
       event: {
         action,
         button,
@@ -1056,9 +1092,11 @@ export function NativeTerminalPane({
     const offset = Math.round((topPx / availablePx) * maxOffset);
     setScrollbar({ ...scrollbar, offset });
 
+    const generation = isRemoteWorkspaceId(session?.workspaceId) ? session?.remoteGeneration ?? null : null;
     void invoke("cmd_native_terminal_scroll", {
       sessionId: targetSessionId,
       behavior: { type: "row", offset },
+      ...(generation != null ? { generation } : {}),
     })
       .then(refreshScrollbar)
       .catch((error: unknown) => {
@@ -2029,9 +2067,11 @@ export function NativeTerminalPane({
         triggerScrollbarReveal();
         if (!isTauri() || !targetSessionId) return;
         const rows = Math.trunc(event.deltaY / 20) || (event.deltaY > 0 ? 1 : -1);
+        const generation = isRemoteWorkspaceId(session?.workspaceId) ? session?.remoteGeneration ?? null : null;
         void invoke("cmd_native_terminal_scroll", {
           sessionId: targetSessionId,
           behavior: { type: "delta", rows },
+          ...(generation != null ? { generation } : {}),
         })
           .then(refreshScrollbar)
           .catch((error: unknown) => {
