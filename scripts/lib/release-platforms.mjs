@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 import { runHostScript, runProcess, quoteSh, quotePowerShell } from "./release-hosts.mjs";
@@ -583,8 +583,11 @@ source_dir="$workspace/source"
 ghostty_dir="$workspace/ghostty"
 out_dir="$workspace/out"
 test ! -e "$source_dir" && test ! -e "$ghostty_dir" && test ! -e "$out_dir"
-git bundle verify "$workspace/source.bundle"
-git bundle verify "$workspace/ghostty.bundle"
+verify_repo="$workspace/.verify-repo"
+git init --bare --quiet "$verify_repo"
+GIT_DIR="$verify_repo" git bundle verify "$workspace/source.bundle"
+GIT_DIR="$verify_repo" git bundle verify "$workspace/ghostty.bundle"
+rm -rf "$verify_repo"
 git clone "$workspace/source.bundle" "$source_dir"
 git -C "$source_dir" checkout --detach ${quoteSh(plan.commitSha)}
 test "$(git -C "$source_dir" rev-parse HEAD)" = ${quoteSh(plan.commitSha)}
@@ -631,8 +634,13 @@ $sourceDir = Join-Path $workspace 'source'
 $ghosttyDir = Join-Path $workspace 'ghostty'
 $outDir = Join-Path $workspace 'out'
 if ((Test-Path $sourceDir) -or (Test-Path $ghosttyDir) -or (Test-Path $outDir)) { throw 'Remote output collision' }
+$verifyRepo = Join-Path $workspace '.verify-repo'
+git init --bare --quiet $verifyRepo; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$env:GIT_DIR = $verifyRepo
 git bundle verify (Join-Path $workspace 'source.bundle'); if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 git bundle verify (Join-Path $workspace 'ghostty.bundle'); if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Remove-Item env:GIT_DIR -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $verifyRepo -Recurse -Force
 git clone (Join-Path $workspace 'source.bundle') $sourceDir; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 git -C $sourceDir checkout --detach ${quotePowerShell(plan.commitSha)}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ((git -C $sourceDir rev-parse HEAD).Trim() -ne ${quotePowerShell(plan.commitSha)}) { throw 'Source checkout SHA mismatch' }
@@ -819,6 +827,7 @@ export async function buildHost({
       execFileSync("git", ["clone", ghosttyBundlePath, isolatedGhostty], { stdio: "pipe" });
 
       const ghosttyTargetDir = join(isolatedSource, "src-tauri", "vendor", "ghostty");
+      rmSync(ghosttyTargetDir, { recursive: true, force: true });
       mkdirSync(dirname(ghosttyTargetDir), { recursive: true });
       execFileSync("cp", ["-R", isolatedGhostty, ghosttyTargetDir]);
 

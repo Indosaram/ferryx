@@ -465,7 +465,7 @@ export async function publishRelease({
     lsRemoteOut = await lsRemoteFn();
   } else {
     try {
-      lsRemoteOut = execFileSync("git", ["ls-remote", "--tags", "origin", `refs/tags/${plan.tag}`], {
+      lsRemoteOut = execFileSync("git", ["ls-remote", "--tags", "origin", `refs/tags/${plan.tag}`, `refs/tags/${plan.tag}^{}`], {
         encoding: "utf8",
       });
     } catch (err) {
