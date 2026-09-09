@@ -70,7 +70,14 @@ struct PersistedAuthState {
 pub struct AuthManager {
     pairing_window: Arc<RwLock<PairingWindow>>,
     devices: Arc<RwLock<HashMap<String, DeviceInfo>>>,
+    /// Device Bearer Tokens: long-lived credentials issued to paired remote
+    /// control clients. Maps token -> owning device id.
     tokens: Arc<RwLock<HashMap<String, String>>>,
+    /// Machine Tokens: credentials used by the local daemon to authenticate
+    /// its reverse tunnel connection to the relay. Distinct tier from device
+    /// bearer tokens; a machine token identifies the host, not a paired
+    /// remote-control device, and is never handed out via pairing.
+    machine_tokens: Arc<RwLock<std::collections::HashSet<String>>>,
     revocations: Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
     persistence_path: Option<PathBuf>,
     last_persisted_at: Arc<RwLock<Instant>>,
@@ -97,10 +104,42 @@ impl AuthManager {
             pairing_window: Arc::new(RwLock::new(PairingWindow::default())),
             devices: Arc::new(RwLock::new(persisted.devices)),
             tokens: Arc::new(RwLock::new(persisted.tokens)),
+            machine_tokens: Arc::new(RwLock::new(std::collections::HashSet::new())),
             revocations: Arc::new(RwLock::new(HashMap::new())),
             persistence_path,
             last_persisted_at: Arc::new(RwLock::new(Instant::now())),
         }
+    }
+
+    /// Generates a new Machine Token authenticating this daemon's reverse
+    /// tunnel connection to the relay. Distinct from Device Bearer Tokens:
+    /// it identifies the machine itself, not a paired remote-control device,
+    /// and is not subject to pairing-code exchange or device revocation.
+    pub fn generate_machine_token(&self) -> String {
+        let token: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(64)
+            .map(char::from)
+            .collect();
+        self.machine_tokens.write().insert(token.clone());
+        token
+    }
+
+    /// Validates a Machine Token presented by the daemon when establishing
+    /// a reverse tunnel to the relay. Never matches Device Bearer Tokens or
+    /// Pairing PINs; each credential tier is checked against its own store.
+    pub fn validate_machine_token(&self, token: &str) -> Result<(), AuthError> {
+        if self.machine_tokens.read().contains(token) {
+            Ok(())
+        } else {
+            Err(AuthError::Unauthorized)
+        }
+    }
+
+    /// Revokes a previously generated Machine Token so it can no longer
+    /// authenticate reverse tunnel connections.
+    pub fn revoke_machine_token(&self, token: &str) -> bool {
+        self.machine_tokens.write().remove(token)
     }
 
     pub fn create_pairing_code(&self, default_permission: DevicePermission) -> String {
@@ -288,6 +327,19 @@ impl AuthManager {
         *self.last_persisted_at.write() = instant;
     }
 
+    /// Test-only hook: backdates an active pairing PIN's creation time so
+    /// expiration logic can be exercised deterministically, without a real
+    /// 60-second sleep in the test suite.
+    #[cfg(test)]
+    pub(crate) fn backdate_pairing_code(&self, code: &str, age: Duration) {
+        let mut window = self.pairing_window.write();
+        if let Some(pairing) = window.codes.get_mut(code) {
+            pairing.created_at = Instant::now()
+                .checked_sub(age)
+                .expect("instant subtraction");
+        }
+    }
+
     fn persist_best_effort(&self) {
         let Some(path) = self.persistence_path.as_deref() else {
             return;
@@ -386,6 +438,85 @@ mod tests {
 
         let invalid = manager.approve_pairing_code_cli("000000");
         assert!(matches!(invalid, Err(AuthError::InvalidPairingCode)));
+    }
+
+    /// Verifies the three credential tiers - Machine Token, 60s Pairing PIN,
+    /// and Device Bearer Token - are validated independently, that a token
+    /// from one tier never authenticates another, and that the pairing PIN
+    /// both expires after 60 seconds and is consumed on first use.
+    #[test]
+    fn test_auth_credential_separation() {
+        let manager = AuthManager::new();
+
+        // --- Tier 1: Machine Token (daemon-to-relay reverse tunnel) ---
+        let machine_token = manager.generate_machine_token();
+        assert!(
+            manager.validate_machine_token(&machine_token).is_ok(),
+            "a freshly generated machine token must validate"
+        );
+        assert!(matches!(
+            manager.validate_machine_token("not-a-real-machine-token"),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // --- Tier 2: 60-second Pairing PIN, single-use, strict expiry ---
+        let code = manager.create_pairing_code(DevicePermission::Control);
+        assert_eq!(code.len(), 6, "pairing PIN must be a 6-digit code");
+
+        // A pairing PIN must never validate as a machine token or vice versa.
+        assert!(matches!(
+            manager.validate_machine_token(&code),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // Backdate the PIN past its 60-second window and confirm it is rejected.
+        manager.backdate_pairing_code(&code, Duration::from_secs(61));
+        assert!(matches!(
+            manager.exchange_pairing_code(&code, "Expired Phone"),
+            Err(AuthError::ExpiredPairingCode)
+        ));
+
+        // Issue a fresh PIN and consume it exactly once.
+        let code = manager.create_pairing_code(DevicePermission::View);
+        let (device_token, device) = manager
+            .exchange_pairing_code(&code, "Tablet")
+            .expect("a fresh, unexpired pairing code must exchange successfully");
+        assert_eq!(device.permission, DevicePermission::View);
+
+        // Re-using the same PIN must fail: pairing codes are single-use.
+        assert!(matches!(
+            manager.exchange_pairing_code(&code, "Second Device"),
+            Err(AuthError::InvalidPairingCode)
+        ));
+
+        // --- Tier 3: Device Bearer Token ---
+        let validated = manager
+            .validate_token(&device_token)
+            .expect("a token minted by pairing exchange must validate as a device bearer token");
+        assert_eq!(validated.id, device.id);
+
+        // A device bearer token must never validate as a machine token.
+        assert!(matches!(
+            manager.validate_machine_token(&device_token),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // A machine token must never validate as a device bearer token.
+        assert!(matches!(
+            manager.validate_token(&machine_token),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // Revoking the machine token removes it from the machine-token tier only.
+        assert!(manager.revoke_machine_token(&machine_token));
+        assert!(matches!(
+            manager.validate_machine_token(&machine_token),
+            Err(AuthError::Unauthorized)
+        ));
+        assert!(
+            manager.validate_token(&device_token).is_ok(),
+            "revoking a machine token must not affect device bearer tokens"
+        );
     }
 }
 

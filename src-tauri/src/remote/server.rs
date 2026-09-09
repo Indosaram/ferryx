@@ -1691,15 +1691,33 @@ struct PushUnsubscribeRequest {
 }
 
 async fn push_subscribe(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
     Json(payload): Json<PushSubscriptionInfo>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
     global_push_store().subscribe(payload);
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn push_unsubscribe(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
     Json(payload): Json<PushUnsubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let token = extract_token(&headers, Some(&query))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
     global_push_store().unsubscribe(&payload.endpoint);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2012,5 +2030,66 @@ mod tests {
         );
 
         handle.stop();
+    }
+
+    /// Push subscribe/unsubscribe endpoints must require a valid Bearer
+    /// device token, matching every other authenticated remote route, and
+    /// must reject unauthenticated requests with 401 rather than silently
+    /// registering/removing push subscriptions.
+    #[tokio::test]
+    async fn test_push_auth() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+
+        fn no_auth_query() -> AuthQuery {
+            AuthQuery {
+                token: None,
+                render: None,
+                cols: None,
+                rows: None,
+            }
+        }
+
+        let subscribe_result = push_subscribe(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Query(no_auth_query()),
+            Json(PushSubscriptionInfo {
+                endpoint: "https://push.example.com/sub/unauth".to_string(),
+                keys: crate::remote::push::PushSubscriptionKeys {
+                    p256dh: "p256dh-key".to_string(),
+                    auth: "auth-key".to_string(),
+                },
+            }),
+        )
+        .await;
+        let (status, _) = subscribe_result.expect_err("unauthenticated subscribe must be rejected");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let unsubscribe_result = push_unsubscribe(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Query(no_auth_query()),
+            Json(PushUnsubscribeRequest {
+                endpoint: "https://push.example.com/sub/unauth".to_string(),
+            }),
+        )
+        .await;
+        let (status, _) = unsubscribe_result.expect_err("unauthenticated unsubscribe must be rejected");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        assert!(
+            global_push_store()
+                .list_subscriptions()
+                .iter()
+                .all(|sub| sub.endpoint != "https://push.example.com/sub/unauth"),
+            "unauthenticated request must not have registered a subscription"
+        );
     }
 }
