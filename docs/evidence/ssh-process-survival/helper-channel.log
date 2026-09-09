@@ -1,0 +1,26 @@
+cleanup: reaped child 57395
+cleanup: reaped child 57394
+cleanup: removed /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-helper-qa-6AdbHz; remoteStopped=false
+72 |           }
+73 |         }
+74 |         const length = buffered.readUInt32BE();
+75 |         const reply = JSON.parse(buffered.subarray(4, 4 + length).toString("utf8"));
+76 |         buffered = buffered.subarray(4 + length);
+77 |         assert.equal(reply.ok, true, `${op}: ${reply.error}`);
+                    ^
+AssertionError: project.register: FORBIDDEN: project outside configured runtime root
+
+false !== true
+
+ generatedMessage: false,
+     actual: false,
+   expected: true,
+   operator: "strictEqual",
+       diff: "simple",
+       code: "ERR_ASSERTION"
+
+      at /Users/indo/code/project/orca-lite/scripts/qa/ssh-helper-survival.mjs:77:16
+      at bounded (/Users/indo/code/project/orca-lite/scripts/qa/ssh-helper-survival.mjs:27:26)
+      at processTicksAndRejections (native:7:39)
+
+Bun v1.4.0 (macOS arm64)

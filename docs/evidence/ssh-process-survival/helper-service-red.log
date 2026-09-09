@@ -1,0 +1,52 @@
+   Compiling ferryx-remote-helper v2026.908.1 (/Users/indo/code/project/orca-lite/remote-helper)
+error[E0425]: cannot find function `bind_runtime` in this scope
+ --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:6:17
+  |
+6 |     let first = bind_runtime(dir.path(), "qa-lock".into()).unwrap();
+  |                 ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `bind_runtime` in this scope
+  --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:10:9
+   |
+10 |         bind_runtime(dir.path(), "qa-lock".into()),
+   |         ^^^^^^^^^^^^ not found in this scope
+
+error[E0282]: type annotations needed
+  --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:11:23
+   |
+11 |         Err(error) if error.starts_with("REMOTE_RUNTIME_CONFLICT:")
+   |                       ^^^^^ cannot infer type
+
+error[E0425]: cannot find function `bind_runtime` in this scope
+  --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:20:17
+   |
+20 |     let first = bind_runtime(dir.path(), "qa-stale".into()).unwrap();
+   |                 ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `bind_runtime` in this scope
+  --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:24:18
+   |
+24 |     let second = bind_runtime(dir.path(), "qa-stale".into()).unwrap();
+   |                  ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `bind_runtime` in this scope
+  --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:37:13
+   |
+37 |     assert!(bind_runtime(&link, "qa-link".into()).is_err());
+   |             ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `bind_runtime` in this scope
+  --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:42:13
+   |
+42 |     assert!(bind_runtime(dir.path(), "qa-link".into()).is_err());
+   |             ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `bind_runtime` in this scope
+  --> ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:50:17
+   |
+50 |     let bound = bind_runtime(dir.path(), "qa-bridge".into()).unwrap();
+   |                 ^^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0282, E0425.
+For more information about an error, try `rustc --explain E0282`.
+error: could not compile `ferryx-remote-helper` (bin "ferryx-remote-helper" test) due to 8 previous errors

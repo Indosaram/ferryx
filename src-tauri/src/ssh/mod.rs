@@ -2,6 +2,8 @@ pub mod browse;
 pub mod config;
 pub mod direct;
 pub mod exec;
+#[path = "../ferryx_scope/ssh/mod.rs"]
+pub mod helper_runtime;
 pub mod operations;
 pub mod projects;
 pub mod runtime;

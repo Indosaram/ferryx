@@ -1,0 +1,9 @@
+   Compiling ferryx-remote-helper v2026.908.1 (/Users/indo/code/project/orca-lite/remote-helper)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.87s
+{"event":"before-disconnect","target":{"backendSessionId":"e343a7a5-a3d7-4466-b3c8-19613e3ff427","epoch":"5426831637447958965","hostId":"qa-host","ownerId":"6e0d0214-bce9-48b5-8bbb-3c4a7985c230"},"pid":94520,"counter":1,"nonce":"58474b9e-0b2b-4a64-8a9d-310a19d013f3"}
+cleanup: reaped child 94519
+{"event":"after-reconnect","target":{"backendSessionId":"e343a7a5-a3d7-4466-b3c8-19613e3ff427","epoch":"5426831637447958965","hostId":"qa-host","ownerId":"6e0d0214-bce9-48b5-8bbb-3c4a7985c230"},"pid":94520,"counter":2,"nonce":"58474b9e-0b2b-4a64-8a9d-310a19d013f3","spawnCount":1}
+PASS: same remote PID, nonce and mutable counter after actual bridge SIGKILL
+cleanup: reaped child 94521
+cleanup: reaped child 94511
+cleanup: removed /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-helper-qa-TWhjOA; remoteStopped=true

@@ -1,0 +1,47 @@
+#< CLIXML
+[
+    {
+        "Path":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-acl-probe-ea8328ac-7f60-4441-916e-b4b9a49c8270",
+        "Owner":  "BUILTIN\\Administrators",
+        "Rules":  [
+                      {
+                          "SID":  "S-1-5-21-3510490687-4041447508-1362901398-1002",
+                          "Rights":  "FullControl",
+                          "Inheritance":  "None",
+                          "Inherited":  false
+                      }
+                  ]
+    },
+    {
+        "Path":  "Microsoft.PowerShell.Core\\FileSystem::C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-acl-probe-ea8328ac-7f60-4441-916e-b4b9a49c8270\\endpoint.json",
+        "Owner":  "BUILTIN\\Administrators",
+        "Rules":  [
+                      {
+                          "SID":  "S-1-5-18",
+                          "Rights":  "FullControl",
+                          "Inheritance":  "None",
+                          "Inherited":  false
+                      },
+                      {
+                          "SID":  "S-1-5-32-544",
+                          "Rights":  "FullControl",
+                          "Inheritance":  "None",
+                          "Inherited":  false
+                      },
+                      {
+                          "SID":  "S-1-5-5-1-2877577298",
+                          "Rights":  "ReadAndExecute, Synchronize",
+                          "Inheritance":  "None",
+                          "Inherited":  false
+                      },
+                      {
+                          "SID":  "S-1-5-21-3510490687-4041447508-1362901398-1002",
+                          "Rights":  "FullControl",
+                          "Inheritance":  "None",
+                          "Inherited":  false
+                      }
+                  ]
+    }
+]
+ACL_PROBE_CLEANED
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="2"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>

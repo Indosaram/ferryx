@@ -1,0 +1,103 @@
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+LINUX_HELPER_VERIFY /tmp/ferryx-helper-verify.IS8730
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling unicode-ident v1.0.24
+   Compiling zerocopy v0.8.57
+   Compiling getrandom v0.4.3
+   Compiling bitflags v2.13.1
+   Compiling cfg_aliases v0.1.1
+   Compiling serde_core v1.0.229
+   Compiling thiserror v1.0.69
+   Compiling rustix v1.1.4
+   Compiling anyhow v1.0.104
+   Compiling nix v0.28.0
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling linux-raw-sys v0.12.1
+   Compiling log v0.4.34
+   Compiling shell-words v1.1.1
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling downcast-rs v1.2.1
+   Compiling base64 v0.22.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v1.0.69
+   Compiling getrandom v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling filedescriptor v0.8.3
+   Compiling uuid v1.26.0
+   Compiling rand_core v0.6.4
+   Compiling tempfile v3.27.0
+   Compiling portable-pty v0.9.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.8
+   Compiling ferryx-remote-helper v2026.908.1 (/tmp/ferryx-helper-verify.IS8730/remote-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.13s
+
+running 23 tests
+     Running unittests ../src-tauri/src/ferryx_scope/ssh/standalone.rs (/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/ferryx_remote_helper-8b45cdceb80ef26b)
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+QA_CLEANUP_TRACKING test=concurrent_spawn runtime_dir="/tmp/.tmpSPxMDM" project_dir="/tmp/.tmpjX72Sc"
+test ssh::helper::helper_core_tests::ssh_process_survival_spawn_dedupe_and_conflict ... ok
+QA_CLEANUP_RECEIPT test=concurrent_spawn removed runtime_dir="/tmp/.tmpSPxMDM" exists=false project_dir="/tmp/.tmpjX72Sc" exists=false
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_rejects_shutdown_op ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_concurrent_spawn_atomic_reservation ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_auth_and_target_validation ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_frame_bounded_below_1mib ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_ring_gap_detection ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_respects_cols_rows ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_project_root_decoupled ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_target_describe_and_list_metadata ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_canonical_decimal_cursor ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+   Compiling bitflags v2.13.1
+   Compiling nix v0.28.0
+error: failed to build archive at `/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/libnix-9fba0656a51612f3.rlib`: Disk quota exceeded (os error 122)
+
+   Compiling portable-pty v0.9.0
+error: could not compile `nix` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+rustc-LLVM ERROR: IO failure on output stream: Disk quota exceeded
+error: could not compile `portable-pty` (lib)
+
+Caused by:
+  Disk quota exceeded (os error 122)
+
+Caused by:
+  failed to parse process output: `/usr/bin/sccache /home/indo/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name portable_pty --edition=2018 /home/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/portable-pty-0.9.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 --cfg 'feature="default"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "serde", "serde_derive", "serde_support"))' -C metadata=543c8c5d3c588bf7 -C extra-filename=-d9280e781ade1c3e --out-dir /tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps -L dependency=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps --extern anyhow=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/libanyhow-57cee97fa7b587ba.rmeta --extern downcast_rs=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/libdowncast_rs-07051c470c15e262.rmeta --extern filedescriptor=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/libfiledescriptor-89048ccfbffcfebc.rmeta --extern libc=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/liblibc-b3aeb41d2112a348.rmeta --extern log=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/liblog-aa9fb8804e6d6f60.rmeta --extern nix=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/libnix-9fba0656a51612f3.rmeta --extern serial2=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/libserial2-ba346b3fddd9c939.rmeta --extern shell_words=/tmp/ferryx-helper-verify.IS8730/remote-helper/target/debug/deps/libshell_words-fce7209edc375e80.rmeta --cap-lints allow` (exit status: 101)
+cleanup: removed Linux helper fixture /tmp/ferryx-helper-verify.IS8730

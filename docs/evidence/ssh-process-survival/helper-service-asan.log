@@ -1,0 +1,52 @@
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling zerocopy v0.8.57
+   Compiling serde_core v1.0.229
+   Compiling cfg_aliases v0.1.1
+   Compiling bitflags v2.13.1
+   Compiling thiserror v1.0.69
+   Compiling getrandom v0.4.3
+   Compiling zmij v1.0.23
+   Compiling rustix v1.1.4
+   Compiling anyhow v1.0.104
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling memchr v2.8.3
+   Compiling nix v0.28.0
+   Compiling itoa v1.0.18
+   Compiling shell-words v1.1.1
+   Compiling once_cell v1.21.4
+   Compiling log v0.4.34
+   Compiling downcast-rs v1.2.1
+   Compiling fastrand v2.5.0
+   Compiling base64 v0.22.1
+   Compiling getrandom v0.2.17
+   Compiling errno v0.3.14
+   Compiling serial2 v0.2.38
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling uuid v1.26.0
+   Compiling rand_core v0.6.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling tempfile v3.27.0
+   Compiling rand_chacha v0.3.1
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v1.0.69
+   Compiling rand v0.8.8
+   Compiling filedescriptor v0.8.3
+   Compiling portable-pty v0.9.0
+   Compiling ferryx-remote-helper v2026.908.1 (/Users/indo/code/project/orca-lite/remote-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 35.11s
+     Running unittests ../src-tauri/src/ferryx_scope/ssh/standalone.rs (remote-helper/target/asan/aarch64-apple-darwin/debug/deps/ferryx_remote_helper-a1bf7ede6afb5130)
+
+running 4 tests
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.03s
+

@@ -1,0 +1,7 @@
+{"event":"before-disconnect","target":{"backendSessionId":"ea110da9-1f22-4594-a357-dd54b30b626c","epoch":"10976724397927049683","hostId":"qa-host","ownerId":"04ec9128-999b-4e83-a7dc-fd38db63acc4"},"pid":60552,"counter":1,"nonce":"0da1d25a-48c3-4c5e-b0d1-02805ac4c5b7"}
+cleanup: reaped child 60551
+{"event":"after-reconnect","target":{"backendSessionId":"ea110da9-1f22-4594-a357-dd54b30b626c","epoch":"10976724397927049683","hostId":"qa-host","ownerId":"04ec9128-999b-4e83-a7dc-fd38db63acc4"},"pid":60552,"counter":2,"nonce":"0da1d25a-48c3-4c5e-b0d1-02805ac4c5b7","spawnCount":1}
+PASS: same remote PID, nonce and mutable counter after actual bridge SIGKILL
+cleanup: reaped child 60553
+cleanup: reaped child 60550
+cleanup: removed /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-helper-qa-OTudcf; remoteStopped=true

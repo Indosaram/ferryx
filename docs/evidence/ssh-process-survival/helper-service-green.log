@@ -1,0 +1,30 @@
+   Compiling ferryx-remote-helper v2026.908.1 (/Users/indo/code/project/orca-lite/remote-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.12s
+     Running unittests ../src-tauri/src/ferryx_scope/ssh/standalone.rs (remote-helper/target/debug/deps/ferryx_remote_helper-24fb5d0aa7f640ae)
+
+running 4 tests
+
+thread 'ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release' (410182) panicked at ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:20:61:
+called `Result::unwrap()` on an `Err` value: "FORBIDDEN: helper IPC must be owned by the current user and private"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced' (410183) panicked at ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:6:60:
+called `Result::unwrap()` on an `Err` value: "FORBIDDEN: helper IPC must be owned by the current user and private"
+
+thread 'ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime' (410181) panicked at ../src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs:50:62:
+called `Result::unwrap()` on an `Err` value: "FORBIDDEN: helper IPC must be owned by the current user and private"
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... FAILED
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... FAILED
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... FAILED
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok
+
+failures:
+
+failures:
+    ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime
+    ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release
+    ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--bin ferryx-remote-helper`

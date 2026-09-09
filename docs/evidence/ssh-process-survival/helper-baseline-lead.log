@@ -1,0 +1,19 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests ../src-tauri/src/ferryx_scope/ssh/standalone.rs (remote-helper/target/debug/deps/ferryx_remote_helper-be9b82707fc73195)
+
+running 6 tests
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+test ssh::helper::tests::retained_pty_survives_bridge_eof_and_replays ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Compiling bitflags v2.13.1
+   Compiling nix v0.28.0
+   Compiling portable-pty v0.9.0
+   Compiling ferryx-remote-helper v2026.908.1 (/Users/indo/code/project/orca-lite/remote-helper)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.19s

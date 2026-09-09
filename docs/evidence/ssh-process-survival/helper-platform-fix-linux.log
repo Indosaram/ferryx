@@ -1,0 +1,114 @@
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+LINUX_HELPER_VERIFY /tmp/ferryx-helper-verify.B6lKsy
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling zerocopy v0.8.57
+   Compiling serde_core v1.0.229
+   Compiling thiserror v1.0.69
+   Compiling cfg_aliases v0.1.1
+   Compiling getrandom v0.4.3
+   Compiling bitflags v2.13.1
+   Compiling rustix v1.1.4
+   Compiling nix v0.28.0
+   Compiling zmij v1.0.23
+   Compiling anyhow v1.0.104
+   Compiling linux-raw-sys v0.12.1
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling memchr v2.8.3
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling log v0.4.34
+   Compiling shell-words v1.1.1
+   Compiling downcast-rs v1.2.1
+   Compiling itoa v1.0.18
+   Compiling base64 v0.22.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling getrandom v0.2.17
+   Compiling serial2 v0.2.38
+   Compiling uuid v1.26.0
+   Compiling rand_core v0.6.4
+   Compiling tempfile v3.27.0
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v1.0.69
+   Compiling ppv-lite86 v0.2.21
+   Compiling filedescriptor v0.8.3
+   Compiling rand_chacha v0.3.1
+   Compiling portable-pty v0.9.0
+   Compiling rand v0.8.8
+   Compiling ferryx-remote-helper v2026.908.1 (/tmp/ferryx-helper-verify.B6lKsy/remote-helper)
+    Finished `test` profile [unoptimized] target(s) in 12.18s
+     Running unittests ../src-tauri/src/ferryx_scope/ssh/standalone.rs (/tmp/ferryx-helper-verify.B6lKsy/remote-helper/target/debug/deps/ferryx_remote_helper-7e91a370fa869d69)
+
+running 23 tests
+QA_CLEANUP_TRACKING test=concurrent_spawn runtime_dir="/tmp/.tmp2ZBhwd" project_dir="/tmp/.tmpFxbtcw"
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_canonical_decimal_cursor ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_rejects_shutdown_op ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_frame_bounded_below_1mib ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_ring_gap_detection ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_respects_cols_rows ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_project_root_decoupled ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_spawn_dedupe_and_conflict ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_concurrent_spawn_atomic_reservation ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_auth_and_target_validation ... ok
+QA_CLEANUP_RECEIPT test=concurrent_spawn removed runtime_dir="/tmp/.tmp2ZBhwd" exists=false project_dir="/tmp/.tmpFxbtcw" exists=false
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_target_describe_and_list_metadata ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+   Compiling bitflags v2.13.1
+   Compiling nix v0.28.0
+   Compiling portable-pty v0.9.0
+   Compiling ferryx-remote-helper v2026.908.1 (/tmp/ferryx-helper-verify.B6lKsy/remote-helper)
+    Finished `dev` profile [unoptimized] target(s) in 3.43s
+{"event":"before-disconnect","target":{"backendSessionId":"6314b073-f050-42a9-b3e4-4c7c8ac1b53c","epoch":"9402508328860617414","hostId":"qa-host","ownerId":"bec8c077-1590-458d-a4f8-a3a345ec6541"},"pid":2819688,"counter":1,"nonce":"c8218ef7-2bf9-4f6a-b1e8-33d954c7b946"}
+cleanup: reaped child 2819686
+{"event":"after-reconnect","target":{"backendSessionId":"6314b073-f050-42a9-b3e4-4c7c8ac1b53c","epoch":"9402508328860617414","hostId":"qa-host","ownerId":"bec8c077-1590-458d-a4f8-a3a345ec6541"},"pid":2819688,"counter":2,"nonce":"c8218ef7-2bf9-4f6a-b1e8-33d954c7b946","spawnCount":1}
+{"event":"verified-describe","describe":{"cols":100,"cursor":"4","cwd":"/tmp/ferryx-helper-qa-Hs0G7w/project","exited":false,"pid":2819688,"rows":30,"target":{"backendSessionId":"6314b073-f050-42a9-b3e4-4c7c8ac1b53c","epoch":"9402508328860617414","hostId":"qa-host","ownerId":"bec8c077-1590-458d-a4f8-a3a345ec6541"}}}
+{"event":"verified-spawn-dedupe","dedupeSpawn":{"pid":2819688,"target":{"backendSessionId":"6314b073-f050-42a9-b3e4-4c7c8ac1b53c","epoch":"9402508328860617414","hostId":"qa-host","ownerId":"bec8c077-1590-458d-a4f8-a3a345ec6541"}},"spawnRequests":2}
+{"event":"verified-spawn-conflict","error":"REQUEST_CONFLICT: clientRequestId already used with different parameters"}
+{"event":"verified-expired-target","error":"TARGET_EXPIRED"}
+{"event":"verified-unknown-target","error":"NOT_FOUND"}
+{"event":"verified-allowlist-rejection","error":"UNSUPPORTED: operation not allowlisted"}
+{"event":"verified-insecure-root-rejection","exitCode":1,"stderr":"FORBIDDEN: helper IPC must be owned by the current user and private"}
+{"event":"verified-symlink-endpoint-rejection","exitCode":1,"stderr":"FORBIDDEN: helper IPC cannot be a symlink"}
+helper[2819695]: FORBIDDEN: helper IPC must be owned by the current user and private
+
+helper[2819696]: FORBIDDEN: helper IPC cannot be a symlink
+
+{"event":"verified-remote-shell-stopped","shellPid":2819688,"shellAlive":false}
+PASS: same remote PID, nonce and mutable counter after actual bridge SIGKILL
+cleanup: reaped child 2819692
+cleanup: reaped child 2819685
+cleanup: removed /tmp/ferryx-helper-qa-Hs0G7w; remoteStopped=true
+{"event":"cleanup-receipt","fixtureRemoved":"/tmp/ferryx-helper-qa-Hs0G7w","trackedPids":[2819685,2819686,2819692,2819695,2819696,2819688],"remainingLivePids":[],"remoteStopped":true}
+cleanup: removed Linux helper fixture /tmp/ferryx-helper-verify.B6lKsy

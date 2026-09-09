@@ -1,0 +1,105 @@
+WINDOWS_HELPER_VERIFY C:\Users\sook\AppData\Local\Temp\ferryx-helper-verify-bff7f377-02fc-4a1d-9be8-037bd9aed429
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling zerocopy v0.8.57
+   Compiling winapi v0.3.9
+   Compiling getrandom v0.4.3
+   Compiling serde_core v1.0.229
+   Compiling cfg_aliases v0.1.1
+   Compiling thiserror v1.0.69
+   Compiling windows-link v0.2.1
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling nix v0.28.0
+   Compiling windows-sys v0.61.2
+   Compiling getrandom v0.2.17
+   Compiling winreg v0.10.1
+   Compiling anyhow v1.0.104
+   Compiling zmij v1.0.23
+   Compiling rand_core v0.6.4
+   Compiling bitflags v2.13.1
+   Compiling serde v1.0.229
+   Compiling lazy_static v1.5.0
+   Compiling serde_json v1.0.151
+   Compiling windows-targets v0.52.6
+   Compiling serial2 v0.2.38
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling shared_library v0.1.9
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling fastrand v2.5.0
+   Compiling downcast-rs v1.2.1
+   Compiling bitflags v1.3.2
+   Compiling shell-words v1.1.1
+   Compiling log v0.4.34
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v1.0.69
+   Compiling memchr v2.8.3
+   Compiling windows-sys v0.59.0
+   Compiling uuid v1.26.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling base64 v0.22.1
+   Compiling tempfile v3.27.0
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.8
+   Compiling filedescriptor v0.8.3
+   Compiling portable-pty v0.9.0
+   Compiling ferryx-remote-helper v2026.908.1 (C:\Users\sook\AppData\Local\Temp\ferryx-helper-verify-bff7f377-02fc-4a1d-9be8-037bd9aed429\remote-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.17s
+     Running unittests ..\src-tauri\src\ferryx_scope\ssh\standalone.rs (AppData\Local\Temp\ferryx-helper-verify-bff7f377-02fc-4a1d-9be8-037bd9aed429\remote-helper\target\debug\deps\ferryx_remote_helper-f81b385313d923c3.exe)
+
+running 23 tests
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+QA_CLEANUP_TRACKING test=concurrent_spawn runtime_dir="C:\\Users\\sook\\AppData\\Local\\Temp\\.tmp2fIqNv" project_dir="C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpQTVp8n"
+test ssh::helper::helper_core_tests::ssh_process_survival_canonical_decimal_cursor ... ok
+QA_CLEANUP_RECEIPT test=concurrent_spawn removed runtime_dir="C:\\Users\\sook\\AppData\\Local\\Temp\\.tmp2fIqNv" exists=false project_dir="C:\\Users\\sook\\AppData\\Local\\Tetest ssh::helper::helper_core_tests::ssh_process_survival_concurrent_spawn_atomic_reservation ... ok
+mp\\.tmpQTVp8n" exists=false
+test ssh::helper::helper_core_tests::ssh_process_survival_frame_bounded_below_1mib ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_respects_cols_rows ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_project_root_decoupled ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_spawn_dedupe_and_conflict ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_rejects_shutdown_op ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_ring_gap_detection ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_auth_and_target_validation ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_target_describe_and_list_metadata ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_untrusted_windows_acl ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.99s
+
+   Compiling ferryx-remote-helper v2026.908.1 (C:\Users\sook\AppData\Local\Temp\ferryx-helper-verify-bff7f377-02fc-4a1d-9be8-037bd9aed429\remote-helper)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.71s
+{"event":"before-disconnect","target":{"backendSessionId":"91f198b1-5a31-4358-918b-231d7be15661","epoch":"3300674837955002138","hostId":"qa-host","ownerId":"b2dc919e-f4cf-4b35-ae88-b89c63f8a8a3"},"pid":8644,"counter":1,"nonce":"b202cd2b-c449-43c5-855d-a48b179db0a1"}
+helper[24076]: SSH_HELPER_CONNECTION: 현재 연결은 원격 호스트에 의해 강제로 끊겼습니다. (os error 10054)
+
+cleanup: reaped child 28316
+{"event":"after-reconnect","target":{"backendSessionId":"91f198b1-5a31-4358-918b-231d7be15661","epoch":"3300674837955002138","hostId":"qa-host","ownerId":"b2dc919e-f4cf-4b35-ae88-b89c63f8a8a3"},"pid":8644,"counter":2,"nonce":"b202cd2b-c449-43c5-855d-a48b179db0a1","spawnCount":1}
+{"event":"verified-describe","describe":{"cols":100,"cursor":"8","cwd":"\\\\?\\C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-helper-qa-YgasTK\\project","exited":false,"pid":8644,"rows":30,"target":{"backendSessionId":"91f198b1-5a31-4358-918b-231d7be15661","epoch":"3300674837955002138","hostId":"qa-host","ownerId":"b2dc919e-f4cf-4b35-ae88-b89c63f8a8a3"}}}
+{"event":"verified-spawn-dedupe","dedupeSpawn":{"pid":8644,"target":{"backendSessionId":"91f198b1-5a31-4358-918b-231d7be15661","epoch":"3300674837955002138","hostId":"qa-host","ownerId":"b2dc919e-f4cf-4b35-ae88-b89c63f8a8a3"}},"spawnRequests":2}
+{"event":"verified-spawn-conflict","error":"REQUEST_CONFLICT: clientRequestId already used with different parameters"}
+{"event":"verified-expired-target","error":"TARGET_EXPIRED"}
+{"event":"verified-unknown-target","error":"NOT_FOUND"}
+{"event":"verified-allowlist-rejection","error":"UNSUPPORTED: operation not allowlisted"}
+{"event":"verified-remote-shell-stopped","shellPid":8644,"shellAlive":false}
+PASS: same remote PID, nonce and mutable counter after actual bridge SIGKILL
+cleanup: reaped child 26216
+helper[24076]: SSH_HELPER_CONNECTION: 현재 연결은 원격 호스트에 의해 강제로 끊겼습니다. (os error 10054)
+
+cleanup: reaped child 24076
+cleanup: removed C:\Users\sook\AppData\Local\Temp\ferryx-helper-qa-YgasTK; remoteStopped=true
+{"event":"cleanup-receipt","fixtureRemoved":"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-helper-qa-YgasTK","trackedPids":[24076,28316,26216,8644],"remainingLivePids":[],"remoteStopped":true}
+cleanup: removed Windows helper verification fixture C:\Users\sook\AppData\Local\Temp\ferryx-helper-verify-bff7f377-02fc-4a1d-9be8-037bd9aed429
+WINDOWS_RUNNER_CLEANED

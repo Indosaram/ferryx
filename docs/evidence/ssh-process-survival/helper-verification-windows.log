@@ -1,0 +1,44 @@
+WINDOWS_HELPER_VERIFY C:\Users\sook\AppData\Local\Temp\ferryx-helper-verify-973b90a4-3100-4a47-965e-9fe8945143ff
+
+running 23 tests
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_canonical_decimal_cursor ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_project_root_decoupled ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_frame_bounded_below_1mib ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_respects_cols_rows ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_spawn_dedupe_and_conflict ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_concurrent_spawn_atomic_reservation ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_auth_and_target_validation ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_ring_gap_detection ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_rejects_shutdown_op ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_target_describe_and_list_metadata ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_untrusted_windows_acl ... FAILED
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... FAILED
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... FAILED
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... FAILED
+test ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell ... FAILED
+test ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io ... FAILED
+test ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication ... FAILED
+test ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state ... FAILED
+
+failures:
+
+failures:
+    ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io
+    ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell
+    ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication
+    ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state
+    ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime
+    ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release
+    ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced
+    ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_untrusted_windows_acl
+
+test result: FAILED. 15 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.06s
+
+cleanup: removed Windows helper verification fixture C:\Users\sook\AppData\Local\Temp\ferryx-helper-verify-973b90a4-3100-4a47-965e-9fe8945143ff
+RUNNER_EXCEPTION: Helper contracts failed: 101
+cleanup: removed copied runner C:\Users\sook\AppData\Local\Temp\verify-remote-helper-f163a57d-7129-43f5-aafa-9703a528d5d3.ps1

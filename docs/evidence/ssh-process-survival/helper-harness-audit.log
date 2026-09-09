@@ -1,0 +1,21 @@
+{"event":"before-disconnect","target":{"backendSessionId":"ee4d2b08-743a-47bc-9478-c035df9faf8a","epoch":"17489049076195372546","hostId":"qa-host","ownerId":"8f3ed5c3-c7b1-476c-a95a-7d6c1478b685"},"pid":1182,"counter":1,"nonce":"e334b0b1-d2c3-4634-9210-8b8159157cc3"}
+cleanup: reaped child 1180
+{"event":"after-reconnect","target":{"backendSessionId":"ee4d2b08-743a-47bc-9478-c035df9faf8a","epoch":"17489049076195372546","hostId":"qa-host","ownerId":"8f3ed5c3-c7b1-476c-a95a-7d6c1478b685"},"pid":1182,"counter":2,"nonce":"e334b0b1-d2c3-4634-9210-8b8159157cc3","spawnCount":1}
+{"event":"verified-describe","describe":{"cols":100,"cursor":"4","cwd":"/private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-helper-qa-GFLm6V/project","exited":false,"pid":1182,"rows":30,"target":{"backendSessionId":"ee4d2b08-743a-47bc-9478-c035df9faf8a","epoch":"17489049076195372546","hostId":"qa-host","ownerId":"8f3ed5c3-c7b1-476c-a95a-7d6c1478b685"}}}
+{"event":"verified-spawn-dedupe","dedupeSpawn":{"pid":1182,"target":{"backendSessionId":"ee4d2b08-743a-47bc-9478-c035df9faf8a","epoch":"17489049076195372546","hostId":"qa-host","ownerId":"8f3ed5c3-c7b1-476c-a95a-7d6c1478b685"}},"spawnRequests":2}
+{"event":"verified-spawn-conflict","error":"REQUEST_CONFLICT: clientRequestId already used with different parameters"}
+{"event":"verified-expired-target","error":"TARGET_EXPIRED"}
+{"event":"verified-unknown-target","error":"NOT_FOUND"}
+{"event":"verified-allowlist-rejection","error":"UNSUPPORTED: operation not allowlisted"}
+helper[1186]: FORBIDDEN: helper IPC must be owned by the current user and private
+
+{"event":"verified-insecure-root-rejection","exitCode":1,"stderr":"FORBIDDEN: helper IPC must be owned by the current user and private"}
+helper[1193]: FORBIDDEN: helper IPC cannot be a symlink
+
+{"event":"verified-symlink-endpoint-rejection","exitCode":1,"stderr":"FORBIDDEN: helper IPC cannot be a symlink"}
+{"event":"verified-remote-shell-stopped","shellPid":1182,"shellAlive":false}
+PASS: same remote PID, nonce and mutable counter after actual bridge SIGKILL
+cleanup: reaped child 1185
+cleanup: reaped child 1179
+cleanup: removed /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-helper-qa-GFLm6V; remoteStopped=true
+{"event":"cleanup-receipt","fixtureRemoved":"/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-helper-qa-GFLm6V","trackedPids":[1179,1180,1185,1186,1193,1182],"remainingLivePids":[],"remoteStopped":true}

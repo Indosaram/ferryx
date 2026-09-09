@@ -1,0 +1,33 @@
+   Compiling ferryx-remote-helper v2026.908.1 (/Users/indo/code/project/orca-lite/remote-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running unittests ../src-tauri/src/ferryx_scope/ssh/standalone.rs (remote-helper/target/debug/deps/ferryx_remote_helper-24fb5d0aa7f640ae)
+
+running 23 tests
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+QA_CLEANUP_TRACKING test=concurrent_spawn runtime_dir="/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpYE2kjp" project_dir="/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpy9xPVC"
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_rejects_shutdown_op ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced ... ok
+test ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_symlink_root_and_endpoint ... ok
+test ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_frame_bounded_below_1mib ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_project_root_decoupled ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_canonical_decimal_cursor ... ok
+QA_CLEANUP_RECEIPT test=concurrent_spawn removed runtime_dir="/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpYE2kjp" exists=false project_dir="/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpy9xPVC" exists=false
+test ssh::helper::helper_core_tests::ssh_process_survival_concurrent_spawn_atomic_reservation ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_ring_gap_detection ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_auth_and_target_validation ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_respects_cols_rows ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_spawn_dedupe_and_conflict ... ok
+test ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell ... ok
+test ssh::helper::helper_core_tests::ssh_reconnect_safety_target_describe_and_list_metadata ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+

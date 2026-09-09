@@ -1,0 +1,80 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling winapi v0.3.9
+   Compiling zerocopy v0.8.57
+   Compiling serde_core v1.0.229
+   Compiling windows-link v0.2.1
+   Compiling getrandom v0.4.3
+   Compiling cfg_aliases v0.1.1
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling thiserror v1.0.69
+   Compiling anyhow v1.0.104
+   Compiling zmij v1.0.23
+   Compiling winreg v0.10.1
+   Compiling getrandom v0.2.17
+   Compiling windows-sys v0.61.2
+   Compiling serde v1.0.229
+   Compiling nix v0.28.0
+   Compiling serde_json v1.0.151
+   Compiling ppv-lite86 v0.2.21
+   Compiling bitflags v2.13.1
+   Compiling lazy_static v1.5.0
+   Compiling rand_core v0.6.4
+   Compiling shared_library v0.1.9
+   Compiling windows-targets v0.52.6
+   Compiling itoa v1.0.18
+   Compiling rand_chacha v0.3.1
+   Compiling log v0.4.34
+   Compiling bitflags v1.3.2
+   Compiling downcast-rs v1.2.1
+   Compiling memchr v2.8.3
+   Compiling shell-words v1.1.1
+   Compiling fastrand v2.5.0
+   Compiling once_cell v1.21.4
+   Compiling rand v0.8.8
+   Compiling windows-sys v0.59.0
+   Compiling uuid v1.26.0
+   Compiling base64 v0.22.1
+   Compiling serial2 v0.2.38
+   Compiling tempfile v3.27.0
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v1.0.69
+   Compiling filedescriptor v0.8.3
+   Compiling portable-pty v0.9.0
+   Compiling ferryx-remote-helper v2026.908.1 (C:\Users\sook\AppData\Local\Temp\ferryx-helper-verify-973b90a4-3100-4a47-965e-9fe8945143ff\remote-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.47s
+     Running unittests ..\src-tauri\src\ferryx_scope\ssh\standalone.rs (AppData\Local\Temp\ferryx-helper-verify-973b90a4-3100-4a47-965e-9fe8945143ff\remote-helper\target\debug\deps\ferryx_remote_helper-f81b385313d923c3.exe)
+QA_CLEANUP_TRACKING test=concurrent_spawn runtime_dir="C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpRH7SvR" project_dir="C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpkELTSP"
+QA_CLEANUP_RECEIPT test=concurrent_spawn removed runtime_dir="C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpRH7SvR" exists=false project_dir="C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpkELTSP" exists=false
+
+thread 'ssh::process::helper_service_tests::ssh_reconnect_safety_rejects_untrusted_windows_acl' (26132) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_service_tests.rs:60:5:
+assertion failed: validate_private(&file).is_ok()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'ssh::process::helper_service_tests::ssh_process_survival_bridge_allows_describe_without_stopping_runtime' (6684) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_service_tests.rs:91:66:
+called `Result::unwrap()` on an `Err` value: "FORBIDDEN: helper IPC must be owned by the current user and private"
+
+thread 'ssh::process::helper_service_tests::ssh_process_survival_stale_endpoint_replaced_only_after_lock_release' (28560) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_service_tests.rs:27:41:
+called `Result::unwrap()` on an `Err` value: "FORBIDDEN: helper IPC must be owned by the current user and private"
+
+thread 'ssh::process::helper_service_tests::ssh_reconnect_safety_live_runtime_cannot_be_replaced' (17412) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_service_tests.rs:15:5:
+assertion failed: matches!(bind_runtime(dir.path(), "qa-lock".into()), Err(error) if
+    error.starts_with("REMOTE_RUNTIME_CONFLICT:"))
+
+thread 'ssh::helper::helper_core_tests::ssh_process_survival_default_platform_login_shell' (20608) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_core_tests.rs:596:111:
+called `Result::unwrap()` on an `Err` value: "Timed out waiting for 'LOGIN_SHELL_CONFIRMED_OK'. Accumulated output: \u{1b}[6n"
+
+thread 'ssh::helper::helper_core_tests::ssh_process_survival_binary_safe_base64_io' (25488) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_core_tests.rs:360:108:
+called `Result::unwrap()` on an `Err` value: "Timed out waiting for 'FERRYX_B64_SENTINEL_771'. Accumulated output: \u{1b}[6n"
+
+thread 'ssh::helper::helper_core_tests::ssh_process_survival_env_retains_session_id_without_fabrication' (15252) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_core_tests.rs:715:111:
+called `Result::unwrap()` on an `Err` value: "Timed out waiting for 'CLAUDE_ID=NONE'. Accumulated output: \u{1b}[6n"
+
+thread 'ssh::helper::helper_core_tests::ssh_process_survival_retains_pid_and_memory_state' (22256) panicked at ..\src-tauri\src\ferryx_scope\ssh\helper_core_tests.rs:277:111:
+called `Result::unwrap()` on an `Err` value: "Timed out waiting for 'SURVIVAL_NONCE=NONCE_39e381a9c54c4c7483540e08b4af8773'. Accumulated output: \u{1b}[6n"
+error: test failed, to rerun pass `--bin ferryx-remote-helper`
