@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for SshHost {
             port: Option<u16>,
 
             identity_file: Option<String>,
-            #[serde(rename = "identity_file")]
+            #[serde(default, rename = "identity_file", deserialize_with = "deserialize_optional_string_lenient")]
             identity_file_snake: Option<String>,
             #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             key: Option<String>,
@@ -82,7 +82,7 @@ impl<'de> Deserialize<'de> for SshHost {
             key_path: Option<String>,
 
             jump_host: Option<String>,
-            #[serde(rename = "jump_host")]
+            #[serde(default, rename = "jump_host", deserialize_with = "deserialize_optional_string_lenient")]
             jump_host_snake: Option<String>,
             #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             proxy_jump: Option<String>,
@@ -416,7 +416,9 @@ mod tests {
             "name": { "display": "old metadata" },
             "host": ["old", "hosts"],
             "user": 12345,
+            "identity_file": { "path": "/legacy/key" },
             "key": false,
+            "jump_host": 99,
             "proxyJump": null
         });
         let host: SshHost = serde_json::from_value(json).expect("deserialize canonical host with non-string legacy fields");
