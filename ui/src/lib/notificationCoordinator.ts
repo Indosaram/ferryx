@@ -160,11 +160,16 @@ export class NotificationCoordinator {
     const effectivePrev = params.previousState ?? this.lastAgentState.get(key);
     this.lastAgentState.set(key, next);
 
+    // Entering an attention state from a non-attention one is a completion edge — and so is
+    // moving BETWEEN distinct attention states (done -> waiting means the agent needs input
+    // again; waiting -> done means the blocked turn finished). The store treats those the
+    // same way: fresh unseen attention with highlight + unread. Only same-state repeats dedupe.
+    const isAttentionState = next === 'waiting' || next === 'done';
+    const wasAttentionState = effectivePrev === 'waiting' || effectivePrev === 'done';
     const isCompletionEdge =
-      (next === 'waiting' || next === 'done') &&
+      isAttentionState &&
       effectivePrev !== undefined &&
-      effectivePrev !== 'waiting' &&
-      effectivePrev !== 'done';
+      (!wasAttentionState || effectivePrev !== next);
 
     if (!isCompletionEdge || params.notificationSuppressed) {
       return;

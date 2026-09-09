@@ -42,6 +42,14 @@ import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
 
+/**
+ * How long after arming an auto-resume attention suppression that suppression stays
+ * effective. The resume blip (agent re-landing at its prompt) arrives within seconds of
+ * the reconnect; a genuine first completion needs the user to notice, orient, and prompt,
+ * so anything later must notify instead of being eaten.
+ */
+export const ATTENTION_SUPPRESSION_WINDOW_MS = 120_000;
+
 type WorkspaceTerminalActivity = TerminalActivity;
 
 export type WorkspaceState = {
@@ -55,8 +63,15 @@ export type WorkspaceState = {
   unreadWorktreePaths: Record<string, boolean>;
   /** Optional for backwards compatibility with persisted/test states created before activity tracking. */
   activityBySessionId?: Record<string, TerminalActivity>;
-  /** Sessions whose NEXT attention transition is app-initiated noise (e.g. auto-resume landing at a prompt). */
-  attentionSuppressions?: Record<string, boolean>;
+  /**
+   * Sessions whose NEXT attention transition is app-initiated noise (e.g. auto-resume
+   * landing at a prompt). Values are the epoch-ms timestamp when suppression was armed;
+   * legacy `true` reads as freshly armed. A resume blip lands within seconds, while a
+   * genuine first completion needs a user round-trip — so only attention inside
+   * `ATTENTION_SUPPRESSION_WINDOW_MS` of the arm is suppressed, and anything later
+   * notifies (and still consumes the flag).
+   */
+  attentionSuppressions?: Record<string, number | boolean>;
 };
 
 export type WorkspaceServices = {
@@ -1996,7 +2011,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         ...state,
         attentionSuppressions: {
           ...(state.attentionSuppressions ?? {}),
-          [action.sessionId]: true,
+          [action.sessionId]: Date.now(),
         },
       };
     }
@@ -2355,7 +2370,23 @@ function applySessionActivity(
   const isSameAttentionState = isAttentionState && wasAttentionState && previous?.state === activity.state;
   // An app-initiated auto-resume fabricates a working->idle->done blip when the agent merely
   // lands back at its prompt; that first attention is noise, not a request for the user.
-  const suppression = state.attentionSuppressions?.[sessionId] === true && isAttentionState;
+  // The blip lands within seconds of the reconnect, while a genuine first completion needs
+  // a user round-trip — so a stale suppression (e.g. the resume raced a bare idle before any
+  // real work) must not eat real completions minutes later.
+  const suppressionArmedAt = state.attentionSuppressions?.[sessionId];
+  const rawSuppressionAgeMs =
+    suppressionArmedAt === true
+      ? 0
+      : typeof suppressionArmedAt === "number"
+        ? Date.now() - suppressionArmedAt
+        : null;
+  // A future-dated arm (clock adjustment) must never extend suppression: treat it as expired.
+  const suppressionAgeMs = rawSuppressionAgeMs !== null && rawSuppressionAgeMs < 0 ? Number.POSITIVE_INFINITY : rawSuppressionAgeMs;
+  const suppression =
+    suppressionAgeMs !== null &&
+    suppressionAgeMs <= ATTENTION_SUPPRESSION_WINDOW_MS &&
+    isAttentionState;
+  const hasSuppressionFlag = suppressionAgeMs !== null;
   const acknowledged =
     isAttentionState &&
     (activity.seen === true ||
@@ -2373,10 +2404,12 @@ function applySessionActivity(
       : {}),
   };
 
+  // The flag is consumed by the first attention transition either way: an effective
+  // suppression eats the resume blip, an expired one lets the genuine completion through.
   let nextState: WorkspaceState = {
     ...state,
     activityBySessionId: { ...(state.activityBySessionId ?? {}), [sessionId]: stored },
-    ...(suppression
+    ...(hasSuppressionFlag && isAttentionState
       ? {
           attentionSuppressions: Object.fromEntries(
             Object.entries(state.attentionSuppressions ?? {}).filter(([id]) => id !== sessionId),

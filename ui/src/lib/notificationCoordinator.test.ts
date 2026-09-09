@@ -286,10 +286,30 @@ describe("agent state change", () => {
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
-  it("ignores a repeat completion when the agent was already waiting", () => {
+  it("notifies when a blocked agent finishes (waiting to done is fresh attention)", () => {
     const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
 
     instance.handleAgentStateChange({ sessionId: "s1", previousState: "waiting", nextState: "done" });
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock.mock.calls[0][0]).toMatchObject({ attentionReason: "done" });
+  });
+
+  it("notifies when a finished agent needs input again (done to waiting is fresh attention)", () => {
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.handleAgentStateChange({ sessionId: "s1", previousState: "done", nextState: "waiting" });
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock.mock.calls[0][0]).toMatchObject({ attentionReason: "waiting" });
+  });
+
+  it("dedupes a repeated identical attention state", () => {
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.handleAgentStateChange({ sessionId: "s1", previousState: "working", nextState: "done" });
+    dispatchMock.mockClear();
+    instance.handleAgentStateChange({ sessionId: "s1", previousState: "done", nextState: "done" });
 
     expect(dispatchMock).not.toHaveBeenCalled();
   });

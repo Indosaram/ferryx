@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
 import {
+  ATTENTION_SUPPRESSION_WINDOW_MS,
   selectActivityNotificationTargets,
   selectGlobalUnreadBadgeCount,
   selectTabActivitySummaries,
@@ -521,6 +522,130 @@ describe("workspace activity tracking", () => {
     const totalBadgeCount = selectGlobalUnreadBadgeCount(currentState, "ws-1");
     expect(totalBadgeCount).toBe(3);
 
+    clearWorkspaceSnapshot();
+  });
+
+  it("lets a stale auto-resume suppression through so the first genuine completion still notifies", () => {
+    clearWorkspaceSnapshot();
+    vi.useFakeTimers();
+    try {
+      const armedAt = 1_000_000;
+      vi.setSystemTime(armedAt);
+      const state: WorkspaceState = {
+        workspaceId: "default",
+        worktrees: [worktree],
+        activeWorktreePath: worktree.path,
+        sessions: {
+          "session-resumed": {
+            id: "session-resumed",
+            cwd: worktree.path,
+            workspaceId: "default",
+            backendSessionId: "backend-resumed",
+            lifecycle: "running",
+          },
+        },
+        layout: {
+          tabs: [
+            { id: "tab-1", label: "main", sessionId: "session-other" },
+            { id: "tab-2", label: "resumed", sessionId: "session-resumed" },
+          ],
+          activeTabId: "tab-1",
+          layoutsByTabId: {},
+        },
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        attentionSuppressions: { "session-resumed": armedAt },
+        activityBySessionId: {
+          "session-resumed": {
+            state: "working",
+            title: "agent",
+            isAgent: true,
+            agentType: "claude",
+          },
+        },
+      } as unknown as WorkspaceState;
+
+      // The resume blip never produced a transition (e.g. coarse background detection
+      // missed it), and the first genuine completion lands after the suppression window.
+      vi.setSystemTime(armedAt + ATTENTION_SUPPRESSION_WINDOW_MS + 1);
+      const next = workspaceReducer(state, {
+        type: "SESSION_SCREEN_ACTIVITY",
+        sessionId: "session-resumed",
+        tabId: "tab-2",
+        state: "idle",
+        ruleId: "prompt_idle",
+      });
+
+      expect(next.activityBySessionId?.["session-resumed"]).toMatchObject({
+        state: "done",
+        seen: false,
+      });
+      // The stale flag is consumed, and the background tab raises unread.
+      expect(next.attentionSuppressions?.["session-resumed"]).toBeUndefined();
+      expect(next.unreadTabIds["tab-2"]).toBe(true);
+      expect(next.unreadWorktreePaths[worktree.path]).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    clearWorkspaceSnapshot();
+  });
+
+  it("arms suppression with a timestamp and suppresses only attention inside the window", () => {
+    clearWorkspaceSnapshot();
+    vi.useFakeTimers();
+    try {
+      const armedAt = 2_000_000;
+      vi.setSystemTime(armedAt);
+      const base: WorkspaceState = {
+        workspaceId: "default",
+        worktrees: [worktree],
+        activeWorktreePath: worktree.path,
+        sessions: {},
+        layout: {
+          tabs: [
+            { id: "tab-1", label: "main", sessionId: "session-other" },
+            { id: "tab-2", label: "resumed", sessionId: "session-resumed" },
+          ],
+          activeTabId: "tab-1",
+          layoutsByTabId: {},
+        },
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activityBySessionId: {
+          "session-resumed": {
+            state: "working",
+            title: "agent",
+            isAgent: true,
+            agentType: "claude",
+          },
+        },
+      } as unknown as WorkspaceState;
+      const idleAction = {
+        type: "SESSION_SCREEN_ACTIVITY",
+        sessionId: "session-resumed",
+        tabId: "tab-2",
+        state: "idle",
+        ruleId: "prompt_idle",
+      } as const;
+
+      const armed = workspaceReducer(base, { type: "SUPPRESS_NEXT_ATTENTION", sessionId: "session-resumed" });
+      expect(armed.attentionSuppressions?.["session-resumed"]).toBe(armedAt);
+
+      // Exact window boundary still counts as the resume blip.
+      vi.setSystemTime(armedAt + ATTENTION_SUPPRESSION_WINDOW_MS);
+      const atBoundary = workspaceReducer(armed, { ...idleAction });
+      expect(atBoundary.activityBySessionId?.["session-resumed"]).toMatchObject({ state: "done", seen: true });
+      expect(atBoundary.attentionSuppressions?.["session-resumed"]).toBeUndefined();
+      expect(atBoundary.unreadTabIds["tab-2"]).toBeUndefined();
+
+      // One millisecond later the same transition is genuine and notifies.
+      vi.setSystemTime(armedAt + ATTENTION_SUPPRESSION_WINDOW_MS + 1);
+      const pastWindow = workspaceReducer(armed, { ...idleAction });
+      expect(pastWindow.activityBySessionId?.["session-resumed"]).toMatchObject({ state: "done", seen: false });
+      expect(pastWindow.unreadTabIds["tab-2"]).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
     clearWorkspaceSnapshot();
   });
 
