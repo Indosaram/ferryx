@@ -828,6 +828,13 @@ function WorkspaceApp({
     });
   }, [runtimeError]);
 
+  // Registration re-runs when the active project object changes identity (a
+  // successful registration enriches hostLabel/branch fields via setProjects).
+  // Key the effect on stable target identity so equivalent projects do not
+  // re-register behind the user's back.
+  const activeProjectTargetKey = activeProject.target?.kind === "ssh"
+    ? `ssh:${activeProject.target.hostId}`
+    : activeProject.target?.kind ?? "none";
   useEffect(() => {
     let cancelled = false;
     setRegisteredProjectId(null);
@@ -951,7 +958,7 @@ function WorkspaceApp({
         workspaceId: activeProject.workspaceId,
       });
     };
-  }, [activeProject.repoRoot, activeProject.workspaceId, activeProject.target, projects.length, registrationAttempt, refreshWorktrees, reportRuntimeError]);
+  }, [activeProject.repoRoot, activeProject.workspaceId, activeProjectTargetKey, projects.length, registrationAttempt, refreshWorktrees, reportRuntimeError]);
 
   // A failed registration leaves the runtime gated, so retry when the window
   // regains focus rather than staying empty until the app restarts.
