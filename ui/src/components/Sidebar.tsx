@@ -767,7 +767,10 @@ function groupWorktreesByProject(
   for (const group of groups) {
     const primaryId = group.primaryProject.workspaceId;
     const listed = group.memberProjects.flatMap((member) => {
-      if (member.workspaceId === activeProjectId) return [];
+      const hasActiveWorktrees = worktrees.some(
+        (w) => resolveWorktreeOwnerId(w, projects, activeProjectId) === member.workspaceId,
+      );
+      if (member.workspaceId === activeProjectId && hasActiveWorktrees) return [];
       return (inactiveProjectWorktrees?.[member.workspaceId] ?? []).map((row) =>
         member.workspaceId === primaryId || row.workspaceId
           ? row
@@ -809,18 +812,25 @@ function groupWorktreesByProject(
     const activeGroup = groups.find((g) => g.memberProjects.some((m) => m.workspaceId === activeProjectId));
     const activePrimaryId = activeGroup ? activeGroup.primaryProject.workspaceId : activeProjectId;
     const activeBucket = grouped.get(activePrimaryId);
-    if (activeBucket && activeBucket.length === 0) {
-      const cached = inactiveProjectWorktrees?.[activePrimaryId];
-      if (cached && cached.length > 0) {
-        for (const row of cached) {
-          if (
-            !activeBucket.some(
-              (candidate) =>
-                candidate.path === row.path &&
-                (candidate.workspaceId ?? activePrimaryId) === (row.workspaceId ?? activePrimaryId),
-            )
-          ) {
-            activeBucket.push(row);
+    if (activeBucket) {
+      const activeProj = projects.find((p) => p.workspaceId === activeProjectId);
+      const isLocalActive = activeProj?.target?.kind !== "ssh";
+      const hasLocalActiveWorktree = activeBucket.some(
+        (candidate) => (candidate.workspaceId ?? activePrimaryId) === activeProjectId && !candidate.hostLabel,
+      );
+      if (isLocalActive && !hasLocalActiveWorktree) {
+        const cached = inactiveProjectWorktrees?.[activeProjectId] ?? inactiveProjectWorktrees?.[activePrimaryId];
+        if (cached && cached.length > 0) {
+          for (const row of cached) {
+            if (
+              !activeBucket.some(
+                (candidate) =>
+                  candidate.path === row.path &&
+                  (candidate.workspaceId ?? activePrimaryId) === (row.workspaceId ?? activePrimaryId),
+              )
+            ) {
+              activeBucket.push(row);
+            }
           }
         }
       }

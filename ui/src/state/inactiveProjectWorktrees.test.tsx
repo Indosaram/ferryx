@@ -1,7 +1,9 @@
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RegisteredProject, Worktree, WorktreeChangedPayload } from "../lib/types";
+import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import type { WorkspaceState } from "./workspaceStore";
 import {
   useInactiveProjectWorktrees,
   type InactiveProjectWorktreeServices,
@@ -52,6 +54,34 @@ async function settleServices(services: InactiveProjectWorktreeServices) {
 }
 
 describe("useInactiveProjectWorktrees", () => {
+  beforeEach(() => {
+    clearWorkspaceSnapshot();
+  });
+
+  it("pre-seeds inactive project worktrees synchronously from cached workspace snapshots", () => {
+    const cachedWorktree: Worktree = {
+      path: "/Users/dev/orca-lite/.orca-worktrees/wt-cached",
+      branch: "refs/heads/orca/orca-lite/cached",
+      head: "cafebabe",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    setWorkspaceSnapshot(gitProject.workspaceId, {
+      workspaceId: gitProject.workspaceId,
+      worktrees: [mainWorktree, cachedWorktree],
+      activeWorktreePath: mainWorktree.path,
+    } as WorkspaceState);
+
+    const services = createServices();
+    const { result } = renderHook(() =>
+      useInactiveProjectWorktrees([gitProject, plainProject], plainProject.workspaceId, [], services),
+    );
+
+    // Initial synchronous render must already contain the cached worktrees
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree, cachedWorktree]);
+  });
   it("publishes freshly registered Git metadata for inactive project grouping", async () => {
     const onRegistered = vi.fn();
     const registered = {

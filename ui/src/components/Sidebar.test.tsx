@@ -234,6 +234,43 @@ describe("Sidebar navigation", () => {
     expect(within(alphaList).getByRole("button", { name: /feature/ })).toBeInTheDocument();
   });
 
+  it("renders local worktrees for an inactive project immediately when opened while active project is empty", () => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
+    ];
+    const betaMain: Worktree = {
+      path: "/repos/beta",
+      head: "b111",
+      branch: "refs/heads/main",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const betaFeature: Worktree = {
+      path: "/repos/beta/.orca-worktrees/wt-feat",
+      head: "b222",
+      branch: "refs/heads/orca/beta/feat",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+
+    renderSidebar({
+      projects,
+      activeProjectId: "alpha",
+      worktrees: [],
+      inactiveProjectWorktrees: { beta: [betaMain, betaFeature] },
+    });
+
+    const betaList = screen.getByRole("list", { name: "beta worktrees" });
+    expect(within(betaList).getByRole("button", { name: /main/ })).toBeInTheDocument();
+    expect(within(betaList).getByRole("button", { name: /feat/ })).toBeInTheDocument();
+  });
+
   it("lists an inactive project's own rows so index-based selection can reach them", () => {
     localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
     const projects = [

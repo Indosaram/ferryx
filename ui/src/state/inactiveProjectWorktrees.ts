@@ -8,6 +8,7 @@ import {
 import type { RegisteredProject, Worktree, WorktreeChangedPayload } from "../lib/types";
 import { switchDebug } from "../lib/switchDebug";
 import { projectRootWorktree as plainRootWorktree } from "../lib/projectIdentity";
+import { getWorkspaceSnapshot } from "./workspaceSnapshotCache";
 
 export type InactiveProjectWorktreeServices = {
   registerProject: (request: { workspaceId: string; repoPath: string }) => Promise<RegisteredProject>;
@@ -34,11 +35,20 @@ export function useInactiveProjectWorktrees(
   services: InactiveProjectWorktreeServices = defaultServices,
   onRegistered?: (project: RegisteredProject) => void,
 ): Record<string, Worktree[]> {
-  const [worktreesByProject, setWorktreesByProject] = useState<Record<string, Worktree[]>>(() =>
-    activeProjectId && activeWorktrees.length > 0
-      ? { [activeProjectId]: activeWorktrees }
-      : {},
-  );
+  const [worktreesByProject, setWorktreesByProject] = useState<Record<string, Worktree[]>>(() => {
+    const initial: Record<string, Worktree[]> = {};
+    for (const project of projects) {
+      if (project.workspaceId === activeProjectId && activeWorktrees.length > 0) {
+        initial[project.workspaceId] = activeWorktrees;
+        continue;
+      }
+      const snapshot = getWorkspaceSnapshot(project.workspaceId);
+      if (snapshot && snapshot.worktrees && snapshot.worktrees.length > 0) {
+        initial[project.workspaceId] = snapshot.worktrees;
+      }
+    }
+    return initial;
+  });
 
   useEffect(() => {
     if (activeProjectId && activeWorktrees.length > 0) {

@@ -22,6 +22,22 @@ describe("project target identity", () => {
     expect(hasValidProjectTarget({ workspaceId: "ssh:opaque", target: { kind: "local" } })).toBe(false);
   });
 
+  it("populates gitBranch and gitHead for local projects in projectRootWorktree", () => {
+    const gitLocal: RegisteredProject = {
+      workspaceId: "local-git",
+      repoRoot: "/repo/git",
+      gitRoot: "/repo/git",
+      gitBranch: "main",
+      gitHead: "deadbeef",
+    };
+    const wt = projectRootWorktree(gitLocal);
+    expect(wt.path).toBe("/repo/git");
+    expect(wt.branch).toBe("main");
+    expect(wt.head).toBe("deadbeef");
+    expect(wt.detached).toBe(false);
+    expect(wt.workspaceId).toBeUndefined();
+  });
+
   it("never deduces SSH ownership from a path shared with local or another host", () => {
     const otherHost: RegisteredProject = { ...remote, workspaceId: "ssh:other", target: { kind: "ssh", hostId: "other" } };
     const projects = [local, remote, otherHost];

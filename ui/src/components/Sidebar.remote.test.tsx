@@ -279,3 +279,49 @@ it("preserves local worktrees in the sidebar and accurately highlights remote wo
   const remoteRow = screen.getByRole("button", { name: /Build machine/ });
   expect(remoteRow).toHaveAttribute("aria-current", "true");
 });
+
+it("preserves local worktrees in unified group when local project is active and active worktrees are loading", () => {
+  const localProject: RegisteredProject = {
+    workspaceId: "unified-app",
+    repoRoot: "/srv/unified-app",
+    gitRoot: "/srv/unified-app",
+    gitRemote: "https://github.com/org/unified-app.git",
+  };
+  const remoteProject: RegisteredProject = {
+    workspaceId: "ssh:unified-remote",
+    repoRoot: "/srv/unified-app",
+    gitRoot: "/srv/unified-app",
+    gitRemote: "https://github.com/org/unified-app.git",
+    target: { kind: "ssh", hostId: "build" },
+  };
+  const localWorktree = {
+    path: "/srv/unified-app",
+    branch: "main",
+    head: "111",
+    bare: false,
+    detached: false,
+    locked: null,
+    prunable: null,
+  };
+
+  render(
+    <Sidebar
+      projects={[localProject, remoteProject]}
+      activeProjectId={localProject.workspaceId}
+      worktrees={[]}
+      inactiveProjectWorktrees={{ [localProject.workspaceId]: [localWorktree] }}
+      agents={[]}
+      activePath={localWorktree.path}
+      onSelectWorktree={vi.fn()}
+      onCreateWorktree={vi.fn()}
+    />,
+  );
+
+  // Both local worktree and synthesized/member remote worktree must be present immediately
+  expect(screen.getByText("main")).toBeInTheDocument();
+  expect(screen.getByText("Build machine")).toBeInTheDocument();
+
+  // Local worktree is active
+  const localRow = screen.getByRole("button", { name: /main/ });
+  expect(localRow).toHaveAttribute("aria-current", "true");
+});
