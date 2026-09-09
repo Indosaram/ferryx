@@ -43,14 +43,24 @@ where
     let Some(values) = opt else {
         return Ok(Vec::new());
     };
-    let mut hosts = Vec::with_capacity(values.len());
+    let mut hosts: Vec<SshHost> = Vec::with_capacity(values.len());
     for (index, value) in values.into_iter().enumerate() {
         let id_hint = value
             .get("id")
             .and_then(|v| v.as_str())
             .map(ToString::to_string);
         match serde_json::from_value::<SshHost>(value) {
-            Ok(host) => hosts.push(host),
+            Ok(host) => {
+                if let Some(position) = hosts.iter().position(|existing| existing.id == host.id) {
+                    tracing::warn!(
+                        "Replacing duplicate SSH host id '{}' at index {index}; keeping the latest configuration",
+                        host.id
+                    );
+                    hosts[position] = host;
+                } else {
+                    hosts.push(host);
+                }
+            }
             Err(e) => {
                 let id_display = id_hint.as_deref().unwrap_or("<unknown>");
                 tracing::warn!("Skipping unparseable SSH host at index {index} (id: {id_display}): {e}");
@@ -225,7 +235,11 @@ fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<Ssh
     for host in imported {
         let key = host.key();
         store.tombstones.retain(|tombstone| tombstone != &key);
-        store.hosts.push(host);
+        if let Some(position) = store.hosts.iter().position(|existing| existing.id == host.id) {
+            store.hosts[position] = host;
+        } else {
+            store.hosts.push(host);
+        }
     }
     save_store(path, &store)?;
     Ok(store.hosts)
@@ -498,8 +512,33 @@ mod tests {
     }
 
     #[test]
+    fn resilient_store_keeps_latest_duplicate_host_id() {
+        let json = r#"{
+            "hosts": [
+                {
+                    "id": "ssh-build",
+                    "label": "Windows",
+                    "hostname": "maho-win",
+                    "source": "config",
+                    "authMethod": "agent"
+                },
+                {
+                    "id": "ssh-build",
+                    "label": "Linux",
+                    "hostname": "omarchy",
+                    "source": "config",
+                    "authMethod": "agent"
+                }
+            ]
+        }"#;
+        let store: SshHostStore = serde_json::from_str(json).expect("deserialize duplicate ids");
+        assert_eq!(store.hosts.len(), 1);
+        assert_eq!(store.hosts[0].label, "Linux");
+        assert_eq!(store.hosts[0].hostname, "omarchy");
+    }
+
+    #[test]
     fn explicit_import_restores_a_previously_deleted_config_host() {
-        // Given a deleted config host and an unrelated deletion.
         let dir = tempfile::tempdir().expect("temporary store");
         let path = dir.path().join("ssh_hosts.json");
         save_store(
@@ -511,14 +550,12 @@ mod tests {
         )
         .expect("seed store");
 
-        // When the user explicitly imports that host again.
         let hosts = import_config_into_store(
             &path,
             "Host dev-box\n  HostName dev.example\n  User dev\n",
         )
         .expect("import config");
 
-        // Then it is returned and persisted, without clearing unrelated deletions.
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].label, "dev-box");
         let saved = load_store(&path);
@@ -528,7 +565,6 @@ mod tests {
 
     #[test]
     fn repeated_import_preserves_existing_hosts_without_duplicates() {
-        // Given a host already saved with user edits.
         let dir = tempfile::tempdir().expect("temporary store");
         let path = dir.path().join("ssh_hosts.json");
         let config = "Host dev-box\n  HostName dev.example\n  User dev\n";
@@ -543,26 +579,39 @@ mod tests {
         )
         .expect("seed store");
 
-        // When the same config is explicitly imported.
         let imported = import_config_into_store(&path, config).expect("import config");
 
-        // Then the existing record is neither duplicated nor overwritten.
         assert_eq!(imported, hosts);
         assert_eq!(load_store(&path).hosts, hosts);
     }
 
     #[test]
+    fn changed_config_alias_replaces_endpoint_without_duplicate_id() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("ssh_hosts.json");
+        let windows = "Host build\n  HostName maho-win\n";
+        let linux = "Host build\n  HostName omarchy\n";
+
+        let first = import_config_into_store(&path, windows).expect("import windows endpoint");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].hostname, "maho-win");
+
+        let second = import_config_into_store(&path, linux).expect("replace with linux endpoint");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, first[0].id);
+        assert_eq!(second[0].hostname, "omarchy");
+        assert_eq!(load_store(&path).hosts, second);
+    }
+
+    #[test]
     fn explicit_config_file_is_read_and_parsed_from_its_own_path() {
-        // Given an SSH config kept outside the default ~/.ssh/config location.
         let dir = tempfile::tempdir().expect("temporary dir");
         let path = dir.path().join("work-ssh-config");
         std::fs::write(&path, "Host work-box\n  HostName work.example\n  User dev\n")
             .expect("write config");
 
-        // When that file is read.
         let result = read_ssh_config_file(&path).expect("read config");
 
-        // Then its hosts are returned and the reported path is that file.
         assert!(result.exists);
         assert_eq!(result.path, path.to_string_lossy());
         assert_eq!(result.hosts.len(), 1);
@@ -573,14 +622,11 @@ mod tests {
 
     #[test]
     fn missing_config_file_reports_absence_instead_of_failing() {
-        // Given a path that holds no file.
         let dir = tempfile::tempdir().expect("temporary dir");
         let path = dir.path().join("absent-config");
 
-        // When it is read.
         let result = read_ssh_config_file(&path).expect("read config");
 
-        // Then absence is reported without hosts.
         assert!(!result.exists);
         assert!(result.hosts.is_empty());
         assert!(result.raw_text.is_empty());

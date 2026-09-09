@@ -65,12 +65,24 @@ let inflightFetch: Promise<SshHost[]> | null = null;
 let inventoryEpoch = 0;
 const listeners = new Set<(hosts: SshHost[]) => void>();
 
-function notifyListeners(hosts: SshHost[]): void {
-  cachedHosts = hosts;
+function normalizeHostInventory(hosts: SshHost[]): SshHost[] {
+  const byId = new Map<string, SshHost>();
+  for (const host of hosts) {
+    // host.id is the routing identity used by project/worktree IPC. Keeping the
+    // latest duplicate prevents a visible option from resolving to an older endpoint.
+    byId.set(host.id, host);
+  }
+  return Array.from(byId.values());
+}
+
+function notifyListeners(hosts: SshHost[]): SshHost[] {
+  const normalized = normalizeHostInventory(hosts);
+  cachedHosts = normalized;
   inventoryEpoch += 1;
   for (const listener of listeners) {
-    listener(hosts);
+    listener(normalized);
   }
+  return normalized;
 }
 
 export function subscribeSshHosts(listener: (hosts: SshHost[]) => void): () => void {
@@ -155,10 +167,9 @@ export async function listSshHosts(): Promise<SshHost[]> {
       if (requestEpoch !== inventoryEpoch) {
         // A mutation completed while this read was in flight; the read is obsolete.
         // Discard it so stale inventory cannot overwrite the newer mutation result.
-        return cachedHosts ?? hosts;
+        return cachedHosts ?? normalizeHostInventory(hosts);
       }
-      notifyListeners(hosts);
-      return hosts;
+      return notifyListeners(hosts);
     } finally {
       inflightFetch = null;
     }
@@ -172,8 +183,7 @@ export async function importSshConfig(configText: string): Promise<SshHost[]> {
     throw new Error("SSH host changes are available only in the Ferryx desktop runtime");
   }
   const hosts = await invoke<SshHost[]>("cmd_ssh_import_config", { configText });
-  notifyListeners(hosts);
-  return hosts;
+  return notifyListeners(hosts);
 }
 
 export async function readSystemSshConfig(
@@ -216,8 +226,7 @@ export async function updateSshHost(host: SshHost): Promise<SshHost[]> {
   }
   const cleaned = cleanHostForIpc(host);
   const hosts = await invoke<SshHost[]>("cmd_ssh_update_host", { host: cleaned });
-  notifyListeners(hosts);
-  return hosts;
+  return notifyListeners(hosts);
 }
 
 export async function deleteSshHost(id: string): Promise<SshHost[]> {
@@ -225,8 +234,7 @@ export async function deleteSshHost(id: string): Promise<SshHost[]> {
     throw new Error("SSH host changes are available only in the Ferryx desktop runtime");
   }
   const hosts = await invoke<SshHost[]>("cmd_ssh_delete_host", { id });
-  notifyListeners(hosts);
-  return hosts;
+  return notifyListeners(hosts);
 }
 
 export async function testSshConnection(host: SshHost): Promise<SshTargetSummary> {

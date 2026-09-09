@@ -2,7 +2,10 @@ import { worktreeIdentity, type RegisteredProject, type Worktree } from "./types
 
 /** Paths may carry mixed separators or trailing slashes; comparisons must not. */
 function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[a-z]:\//i.test(normalized) || normalized.startsWith("//")
+    ? normalized.toLowerCase()
+    : normalized;
 }
 
 function ownsPath(root: string, path: string): boolean {
@@ -11,13 +14,26 @@ function ownsPath(root: string, path: string): boolean {
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
+function uniqueDeepestRemoteOwner(
+  projects: readonly RegisteredProject[],
+  path: string,
+): RegisteredProject | undefined {
+  const candidates = projects
+    .filter((project) => project.target?.kind === "ssh" && ownsPath(project.repoRoot, path))
+    .sort((left, right) => normalizePath(right.repoRoot).length - normalizePath(left.repoRoot).length);
+  if (candidates.length === 0) return undefined;
+
+  const deepestLength = normalizePath(candidates[0].repoRoot).length;
+  const deepest = candidates.filter((project) => normalizePath(project.repoRoot).length === deepestLength);
+  return deepest.length === 1 ? deepest[0] : undefined;
+}
+
 /**
- * A worktree names its owner in an `orca/<wsId>/<slug>` branch. Rows without that
- * identity - plain-folder roots, main checkouts, externally created worktrees -
- * are owned by the project whose repoRoot contains their path, never by whichever
- * project happens to be active. A branch that names a project which does not own
- * the row's path is not trusted, so an external or mislabeled branch cannot move
- * a row into another project.
+ * A worktree names its owner in an `orca/<wsId>/<slug>` branch. Anything without that
+ * identity is attributed by its registered root. Remote rows returned by the backend do
+ * not currently carry `workspaceId`, so a unique SSH repo-root match must be recovered
+ * before the local-project fallback; otherwise a Windows path can be routed to a local
+ * macOS workspace and fail local absolute-path validation.
  */
 export function resolveWorktreeOwnerId(
   worktree: Worktree,
@@ -27,6 +43,10 @@ export function resolveWorktreeOwnerId(
   if (worktree.workspaceId && projects.some((project) => project.workspaceId === worktree.workspaceId)) {
     return worktree.workspaceId;
   }
+
+  const remoteOwner = uniqueDeepestRemoteOwner(projects, worktree.path);
+  if (remoteOwner) return remoteOwner.workspaceId;
+
   const localProjects = projects.filter((project) => project.target?.kind !== "ssh");
   const identityOwner = worktreeIdentity(worktree)?.wsId;
   if (

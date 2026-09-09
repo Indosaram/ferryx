@@ -7,6 +7,10 @@ function project(workspaceId: string, repoRoot: string): RegisteredProject {
   return { workspaceId, repoRoot, gitRoot: repoRoot };
 }
 
+function remoteProject(workspaceId: string, repoRoot: string, hostId: string): RegisteredProject {
+  return { workspaceId, repoRoot, gitRoot: repoRoot, target: { kind: "ssh", hostId } };
+}
+
 function worktree(path: string, branch: string | null): Worktree {
   return { path, head: "", branch, bare: false, detached: false, locked: null, prunable: null };
 }
@@ -77,5 +81,25 @@ describe("resolveWorktreeOwnerId", () => {
         "fallback",
       ),
     ).toBe("fallback");
+  });
+
+  it("recovers a missing owner id for a Windows SSH row from its unique registered remote root", () => {
+    const projects = [
+      project("local-group", "/Users/indo/work/coinbase-scalper"),
+      remoteProject("ssh:windows-project", "C:/Users/sook/work/coinbase-scalper", "maho-win"),
+    ];
+    const row = worktree("C:/Users/sook/work/coinbase-scalper", null);
+
+    expect(resolveWorktreeOwnerId(row, projects, "local-group")).toBe("ssh:windows-project");
+  });
+
+  it("does not guess between remote hosts when the same remote path is registered twice", () => {
+    const projects = [
+      remoteProject("ssh:win-a", "C:/Users/sook/work/repo", "win-a"),
+      remoteProject("ssh:win-b", "C:/Users/sook/work/repo", "win-b"),
+    ];
+    const row = worktree("C:/Users/sook/work/repo", null);
+
+    expect(resolveWorktreeOwnerId(row, projects, "fallback")).toBe("fallback");
   });
 });
