@@ -1,4 +1,4 @@
-import { Cable, Check, Laptop, Radio, Wifi, X } from "lucide-react";
+import { Cable, Check, Laptop, Radio, Server, Wifi, X } from "lucide-react";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { cn } from "../lib/cn";
@@ -10,17 +10,36 @@ import {
   type TransportType,
 } from "../state/remoteHostStore";
 
-const TRANSPORT_LABEL: Record<TransportType, string> = {
+/**
+ * Transports the drawer can render. `relay` reaches a host through the signaling/relay server
+ * instead of a direct path, so it is not part of the discovery-oriented `TransportType` union
+ * in `remoteHostStore` yet; widening here keeps store hosts assignable while the badge renders
+ * relay-backed hosts too.
+ */
+export type DrawerTransport = TransportType | "relay";
+
+const TRANSPORT_LABEL: Record<DrawerTransport, string> = {
   tailscale: "Tailscale",
   mdns: "mDNS",
   sshTunnel: "SSH",
+  relay: "Relay",
 };
 
-const TRANSPORT_ICON: Record<TransportType, typeof Wifi> = {
+const TRANSPORT_ICON: Record<DrawerTransport, typeof Wifi> = {
   tailscale: Wifi,
   mdns: Radio,
   sshTunnel: Cable,
+  relay: Server,
 };
+
+/**
+ * Hosts cross the wire as JSON, so an unrecognized transport is a real possibility until the
+ * store union catches up. Fall back to the relay badge — a host we can reach but can't classify
+ * arrived through the relay path — instead of rendering an undefined icon.
+ */
+function asDrawerTransport(transport: string): DrawerTransport {
+  return transport in TRANSPORT_LABEL ? (transport as DrawerTransport) : "relay";
+}
 
 /**
  * Per-host rollup of agent activity. This isn't part of `HostEndpoint` yet — hosts may carry an
@@ -43,7 +62,7 @@ export function getHostAgentSummary(host: HostEndpoint): HostAgentSummary {
   return { running, waiting };
 }
 
-function TransportBadge({ transport }: { transport: TransportType }) {
+function TransportBadge({ transport }: { transport: DrawerTransport }) {
   const Icon = TRANSPORT_ICON[transport];
   return (
     <span
@@ -212,7 +231,7 @@ export function MobileHostDrawer({ open, onOpenChange }: MobileHostDrawerProps) 
                         {active ? <Check className="size-4 shrink-0" aria-hidden="true" /> : null}
                       </span>
                       <span className="mt-1 flex flex-wrap items-center gap-1.5">
-                        <TransportBadge transport={host.transport} />
+                        <TransportBadge transport={asDrawerTransport(host.transport)} />
                         <OnlineIndicator host={host} />
                         {host.authStatus !== "paired" ? (
                           <span

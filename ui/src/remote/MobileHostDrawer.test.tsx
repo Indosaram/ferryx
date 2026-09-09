@@ -2,7 +2,12 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
-import { hostAgentTotals, MobileHostDrawer, type HostWithAgentSummary } from "./MobileHostDrawer";
+import {
+  hostAgentTotals,
+  MobileHostDrawer,
+  type DrawerTransport,
+  type HostWithAgentSummary,
+} from "./MobileHostDrawer";
 
 function makeHost(overrides: Partial<HostWithAgentSummary> = {}): HostWithAgentSummary {
   return {
@@ -14,6 +19,14 @@ function makeHost(overrides: Partial<HostWithAgentSummary> = {}): HostWithAgentS
     online: true,
     ...overrides,
   };
+}
+
+/**
+ * `remoteHostStore`'s `TransportType` union has not gained `"relay"` yet, so relay hosts enter
+ * the store the same way they arrive over the wire: as a transport string the drawer widens.
+ */
+function makeTransportHost(hostId: string, name: string, transport: DrawerTransport): HostEndpoint {
+  return { ...makeHost({ hostId, name }), transport } as HostEndpoint;
 }
 
 beforeEach(() => {
@@ -56,6 +69,41 @@ describe("MobileHostDrawer", () => {
     expect(host3).toHaveTextContent("Build Box");
     expect(host3).toHaveTextContent("SSH");
     expect(host3.querySelector('[data-testid="mobile-host-online-indicator"]')).toHaveAttribute("data-online", "true");
+  });
+
+  it("renders a Relay transport badge for relay-reachable hosts", () => {
+    remoteHostStore.setHosts([
+      makeTransportHost("host-1", "Studio Mac", "tailscale"),
+      makeTransportHost("host-4", "Relay Box", "relay"),
+    ]);
+
+    render(<MobileHostDrawer open onOpenChange={vi.fn()} />);
+
+    const relayHost = screen.getByTestId("mobile-host-option-host-4");
+    const badge = relayHost.querySelector('[data-testid="mobile-host-transport-badge"]');
+    expect(badge).toHaveAttribute("data-transport", "relay");
+    expect(badge).toHaveTextContent("Relay");
+    expect(badge?.querySelector("svg")).toBeInTheDocument();
+
+    const directHost = screen.getByTestId("mobile-host-option-host-1");
+    expect(directHost.querySelector('[data-testid="mobile-host-transport-badge"]')).toHaveAttribute(
+      "data-transport",
+      "tailscale",
+    );
+  });
+
+  it("falls back to the relay badge for an unrecognized transport instead of crashing", () => {
+    remoteHostStore.setHosts([
+      makeTransportHost("host-5", "Mystery Box", "quicWarp" as DrawerTransport),
+    ]);
+
+    render(<MobileHostDrawer open onOpenChange={vi.fn()} />);
+
+    const badge = screen
+      .getByTestId("mobile-host-option-host-5")
+      .querySelector('[data-testid="mobile-host-transport-badge"]');
+    expect(badge).toHaveAttribute("data-transport", "relay");
+    expect(badge).toHaveTextContent("Relay");
   });
 
   it("shows an empty state when no hosts have been discovered", () => {

@@ -10,7 +10,6 @@ import {
   revokeRemoteDevice,
   type DeviceInfo,
   type RemoteGatewayStatus,
-  type RemoteNetworkMode,
 } from "../../lib/tauri";
 
 import { SettingRow, SettingsHeading } from "./primitives";
@@ -18,15 +17,47 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
+import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 
-type ConnectionMode = Extract<RemoteNetworkMode, "localNetwork" | "tailscale" | "relay">;
+const DEFAULT_PORT = 43821;
+const DEFAULT_RELAY_PLACEHOLDER = "https://relay.ferryx.dev";
 
-const CONNECTION_MODES: Array<{ value: ConnectionMode; label: string }> = [
-  { value: "localNetwork", label: "Local Network" },
-  { value: "tailscale", label: "Tailscale" },
-  { value: "relay", label: "Relay Server" },
-];
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+/**
+ * Direct-path hints published alongside the pairing code. The relay always works;
+ * these let a scanning device upgrade to a LAN or Tailscale endpoint when reachable.
+ */
+function directCandidates(status: RemoteGatewayStatus | null): string[] {
+  const port = status?.port ?? DEFAULT_PORT;
+  const hosts = [status?.localIp, status?.boundAddress].filter(
+    (host): host is string => Boolean(host) && host !== "0.0.0.0" && host !== "::",
+  );
+  return Array.from(new Set(hosts)).map((host) => `http://${host}:${port}`);
+}
+
+/**
+ * One universal link for every transport: the relay URL carries the PIN plus direct
+ * hints, and a relay-less desktop falls back to its own LAN address.
+ */
+export function buildPairingUrl(
+  status: RemoteGatewayStatus | null,
+  relayUrl: string,
+  code: string,
+): string {
+  const relay = trimTrailingSlashes((status?.relayUrl ?? relayUrl ?? "").trim());
+  if (relay) {
+    const candidates = directCandidates(status);
+    const hints = candidates.length > 0 ? `&hints=${encodeURIComponent(candidates.join(","))}` : "";
+    return `${relay}/#pair=${code}${hints}`;
+  }
+  const port = status?.port ?? DEFAULT_PORT;
+  const host = status?.localIp ?? status?.boundAddress ?? "localhost";
+  return `http://${host}:${port}/#pair=${code}`;
+}
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
   try {
@@ -61,11 +92,10 @@ export function RemoteAccessSection() {
   const [qrError, setQrError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [pinCopied, setPinCopied] = useState(false);
-  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("localNetwork");
+  const [linkCopied, setLinkCopied] = useState(false);
   const [relayUrl, setRelayUrl] = useState("");
-  const [connectUrl, setConnectUrl] = useState<string | null>(null);
+  const [pairingUrl, setPairingUrl] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
   const clearCopyTimer = useCallback(() => {
@@ -93,34 +123,21 @@ export function RemoteAccessSection() {
     if (s) {
       statusRef.current = s;
       setStatus(s);
+      if (s.relayUrl) setRelayUrl((current) => (current ? current : s.relayUrl ?? ""));
     }
     setDevices(devList);
     return s;
   }, []);
 
-  const generatePairing = useCallback(async (currentStatus?: RemoteGatewayStatus | null) => {
-    const s = currentStatus ?? statusRef.current;
+  const generatePairing = useCallback(async () => {
     setIsGeneratingQr(true);
     setQrError(null);
     try {
       const res = await createPairingCode("control");
       setPairingCode(res.code);
 
-      const port = s?.port ?? 43821;
-      const mode = s?.mode ?? connectionMode;
-      const effectiveRelayUrl = s?.relayUrl ?? relayUrl;
-
-      let url: string;
-      if (mode === "relay" && effectiveRelayUrl) {
-        url = `${effectiveRelayUrl.replace(/\/+$/, "")}/#pair=${res.code}`;
-      } else if (mode === "tailscale") {
-        const host = s?.boundAddress ?? s?.localIp ?? "localhost";
-        url = `http://${host}:${port}/#pair=${res.code}`;
-      } else {
-        const host = s?.localIp ? `${s.localIp}:${port}` : `localhost:${port}`;
-        url = `http://${host}/#pair=${res.code}`;
-      }
-      setConnectUrl(url);
+      const url = buildPairingUrl(statusRef.current, relayUrl, res.code);
+      setPairingUrl(url);
 
       const QRCode = (await import("qrcode")).default;
       const dataUrl = await QRCode.toDataURL(url, {
@@ -133,16 +150,17 @@ export function RemoteAccessSection() {
       setQrError(error instanceof Error ? error.message : "Failed to generate pairing QR code");
       setPairingCode(null);
       setQrDataUrl(null);
-      setConnectUrl(null);
+      setPairingUrl(null);
     } finally {
       setIsGeneratingQr(false);
     }
-  }, [connectionMode, relayUrl]);
+  }, [relayUrl]);
 
   const handleGeneratePairing = () => {
     setActionError(null);
     clearCopyTimer();
     setPinCopied(false);
+    setLinkCopied(false);
     void generatePairing();
   };
 
@@ -162,12 +180,14 @@ export function RemoteAccessSection() {
         setQrDataUrl(null);
         setQrError(null);
         setPinCopied(false);
-        setConnectUrl(null);
+        setLinkCopied(false);
+        setPairingUrl(null);
         await refreshStatus();
       } else {
+        const trimmedRelay = relayUrl.trim();
         const s = await enableRemoteGateway({
-          mode: connectionMode,
-          relayUrl: connectionMode === "relay" ? relayUrl : undefined,
+          mode: trimmedRelay ? "relay" : "localNetwork",
+          relayUrl: trimmedRelay || undefined,
         });
         statusRef.current = s;
         setStatus(s);
@@ -191,15 +211,12 @@ export function RemoteAccessSection() {
     }
   };
 
-  const port = status?.port ?? 43821;
-  const localUrl = status?.localIp ? `http://${status.localIp}:${port}` : `http://localhost:${port}`;
-
   return (
     <section aria-labelledby="settings-remote-heading" aria-label="Remote Access">
       <SettingsHeading
         icon={<Radio />}
         title="Remote Access"
-        description="Access desktop terminal sessions from your mobile browser. Existing authorized browser profiles reconnect while Remote remains enabled; re-pair only after browser storage is cleared, a device is revoked, or a different browser profile/device is used."
+        description="Access desktop terminal sessions from your phone. One switch turns remote access on; one QR code pairs any device, connecting through the relay and upgrading to a direct LAN or Tailscale path whenever it is reachable."
       />
       <h2 id="settings-remote-heading" className="sr-only">
         Remote Access
@@ -216,175 +233,118 @@ export function RemoteAccessSection() {
       <div className="border-y border-border">
         <SettingRow
           label="Remote Access"
-          description="Enable access to live terminal sessions over your local network."
+          description="Serve live terminal sessions to paired devices. Authorized browsers reconnect automatically while this stays on."
         >
-          <div className="flex items-center gap-2">
-            <Switch
-              id="remote-access-enable"
-              aria-label="Remote Access"
-              checked={Boolean(status?.enabled)}
-              disabled={loading}
-              onCheckedChange={(checked) => void handleToggle(checked)}
-            />
-          </div>
+          <Switch
+            id="remote-access-enable"
+            aria-label="Remote Access"
+            checked={Boolean(status?.enabled)}
+            disabled={loading}
+            onCheckedChange={(checked) => void handleToggle(checked)}
+          />
         </SettingRow>
 
-        {status?.enabled && (
-          <>
-            <SettingRow
-              label="Connection Mode"
-              description="Choose how devices reach this desktop: your local network, a Tailscale tailnet, or a relay server."
-            >
-              <div className="flex flex-col items-end gap-2">
-                <div role="radiogroup" aria-label="Connection Mode" className="flex items-center gap-1">
-                  {CONNECTION_MODES.map(({ value, label }) => (
-                    <Button
-                      key={value}
-                      type="button"
-                      role="radio"
-                      aria-checked={connectionMode === value}
-                      variant={connectionMode === value ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setConnectionMode(value)}
-                      className="h-7 px-2.5 text-[11px] font-medium"
-                    >
-                      {label}
-                    </Button>
-                  ))}
-                </div>
-                {connectionMode === "relay" ? (
-                  <input
-                    type="url"
-                    aria-label="Relay Server URL"
-                    placeholder="https://relay.example.com"
-                    value={relayUrl}
-                    onChange={(e) => setRelayUrl(e.target.value)}
-                    className="h-7 w-56 rounded border border-border bg-background px-2 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                ) : null}
-              </div>
-            </SettingRow>
+        <SettingRow
+          label="Relay / Signaling Server URL"
+          description="Public relay that carries pairing and traffic when a device is off your network. Leave empty to stay local-network only."
+        >
+          <Input
+            type="url"
+            aria-label="Relay / Signaling Server URL"
+            placeholder={DEFAULT_RELAY_PLACEHOLDER}
+            value={relayUrl}
+            onChange={(e) => setRelayUrl(e.target.value)}
+            className="h-8 w-full max-w-64 rounded-md px-2 text-[12px] md:text-[12px] sm:w-64"
+          />
+        </SettingRow>
 
-            <SettingRow
-              label="Instant QR Connect"
-              description="Scan this QR code with your phone camera to pair and connect immediately without typing."
-            >
-              <Card className="flex flex-col items-center gap-2 rounded-lg border border-border bg-card p-3 shadow-none">
-                {qrDataUrl ? (
-                  <img src={qrDataUrl} alt="Pairing QR Code" className="h-[160px] w-[160px] rounded" />
-                ) : null}
-                {!qrDataUrl && isGeneratingQr ? (
-                  <div className="flex h-[160px] w-[160px] items-center justify-center text-[11px] text-muted-foreground">
-                    Generating...
-                  </div>
-                ) : null}
-                {!qrDataUrl && !isGeneratingQr && qrError ? (
-                  <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 p-2 text-center text-[11px] text-destructive">
-                    <span>{qrError}</span>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      onClick={handleGeneratePairing}
-                      className="h-7 bg-destructive/10 px-2.5 text-[11px] font-medium text-destructive hover:bg-destructive/20"
-                    >
-                      Retry
-                    </Button>
-                  </div>
-                ) : null}
-                {!qrDataUrl && !isGeneratingQr && !qrError ? (
-                  <div className="flex h-[160px] w-[160px] flex-col items-center justify-center gap-2 text-[11px] text-muted-foreground">
-                    <Button
-                      type="button"
-                      variant="default"
-                      size="sm"
-                      onClick={handleGeneratePairing}
-                      className="h-7 px-2.5 text-[11px] font-medium shadow-sm"
-                    >
-                      Generate QR Code
-                    </Button>
-                  </div>
-                ) : null}
-                {pairingCode ? (
-                  <div className="flex w-full items-center justify-between px-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      data-testid="remote-pairing-code"
-                      aria-label={pinCopied ? `Copied pairing PIN ${pairingCode}` : `Copy pairing PIN ${pairingCode}`}
-                      onClick={async () => {
-                        if (await copyTextToClipboard(pairingCode)) {
-                          showCopied(setPinCopied);
-                        }
-                      }}
-                      className="h-auto p-0 font-mono text-[11px] font-semibold text-status-success hover:bg-transparent hover:underline"
-                    >
-                      {pinCopied ? "Copied" : `PIN: ${pairingCode}`}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      disabled={isGeneratingQr}
-                      onClick={handleGeneratePairing}
-                      className="h-auto p-0 text-[11px] text-muted-foreground underline hover:text-foreground disabled:opacity-50"
-                    >
-                      {isGeneratingQr ? "Generating..." : "New Code"}
-                    </Button>
-                  </div>
-                ) : null}
-                {!pairingCode && !isGeneratingQr && !qrError ? (
+        {status?.enabled ? (
+          <SettingRow
+            label="Pairing QR Code"
+            description="Scan with a phone camera to pair and connect in one step. The link carries the PIN plus direct-path hints."
+          >
+            <Card className="flex w-[220px] flex-col items-center gap-2 rounded-lg border border-border bg-card p-3 shadow-none">
+              {qrDataUrl ? (
+                <img src={qrDataUrl} alt="Pairing QR Code" className="size-[160px] rounded-md" />
+              ) : isGeneratingQr ? (
+                <div className="flex size-[160px] items-center justify-center text-[11px] text-muted-foreground">
+                  Generating...
+                </div>
+              ) : qrError ? (
+                <div className="flex size-[160px] flex-col items-center justify-center gap-2 p-2 text-center text-[11px] text-destructive">
+                  <span>{qrError}</span>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    onClick={handleGeneratePairing}
+                    className="h-7 bg-destructive/10 px-2.5 text-[11px] font-medium text-destructive hover:bg-destructive/20"
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex size-[160px] items-center justify-center">
+                  <Button
+                    type="button"
+                    variant="default"
+                    size="sm"
+                    onClick={handleGeneratePairing}
+                    className="h-7 px-2.5 text-[11px] font-medium shadow-sm"
+                  >
+                    Generate QR Code
+                  </Button>
+                </div>
+              )}
+
+              {pairingCode ? (
+                <div className="flex w-full items-center justify-between px-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    data-testid="remote-pairing-code"
+                    aria-label={pinCopied ? `Copied pairing PIN ${pairingCode}` : `Copy pairing PIN ${pairingCode}`}
+                    onClick={async () => {
+                      if (await copyTextToClipboard(pairingCode)) {
+                        showCopied(setPinCopied);
+                      }
+                    }}
+                    className="h-auto p-0 font-mono text-[11px] font-semibold text-status-success hover:bg-transparent hover:underline"
+                  >
+                    {pinCopied ? "Copied" : `PIN: ${pairingCode}`}
+                  </Button>
                   <Button
                     type="button"
                     variant="link"
                     size="sm"
+                    disabled={isGeneratingQr}
                     onClick={handleGeneratePairing}
-                    className="h-auto p-0 text-[11px] text-muted-foreground underline hover:text-foreground"
+                    className="h-auto p-0 text-[11px] text-muted-foreground underline hover:text-foreground disabled:opacity-50"
                   >
-                    Generate Code
-                  </Button>
-                ) : null}
-                {connectUrl ? (
-                  <div
-                    data-testid="active-connection-url"
-                    className="w-full break-all rounded bg-muted px-2 py-1 text-center text-[10px] text-muted-foreground"
-                  >
-                    <span className="font-semibold uppercase tracking-wide">
-                      {connectionMode === "relay" ? "Relay" : connectionMode === "tailscale" ? "Tailscale" : "Local LAN"}
-                    </span>
-                    {": "}
-                    <span className="font-mono">{connectUrl}</span>
-                  </div>
-                ) : null}
-              </Card>
-            </SettingRow>
-
-            <SettingRow
-              label="Connection URLs"
-              description="Direct browser address for mobile and other devices on your network."
-            >
-              <div className="space-y-1 text-right">
-                <div className="flex items-center justify-end gap-1.5 font-mono text-[11px] text-foreground">
-                  <span>{localUrl}</span>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={async () => {
-                      if (await copyTextToClipboard(localUrl)) {
-                        showCopied(setCopied);
-                      }
-                    }}
-                    className="h-auto rounded bg-muted px-1.5 py-0.5 text-[11px] hover:bg-muted/80"
-                  >
-                    {copied ? "Copied" : "Copy"}
+                    {isGeneratingQr ? "Generating..." : "New Code"}
                   </Button>
                 </div>
-              </div>
-            </SettingRow>
-          </>
-        )}
+              ) : null}
+
+              {pairingUrl ? (
+                <button
+                  type="button"
+                  data-testid="pairing-url"
+                  aria-label={linkCopied ? "Copied pairing link" : "Copy pairing link"}
+                  onClick={async () => {
+                    if (await copyTextToClipboard(pairingUrl)) {
+                      showCopied(setLinkCopied);
+                    }
+                  }}
+                  className="w-full break-all rounded-md bg-muted px-2 py-1 text-center font-mono text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  {linkCopied ? "Copied" : pairingUrl}
+                </button>
+              ) : null}
+            </Card>
+          </SettingRow>
+        ) : null}
       </div>
 
       <div className="mt-8 space-y-3">
@@ -411,25 +371,25 @@ export function RemoteAccessSection() {
                 </div>
                 {confirmRevokeId === dev.id ? (
                   <div className="flex items-center gap-1.5">
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        aria-label={`Confirm revoke ${dev.name || dev.id}`}
-                        onClick={() => void handleRevoke(dev.id)}
-                        className="h-7 px-2 text-[11px] font-medium"
-                      >
-                        Confirm Revoke
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setConfirmRevokeId(null)}
-                        className="h-7 px-2 text-[11px] text-muted-foreground hover:bg-accent"
-                      >
-                        Cancel
-                      </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      aria-label={`Confirm revoke ${dev.name || dev.id}`}
+                      onClick={() => void handleRevoke(dev.id)}
+                      className="h-7 px-2 text-[11px] font-medium"
+                    >
+                      Confirm Revoke
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setConfirmRevokeId(null)}
+                      className="h-7 px-2 text-[11px] text-muted-foreground hover:bg-accent"
+                    >
+                      Cancel
+                    </Button>
                   </div>
                 ) : (
                   <Button
