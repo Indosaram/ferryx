@@ -287,12 +287,17 @@ async fn exercise_child(root: &Path) {
     assert!(wire.get("program").is_none());
     let mut retained = None;
     for request_id in ["new-tab", "split-restore"] {
+        let spawn_cwd = if request_id == "new-tab" {
+            Some(response.repo_root.clone())
+        } else {
+            None
+        };
         let id = daemon
             .handle_spawn(
                 request_id,
                 &response.workspace_id,
                 None,
-                None,
+                spawn_cwd,
                 80,
                 24,
                 None,

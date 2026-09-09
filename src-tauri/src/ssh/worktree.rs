@@ -147,6 +147,40 @@ pub fn validate_path_inside_root(
     Ok(())
 }
 
+pub fn validate_cwd_inside_root(
+    platform: RemotePlatform,
+    root: &str,
+    path: &str,
+) -> Result<(), IpcError> {
+    match platform {
+        RemotePlatform::Posix => {
+            let norm_root = root.trim_end_matches('/');
+            let norm_path = path.trim_end_matches('/');
+            if norm_path.split('/').any(|seg| seg == "..")
+                || (norm_path != norm_root && !norm_path.starts_with(&format!("{norm_root}/")))
+            {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidPath,
+                    "Working directory must be inside the project repository root",
+                ));
+            }
+        }
+        RemotePlatform::Windows => {
+            let norm_root = root.replace('\\', "/").trim_end_matches('/').to_lowercase();
+            let norm_path = path.replace('\\', "/").trim_end_matches('/').to_lowercase();
+            if norm_path.split('/').any(|seg| seg == "..")
+                || (norm_path != norm_root && !norm_path.starts_with(&format!("{norm_root}/")))
+            {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidPath,
+                    "Working directory must be inside the project repository root",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn resolve_remote_spawn_root(
     platform: RemotePlatform,
     repo_root: &str,
@@ -154,8 +188,19 @@ pub fn resolve_remote_spawn_root(
     cwd: Option<&str>,
 ) -> Result<String, IpcError> {
     if let Some(cwd) = cwd {
-        validate_path_inside_root(platform, repo_root, cwd)?;
-        Ok(cwd.to_string())
+        validate_cwd_inside_root(platform, repo_root, cwd)?;
+        let is_root = match platform {
+            RemotePlatform::Posix => cwd.trim_end_matches('/') == repo_root.trim_end_matches('/'),
+            RemotePlatform::Windows => {
+                cwd.replace('\\', "/").trim_end_matches('/').to_lowercase()
+                    == repo_root.replace('\\', "/").trim_end_matches('/').to_lowercase()
+            }
+        };
+        if is_root {
+            Ok(repo_root.to_string())
+        } else {
+            Ok(cwd.to_string())
+        }
     } else if let Some(identity) = worktree {
         if identity.slug.trim().is_empty() {
             return Err(IpcError::new(
@@ -688,5 +733,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res_none, "/srv/repo");
+
+        // cwd equal to repo_root ok (posix and windows)
+        let res_root_posix = resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            None,
+            Some("/srv/repo"),
+        )
+        .unwrap();
+        assert_eq!(res_root_posix, "/srv/repo");
+
+        let res_root_slash = resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            None,
+            Some("/srv/repo/"),
+        )
+        .unwrap();
+        assert_eq!(res_root_slash, "/srv/repo");
+
+        let res_root_win = resolve_remote_spawn_root(
+            RemotePlatform::Windows,
+            r"C:\Repo",
+            None,
+            Some(r"C:\Repo"),
+        )
+        .unwrap();
+        assert_eq!(res_root_win, r"C:\Repo");
+
+        let res_root_win_ci = resolve_remote_spawn_root(
+            RemotePlatform::Windows,
+            r"C:\Repo",
+            None,
+            Some(r"c:\repo\"),
+        )
+        .unwrap();
+        assert_eq!(res_root_win_ci, r"C:\Repo");
     }
 }
