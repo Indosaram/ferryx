@@ -146,8 +146,29 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairCliCommand {
+    List,
     GeneratePin,
     Approve { pin: String },
+}
+
+const PAIR_USAGE: &str = "expected `ferryx pair <list|generate|--generate-pin|approve <pin>>`";
+
+/// Parses a pair subcommand (`list`, `generate`, `--generate-pin`, `approve <pin>`)
+/// starting at `args[subcommand_index]`. Shared by both `ferryx pair <...>` and
+/// `ferryx remote pair <...>`.
+fn parse_pair_subcommand(args: &[String], subcommand_index: usize) -> Result<PairCliCommand, String> {
+    match args.get(subcommand_index).map(String::as_str) {
+        Some("list") => Ok(PairCliCommand::List),
+        Some("--generate-pin") | Some("generate") => Ok(PairCliCommand::GeneratePin),
+        Some("approve") => {
+            let pin = args
+                .get(subcommand_index + 1)
+                .cloned()
+                .ok_or_else(|| "missing <pin> for `ferryx pair approve`".to_string())?;
+            Ok(PairCliCommand::Approve { pin })
+        }
+        _ => Err(PAIR_USAGE.into()),
+    }
 }
 
 pub fn parse_pair_cli<I, T>(args: I) -> Result<PairCliCommand, String>
@@ -160,19 +181,9 @@ where
         .map(|arg| arg.as_ref().to_string())
         .collect::<Vec<_>>();
     if args.get(1).is_none_or(|arg| arg != "pair") {
-        return Err("expected `ferryx pair <--generate-pin|approve>`".into());
+        return Err(PAIR_USAGE.into());
     }
-    match args.get(2).map(String::as_str) {
-        Some("--generate-pin") => Ok(PairCliCommand::GeneratePin),
-        Some("approve") => {
-            let pin = args
-                .get(3)
-                .cloned()
-                .ok_or_else(|| "missing <pin> for `ferryx pair approve`".to_string())?;
-            Ok(PairCliCommand::Approve { pin })
-        }
-        _ => Err("expected `ferryx pair <--generate-pin|approve>`".into()),
-    }
+    parse_pair_subcommand(&args, 2)
 }
 
 fn remote_auth_manager() -> ferryx_lib::remote::AuthManager {
@@ -207,6 +218,18 @@ fn remote_auth_manager() -> ferryx_lib::remote::AuthManager {
 
 pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
     match command {
+        PairCliCommand::List => {
+            let manager = remote_auth_manager();
+            let devices = manager.list_devices();
+            if devices.is_empty() {
+                println!("No paired devices");
+            } else {
+                for device in devices {
+                    println!("{}\t{}\t{:?}", device.id, device.name, device.permission);
+                }
+            }
+            Ok(())
+        }
         PairCliCommand::GeneratePin => {
             let manager = remote_auth_manager();
             let pin = manager.create_pairing_code(ferryx_lib::remote::DevicePermission::Control);
@@ -236,6 +259,7 @@ fn print_browser_cli_error(code: &str, message: impl AsRef<str>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteCliCommand {
     Status { json: bool },
+    Pair(PairCliCommand),
 }
 
 pub fn parse_remote_cli<I, T>(args: I) -> Result<RemoteCliCommand, String>
@@ -248,14 +272,15 @@ where
         .map(|arg| arg.as_ref().to_string())
         .collect::<Vec<_>>();
     if args.get(1).is_none_or(|arg| arg != "remote") {
-        return Err("expected `ferryx remote status`".into());
+        return Err("expected `ferryx remote <status|pair>`".into());
     }
     match args.get(2).map(String::as_str) {
         Some("status") => {
             let json = args.iter().skip(3).any(|arg| arg == "--json");
             Ok(RemoteCliCommand::Status { json })
         }
-        _ => Err("expected `ferryx remote status`".into()),
+        Some("pair") => parse_pair_subcommand(&args, 3).map(RemoteCliCommand::Pair),
+        _ => Err("expected `ferryx remote <status|pair>`".into()),
     }
 }
 
@@ -345,6 +370,7 @@ pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
             }
             Ok(())
         }
+        RemoteCliCommand::Pair(pair_command) => run_pair_cli(pair_command),
     }
 }
 
