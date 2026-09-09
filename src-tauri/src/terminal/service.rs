@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 pub struct TerminalService {
     pty_manager: Arc<PtyManager>,
     output_hub: Arc<TerminalOutputHub>,
+    remote: Arc<super::remote::RemoteRuntime>,
 }
 
 impl Default for TerminalService {
@@ -24,9 +25,48 @@ impl Default for TerminalService {
 impl TerminalService {
     pub fn new(pty_manager: Arc<PtyManager>, output_hub: Arc<TerminalOutputHub>) -> Self {
         Self {
+            remote: Arc::new(super::remote::RemoteRuntime::new(output_hub.clone())),
             pty_manager,
             output_hub,
         }
+    }
+
+    pub fn remote(&self) -> &Arc<super::remote::RemoteRuntime> {
+        &self.remote
+    }
+
+    /// Generation-aware admission. The returned future must be awaited for delivery status.
+    pub fn write_input_operation(
+        &self,
+        id: &str,
+        generation: u64,
+        data: Vec<u8>,
+    ) -> Result<super::remote::RemoteOperation, PtyError> {
+        if self.remote.contains(id) {
+            return self
+                .remote
+                .write(id, generation, data)
+                .map_err(|e| PtyError::Other(e.to_string()));
+        }
+        self.write_input(id, &data)?;
+        Ok(Box::pin(async { Ok(()) }))
+    }
+
+    pub fn resize_operation(
+        &self,
+        id: &str,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    ) -> Result<super::remote::RemoteOperation, PtyError> {
+        if self.remote.contains(id) {
+            return self
+                .remote
+                .resize(id, generation, cols, rows)
+                .map_err(|e| PtyError::Other(e.to_string()));
+        }
+        self.resize(id, cols, rows)?;
+        Ok(Box::pin(async { Ok(()) }))
     }
 
     pub fn pty_manager(&self) -> &Arc<PtyManager> {
@@ -75,7 +115,9 @@ impl TerminalService {
         let mut cmd = CommandBuilder::new(&plan.program);
         cmd.args(&plan.args);
         // No remote path is ever used as the local SSH process working directory.
-        let pty_rx = self.pty_manager.spawn_with_id(session_id.clone(), cmd, cols, rows)?;
+        let pty_rx = self
+            .pty_manager
+            .spawn_with_id(session_id.clone(), cmd, cols, rows)?;
 
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
@@ -112,11 +154,7 @@ impl TerminalService {
         &self,
         session_id: &str,
     ) -> Result<(Vec<u8>, broadcast::Receiver<Vec<u8>>), PtyError> {
-        if !self
-            .pty_manager
-            .list_sessions()
-            .contains(&session_id.to_string())
-        {
+        if !self.list_sessions().contains(&session_id.to_string()) {
             return Err(PtyError::SessionNotFound(session_id.to_string()));
         }
 
@@ -130,11 +168,7 @@ impl TerminalService {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Result<SessionAttachment, PtyError> {
-        if !self
-            .pty_manager
-            .list_sessions()
-            .contains(&session_id.to_string())
-        {
+        if !self.list_sessions().contains(&session_id.to_string()) {
             return Err(PtyError::SessionNotFound(session_id.to_string()));
         }
 
@@ -144,6 +178,11 @@ impl TerminalService {
     }
 
     pub fn write_input(&self, session_id: &str, data: &[u8]) -> Result<(), PtyError> {
+        if self.remote.contains(session_id) {
+            return Err(PtyError::Other(
+                "Remote input requires write_input_operation and a generation".into(),
+            ));
+        }
         self.pty_manager.write_input(session_id, data)
     }
 
@@ -161,12 +200,21 @@ impl TerminalService {
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
+        if self.remote.contains(session_id) {
+            return self
+                .remote
+                .close(session_id)
+                .await
+                .map_err(|e| PtyError::Other(e.to_string()));
+        }
         self.output_hub.remove_session(session_id);
         self.pty_manager.close_session(session_id).await
     }
 
     pub fn list_sessions(&self) -> Vec<String> {
-        self.pty_manager.list_sessions()
+        let mut sessions = self.pty_manager.list_sessions();
+        sessions.extend(self.remote.list());
+        sessions
     }
 
     pub fn get_session(&self, session_id: &str) -> Option<Arc<PtySession>> {

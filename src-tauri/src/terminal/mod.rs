@@ -31,6 +31,9 @@ pub(crate) mod metrics;
 pub mod output_hub;
 pub mod preferences;
 pub mod pty;
+pub mod remote;
+#[cfg(test)]
+mod remote_runtime_tests;
 pub(crate) mod resume_cwd;
 pub mod service;
 pub mod session;

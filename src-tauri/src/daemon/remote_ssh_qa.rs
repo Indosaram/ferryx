@@ -80,7 +80,7 @@ pub(super) async fn run(config_path: &Path) {
 async fn exercise(config: &QaConfig) {
     // All bookkeeping is private to this test. No remote fixtures are created or
     // repositories mutated; VM setup/cleanup belongs to the lead.
-    let state = tempfile::tempdir().unwrap();
+    let state = tempfile::Builder::new().prefix("fx").tempdir_in("/tmp").unwrap();
     let host_store = state.path().join("ssh_hosts.json");
     write_hosts(&host_store, vec![config.host.clone()]);
     let response = register_remote_project(
@@ -107,7 +107,14 @@ async fn exercise(config: &QaConfig) {
         "FERRYX_SSH_QA_REGISTERED {}",
         serde_json::to_string(&response).unwrap()
     );
-    let daemon = DaemonServer::new();
+    let mut daemon = DaemonServer::new_with_paths(Some(state.path().join("gateway.json")), Some(state.path().join("auth.json")));
+    let _helper = if config.host.hostname == "127.0.0.1" {
+        Some(install_test_helper(&config.host, state.path()).await)
+    } else {
+        // External QA uses its explicitly preinstalled helper, never a local-path fixture.
+        daemon.helper_home = None;
+        None
+    };
     for request in ["qa-new-tab", "qa-split-restore"] {
         let session = daemon
             .handle_spawn(
@@ -125,13 +132,8 @@ async fn exercise(config: &QaConfig) {
             .await
             .expect("daemon-owned SSH PTY");
         let (mut history, mut events) = daemon.terminal_service.attach(&session).unwrap();
-        daemon
-            .terminal_service
-            .write_input(
-                &session,
-                b"printf '\\136\\123\\123\\110\\055\\117\\113\\072'; pwd -P\n",
-            )
-            .unwrap();
+        wait_remote_connected(&daemon, &session).await;
+        daemon.write_session_input(&session, b"printf '\\136\\123\\123\\110\\055\\117\\113\\072'; pwd -P\n".to_vec()).await.unwrap();
         let expected = format!("^SSH-OK:{}", config.expected_repo_root);
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             while !String::from_utf8_lossy(&history).contains(&expected) {

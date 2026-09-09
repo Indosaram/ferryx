@@ -1602,6 +1602,21 @@ impl NativeTerminalSurfaceHostState {
                             }
                         }
                     }
+                    DaemonStreamMessage::RemoteStatus {
+                        state, generation, failure, replay_gap, ..
+                    } => {
+                        if let Some(app) = app_handle.as_ref() {
+                            if let Err(error) = app.emit("terminal_remote_status", serde_json::json!({
+                                "sessionId": session_id_owned,
+                                "state": state,
+                                "generation": generation,
+                                "failure": failure,
+                                "replayGap": replay_gap,
+                            })) {
+                                tracing::warn!(%error, "Failed to emit remote terminal status");
+                            }
+                        }
+                    }
                     DaemonStreamMessage::Exit { .. } => {
                         update_sender.send_replace(());
                         break;
@@ -2596,6 +2611,31 @@ mod tests {
         fn drop(&mut self) {
             self.state.teardown();
         }
+    }
+
+    #[tokio::test]
+    async fn ssh_reconnect_safety_native_status_reaches_desktop() {
+        use tauri::Listener;
+        let harness = DirectRenderHarness::new(vec![]);
+        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let listener = harness._app.listen("terminal_remote_status", move |event| {
+            sender.send(event.payload().to_string()).unwrap();
+        });
+        harness._output.send(DaemonStreamMessage::RemoteStatus {
+            session_id: harness.request.session_id.clone().into(),
+            state: crate::terminal::remote::RemoteConnectionState::Reconnecting,
+            generation: 9,
+            failure: None,
+            replay_gap: None,
+        }).await.unwrap();
+        let payload = tokio::time::timeout(
+            std::time::Duration::from_secs(3), received.recv(),
+        ).await.expect("native pump must forward remote state").unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["sessionId"], harness.request.session_id);
+        assert_eq!(payload["state"], "reconnecting");
+        assert_eq!(payload["generation"], 9);
+        harness._app.unlisten(listener);
     }
 
     #[tokio::test]

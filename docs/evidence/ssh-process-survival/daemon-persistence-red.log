@@ -1,0 +1,118 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+error[E0599]: no method named `persist_remote_sessions_at` found for struct `daemon::server::DaemonServer` in the current scope
+   --> src/daemon/ssh_survival_tests.rs:14:12
+    |
+ 14 |     server.persist_remote_sessions_at(path.clone()).await.unwrap();
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `daemon::server::DaemonServer`
+    |
+   ::: src/daemon/server.rs:831:1
+    |
+831 | pub struct DaemonServer {
+    | ----------------------- method `persist_remote_sessions_at` not found for this struct
+
+error[E0282]: type annotations needed
+  --> src/daemon/ssh_survival_tests.rs:14:5
+   |
+14 |     server.persist_remote_sessions_at(path.clone()).await.unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0599]: no method named `restore_remote_sessions_at` found for struct `daemon::server::DaemonServer` in the current scope
+   --> src/daemon/ssh_survival_tests.rs:17:14
+    |
+ 17 |     restored.restore_remote_sessions_at(path).await.unwrap();
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `daemon::server::DaemonServer`
+    |
+   ::: src/daemon/server.rs:831:1
+    |
+831 | pub struct DaemonServer {
+    | ----------------------- method `restore_remote_sessions_at` not found for this struct
+
+error[E0282]: type annotations needed
+  --> src/daemon/ssh_survival_tests.rs:17:5
+   |
+17 |     restored.restore_remote_sessions_at(path).await.unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0599]: no variant named `RetryRemoteSession` found for enum `daemon::protocol::DaemonRequest`
+   --> src/daemon/ssh_survival_tests.rs:27:46
+    |
+ 27 |     assert!(matches!(request, DaemonRequest::RetryRemoteSession { session_id } if session_id == "original"));
+    |                                              ^^^^^^^^^^^^^^^^^^ variant not found in `daemon::protocol::DaemonRequest`
+    |
+   ::: src/daemon/protocol.rs:116:1
+    |
+116 | pub enum DaemonRequest {
+    | ---------------------- variant `RetryRemoteSession` not found here
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0282, E0599.
+For more information about an error, try `rustc --explain E0282`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 5 previous errors; 10 warnings emitted

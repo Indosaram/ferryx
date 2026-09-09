@@ -192,6 +192,9 @@ pub fn start_managed_pump<R: Runtime>(
                                     Some(&epoch_str),
                                 );
                             }
+                            Ok(DaemonStreamMessage::RemoteStatus { state, generation, failure, replay_gap, .. }) => {
+                                let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap}));
+                            }
                             Ok(DaemonStreamMessage::AgentState { .. }) => {}
                             Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
                                 flush_terminal_output(
@@ -265,6 +268,9 @@ pub fn start_managed_pump<R: Runtime>(
                         &[],
                         Some(&epoch_str),
                     );
+                }
+                Some(DaemonStreamMessage::RemoteStatus { state, generation, failure, replay_gap, .. }) => {
+                    let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap}));
                 }
                 Some(DaemonStreamMessage::AgentState { .. }) => {}
                 Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
@@ -1003,6 +1009,26 @@ pub async fn cmd_terminal_resize(
 }
 
 #[tauri::command]
+pub async fn cmd_terminal_remote_write(daemon_client: State<'_, Arc<DaemonClient>>, session_id: String, generation: u64, data: String) -> Result<(), IpcError> {
+    remote_control_result(daemon_client.send_request(crate::daemon::protocol::DaemonRequest::RemoteWrite { session_id, generation, data: data.into_bytes() }).await?)
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_remote_resize(daemon_client: State<'_, Arc<DaemonClient>>, session_id: String, generation: u64, cols: u16, rows: u16) -> Result<(), IpcError> {
+    remote_control_result(daemon_client.send_request(crate::daemon::protocol::DaemonRequest::RemoteResize { session_id, generation, cols, rows }).await?)
+}
+
+fn remote_control_result(reply: crate::daemon::protocol::DaemonResponse) -> Result<(), IpcError> {
+    use crate::daemon::protocol::DaemonResponse;
+    match reply {
+        DaemonResponse::WriteOk | DaemonResponse::ResizeOk => Ok(()),
+        DaemonResponse::RemoteSessionError { failure } => Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure).map_err(|e| IpcError::internal(e.to_string()))?)),
+        DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+        _ => Err(IpcError::internal("Unexpected remote control response")),
+    }
+}
+
+#[tauri::command]
 pub async fn cmd_terminal_signal(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
@@ -1011,6 +1037,22 @@ pub async fn cmd_terminal_signal(
     daemon_client
         .signal_terminal(&session_id, signal.into())
         .await
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_remote_status(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<crate::daemon::protocol::DaemonResponse, IpcError> {
+    daemon_client.remote_session_status(&session_id).await
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_remote_retry(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<crate::daemon::protocol::DaemonResponse, IpcError> {
+    daemon_client.retry_remote_session(&session_id).await
 }
 
 #[tauri::command]

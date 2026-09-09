@@ -1,0 +1,372 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:57:19
+   |
+57 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+  --> src/worktree/manager.rs:64:8
+   |
+63 | impl WriterLeaseGuard {
+   | --------------------- associated items in this implementation
+64 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+   |        ^^^
+...
+72 |     pub(crate) fn canonical_path(&self) -> &Path {
+   |                   ^^^^^^^^^^^^^^
+...
+76 |     pub(crate) fn owner_id(&self) -> &str {
+   |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:309:19
+    |
+105 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+309 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 16 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.85s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-65ba3c6eeb84e06e)
+
+running 242 tests
+test ipc::native_terminal::tests::test_classify_windows_clipboard_empty_when_no_text_or_image ... ok
+test ipc::native_terminal::tests::test_classify_clipboard_content_image_when_image_uti_or_non_empty_types ... ok
+test ipc::native_terminal::tests::test_classify_clipboard_content_empty_when_no_text_and_empty_types ... ok
+test ipc::native_terminal::tests::authoritative_mouse_event_scales_logical_position_to_physical_pixels ... ok
+test ipc::native_terminal::tests::authoritative_mouse_event_replaces_frontend_renderer_size ... ok
+test ipc::native_terminal::tests::test_classify_clipboard_content_prefers_non_empty_text ... ok
+test ipc::native_terminal::tests::authoritative_mouse_event_uses_rendered_physical_size_and_cell_metrics ... ok
+test ipc::native_terminal::tests::test_classify_windows_clipboard_image_when_bitmap_dib_hdrop_or_custom_image ... ok
+test ipc::native_terminal::tests::test_is_windows_image_or_file_format ... ok
+test ipc::native_terminal::tests::test_classify_windows_clipboard_prefers_text ... ok
+test native_terminal::composition::tests::test_is_child_compositor ... ok
+test native_terminal::composition::tests::test_active_for_platform_honest_descriptor_and_validation ... ok
+test native_terminal::composition::tests::test_validate_desktop_composition_accepts_supported_platform_kinds ... ok
+test native_terminal::composition::tests::test_validate_desktop_composition_rejects_missing_layer_backing ... ok
+test native_terminal::composition::tests::test_validate_desktop_composition_rejects_missing_pointer_transparency ... ok
+test native_terminal::composition::tests::test_validate_desktop_composition_rejects_root_webview_window ... ok
+test native_terminal::composition::tests::test_validate_desktop_composition_rejects_unsupported_fallback ... ok
+test ipc::native_terminal::tests::deferred_presentation_status_survives_the_ipc_boundary ... ok
+test ipc::native_terminal::tests::test_decode_windows_clipboard_utf16 ... ok
+test ipc::native_terminal::tests::test_clipboard_content_serde_tagged_format ... ok
+test ipc::native_terminal::tests::bounds_receipt_serializes_actual_presentation_status ... ok
+test ipc::native_terminal::tests::rejected_native_input_reports_that_no_pty_write_occurred ... ok
+test native_terminal::input::tests::native_terminal_input_deserializes_from_frontend_payloads ... ok
+test native_terminal::input::tests::natural_text_editing_chords_emit_ghostty_legacy_bytes ... ok
+test native_terminal::input::tests::non_natural_text_editing_chords_stay_on_the_encoder_path ... ok
+test native_terminal::input::tests::parse_browser_key_handles_named_keys_and_unicode_and_rejects_unsupported ... ok
+test native_terminal::key::tests::key_event_deserialize_from_json ... ok
+test native_terminal::key::tests::key_modifiers_deserialize_from_camel_case_json ... ok
+test native_terminal::cell_extractor::tests::test_extract_cell_snapshot_blink_roundtrip ... ok
+test native_terminal::cell_extractor::tests::test_extract_cell_snapshot_strikethrough_roundtrip ... ok
+test native_terminal::cell_extractor::tests::test_extract_cell_snapshot_invisible_roundtrip ... ok
+test native_terminal::cell_extractor::tests::test_extract_cell_snapshot_faint_roundtrip ... ok
+test native_terminal::cell_extractor::tests::test_extract_cell_snapshot_overline_roundtrip ... ok
+test native_terminal::input::tests::local_ime_input_updates_real_terminal_snapshot_with_wide_cells ... ok
+test native_terminal::input::tests::local_input_snapshot_survives_layout_resize ... ok
+test native_terminal::mouse::tests::mouse_event_deserializes_from_camel_case_wire_json ... ok
+test ipc::native_terminal::tests::pty_resize_queue_keeps_latest_size_for_each_pane ... ok
+test ipc::native_terminal::tests::pty_resize_queue_coalesces_updates_arriving_during_an_inflight_request ... ok
+test native_terminal::input::tests::encoded_routes_natural_text_editing_chords_past_the_key_encoder ... ok
+test native_terminal::input::tests::ctrl_c_frontend_payload_deserializes_and_encodes_control_character ... ok
+test native_terminal::input::tests::key_event_input_advances_terminal_state ... ok
+test ipc::native_terminal::tests::wire_receipt_reports_effective_presentation_scale ... ok
+test ipc::native_terminal::tests::test_native_terminal_drag_selection_written_to_unique_pasteboard ... ok
+test native_terminal::renderer::coretext_font::macos::tests::generic_monospace_keyword_resolves_to_a_fixed_pitch_face ... ok
+test native_terminal::renderer::coretext_font::macos::tests::detects_coretexts_silent_substitution_for_unknown_names ... ok
+test native_terminal::renderer::coretext_font::macos::tests::cell_metrics_come_from_the_resolved_primary_at_every_scale ... ok
+test native_terminal::renderer::coretext_font::macos::tests::nothing_installed_falls_back_to_the_platform_monospace_family ... ok
+test native_terminal::renderer::coretext_font::macos::tests::missing_primary_is_skipped_in_favour_of_the_first_installed_family ... ok
+test native_terminal::renderer::coretext_font::macos::tests::missing_families_never_reach_the_configured_fallback_tier ... ok
+test native_terminal::renderer::color_glyph::tests::test_rasterize_color_glyph_cat_emoji ... ok
+test native_terminal::renderer::font_manager::tests::test_meslo_lgs_nf_13pt_matches_ghostty_cell_geometry ... ok
+test native_terminal::renderer::color_glyph::tests::test_rasterize_color_glyph_orientation ... ok
+test native_terminal::renderer::color_glyph::tests::test_rasterize_color_glyph_complex_sequences ... ok
+test native_terminal::renderer::gpu_context::tests::chooses_opaque_compositing_when_the_surface_supports_it ... ok
+test native_terminal::renderer::gpu_context::tests::falls_back_to_auto_compositing_when_opaque_is_unavailable ... ok
+test native_terminal::renderer::gpu_context::tests::falls_back_to_srgb_surface_only_when_unorm_is_unavailable ... ok
+test native_terminal::renderer::gpu_context::tests::prefers_linear_unorm_surface_for_srgb_encoded_terminal_colors ... ok
+test native_terminal::renderer::font_manager::resolution_tests::resolves_a_configured_system_family_and_covers_box_drawing ... ok
+test native_terminal::renderer::font_manager::tests::test_glyph_placement_snaps_to_integral_physical_pixels ... ok
+test native_terminal::renderer::font_manager::tests::test_variable_font_korean_weight_instantiation ... ok
+test native_terminal::renderer::font_manager::tests::test_rasterization_determinism ... ok
+test native_terminal::renderer::font_manager::tests::test_font_manager_derives_nonzero_metrics_and_rasterizes ... ok
+test native_terminal::renderer::instances::tests::test_row_hash_invalidates_on_attribute_changes ... ok
+test native_terminal::renderer::font_manager::resolution_tests::test_color_glyph_detection_routing ... ok
+test native_terminal::renderer::font_manager::tests::test_glyph_orientation_regression ... ok
+test native_terminal::renderer::font_manager::tests::test_glyph_rasterization_avoids_fractional_shrink_within_rounding_tolerance ... ok
+test native_terminal::renderer::font_manager::tests::test_bold_hangul_ink_density ... ok
+test native_terminal::renderer::font_manager::tests::test_pua_non_hijack_and_unsupported_codepoint ... ok
+test native_terminal::renderer::font_manager::resolution_tests::rasterizes_the_glyphs_agents_actually_emit ... ok
+test native_terminal::renderer::instances::tests::test_cell_invisible_produces_zero_glyph_instances ... ok
+test native_terminal::renderer::atlas::tests::atlas_skips_all_zero_raster_without_allocating_slot ... ok
+test native_terminal::scroll::tests::test_compute_attention_frame_rects_exact_geometry ... ok
+test native_terminal::scroll::tests::test_compute_attention_frame_rects_zero_or_negative_returns_empty ... ok
+test native_terminal::scroll::tests::test_compute_scrollbar_overlay_rect_min_thumb_clamp ... ok
+test native_terminal::renderer::instances::tests::test_cell_overline_produces_rect_at_cell_top ... ok
+test native_terminal::scroll::tests::test_compute_scrollbar_overlay_rect_no_scrollback_returns_none ... ok
+test native_terminal::scroll::tests::test_compute_scrollbar_overlay_rect_normal_case_exact_geometry ... ok
+test native_terminal::scroll::tests::test_macos_wheel_scroll_rows_line_deltas ... ok
+test native_terminal::scroll::tests::test_macos_wheel_scroll_rows_precise_sign_and_scale ... ok
+test native_terminal::renderer::instances::tests::test_cell_strikethrough_produces_rect_in_vertical_middle ... ok
+test native_terminal::scroll::tests::test_macos_wheel_scroll_rows_zero_and_non_finite ... ok
+test native_terminal::renderer::instances::tests::test_cell_underline_produces_rect_in_lower_cell ... ok
+test native_terminal::selection::tests::mouse_gesture_without_authoritative_renderer_size_is_rejected ... ok
+test native_terminal::renderer::instances::tests::test_cell_faint_glyph_color_differs_from_non_faint ... ok
+test native_terminal::surface_error::tests::native_surface_timeout_drops_frame_without_terminal_failure ... ok
+test native_terminal::surface_error::tests::native_surface_occluded_drops_frame_without_terminal_failure ... ok
+test native_terminal::renderer::atlas::tests::test_atlas_color_and_mask_coexist ... ok
+test native_terminal::renderer::coretext_font::macos::tests::hangul_still_resolves_through_the_coretext_cascade ... ok
+test native_terminal::surface_host::tests::attach_daemon_attachment_with_bounds_tolerates_invalid_initial_bounds ... ok
+test native_terminal::surface_host::tests::attach_replayed_history_emits_title_for_new_and_existing_sessions ... ok
+test native_terminal::surface_host::tests::attach_replays_segmented_history_across_resizes ... ok
+test native_terminal::surface_host::tests::attach_replays_history_at_daemon_pty_size ... ok
+test native_terminal::surface_host::tests::detached_layout_cannot_restore_obsolete_geometry ... ok
+test native_terminal::surface_host::tests::bounds_ipc_presents_when_browser_child_is_open ... ok
+test native_terminal::surface_host::tests::detached_session_still_reports_agent_state_transitions ... ok
+test native_terminal::surface_host::tests::direct_execution_characterization ... ok
+test native_terminal::surface_host::tests::direct_retry_coalesces_with_existing_pending_render ... ok
+test native_terminal::surface_host::tests::direct_retry_focus_preserves_dropped_receipt ... ok
+test native_terminal::surface_host::tests::direct_retry_detach_or_close_before_dispatch_cannot_reveal_or_resurrect ... ok
+test native_terminal::surface_host::tests::empty_preedit_leaves_snapshot_grid_unchanged ... ok
+test native_terminal::surface_host::tests::deferred_bounds_retry_does_not_restore_obsolete_width ... ok
+test native_terminal::surface_host::tests::direct_retry_recovers_lost_then_timeout ... ok
+test native_terminal::surface_host::tests::ghostty_grid_resize_notifies_pty_with_matching_dimensions ... ok
+test native_terminal::surface_host::tests::direct_retry_scheduled_timeout_rearms_without_inline_recursion ... ok
+test native_terminal::surface_host::tests::native_terminal_surface_host_extracts_live_selection_snapshot_for_render_input ... ok
+test native_terminal::surface_host::tests::extension_reported_state_wins_over_screen_inference ... ok
+test native_terminal::surface_host::tests::preedit_clamps_at_row_end_without_writing_out_of_bounds ... ok
+test native_terminal::surface_host::tests::preedit_fully_replaces_existing_cell_text_colors_and_attributes ... ok
+test native_terminal::surface_host::tests::preedit_hangul_syllable_writes_wide_cell_and_underlined_spacer_tail ... ok
+test native_terminal::surface_host::tests::preedit_narrow_ascii_overwrites_cells_with_underlines_without_moving_cursor ... ok
+test native_terminal::surface_host::tests::driver_edge_triggered_agent_state_emission ... ok
+test native_terminal::surface_host::tests::presentation_ownership_stays_attached_until_host_guard_is_released ... ok
+test native_terminal::surface_host::tests::receipt_reports_effective_presentation_scale ... ok
+test native_terminal::surface_host::tests::render_schedule_coordinator_burst_coalescing_and_consumption_lifecycle ... ok
+test native_terminal::surface_host::tests::render_schedule_coordinator_stays_pending_until_frame_completion ... ok
+test native_terminal::surface_host::tests::reattach_existing_session_with_bounds_tolerates_invalid_bounds ... ok
+test native_terminal::surface_host::tests::direct_retry_fatal_errors_do_not_loop ... ok
+test native_terminal::surface_host::tests::output_presents_when_browser_child_is_open ... ok
+test native_terminal::surface_host::tests::surface_host_drop_order_guarantees_surface_drops_before_target ... ok
+test native_terminal::surface_host::tests::one_shot_render_requeues_when_frame_is_dropped ... ok
+test native_terminal::surface_host::tests::surface_receipt_carries_render_snapshot_cursor_geometry ... ok
+test native_terminal::surface_host::tests::resize_keeps_viewport_at_bottom_when_at_bottom ... ok
+test native_terminal::surface_host::tests::resize_preserves_scrollback_ratio_when_scrolled_up ... ok
+test native_terminal::surface_host::tests::ssh_reconnect_safety_native_status_reaches_desktop ... ok
+test native_terminal::surface_host::tests::lagged_recovery_restores_grid_to_pane_layout_dimensions ... ok
+test native_terminal::surface_host::tests::test_set_attention_frame_updates_session_state ... ok
+test native_terminal::surface_host::tests::synchronized_output_bounds_ipc_waits_for_actual_presentation ... ok
+test native_terminal::terminal::tests::native_terminal_alternate_screen_detection ... ok
+test native_terminal::terminal::tests::native_terminal_double_click_drag_extends_selection_by_word ... ok
+test native_terminal::terminal::tests::native_terminal_double_click_selects_word_and_triple_click_selects_line ... ok
+test native_terminal::terminal::tests::native_terminal_ffi_probe_bel_reports_counter_observation ... ok
+test native_terminal::terminal::tests::native_terminal_ffi_probe_osc_2_reports_title_change_and_value ... ok
+test native_terminal::terminal::tests::native_terminal_pointer_drag_installs_a_text_selection ... ok
+test native_terminal::terminal::tests::synchronized_output_survives_resize_until_redraw_completes ... ok
+test native_terminal::surface_host::tests::synchronized_output_pump_presents_only_the_completed_redraw ... ok
+test native_terminal::terminal::tests::synchronized_output_uses_vt_mode_and_a_bounded_deadline ... ok
+test native_terminal::terminal::tests::test_full_palette_defaults_cube_grays_and_overrides ... ok
+test native_terminal::terminal::tests::test_apply_theme_preferences_on_terminal ... ok
+test native_terminal::terminal::tests::test_line_text_at_preserves_leading_whitespace_for_indented_lines ... ok
+test native_terminal::terminal::tests::test_line_text_at_reads_unwrapped_line_without_modifying_selection ... ok
+test native_terminal::terminal::tests::test_selection_with_scrollback ... ok
+test native_terminal::wheel::tests::test_wheel_alternate_screen_encodes_arrow_keys ... ok
+test native_terminal::wheel::tests::test_wheel_alternate_screen_shift_overrides_to_viewport ... ok
+test native_terminal::wheel::tests::test_wheel_primary_screen_returns_viewport ... ok
+test native_terminal::wheel::tests::test_wheel_with_mouse_tracking_shift_overrides_to_viewport ... ok
+test native_terminal::wheel::tests::test_wheel_zero_rows_returns_none ... ok
+test terminal::output_hub::tests::ssh_process_survival_gap_precedes_recovered_bytes_and_invalidates_history ... ok
+test terminal::output_hub::tests::test_bounded_buffer_overflow ... ok
+test native_terminal::wheel::tests::test_wheel_with_mouse_tracking_encodes_sgr_wheel ... ok
+test terminal::output_hub::tests::test_bounded_history_sequence_range_and_eviction ... ok
+test terminal::output_hub::tests::test_monotonic_u64_sequences_per_session ... ok
+test native_terminal::surface_host::tests::synchronized_output_pump_recovers_a_missing_end_without_more_output ... ok
+test terminal::output_hub::tests::test_output_hub_bracketed_paste_retention_on_eviction ... ok
+test terminal::output_hub::tests::test_output_hub_initial_size_and_eviction_segmented_snapshot ... ok
+test terminal::output_hub::tests::test_output_hub_replay_and_broadcast ... ok
+test terminal::output_hub::tests::test_output_hub_resize_ledger_and_segmented_snapshot ... ok
+test terminal::output_hub::tests::test_replay_after_last_emitted_sequence_is_bounded_unless_evicted ... ok
+test terminal::output_hub::tests::test_replay_after_sequence_partial_and_up_to_date ... ok
+test terminal::output_hub::tests::test_replay_gap_detection_on_eviction ... ok
+test terminal::output_hub::tests::test_output_hub_resize_with_no_output_after_produces_trailing_segment ... ok
+test terminal::preferences::tests::test_apply_terminal_preference_overrides_shell ... ok
+test terminal::preferences::tests::test_empty_font_family_resets_list ... ok
+test terminal::output_hub::tests::test_subscriber_first_attachment_ordering_prevents_lost_chunks ... ok
+test terminal::preferences::tests::test_scrollback_parsing_and_overrides ... ok
+test terminal::preferences::tests::test_palette_hex_and_256_colors ... ok
+test terminal::preferences::tests::test_find_ghostty_binary_on_path_and_theme_candidates ... ok
+test terminal::pty::tests::utf8_locale_override_injected_when_environment_selects_no_locale ... ok
+test terminal::pty::tests::utf8_locale_override_respects_explicit_locale_variables ... ok
+test terminal::pty::tests::utf8_locale_override_treats_empty_locale_variables_as_unset ... ok
+test native_terminal::surface_host::tests::synchronized_output_does_not_present_partial_redraw ... ok
+test terminal::remote_runtime_tests::ssh_daemon_restart_descriptor_only_and_drop_does_not_stop ... ok
+test terminal::remote_runtime_tests::ssh_daemon_restart_rejects_duplicate_target_controller ... ok
+test terminal::remote_runtime_tests::ssh_reconnect_safety_authentication_on_redial_stops_retries ... ok
+test terminal::remote_runtime_tests::ssh_process_survival_same_target_replay_and_close ... ok
+test terminal::remote_runtime_tests::ssh_reconnect_safety_erased_ipc_errors_are_not_classified_by_prose ... ok
+test terminal::remote_runtime_tests::ssh_reconnect_safety_failure_classification ... ok
+test terminal::remote_runtime_tests::ssh_reconnect_safety_control_failure_interrupts_pending_read ... ok
+test terminal::remote_runtime_tests::ssh_reconnect_safety_setup_classifies_structured_transport_and_authentication ... ok
+test native_terminal::surface_host::tests::synchronized_output_bounds_ipc_finishes_on_detach_or_stream_end ... ok
+test terminal::resume_cwd::tests::non_omo_startups_keep_their_existing_directory_contract ... ok
+test terminal::remote_runtime_tests::ssh_reconnect_safety_retry_cap_and_terminal_failure ... ok
+test terminal::resume_cwd::tests::rejects_missing_legacy_session_instead_of_using_pane_root ... ok
+test native_terminal::surface_host::tests::warm_return_reasserts_pty_size_without_replaying_terminal ... ok
+test terminal::resume_cwd::tests::rejects_conflicting_project_directories_for_same_id ... ok
+test terminal::resume_cwd::tests::rejects_relative_project_directory ... ok
+test terminal::resume_cwd::tests::rejects_transcript_belonging_to_another_session ... ok
+test terminal::resume_cwd::tests::restores_nested_project_from_reported_transcript ... ok
+test terminal::resume_cwd::tests::repairs_legacy_id_only_state_from_exact_session_header ... ok
+test terminal::shell::tests::test_agent_resume_validates_bounded_absolute_transcript_paths ... ok
+test terminal::shell::tests::test_agent_resume_validation_rejects_control_characters ... ok
+test terminal::shell::tests::test_agent_resume_validation_rejects_empty_or_too_long ... ok
+test terminal::shell::tests::test_agent_resume_validation_rejects_latest ... ok
+test terminal::shell::tests::test_agent_resume_validation_rejects_leading_dash ... ok
+test terminal::shell::tests::test_agent_resume_validation_rejects_missing_transcript_for_pi_and_prime ... ok
+test terminal::shell::tests::test_agent_resume_validation_rejects_unsupported_agent ... ok
+test terminal::shell::tests::test_agent_resume_validation_rejects_wrong_key ... ok
+test terminal::shell::tests::test_custom_shell_keeps_no_login_flag ... ok
+test terminal::shell::tests::test_custom_path_passthrough ... ok
+test terminal::shell::tests::test_empty_and_whitespace_preference_treated_as_default ... ok
+test terminal::shell::tests::test_linux_default ... ok
+test terminal::shell::tests::test_macos_default_with_shell_env ... ok
+test terminal::shell::tests::test_macos_default_without_shell_env ... ok
+test terminal::shell::tests::test_resolve_agent_resume_all_supported_mappings ... ok
+test terminal::shell::tests::test_resolve_agent_resume_omo_never_uses_session_id_flag ... ok
+test terminal::resume_cwd::tests::rejects_fifo_transcripts ... ok
+test terminal::shell::tests::test_resolve_startup_command_pure_fallback_to_shell ... ok
+test terminal::shell::tests::test_windows_default_pwsh_absent ... ok
+test terminal::shell::tests::test_windows_default_pwsh_present ... ok
+test terminal::shell::tests::test_windows_explicit_choices ... ok
+test terminal::resume_cwd::tests::resolved_resume_directory_is_used_by_a_real_process ... ok
+test native_terminal::renderer::renderer::tests::oversized_glyph_is_rejected_before_shelf_placement ... ok
+test native_terminal::surface_host::tests::attached_throttled_burst_still_emits_trailing_state_transition ... ok
+test terminal::shell::tests::test_qa_happy_claude_resume_creates_command_builder_without_executing ... ok
+test terminal::shell::tests::test_resolve_startup_command_omo_resolves_executable_path ... ok
+test terminal::tests::interrupt_signal_targets_foreground_pty_process_group ... ok
+test terminal::tests::close_session_is_idempotent ... ok
+test terminal::tests::explicit_close_kills_reaps_and_removes_session ... ok
+test terminal::tests::spawned_pty_advertises_a_real_terminal_type ... ok
+test terminal::tests::spawned_pty_advertises_truecolor_support ... ok
+test terminal::tests::terminal_service_natural_exit_closes_daemon_owned_output_stream ... ok
+test terminal::pty::tests::close_after_interrupt_still_succeeds_via_escalation_and_reap ... ok
+test terminal::tests::test_kill ... ok
+test terminal::tests::test_lifecycle_poll_interval_is_relaxed_and_event_driven ... ok
+test terminal::tests::natural_child_exit_auto_removes_session_and_records_exit_code ... ok
+test terminal::tests::test_resize ... ok
+test terminal::tests::test_session_lifecycle_and_errors ... ok
+test terminal::tests::dropped_output_receiver_still_cleans_reader_and_session ... ok
+test terminal::tests::test_spawn_startup_command_omo ... ok
+test terminal::tests::test_spawn_write_echo_and_read ... ok
+test terminal::tests::test_terminal_service_sequence_safe_attach_and_replay ... ok
+test native_terminal::renderer::renderer::tests::last_frame_renders_new_glyph_when_only_history_fills_atlas ... ok
+test terminal::tests::fast_spawn_close_race_is_safe ... ok
+test terminal::tests::resize_is_observed_by_the_child_shell ... ok
+test native_terminal::renderer::atlas::tests::atlas_overflow_never_invalidates_earlier_entries_mid_frame ... ok
+test terminal::pty::tests::close_escalates_term_ignoring_process_group_and_reaps_bounded_without_touching_sibling ... ok
+test native_terminal::renderer::renderer::tests::tracked_payload_matches_textures_entries_clear_and_config_changes ... ok
+test native_terminal::renderer::renderer::tests::all_visible_glyphs_survive_when_dense_2x_working_set_repeats ... ok
+test native_terminal::renderer::renderer::tests::empty_rasters_do_not_force_atlas_growth_under_pressure ... ok
+test terminal::tests::test_multiple_concurrent_sessions ... ok
+test native_terminal::renderer::renderer::tests::surface_entry_paths_complete_dense_frames_before_submission ... ok
+test native_terminal::renderer::renderer::tests::failed_frame_cannot_be_reused_as_partial_success ... ok
+test native_terminal::renderer::renderer::tests::dense_working_set_grows_across_multiple_atlas_sizes ... ok
+
+test result: ok. 242 passed; 0 failed; 0 ignored; 0 measured; 596 filtered out; finished in 5.01s

@@ -6,6 +6,20 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tempfile::TempDir;
 
+#[test]
+fn ssh_reconnect_safety_setup_error_preserves_structured_fields() {
+    // Given: setup failed with a machine-readable code and diagnostic details.
+    let expected = IpcError::new(crate::ipc::IpcErrorCode::IoError, "opaque diagnostic")
+        .with_details(serde_json::json!({"stage": "transport", "exitCode": 255}));
+    // When: the error crosses the bridge boundary.
+    let converted = BridgeError::from(expected.clone());
+    // Then: the runtime can classify the original fields without parsing prose.
+    match converted {
+        BridgeError::SshSetup(actual) => assert_eq!(actual, expected),
+        other => panic!("Setup error lost its structured fields: {other:?}"),
+    }
+}
+
 fn helper_binary_path() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let debug_path = manifest_dir.join("../remote-helper/target/debug/ferryx-remote-helper");

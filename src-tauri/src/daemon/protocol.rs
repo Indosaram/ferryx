@@ -52,8 +52,8 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalStartup {
-    /// Desktop-derived inventory location; the daemon resolves the workspace and
-    /// enabled host from disk on every spawn. Never accepts an arbitrary program.
+    /// Compatibility field only: must equal the daemon-configured inventory location.
+    /// The daemon resolves the registered project and enabled host from disk.
     #[serde(rename_all = "camelCase")]
     RemoteSsh { host_store_path: std::path::PathBuf },
     #[serde(rename_all = "camelCase")]
@@ -162,6 +162,14 @@ pub enum DaemonRequest {
     Close {
         session_id: String,
     },
+    #[serde(rename_all = "camelCase")]
+    RetryRemoteSession { session_id: String },
+    #[serde(rename_all = "camelCase")]
+    RemoteSessionDetails { session_id: String },
+    #[serde(rename_all = "camelCase")]
+    RemoteWrite { session_id: String, generation: u64, #[serde(with = "base64_serde")] data: Vec<u8> },
+    #[serde(rename_all = "camelCase")]
+    RemoteResize { session_id: String, generation: u64, cols: u16, rows: u16 },
     ListSessions,
     #[serde(rename_all = "camelCase")]
     DescribeSession {
@@ -263,6 +271,11 @@ pub enum DaemonResponse {
         provider_id: String,
         existing_session_id: String,
     },
+    #[serde(rename_all = "camelCase")]
+    RemoteSessionDetailsOk { details: Option<crate::terminal::remote::RemoteSessionDetails>, legacy_direct_ssh: bool },
+    #[serde(rename_all = "camelCase")]
+    RemoteSessionError { failure: crate::terminal::remote::RemoteFailure },
+    RetryRemoteSessionOk,
     WriteOk,
     ResizeOk,
     SignalOk,
@@ -389,6 +402,14 @@ pub enum DaemonStreamMessage<'a> {
         agent: Option<Cow<'a, str>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_session: Option<AgentProviderSession>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoteStatus {
+        session_id: Cow<'a, str>,
+        state: crate::terminal::remote::RemoteConnectionState,
+        generation: u64,
+        failure: Option<crate::terminal::remote::RemoteFailure>,
+        replay_gap: Option<crate::terminal::remote::RemoteReplayGap>,
     },
     #[serde(rename_all = "camelCase")]
     Exit {

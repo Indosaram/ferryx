@@ -36,6 +36,7 @@ pub struct SshHostStore {
 }
 
 pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
+    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR") { return Ok(PathBuf::from(dir).join("ssh_hosts.json")); }
     let app_dir = app.path().app_data_dir().map_err(|e| {
         IpcError::new(
             IpcErrorCode::IoError,
@@ -267,6 +268,21 @@ pub async fn cmd_ssh_test_connection(host: SshHost) -> Result<SshTargetSummary, 
         diagnostic,
         checked_at: now_millis(),
     })
+}
+
+/// Explicit user-selected artifact installation; no build or download is performed.
+#[tauri::command]
+pub async fn cmd_ssh_install_project_helper<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    local_binary: PathBuf,
+) -> Result<crate::ssh::helper_setup::HelperLocation, IpcError> {
+    let store = get_ssh_store_path(&app)?;
+    let (_, host) = super::run_blocking(move || crate::ssh::projects::resolve(&store, &workspace_id)).await?;
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    let location = crate::ssh::helper_setup::default_location(&host, &environment)?;
+    crate::ssh::helper_setup::install(&host, &environment, &location, &local_binary).await?;
+    Ok(location)
 }
 
 #[tauri::command]

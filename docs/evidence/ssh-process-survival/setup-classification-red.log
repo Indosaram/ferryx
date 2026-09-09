@@ -1,0 +1,223 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+error[E0004]: non-exhaustive patterns: `Some(daemon::protocol::DaemonStreamMessage::RemoteStatus { .. })` not covered
+   --> src/ipc/terminal.rs:118:19
+    |
+118 |             match next {
+    |                   ^^^^ pattern `Some(daemon::protocol::DaemonStreamMessage::RemoteStatus { .. })` not covered
+    |
+note: `std::option::Option<daemon::protocol::DaemonStreamMessage<'_>>` defined here
+   --> /Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:599:1
+    |
+599 | pub enum Option<T> {
+    | ^^^^^^^^^^^^^^^^^^
+...
+607 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ---- not covered
+    = note: the matched value is of type `std::option::Option<daemon::protocol::DaemonStreamMessage<'_>>`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+281 ~                 None => break,
+282 ~                 Some(daemon::protocol::DaemonStreamMessage::RemoteStatus { .. }) => todo!(),
+    |
+
+error[E0004]: non-exhaustive patterns: `Ok(daemon::protocol::DaemonStreamMessage::RemoteStatus { .. })` not covered
+   --> src/ipc/terminal.rs:132:31
+    |
+132 |                         match messages.try_recv() {
+    |                               ^^^^^^^^^^^^^^^^^^^ pattern `Ok(daemon::protocol::DaemonStreamMessage::RemoteStatus { .. })` not covered
+    |
+note: `std::result::Result<daemon::protocol::DaemonStreamMessage<'_>, tokio::sync::mpsc::error::TryRecvError>` defined here
+   --> /Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:557:1
+    |
+557 | pub enum Result<T, E> {
+    | ^^^^^^^^^^^^^^^^^^^^^
+...
+561 |     Ok(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     -- not covered
+    = note: the matched value is of type `std::result::Result<daemon::protocol::DaemonStreamMessage<'_>, tokio::sync::mpsc::error::TryRecvError>`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+207 ~                             Err(_) => break,
+208 ~                             Ok(daemon::protocol::DaemonStreamMessage::RemoteStatus { .. }) => todo!(),
+    |
+
+warning: variable does not need to be mutable
+  --> src/ipc/terminal.rs:90:9
+   |
+90 |     let mut messages = attachment.messages;
+   |         ----^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `epoch`
+  --> src/ipc/terminal.rs:89:9
+   |
+89 |     let epoch = attachment.epoch;
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_epoch`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `messages`
+  --> src/ipc/terminal.rs:90:9
+   |
+90 |     let mut messages = attachment.messages;
+   |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_messages`
+
+warning: unused variable: `session_id_clone`
+  --> src/ipc/terminal.rs:91:9
+   |
+91 |     let session_id_clone = session_id.clone();
+   |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_id_clone`
+
+warning: unused variable: `app`
+  --> src/ipc/terminal.rs:92:9
+   |
+92 |     let app = app_handle.clone();
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_app`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+error[E0004]: non-exhaustive patterns: `daemon::protocol::DaemonStreamMessage::RemoteStatus { .. }` not covered
+    --> src/native_terminal/surface_host.rs:1420:23
+     |
+1420 |                 match msg {
+     |                       ^^^ pattern `daemon::protocol::DaemonStreamMessage::RemoteStatus { .. }` not covered
+     |
+note: `daemon::protocol::DaemonStreamMessage<'_>` defined here
+    --> src/daemon/protocol.rs:369:10
+     |
+ 369 | pub enum DaemonStreamMessage<'a> {
+     |          ^^^^^^^^^^^^^^^^^^^
+...
+ 407 |     RemoteStatus {
+     |     ------------ not covered
+     = note: the matched value is of type `daemon::protocol::DaemonStreamMessage<'_>`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+     |
+1608 ~                     },
+1609 +                     daemon::protocol::DaemonStreamMessage::RemoteStatus { .. } => todo!()
+     |
+
+warning: variable does not need to be mutable
+    --> src/native_terminal/surface_host.rs:1333:13
+     |
+1333 |         let mut messages = attachment.messages;
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `update_sender`
+    --> src/native_terminal/surface_host.rs:1208:14
+     |
+1208 |         let (update_sender, render_coordinator, events) = {
+     |              ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_update_sender`
+
+warning: unused variable: `render_coordinator`
+    --> src/native_terminal/surface_host.rs:1208:29
+     |
+1208 |         let (update_sender, render_coordinator, events) = {
+     |                             ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_render_coordinator`
+
+warning: unused variable: `messages`
+    --> src/native_terminal/surface_host.rs:1333:13
+     |
+1333 |         let mut messages = attachment.messages;
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_messages`
+
+warning: unused variable: `sessions`
+    --> src/native_terminal/surface_host.rs:1334:13
+     |
+1334 |         let sessions = Arc::clone(&self.sessions);
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sessions`
+
+warning: unused variable: `hosts`
+    --> src/native_terminal/surface_host.rs:1335:13
+     |
+1335 |         let hosts = Arc::clone(&self.hosts);
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_hosts`
+
+warning: unused variable: `event_sink`
+    --> src/native_terminal/surface_host.rs:1336:13
+     |
+1336 |         let event_sink = Arc::clone(&self.event_sink);
+     |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_event_sink`
+
+warning: unused variable: `session_id_owned`
+    --> src/native_terminal/surface_host.rs:1337:13
+     |
+1337 |         let session_id_owned = session_id.to_string();
+     |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_id_owned`
+
+warning: unused variable: `app_handle`
+    --> src/native_terminal/surface_host.rs:1338:13
+     |
+1338 |         let app_handle = app;
+     |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_app_handle`
+
+For more information about this error, try `rustc --explain E0004`.
+warning: `ferryx` (lib test) generated 24 warnings
+error: could not compile `ferryx` (lib test) due to 3 previous errors; 24 warnings emitted

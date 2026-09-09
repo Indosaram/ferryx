@@ -445,6 +445,14 @@ impl LegacyPeer {
                                 sequence,
                                 bytes: data.into_owned().into(),
                                 metrics_read_unix_micros,
+                                replay_gap: None,
+                            });
+                        }
+                        DaemonStreamMessage::Gap { requested_after_sequence, available_from_sequence, .. } => {
+                            let _ = tx.send(OutputChunk {
+                                sequence: available_from_sequence.saturating_sub(1),
+                                bytes: Vec::new().into(), metrics_read_unix_micros: None,
+                                replay_gap: Some(crate::terminal::output_hub::ReplayGap { requested_after_sequence, available_from_sequence }),
                             });
                         }
                         DaemonStreamMessage::Exit { .. } => {
@@ -534,6 +542,7 @@ impl SessionRouter {
 
     pub fn is_local_session(&self, session_id: &str) -> bool {
         self.terminal_service.get_session(session_id).is_some()
+            || self.terminal_service.remote().contains(session_id)
     }
 
     pub fn find_legacy_peer_for_session(&self, session_id: &str) -> Option<Arc<LegacyPeer>> {
@@ -572,6 +581,9 @@ impl RemoteSessionBackend for SessionRouter {
         let session_id = session_id.to_string();
         Box::pin(async move {
             self.validate_ssh_workspace(&session_id).await?;
+            if let Some(details) = self.terminal_service.remote().details(&session_id) {
+                return Ok(RemoteSessionDetails { session_id, workspace_id: Some(details.descriptor.config.project_id), worktree_label: None, worktree_path: Some(PathBuf::from(details.descriptor.config.project_path)), running: details.state == crate::terminal::remote::RemoteConnectionState::Connected, cols: details.descriptor.cols, rows: details.descriptor.rows });
+            }
             if self.is_local_session(&session_id) {
                 let session = self
                     .terminal_service
@@ -636,9 +648,8 @@ impl RemoteSessionBackend for SessionRouter {
         Box::pin(async move {
             self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
-                self.terminal_service
-                    .write_input(&session_id, &data)
-                    .map_err(|e| e.to_string())
+                let generation = self.terminal_service.remote().details(&session_id).map(|d| d.generation).unwrap_or(0);
+                self.terminal_service.write_input_operation(&session_id, generation, data).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
             } else if let Some(peer) = self.find_legacy_peer_for_session(&session_id) {
                 peer.write_input(&session_id, &data).await
             } else {
@@ -652,9 +663,8 @@ impl RemoteSessionBackend for SessionRouter {
         Box::pin(async move {
             self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
-                self.terminal_service
-                    .resize(&session_id, cols, rows)
-                    .map_err(|e| e.to_string())
+                let generation = self.terminal_service.remote().details(&session_id).map(|d| d.generation).unwrap_or(0);
+                self.terminal_service.resize_operation(&session_id, generation, cols, rows).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
             } else if let Some(peer) = self.find_legacy_peer_for_session(&session_id) {
                 peer.resize(&session_id, cols, rows).await
             } else {

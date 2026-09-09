@@ -228,6 +228,9 @@ pub enum BridgeError {
     #[error("SSH plan error: {0}")]
     SshPlan(String),
 
+    #[error("SSH setup error: {}", .0.message)]
+    SshSetup(IpcError),
+
     #[error("Process spawn failed: {0}")]
     ProcessSpawn(String),
 
@@ -275,7 +278,7 @@ pub enum BridgeError {
 
 impl From<IpcError> for BridgeError {
     fn from(err: IpcError) -> Self {
-        BridgeError::SshPlan(err.message)
+        BridgeError::SshSetup(err)
     }
 }
 

@@ -1,0 +1,199 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+error[E0599]: no method named `restore_remote_sessions_at` found for struct `std::sync::Arc<daemon::server::DaemonServer>` in the current scope
+    --> src/daemon/server.rs:1149:14
+     |
+1149 |         self.restore_remote_sessions_at(self.remote_sessions_path.clone()).await?;
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `std::sync::Arc<daemon::server::DaemonServer>`
+
+error[E0004]: non-exhaustive patterns: `Ok(daemon::protocol::DaemonRequest::RetryRemoteSession { .. })`, `Ok(daemon::protocol::DaemonRequest::RemoteSessionDetails { .. })`, `Ok(daemon::protocol::DaemonRequest::RemoteWrite { .. })` and 1 more not covered
+    --> src/daemon/server.rs:1210:38
+     |
+1210 |                     let resp = match req {
+     |                                      ^^^ patterns `Ok(daemon::protocol::DaemonRequest::RetryRemoteSession { .. })`, `Ok(daemon::protocol::DaemonRequest::RemoteSessionDetails { .. })`, `Ok(daemon::protocol::DaemonRequest::RemoteWrite { .. })` and 1 more not covered
+     |
+note: `std::result::Result<daemon::protocol::DaemonRequest, serde_json::Error>` defined here
+    --> /Users/indo/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:557:1
+     |
+ 557 | pub enum Result<T, E> {
+     | ^^^^^^^^^^^^^^^^^^^^^
+...
+ 561 |     Ok(#[stable(feature = "rust1", since = "1.0.0")] T),
+     |     -- not covered
+     = note: the matched value is of type `std::result::Result<daemon::protocol::DaemonRequest, serde_json::Error>`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern as shown, or multiple match arms
+     |
+1669 ~                 },
+1670 ~                 _ => todo!(),
+     |
+
+error[E0599]: no method named `spawn_remote` found for reference `&daemon::server::DaemonServer` in the current scope
+    --> src/daemon/server.rs:2027:25
+     |
+2027 |             return self.spawn_remote(project, host, client_request_id, worktree, cwd, cols, rows, spawn_fingerprint).await;
+     |                         ^^^^^^^^^^^^ method not found in `&daemon::server::DaemonServer`
+
+error[E0599]: no method named `persist_remote_sessions_at` found for reference `&daemon::server::DaemonServer` in the current scope
+    --> src/daemon/server.rs:2185:14
+     |
+2185 |         self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await.map_err(crate::terminal::PtyError::Other)?;
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&daemon::server::DaemonServer`
+
+error[E0282]: type annotations needed
+    --> src/daemon/server.rs:2185:9
+     |
+2185 |         self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await.map_err(crate::terminal::PtyError::Other)?;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0425]: cannot find function `daemon_ssh_store_path` in this scope
+   --> src/daemon/server.rs:960:29
+    |
+960 |             ssh_store_path: daemon_ssh_store_path(),
+    |                             ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0599]: no method named `persist_remote_sessions_at` found for struct `daemon::server::DaemonServer` in the current scope
+   --> src/daemon/ssh_survival_tests.rs:14:12
+    |
+ 14 |     server.persist_remote_sessions_at(path.clone()).await.unwrap();
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `daemon::server::DaemonServer`
+    |
+   ::: src/daemon/server.rs:831:1
+    |
+831 | pub struct DaemonServer {
+    | ----------------------- method `persist_remote_sessions_at` not found for this struct
+
+error[E0282]: type annotations needed
+  --> src/daemon/ssh_survival_tests.rs:14:5
+   |
+14 |     server.persist_remote_sessions_at(path.clone()).await.unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0599]: no method named `restore_remote_sessions_at` found for struct `daemon::server::DaemonServer` in the current scope
+   --> src/daemon/ssh_survival_tests.rs:17:14
+    |
+ 17 |     restored.restore_remote_sessions_at(path).await.unwrap();
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `daemon::server::DaemonServer`
+    |
+   ::: src/daemon/server.rs:831:1
+    |
+831 | pub struct DaemonServer {
+    | ----------------------- method `restore_remote_sessions_at` not found for this struct
+
+error[E0282]: type annotations needed
+  --> src/daemon/ssh_survival_tests.rs:17:5
+   |
+17 |     restored.restore_remote_sessions_at(path).await.unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0599]: no variant or associated item named `SshSetup` found for enum `ssh::bridge::BridgeError` in the current scope
+   --> src/ssh/bridge_tests.rs:18:22
+    |
+ 18 |         BridgeError::SshSetup(actual) => assert_eq!(actual, expected),
+    |                      ^^^^^^^^ variant or associated item not found in `ssh::bridge::BridgeError`
+    |
+   ::: src/ssh/bridge.rs:224:1
+    |
+224 | pub enum BridgeError {
+    | -------------------- variant or associated item `SshSetup` not found for this enum
+
+error[E0004]: non-exhaustive patterns: `&daemon::protocol::DaemonRequest::RetryRemoteSession { .. }`, `&daemon::protocol::DaemonRequest::RemoteSessionDetails { .. }`, `&daemon::protocol::DaemonRequest::RemoteWrite { .. }` and 1 more not covered
+   --> src/daemon/client.rs:118:11
+    |
+118 |     match req {
+    |           ^^^ patterns `&daemon::protocol::DaemonRequest::RetryRemoteSession { .. }`, `&daemon::protocol::DaemonRequest::RemoteSessionDetails { .. }`, `&daemon::protocol::DaemonRequest::RemoteWrite { .. }` and 1 more not covered
+    |
+note: `daemon::protocol::DaemonRequest` defined here
+   --> src/daemon/protocol.rs:116:10
+    |
+116 | pub enum DaemonRequest {
+    |          ^^^^^^^^^^^^^
+...
+166 |     RetryRemoteSession { session_id: String },
+    |     ------------------ not covered
+167 |     #[serde(rename_all = "camelCase")]
+168 |     RemoteSessionDetails { session_id: String },
+    |     -------------------- not covered
+169 |     #[serde(rename_all = "camelCase")]
+170 |     RemoteWrite { session_id: String, generation: u64, #[serde(with = "base64_serde")] data: Vec<u8> },
+    |     ----------- not covered
+171 |     #[serde(rename_all = "camelCase")]
+172 |     RemoteResize { session_id: String, generation: u64, cols: u16, rows: u16 },
+    |     ------------ not covered
+    = note: the matched value is of type `&daemon::protocol::DaemonRequest`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern as shown, or multiple match arms
+    |
+147 ~         DaemonRequest::Shutdown => "shutdown",
+148 ~         _ => todo!(),
+    |
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0004, E0282, E0425, E0599.
+For more information about an error, try `rustc --explain E0004`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 12 previous errors; 10 warnings emitted

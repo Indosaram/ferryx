@@ -118,6 +118,10 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
     match req {
         DaemonRequest::Handshake { .. } => "handshake",
         DaemonRequest::Ping => "ping",
+        DaemonRequest::RetryRemoteSession { .. } => "retryRemoteSession",
+        DaemonRequest::RemoteSessionDetails { .. } => "remoteSessionDetails",
+        DaemonRequest::RemoteWrite { .. } => "remoteWrite",
+        DaemonRequest::RemoteResize { .. } => "remoteResize",
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
         DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
         DaemonRequest::Spawn { .. } => "spawn",
@@ -1119,6 +1123,14 @@ impl DaemonClient {
                 "Unexpected daemon response for attach",
             )),
         }
+    }
+
+    pub async fn remote_session_status(&self, session_id: &str) -> Result<DaemonResponse, IpcError> {
+        self.send_request(DaemonRequest::RemoteSessionDetails { session_id: session_id.into() }).await
+    }
+
+    pub async fn retry_remote_session(&self, session_id: &str) -> Result<DaemonResponse, IpcError> {
+        self.send_request(DaemonRequest::RetryRemoteSession { session_id: session_id.into() }).await
     }
 
     pub async fn write_terminal(&self, session_id: &str, data: Vec<u8>) -> Result<(), IpcError> {

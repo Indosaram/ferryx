@@ -1,0 +1,156 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+error[E0560]: struct `output_hub::OutputChunk` has no field named `replay_gap`
+   --> src/daemon/proxy.rs:448:33
+    |
+448 | ...                   replay_gap: None,
+    |                       ^^^^^^^^^^ `output_hub::OutputChunk` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0560]: struct `output_hub::OutputChunk` has no field named `replay_gap`
+   --> src/daemon/proxy.rs:455:33
+    |
+455 | ...                   replay_gap: Some(crate::terminal::output_hub::ReplayGap { requested_after_sequence, available_from_sequence }),
+    |                       ^^^^^^^^^^ `output_hub::OutputChunk` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0609]: no field `replay_gap` on type `output_hub::OutputChunk`
+    --> src/daemon/server.rs:2618:47
+     |
+2618 |                     if let Some(gap) = &chunk.replay_gap {
+     |                                               ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `sequence`, `bytes`, `metrics_read_unix_micros`
+
+error[E0609]: no field `replay_gap` on type `output_hub::OutputChunk`
+    --> src/daemon/server.rs:2656:41
+     |
+2656 | ...                   if next.replay_gap.is_some() { pending = Some(Ok(next)); break; }
+     |                               ^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `sequence`, `bytes`, `metrics_read_unix_micros`
+
+error[E0599]: no method named `publish_gap` found for struct `std::sync::Arc<output_hub::TerminalOutputHub>` in the current scope
+   --> src/daemon/ssh_survival_tests.rs:47:9
+    |
+ 47 |     hub.publish_gap("gap-session");
+    |         ^^^^^^^^^^^
+    |
+help: there is a method `publish` with a similar name, but with different arguments
+   --> src/terminal/output_hub.rs:442:5
+    |
+442 |     pub fn publish(&self, session_id: &str, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0560]: struct `output_hub::OutputChunk` has no field named `replay_gap`
+    --> src/daemon/server.rs:2809:13
+     |
+2809 |             replay_gap: None,
+     |             ^^^^^^^^^^ `output_hub::OutputChunk` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0599]: no method named `publish_gap` found for struct `output_hub::TerminalOutputHub` in the current scope
+   --> src/terminal/output_hub.rs:596:13
+    |
+389 | pub struct TerminalOutputHub {
+    | ---------------------------- method `publish_gap` not found for this struct
+...
+596 |         hub.publish_gap("remote").unwrap();
+    |             ^^^^^^^^^^^
+    |
+help: there is a method `publish` with a similar name, but with different arguments
+   --> src/terminal/output_hub.rs:442:5
+    |
+442 |     pub fn publish(&self, session_id: &str, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0609]: no field `replay_gap` on type `output_hub::OutputChunk`
+   --> src/terminal/output_hub.rs:603:28
+    |
+603 |         let gap = boundary.replay_gap.unwrap();
+    |                            ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `sequence`, `bytes`, `metrics_read_unix_micros`
+
+error[E0609]: no field `replay_gap` on type `output_hub::OutputChunk`
+   --> src/terminal/remote_runtime_tests.rs:255:22
+    |
+255 |     assert!(boundary.replay_gap.is_some());
+    |                      ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `sequence`, `bytes`, `metrics_read_unix_micros`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0560, E0599, E0609.
+For more information about an error, try `rustc --explain E0560`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 9 previous errors; 10 warnings emitted

@@ -33,6 +33,8 @@ pub struct OutputChunk {
     pub bytes: Arc<[u8]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_read_unix_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_gap: Option<ReplayGap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +135,7 @@ impl BoundedBuffer {
             sequence,
             bytes: Arc::from(chunk_bytes),
             metrics_read_unix_micros,
+            replay_gap: None,
         };
 
         self.current_size += chunk.bytes.len();
@@ -383,6 +386,7 @@ struct SessionHub {
     sender: broadcast::Sender<OutputChunk>,
     raw_sender: broadcast::Sender<Vec<u8>>,
     resize_ledger: Vec<ResizePoint>,
+    replay_gap: Option<ReplayGap>,
 }
 
 #[derive(Clone)]
@@ -432,6 +436,7 @@ impl TerminalOutputHub {
             sender: tx,
             raw_sender: raw_tx,
             resize_ledger: Vec::new(),
+            replay_gap: None,
         };
         self.sessions
             .write()
@@ -441,6 +446,33 @@ impl TerminalOutputHub {
 
     pub fn publish(&self, session_id: &str, chunk_bytes: Vec<u8>) -> Option<OutputChunk> {
         self.publish_with_read_timestamp(session_id, chunk_bytes, None)
+    }
+
+    pub fn publish_gap(&self, session_id: &str) -> Option<OutputChunk> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let mut hub = session_hub.write();
+        let sequence = hub.buffer.allocate_sequence();
+        let gap = ReplayGap {
+            requested_after_sequence: sequence.saturating_sub(1),
+            available_from_sequence: sequence + 1,
+        };
+        hub.buffer.chunks.clear();
+        hub.buffer.current_size = 0;
+        let size = hub.resize_ledger.last().cloned();
+        hub.resize_ledger.clear();
+        if let Some(mut size) = size {
+            size.sequence = sequence;
+            hub.resize_ledger.push(size);
+        }
+        hub.replay_gap = Some(gap.clone());
+        let boundary = OutputChunk {
+            sequence,
+            bytes: Arc::from([]),
+            metrics_read_unix_micros: None,
+            replay_gap: Some(gap),
+        };
+        let _ = hub.sender.send(boundary.clone());
+        Some(boundary)
     }
 
     pub fn publish_with_read_timestamp(
@@ -537,6 +569,11 @@ impl TerminalOutputHub {
         let (history, history_segments, history_start_sequence, history_end_sequence, gap) = hub
             .buffer
             .snapshot_after_segmented(after_sequence, &hub.resize_ledger);
+        let gap = gap.or_else(|| {
+            hub.replay_gap.clone().filter(|gap| {
+                after_sequence.is_none_or(|after| after < gap.available_from_sequence - 1)
+            })
+        });
 
         let snapshot = AttachmentSnapshot {
             session_id: session_id.to_string(),
@@ -586,6 +623,29 @@ impl TerminalOutputHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ssh_process_survival_gap_precedes_recovered_bytes_and_invalidates_history() {
+        let hub = TerminalOutputHub::new(1024);
+        hub.register_session("remote");
+        hub.publish("remote", b"stale".to_vec());
+        let mut live = hub.subscribe_with_sequence("remote", Some(1)).unwrap();
+        hub.publish_gap("remote").unwrap();
+        let between = hub.subscribe_with_sequence("remote", Some(1)).unwrap();
+        assert!(between.snapshot.history.is_empty());
+        assert!(between.snapshot.gap.is_some());
+        hub.publish("remote", b"recovered".to_vec());
+        let boundary = live.receiver.try_recv().unwrap();
+        assert!(boundary.bytes.is_empty());
+        let gap = boundary.replay_gap.unwrap();
+        assert_eq!(gap.requested_after_sequence, 1);
+        let output = live.receiver.try_recv().unwrap();
+        assert_eq!(&*output.bytes, b"recovered");
+        assert_eq!(gap.available_from_sequence, output.sequence);
+        let late = hub.subscribe_with_sequence("remote", Some(1)).unwrap();
+        assert_eq!(late.snapshot.history, b"recovered");
+        assert_eq!(late.snapshot.gap, Some(gap));
+    }
 
     #[tokio::test]
     async fn test_output_hub_replay_and_broadcast() {
