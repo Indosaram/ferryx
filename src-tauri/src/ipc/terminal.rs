@@ -581,23 +581,23 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let cols = request.cols.unwrap_or(80);
     let rows = request.rows.unwrap_or(24);
     let spawn_result = if crate::ssh::projects::is_remote(&request.workspace_id) {
-        if request.worktree.is_some() || request.startup.is_some() {
+        if request.startup.is_some() {
             return Err(crate::ssh::projects::unsupported());
         }
         let host_store_path = super::ssh::get_ssh_store_path(&app)?;
         let lookup = host_store_path.clone();
         let id = request.workspace_id.clone();
         run_blocking(move || crate::ssh::projects::resolve(&lookup, &id)).await?;
-        // Splits and cold restore intentionally start at the registered remote root.
-        // Never inherit or canonicalize the local ssh process CWD.
+        // Explicit worktree/cwd spawn at the validated remote worktree path,
+        // everything else at the registered root; local process CWD is still never inherited.
         daemon_client
             .spawn_terminal_with_startup(
                 request
                     .client_request_id
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 request.workspace_id,
-                None,
-                None,
+                request.worktree.clone(),
+                request.cwd.clone().map(|p| p.to_string_lossy().to_string()),
                 cols,
                 rows,
                 None,

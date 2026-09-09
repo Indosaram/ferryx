@@ -3,6 +3,7 @@ use super::runtime::{
 };
 use super::{direct, SshHost};
 use crate::ipc::{IpcError, IpcErrorCode};
+use crate::worktree::WorktreeIdentity;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -144,6 +145,36 @@ pub fn validate_path_inside_root(
         }
     }
     Ok(())
+}
+
+pub fn resolve_remote_spawn_root(
+    platform: RemotePlatform,
+    repo_root: &str,
+    worktree: Option<&WorktreeIdentity>,
+    cwd: Option<&str>,
+) -> Result<String, IpcError> {
+    if let Some(cwd) = cwd {
+        validate_path_inside_root(platform, repo_root, cwd)?;
+        Ok(cwd.to_string())
+    } else if let Some(identity) = worktree {
+        if identity.slug.trim().is_empty() {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "Worktree slug cannot be empty",
+            ));
+        }
+        if identity.slug.contains("..") {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidPath,
+                "Worktree slug must not contain '..'",
+            ));
+        }
+        let path = remote_worktree_path(platform, repo_root, &identity.slug);
+        validate_path_inside_root(platform, repo_root, &path)?;
+        Ok(path)
+    } else {
+        Ok(repo_root.to_string())
+    }
 }
 
 pub fn worktree_list_script(platform: RemotePlatform, repo_root: &str, marker: &str) -> String {
@@ -537,5 +568,125 @@ mod tests {
         assert_eq!(parsed[0].branch.as_deref(), Some("orca/ssh-abc/new"));
         assert!(!parsed[0].bare);
         assert!(!parsed[0].detached);
+    }
+
+    #[test]
+    fn test_resolve_remote_spawn_root() {
+        // cwd inside root ok
+        let res = resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            None,
+            Some("/srv/repo/.orca-worktrees/wt-1"),
+        )
+        .unwrap();
+        assert_eq!(res, "/srv/repo/.orca-worktrees/wt-1");
+
+        // cwd outside (posix backslash-sibling /srv/repo\outside) rejected
+        assert!(resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            None,
+            Some(r"/srv/repo\outside"),
+        )
+        .is_err());
+
+        // cwd outside (/srv/repo-other/x) rejected
+        assert!(resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            None,
+            Some("/srv/repo-other/x"),
+        )
+        .is_err());
+
+        // .. segment rejected
+        assert!(resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            None,
+            Some("/srv/repo/../outside"),
+        )
+        .is_err());
+        assert!(resolve_remote_spawn_root(
+            RemotePlatform::Windows,
+            r"C:\Repo",
+            None,
+            Some(r"C:\Repo\..\outside"),
+        )
+        .is_err());
+
+        // worktree-derived path equals <root>/.orca-worktrees/wt-<slug> (posix)
+        let wt = WorktreeIdentity {
+            ws_id: "agent".into(),
+            slug: "feature-1".into(),
+        };
+        let res_posix = resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            Some(&wt),
+            None,
+        )
+        .unwrap();
+        assert_eq!(res_posix, "/srv/repo/.orca-worktrees/wt-feature-1");
+
+        // backslash variant (windows)
+        let res_win = resolve_remote_spawn_root(
+            RemotePlatform::Windows,
+            r"C:\Repo",
+            Some(&wt),
+            None,
+        )
+        .unwrap();
+        assert_eq!(res_win, r"C:\Repo\.orca-worktrees\wt-feature-1");
+
+        // empty slug rejected with IpcErrorCode::InvalidArgument
+        let empty_wt = WorktreeIdentity {
+            ws_id: "agent".into(),
+            slug: "".into(),
+        };
+        let err = resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            Some(&empty_wt),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+
+        // slug containing .. rejected
+        let dotdot_wt = WorktreeIdentity {
+            ws_id: "agent".into(),
+            slug: "../escape".into(),
+        };
+        assert!(resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            Some(&dotdot_wt),
+            None,
+        )
+        .is_err());
+
+        let dotdot_mid_wt = WorktreeIdentity {
+            ws_id: "agent".into(),
+            slug: "sub/../escape".into(),
+        };
+        assert!(resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            Some(&dotdot_mid_wt),
+            None,
+        )
+        .is_err());
+
+        // none -> repo_root
+        let res_none = resolve_remote_spawn_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(res_none, "/srv/repo");
     }
 }

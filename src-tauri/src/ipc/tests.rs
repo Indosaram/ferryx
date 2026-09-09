@@ -968,3 +968,242 @@ fn test_spawn_terminal_request_serde_camelcase_roundtrip() {
     assert!(serialized.contains(r#""agentType":"omo""#));
     assert!(serialized.contains(r#""sessionId""#) || serialized.contains(r#""session_id""#));
 }
+
+#[tokio::test]
+async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DaemonSessionDetails};
+    use crate::ipc::terminal::cmd_terminal_spawn;
+    use crate::worktree::WorktreeIdentity;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("mock_daemon.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
+
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::channel::<DaemonRequest>(8);
+
+    let server_task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let req_tx = req_tx.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(req) = serde_json::from_str::<DaemonRequest>(line.trim()) {
+                        let _ = req_tx.send(req.clone()).await;
+                        let resp = match req {
+                            DaemonRequest::Handshake { .. } => {
+                                DaemonResponse::HandshakeOk {
+                                    version: crate::daemon::protocol::DAEMON_PROTOCOL_VERSION,
+                                    pid: std::process::id(),
+                                    epoch: 1,
+                                    binary_path: None,
+                                    binary_mtime_ms: None,
+                                    daemon_version: None,
+                                }
+                            }
+                            DaemonRequest::Spawn { .. } => {
+                                DaemonResponse::SpawnOk {
+                                    session_id: "remote-mock-session".into(),
+                                    epoch: 1,
+                                    session: DaemonSessionDetails {
+                                        session_id: "remote-mock-session".into(),
+                                        workspace_id: None,
+                                        worktree: None,
+                                        cwd: None,
+                                        cols: 90,
+                                        rows: 30,
+                                        running: true,
+                                        start_sequence: None,
+                                        end_sequence: None,
+                                    },
+                                }
+                            }
+                            DaemonRequest::Attach { .. } => {
+                                DaemonResponse::AttachOk {
+                                    epoch: 1,
+                                    session_id: "remote-mock-session".into(),
+                                    start_sequence: None,
+                                    end_sequence: None,
+                                    gap: None,
+                                    history: vec![],
+                                    pty_cols: Some(90),
+                                    pty_rows: Some(30),
+                                    history_segments: vec![],
+                                }
+                            }
+                            _ => DaemonResponse::Pong,
+                        };
+                        let mut resp_json = serde_json::to_string(&resp).unwrap();
+                        resp_json.push('\n');
+                        let _ = write_half.write_all(resp_json.as_bytes()).await;
+                        let _ = write_half.flush().await;
+                    }
+                    line.clear();
+                }
+            });
+        }
+    });
+
+    let daemon_client = Arc::new(DaemonClient::new_with_socket(socket_path));
+    let registry = WorkspaceRegistry::new();
+    let app = tauri::test::mock_builder()
+        .manage(daemon_client.clone())
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let store_path = crate::ipc::ssh::get_ssh_store_path(&app.handle()).expect("store path");
+    std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+
+    let host = crate::ssh::SshHost {
+        id: "mock-host".into(),
+        label: "Mock Host".into(),
+        hostname: "127.0.0.1".into(),
+        username: Some("mock-user".into()),
+        port: Some(22),
+        identity_file: None,
+        jump_host: None,
+        source: crate::ssh::SshHostSource::Config,
+        auth_method: crate::ssh::SshAuthMethod::Agent,
+        disabled: None,
+    };
+    std::fs::write(
+        &store_path,
+        serde_json::to_vec(&crate::ipc::ssh::SshHostStore {
+            hosts: vec![host.clone()],
+            tombstones: vec![],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let ws_id = crate::ssh::projects::identity(&host.id, "/srv/project");
+    let project = crate::ssh::projects::RemoteProject {
+        workspace_id: ws_id.clone(),
+        host_id: host.id.clone(),
+        repo_root: "/srv/project".into(),
+        git_root: None,
+        git_remote: None,
+        git_branch: None,
+        git_head: None,
+        platform: Some(crate::ssh::runtime::RemotePlatform::Posix),
+    };
+    let mut projects_map = std::collections::BTreeMap::new();
+    projects_map.insert(ws_id.clone(), project);
+    std::fs::write(
+        crate::ssh::projects::store_path(&store_path),
+        serde_json::to_vec(&projects_map).unwrap(),
+    )
+    .unwrap();
+
+    let wt_ident = WorktreeIdentity {
+        ws_id: "agent-1".into(),
+        slug: "feat-remote".into(),
+    };
+    let wt_path = PathBuf::from("/srv/project/.orca-worktrees/wt-feat-remote");
+
+    let request = SpawnTerminalRequest {
+        workspace_id: ws_id.clone(),
+        worktree: Some(wt_ident.clone()),
+        cwd: Some(wt_path.clone()),
+        cols: Some(90),
+        rows: Some(30),
+        client_request_id: Some("req-forward-wt".into()),
+        inherit_from_session_id: None,
+        shell: None,
+        startup: None,
+    };
+
+    let spawned = cmd_terminal_spawn(
+        app.handle().clone(),
+        app.state::<Arc<DaemonClient>>(),
+        app.state::<WorkspaceRegistry>(),
+        request,
+    )
+    .await
+    .expect("remote terminal spawn should forward worktree and cwd to daemon");
+
+    assert_eq!(spawned.session_id, "remote-mock-session");
+
+    // Verify DaemonRequest::Spawn captured worktree and cwd
+    let mut received_spawn = None;
+    while let Ok(req) = req_rx.try_recv() {
+        if let DaemonRequest::Spawn { .. } = req {
+            received_spawn = Some(req);
+            break;
+        }
+    }
+    let Some(DaemonRequest::Spawn {
+        workspace_id,
+        worktree,
+        cwd,
+        cols,
+        rows,
+        startup,
+        ..
+    }) = received_spawn
+    else {
+        panic!("expected DaemonRequest::Spawn to be received by mock daemon");
+    };
+
+    assert_eq!(workspace_id, ws_id);
+    assert_eq!(worktree, Some(wt_ident));
+    assert_eq!(cwd, Some(wt_path.to_string_lossy().to_string()));
+    assert_eq!(cols, 90);
+    assert_eq!(rows, 30);
+    assert_eq!(
+        startup,
+        Some(crate::daemon::protocol::TerminalStartup::RemoteSsh {
+            host_store_path: store_path
+        })
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn remote_terminal_spawn_rejects_explicit_startup() {
+    use crate::ipc::terminal::cmd_terminal_spawn;
+
+    let app = tauri::test::mock_builder()
+        .manage(Arc::new(DaemonClient::new_with_socket(PathBuf::from("/unused"))))
+        .manage(WorkspaceRegistry::new())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let request = SpawnTerminalRequest {
+        workspace_id: "ssh:0123456789abcdef".into(),
+        worktree: None,
+        cwd: None,
+        cols: Some(80),
+        rows: Some(24),
+        client_request_id: None,
+        inherit_from_session_id: None,
+        shell: None,
+        startup: Some(crate::daemon::protocol::TerminalStartup::AgentResume {
+            agent_type: "claude".into(),
+            provider_session: crate::daemon::protocol::AgentProviderSession {
+                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+                id: "sess-1".into(),
+                transcript_path: None,
+            },
+        }),
+    };
+
+    let err = cmd_terminal_spawn(
+        app.handle().clone(),
+        app.state::<Arc<DaemonClient>>(),
+        app.state::<WorkspaceRegistry>(),
+        request,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code, IpcErrorCode::Unsupported);
+}

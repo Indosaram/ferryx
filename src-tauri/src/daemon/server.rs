@@ -1940,10 +1940,9 @@ impl DaemonServer {
             startup.as_ref(),
         ) {
             (true, Some(TerminalStartup::RemoteSsh { host_store_path })) => {
-                if worktree.is_some() || cwd.is_some() || shell.is_some() {
+                if shell.is_some() {
                     return Err(SpawnError::Other(
-                        "SSH worktrees, custom CWD and local shell overrides are unsupported"
-                            .into(),
+                        "Local shell overrides are unsupported for SSH sessions".into(),
                     ));
                 }
                 let path = host_store_path.clone();
@@ -2034,10 +2033,17 @@ impl DaemonServer {
             };
             let endpoint = bridge.as_ref().map(|bridge| bridge.endpoint.clone());
             let service = self.terminal_service.clone();
-            let root = project.repo_root.clone();
+            let root = crate::ssh::worktree::resolve_remote_spawn_root(
+                environment.platform,
+                &project.repo_root,
+                worktree.as_ref(),
+                cwd.as_deref(),
+            )
+            .map_err(|e| SpawnError::Other(e.to_string()))?;
+            let ssh_root = root.clone();
             let (id, rx) = crate::ipc::run_blocking(move || {
                 service
-                    .spawn_ssh(&host, &environment, &root, cols, rows, endpoint.as_ref())
+                    .spawn_ssh(&host, &environment, &ssh_root, cols, rows, endpoint.as_ref())
                     .map_err(crate::ipc::IpcError::from)
             })
             .await
@@ -2052,7 +2058,7 @@ impl DaemonServer {
                     }
                 }));
             }
-            (id, rx, PathBuf::from(project.repo_root))
+            (id, rx, PathBuf::from(root))
         } else {
             // Resolve manager from workspace registry; workspace MUST be registered.
             let (mgr, default_cwd) = self

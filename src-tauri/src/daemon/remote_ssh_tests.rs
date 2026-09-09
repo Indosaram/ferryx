@@ -288,6 +288,68 @@ async fn exercise_child(root: &Path) {
             retained = Some(id);
         }
     }
+    let wt_dir = Path::new(&response.repo_root).join(".orca-worktrees").join("wt-feature");
+    std::fs::create_dir_all(&wt_dir).unwrap();
+    let wt_identity = crate::worktree::WorktreeIdentity {
+        ws_id: "agent".into(),
+        slug: "feature".into(),
+    };
+    let wt_session_id = daemon
+        .handle_spawn(
+            "remote-worktree-tab",
+            &response.workspace_id,
+            Some(wt_identity.clone()),
+            Some(wt_dir.to_str().unwrap().into()),
+            80,
+            24,
+            None,
+            Some(startup.clone()),
+        )
+        .await
+        .expect("SSH PTY spawn in remote worktree");
+    let (mut wt_history, mut wt_events) = daemon.terminal_service.attach(&wt_session_id).unwrap();
+    daemon
+        .terminal_service
+        .write_input(
+            &wt_session_id,
+            b"printf '\\136\\123\\123\\110\\055\\117\\113\\072'; pwd -P\n",
+        )
+        .unwrap();
+    let expected_wt = format!("^SSH-OK:{}", wt_dir.to_str().unwrap());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !String::from_utf8_lossy(&wt_history).contains(&expected_wt) {
+            wt_history.extend(wt_events.recv().await.expect("SSH PTY output event"));
+        }
+    })
+    .await
+    .expect("remote command produced exact worktree root through real SSH PTY");
+    let DaemonResponse::DescribeSessionOk { session: wt_session } =
+        daemon.handle_describe_session(&wt_session_id)
+    else {
+        panic!("session details")
+    };
+    assert_eq!(wt_session.cwd.as_deref(), Some(wt_dir.to_str().unwrap()));
+    assert_eq!(wt_session.worktree.as_ref(), Some(&wt_identity));
+    daemon.handle_close(&wt_session_id).await.unwrap();
+
+    let shell_err = daemon
+        .handle_spawn(
+            "remote-shell-override",
+            &response.workspace_id,
+            None,
+            None,
+            80,
+            24,
+            Some("/bin/zsh".into()),
+            Some(startup.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        shell_err.to_string().contains("shell overrides are unsupported"),
+        "unexpected error message: {shell_err}"
+    );
+
     let retained = retained.unwrap();
     daemon.validate_session_ssh_target(&retained).await.unwrap();
     host.disabled = Some(true);
