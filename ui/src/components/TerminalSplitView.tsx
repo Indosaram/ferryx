@@ -192,8 +192,8 @@ type TerminalSplitViewProps = {
   agents?: Array<{ name: string; command: string; args: string }>;
   onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
   defaultAgentId?: string | null;
-  onNavigateBrowserTab?: (tabId: string, url: string) => void;
-  onReloadBrowserTab?: (tabId: string) => void;
+  onNavigateBrowserTab?: (tabId: string, url: string, browserId?: string) => void;
+  onReloadBrowserTab?: (tabId: string, browserId?: string) => void;
   onSplitPane?: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane?: (tabId: string, leafId: string) => void;
   onSetRatio?: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
@@ -641,8 +641,8 @@ type TabGroupViewProps = {
   agents?: Array<{ name: string; command: string; args: string }>;
   onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
   defaultAgentId?: string | null;
-  onNavigateBrowserTab: (tabId: string, url: string) => void;
-  onReloadBrowserTab: (tabId: string) => void;
+  onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
+  onReloadBrowserTab: (tabId: string, browserId?: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onMoveTabToSplit?: (
     tabId: string,
@@ -845,8 +845,8 @@ type PaneRendererProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
-  onNavigateBrowserTab: (tabId: string, url: string) => void;
-  onReloadBrowserTab: (tabId: string) => void;
+  onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
+  onReloadBrowserTab: (tabId: string, browserId?: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
@@ -931,8 +931,8 @@ type PaneLeafViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
-  onNavigateBrowserTab: (tabId: string, url: string) => void;
-  onReloadBrowserTab: (tabId: string) => void;
+  onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
+  onReloadBrowserTab: (tabId: string, browserId?: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
@@ -1207,8 +1207,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 <BrowserPane
                   tab={browserTab}
                   visible={browserPanesVisible}
-                  onNavigate={(url) => onNavigateBrowserTab(tab.id, url)}
-                  onReload={() => onReloadBrowserTab(tab.id)}
+                  onNavigate={(url) => onNavigateBrowserTab(tab.id, url, browserTab.browserId)}
+                  onReload={() => onReloadBrowserTab(tab.id, browserTab.browserId)}
                 />
               );
             }
