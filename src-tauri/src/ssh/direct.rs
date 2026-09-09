@@ -236,7 +236,34 @@ pub async fn probe(host: &SshHost, path: &str) -> Result<(String, Option<String>
     Ok((probed.repo_root, probed.git_root, probed.git_remote))
 }
 
-fn spawn_child(
+pub fn bridge_command(
+    env: &super::runtime::RemoteEnvironment,
+    location: &super::helper_setup::HelperLocation,
+) -> String {
+    match env.platform {
+        super::runtime::RemotePlatform::Posix => format!(
+            "exec {} bridge --stdio --root {}",
+            quote_posix(&location.executable),
+            quote_posix(&location.root),
+        ),
+        super::runtime::RemotePlatform::Windows => format!(
+            "& {} bridge --stdio --root {}",
+            super::runtime::powershell_data(&location.executable),
+            super::runtime::powershell_data(&location.root),
+        ),
+    }
+}
+
+pub fn bridge_plan(
+    host: &SshHost,
+    env: &super::runtime::RemoteEnvironment,
+    location: &super::helper_setup::HelperLocation,
+) -> Result<ShellCommandPlan, IpcError> {
+    let command = bridge_command(env, location);
+    ssh_plan(host, env.executor.command(&command), false)
+}
+
+pub(crate) fn spawn_child(
     plan: &ShellCommandPlan,
     stdin: Stdio,
 ) -> Result<tokio::process::Child, IpcError> {

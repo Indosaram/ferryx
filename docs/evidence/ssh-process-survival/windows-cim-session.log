@@ -1,0 +1,4 @@
+{"event":"handshake-after-start-ssh-exit","arch":"x86_64","capabilities":["sshHelperV1"],"epoch":"3930053837692487182","hostId":"qa-job-b20977b8-da14-4961-b1d5-fad16d809f8f","os":"windows","ownerId":"e92817c8-a37c-4c7c-8cbc-0f2c154c8f47","protocol":1}
+{"event":"before-transport-loss","pid":27964,"nonce":"e5f64559-1c4e-4fae-a6e1-ca2fd5cb951c","counter":1,"target":{"backendSessionId":"dc0ad535-d7d4-4f0f-96ad-6b02d0ba2842","epoch":"3930053837692487182","hostId":"qa-job-b20977b8-da14-4961-b1d5-fad16d809f8f","ownerId":"e92817c8-a37c-4c7c-8cbc-0f2c154c8f47"}}
+{"event":"after-transport-loss","pid":27964,"nonce":"e5f64559-1c4e-4fae-a6e1-ca2fd5cb951c","counter":2,"target":{"backendSessionId":"dc0ad535-d7d4-4f0f-96ad-6b02d0ba2842","epoch":"3930053837692487182","hostId":"qa-job-b20977b8-da14-4961-b1d5-fad16d809f8f","ownerId":"e92817c8-a37c-4c7c-8cbc-0f2c154c8f47"},"spawnRequests":1}
+{"event":"remote-pty-stopped","pid":27964}

@@ -306,3 +306,30 @@ fn install_remote_extension_script_creates_and_populates_extension() {
     let content = std::fs::read_to_string(&installed_file).unwrap();
     assert_eq!(content, crate::daemon::agent_extension::EXTENSION_SOURCE);
 }
+
+#[test]
+fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
+    let env = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Posix,
+        executor: crate::ssh::runtime::RemoteExecutor::Sh,
+        version: "Linux 6.1".into(),
+        home: "/home/user".into(),
+        temp: "/tmp".into(),
+        git: true,
+    };
+    let location = crate::ssh::helper_setup::HelperLocation {
+        executable: "/home/user/.ferryx/bin/ferryx-remote-helper".into(),
+        root: "/home/user/.ferryx/helper/host-one".into(),
+    };
+    let plan = bridge_plan(&host(), &env, &location).expect("bridge_plan");
+    assert_eq!(plan.program, "ssh");
+    assert!(plan.args.iter().any(|v| v == "-T"));
+    assert!(!plan.args.iter().any(|v| v == "-tt"));
+    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "UpdateHostKeys=no"]));
+    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "StrictHostKeyChecking=yes"]));
+    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
+    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "ClearAllForwardings=yes"]));
+    let remote_cmd = plan.args.last().unwrap();
+    assert!(remote_cmd.contains("bridge --stdio --root"));
+}
+
