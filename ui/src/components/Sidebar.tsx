@@ -28,9 +28,10 @@ import { toast } from "sonner";
 
 import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
 import { cn } from "../lib/cn";
+import { workspaceName } from "../lib/branchFilter";
 import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
-import { getCachedSshHosts, useSshHosts } from "../lib/sshHosts";
+import { useSshHosts } from "../lib/sshHosts";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
@@ -196,15 +197,17 @@ export function Sidebar({
     });
   }, []);
 
+  const { hosts } = useSshHosts();
+
   const naturalWorktreesByProject = useMemo(
     () => groupWorktreesByProject(
       worktrees,
       projects,
       activeProjectId,
       inactiveProjectWorktrees,
-      typeof getCachedSshHosts === "function" ? getCachedSshHosts() ?? undefined : undefined,
+      hosts,
     ),
-    [activeProjectId, inactiveProjectWorktrees, projects, worktrees],
+    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees],
   );
   const worktreesByProject = useMemo(
     () => applyWorktreeOrder(naturalWorktreesByProject, worktreeOrder),
@@ -391,6 +394,17 @@ export function Sidebar({
                 );
                 const attentionState = projectAttentionState(projectActivity);
                 const activityIndicator = resolveActivityIndicator(projectActivity);
+                const isStandaloneRemote =
+                  project.target?.kind === "ssh" &&
+                  group.memberProjects.length === 1 &&
+                  !group.memberProjects.some((p) => p.target?.kind !== "ssh");
+                const standaloneRemote = project.target?.kind === "ssh" ? project.target : null;
+                const standaloneHost = standaloneRemote
+                  ? hosts.find((h) => h.id === standaloneRemote.hostId)
+                  : null;
+                const standaloneHostLabel = standaloneHost?.label ?? project.hostLabel ?? standaloneRemote?.hostId;
+                const standaloneRootWorktree = projectWorktrees[0] ?? projectRootWorktree(project, standaloneHostLabel);
+                const standaloneDisplayName = workspaceName(standaloneRootWorktree);
                 const header = (
                   <ProjectHeader
                     project={project}
@@ -405,13 +419,9 @@ export function Sidebar({
                     }}
                     onCreateWorktree={() => onCreateWorktree(project)}
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
+                    isStandaloneRemote={isStandaloneRemote}
                   />
                 );
-
-                const isStandaloneRemote =
-                  project.target?.kind === "ssh" &&
-                  group.memberProjects.length === 1 &&
-                  !group.memberProjects.some((p) => p.target?.kind !== "ssh");
 
                 return (
                   <SortableProjectSection key={group.groupId} workspaceId={group.groupId} header={header}>
@@ -427,17 +437,40 @@ export function Sidebar({
                           {isStandaloneRemote ? (
                             <button
                               type="button"
-                              className={cn("my-0.5 flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs hover:bg-white/5",
-                                activeWorktreeOwnerId === project.workspaceId ? "border-[#6c6c6c] bg-[#3f3f3f]" : "border-transparent")}
+                              className={cn(
+                                "group/worktree-row my-0.5 flex min-h-[28px] w-full items-center justify-between rounded-md border px-2 py-1 text-left text-xs transition-colors hover:bg-white/[0.04]",
+                                activeWorktreeOwnerId === project.workspaceId ? "border-[#6c6c6c] bg-[#3f3f3f]" : "border-transparent bg-transparent",
+                              )}
                               aria-current={activeWorktreeOwnerId === project.workspaceId ? "true" : undefined}
-                              title="Remote SSH root. Git worktrees and local file-manager reveal are unavailable."
+                              title={`Remote worktree: ${project.repoRoot}${standaloneHostLabel ? ` (${standaloneHostLabel})` : ""}`}
                               data-shortcut-worktree-path={project.repoRoot}
                               data-shortcut-workspace-id={project.workspaceId}
-                              onClick={() => onSelectWorktree(projectRootWorktree(project))}
+                              onClick={() => onSelectWorktree(standaloneRootWorktree)}
                             >
-                              {activityIndicator ? <StatusDot state={activityIndicator} /> : null}
-                              <span className="min-w-0 truncate">{project.repoRoot}</span>
-                              <span className="shrink-0 text-muted-foreground">SSH root</span>
+                              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                                {activityIndicator ? (
+                                  <StatusDot state={activityIndicator} />
+                                ) : (
+                                  <span className="size-2 shrink-0 rounded-full bg-status-idle" />
+                                )}
+                                <span
+                                  className={cn(
+                                    "truncate text-[12px] font-semibold leading-tight",
+                                    activeWorktreeOwnerId === project.workspaceId ? "text-[#fafafa]" : "text-worktree-sidebar-foreground",
+                                  )}
+                                >
+                                  {standaloneDisplayName}
+                                </span>
+                              </span>
+                              {standaloneHostLabel ? (
+                                <span
+                                  data-testid="remote-machine-badge"
+                                  title={standaloneHostLabel}
+                                  className="ml-auto max-w-[88px] shrink-0 truncate rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]"
+                                >
+                                  {standaloneHostLabel}
+                                </span>
+                              ) : null}
                             </button>
                           ) : <WorktreeList
                             worktrees={projectWorktrees}
@@ -541,6 +574,7 @@ type ProjectHeaderProps = {
   onCreateWorktree?: () => void;
   onRemoveProject?: () => void;
   inert?: boolean;
+  isStandaloneRemote?: boolean;
 };
 
 function ProjectHeader({
@@ -554,12 +588,18 @@ function ProjectHeader({
   onCreateWorktree,
   onRemoveProject,
   inert = false,
+  isStandaloneRemote = true,
 }: ProjectHeaderProps) {
   const { hosts } = useSshHosts();
   const remote = project.target?.kind === "ssh" ? project.target : null;
-  const hostLabel = remote ? hosts.find((host) => host.id === remote.hostId)?.label ?? remote.hostId : null;
+  const hostLabel = remote
+    ? (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId)
+    : null;
+  const folderName = remote
+    ? (project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/")
+    : project.workspaceId;
   const projectLabel = remote
-    ? `${project.repoRoot.split("/").filter(Boolean).at(-1) ?? "/"} (${hostLabel})`
+    ? (isStandaloneRemote && hostLabel ? `${folderName} (${hostLabel})` : folderName)
     : project.workspaceId;
   const menuUnlistenRef = useRef<(() => void) | null>(null);
 
@@ -575,7 +615,7 @@ function ProjectHeader({
     event.preventDefault();
     event.stopPropagation();
     const items: NativeMenuEntry[] = [
-      { kind: "item", id: "add-worktree", label: remote ? "Git worktrees unavailable over SSH" : "Add Worktree", enabled: !remote && project.gitRoot !== null, icon: "add" },
+      { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
       { kind: "item", id: "reveal", label: remote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !remote, icon: "reveal" },
       { kind: "item", id: "copy-path", label: "Copy Project Path" },
       { kind: "separator" },
@@ -589,7 +629,7 @@ function ProjectHeader({
       (id) => {
         menuUnlistenRef.current?.();
         menuUnlistenRef.current = null;
-        if (id === "add-worktree" && !remote) onCreateWorktree?.();
+        if (id === "add-worktree") onCreateWorktree?.();
         else if (id === "reveal" && !remote) {
           revealPath(project.repoRoot).catch((err: unknown) => {
             toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);
@@ -662,7 +702,7 @@ function ProjectHeader({
             </span>
           ) : activity.hasWorking ? <StatusDot state="working" /> : null}
         </button>
-        {!remote && project.gitRoot !== null ? (
+        {project.gitRoot !== null ? (
           <IconButton
             label={`Add worktree to ${project.workspaceId}`}
             size="sm"
@@ -806,11 +846,21 @@ function groupWorktreesByProject(
             candidate.path === member.repoRoot &&
             (candidate.workspaceId ?? project.workspaceId) === member.workspaceId,
         );
-        const hostLabel = hosts?.find((h) => h.id === target.hostId)?.label ?? target.hostId;
+        const hostLabel = hosts?.find((h) => h.id === target.hostId)?.label ?? member.hostLabel ?? target.hostId;
         if (existingIndex === -1) {
           bucket.push(projectRootWorktree(member, hostLabel));
-        } else if (!bucket[existingIndex].hostLabel && hostLabel) {
-          bucket[existingIndex] = { ...bucket[existingIndex], hostLabel };
+        } else {
+          const row = bucket[existingIndex];
+          const newBranch = member.gitBranch !== undefined ? member.gitBranch : row.branch;
+          const newHead = member.gitHead !== undefined ? (member.gitHead ?? "") : row.head;
+          const newDetached = Boolean(newHead && !newBranch);
+          bucket[existingIndex] = {
+            ...row,
+            hostLabel: hostLabel ?? row.hostLabel,
+            branch: newBranch,
+            head: newHead,
+            detached: newDetached,
+          };
         }
       }
     }

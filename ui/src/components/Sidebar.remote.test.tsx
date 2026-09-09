@@ -19,25 +19,112 @@ it("renders a host-labelled remote root and selects its explicit backend workspa
   render(<Sidebar projects={[project]} activeProjectId={project.workspaceId} worktrees={[]} agents={[]} activePath="" onSelectWorktree={onSelectWorktree} onCreateWorktree={vi.fn()} />);
   expect(screen.getByRole("button", { name: "repo (Build machine)" })).toBeInTheDocument();
   expect(screen.queryByText(project.workspaceId)).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: `${project.repoRoot} SSH root` }));
+  fireEvent.click(screen.getByRole("button", { name: "repo Build machine" }));
   expect(onSelectWorktree).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: project.workspaceId, path: project.repoRoot, branch: null }));
 });
 
-it("disables remote Git and reveal menu actions and rejects even stale native callbacks", async () => {
+it("renders remote worktree branch name on the left and machine badge on the right", () => {
+  const branchProject: RegisteredProject = {
+    workspaceId: "ssh:branch-hash",
+    repoRoot: "/srv/backend-app",
+    gitRoot: "/srv/backend-app",
+    gitBranch: "feature/auth-flow",
+    target: { kind: "ssh", hostId: "build" },
+  };
+  render(
+    <Sidebar
+      projects={[branchProject]}
+      activeProjectId={branchProject.workspaceId}
+      worktrees={[]}
+      agents={[]}
+      activePath=""
+      onSelectWorktree={vi.fn()}
+      onCreateWorktree={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "feature/auth-flow Build machine" })).toBeInTheDocument();
+  const badge = screen.getByTestId("remote-machine-badge");
+  expect(badge).toHaveTextContent("Build machine");
+  expect(badge).toHaveClass("truncate");
+});
+
+it("renders a host-labelled remote root for a Windows path with backslashes", () => {
+  const winProject: RegisteredProject = {
+    workspaceId: "ssh:win-hash",
+    repoRoot: "C:\\Users\\sook\\work\\coinbase-scalper",
+    gitRoot: "C:\\Users\\sook\\work\\coinbase-scalper",
+    target: { kind: "ssh", hostId: "build" },
+  };
+  render(
+    <Sidebar
+      projects={[winProject]}
+      activeProjectId={winProject.workspaceId}
+      worktrees={[]}
+      agents={[]}
+      activePath=""
+      onSelectWorktree={vi.fn()}
+      onCreateWorktree={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "coinbase-scalper (Build machine)" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "C:\\Users\\sook\\work\\coinbase-scalper (Build machine)" })).not.toBeInTheDocument();
+});
+
+it("renders clean project name without host label for multi-machine remote project group", () => {
+  const winProject: RegisteredProject = {
+    workspaceId: "ssh:win-hash",
+    repoRoot: "C:\\Users\\sook\\work\\PirateTalk",
+    gitRoot: "C:\\Users\\sook\\work\\PirateTalk",
+    gitRemote: "https://github.com/Indosaram/PirateTalk.git",
+    target: { kind: "ssh", hostId: "build" },
+  };
+  const linuxProject: RegisteredProject = {
+    workspaceId: "ssh:linux-hash",
+    repoRoot: "/home/indo/projects/PirateTalk",
+    gitRoot: "/home/indo/projects/PirateTalk",
+    gitRemote: "https://github.com/Indosaram/PirateTalk.git",
+    target: { kind: "ssh", hostId: "build" },
+  };
+  render(
+    <Sidebar
+      projects={[winProject, linuxProject]}
+      activeProjectId={winProject.workspaceId}
+      worktrees={[]}
+      agents={[]}
+      activePath=""
+      onSelectWorktree={vi.fn()}
+      onCreateWorktree={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "PirateTalk" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "PirateTalk (Build machine)" })).not.toBeInTheDocument();
+});
+
+it("shows an enabled Add Worktree menu item for an SSH project with gitRoot and triggers creation", async () => {
   const onCreateWorktree = vi.fn();
   render(<Sidebar projects={[project]} activeProjectId={project.workspaceId} worktrees={[]} agents={[]} activePath="" onSelectWorktree={vi.fn()} onCreateWorktree={onCreateWorktree} />);
   await act(async () => { fireEvent.contextMenu(screen.getByRole("button", { name: "repo (Build machine)" })); });
   const [, entries, , onAction] = native.openNativePopupMenu.mock.calls[0];
   expect(entries).toEqual(expect.arrayContaining([
-    expect.objectContaining({ id: "add-worktree", enabled: false }),
-    expect.objectContaining({ id: "reveal", enabled: false }),
+    expect.objectContaining({ id: "add-worktree", label: "Add Worktree", enabled: true }),
+    expect.objectContaining({ id: "reveal", label: "Local reveal unavailable over SSH", enabled: false }),
   ]));
   act(() => { onAction("reveal"); onAction("add-worktree"); });
   expect(native.revealPath).not.toHaveBeenCalled();
-  expect(onCreateWorktree).not.toHaveBeenCalled();
+  expect(onCreateWorktree).toHaveBeenCalledOnce();
   native.openNativePopupMenu.mockClear();
-  fireEvent.contextMenu(screen.getByRole("button", { name: `${project.repoRoot} SSH root` }));
+  fireEvent.contextMenu(screen.getByRole("button", { name: "repo Build machine" }));
   expect(native.openNativePopupMenu).not.toHaveBeenCalled();
+});
+
+it("disables Add Worktree for a remote project without gitRoot", async () => {
+  const noGitProject: RegisteredProject = { ...project, gitRoot: null };
+  render(<Sidebar projects={[noGitProject]} activeProjectId={noGitProject.workspaceId} worktrees={[]} agents={[]} activePath="" onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />);
+  await act(async () => { fireEvent.contextMenu(screen.getByRole("button", { name: "repo (Build machine)" })); });
+  const [, entries] = native.openNativePopupMenu.mock.calls[0];
+  expect(entries).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: "add-worktree", enabled: false }),
+  ]));
 });
 
 it("falls back to the configured host ID rather than a workspace hash when the host is missing", () => {
@@ -50,11 +137,13 @@ it("groups matching remote project under existing local project as a remote work
     workspaceId: "my-app",
     repoRoot: "/Users/dev/my-app",
     gitRoot: "/Users/dev/my-app",
+    gitRemote: "https://github.com/org/my-app.git",
   };
   const remoteProject: RegisteredProject = {
     workspaceId: "ssh:remote-app",
     repoRoot: "/srv/my-app",
     gitRoot: "/srv/my-app",
+    gitRemote: "https://github.com/org/my-app.git",
     target: { kind: "ssh", hostId: "build" },
   };
   const localWorktree = {
@@ -136,11 +225,13 @@ it("preserves local worktrees in the sidebar and accurately highlights remote wo
     workspaceId: "shared-app",
     repoRoot: "/srv/shared-app",
     gitRoot: "/srv/shared-app",
+    gitRemote: "https://github.com/org/shared-app.git",
   };
   const remoteProject: RegisteredProject = {
     workspaceId: "ssh:shared-remote",
     repoRoot: "/srv/shared-app",
     gitRoot: "/srv/shared-app",
+    gitRemote: "https://github.com/org/shared-app.git",
     target: { kind: "ssh", hostId: "build" },
   };
   const localWorktree = {

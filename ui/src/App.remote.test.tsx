@@ -31,6 +31,15 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
   publishFocusedTerminal: async () => undefined,
   setBadgeCount: async () => ({ supported: false, count: 0 }),
 }));
+vi.mock("./lib/remoteDirectories", () => ({
+  listRemoteDirectories: vi.fn(async (_host: string, path: string | null) => ({
+    path: path ?? "/srv/repo",
+    parentPath: null,
+    homePath: "/home/ubuntu",
+    entries: [],
+    truncated: false,
+  })),
+}));
 vi.mock("./lib/remoteProject", async (importOriginal) => ({
   ...await importOriginal<typeof import("./lib/remoteProject")>(),
   registerRemoteProject: native.registerRemoteProject,
@@ -104,7 +113,7 @@ describe("App SSH project lifecycle", () => {
 
     // When the user selects the SSH root, each unresolved stage stays busy.
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "/srv/repo SSH root" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /repo build|\/srv\/repo SSH root/ })); });
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
     expect(screen.queryByTestId("empty-workspace-view")).not.toBeInTheDocument();
     await act(async () => { registration.resolve(registered); await registration.promise; });
@@ -195,7 +204,8 @@ describe("App SSH project lifecycle", () => {
     expect(native.registerProject).not.toHaveBeenCalled();
     expect(native.registerRemoteProject).toHaveBeenCalledWith({ workspaceId: remote.workspaceId, hostId: "build", repoPath: remote.repoRoot });
     await act(async () => { registration.resolve(registered); await registration.promise; });
-    expect(native.listWorktrees).not.toHaveBeenCalled();
+    await act(async () => {});
+    expect(native.listWorktrees).toHaveBeenCalledWith(remote.workspaceId);
     expect(native.watchDagProject).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /New Terminal/ })).toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!)[0].target).toEqual(remote.target);
@@ -232,9 +242,10 @@ describe("App SSH project lifecycle", () => {
     const registration = deferred<RegisteredRemoteProject>();
     native.registerRemoteProject.mockReturnValue(registration.promise);
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
-    fireEvent.click(screen.getByTestId("project-type-remote"));
-    fireEvent.change(screen.getByTestId("remote-repo-path-input"), { target: { value: "/srv/input" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Add Project" })); });
+    await act(async () => { fireEvent.click(screen.getByTestId("project-type-remote")); });
+    await act(async () => { fireEvent.change(screen.getByTestId("remote-repo-path-input"), { target: { value: "/srv/input/" } }); });
+    await act(async () => {});
     await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-remote")); });
     await act(async () => { registration.resolve(registered); await registration.promise; });
     expect(native.registerProject).not.toHaveBeenCalled();
@@ -260,7 +271,7 @@ describe("App SSH project lifecycle", () => {
     seed([{ ...remote, workspaceId: "alias", repoRoot: "/srv/input" }]);
     await mount();
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
-    expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!)).toEqual([remote]);
+    expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!)).toEqual([expect.objectContaining(remote)]);
     const spawn = deferred<string>();
     native.spawnTerminal.mockReturnValueOnce(spawn.promise);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New Terminal" })); });
@@ -272,7 +283,7 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Split remote pane" })); });
     expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, worktree: null, cwd: null, inheritFromSessionId: "remote-backend" }));
     expect(native.registerProject).not.toHaveBeenCalled();
-    expect(native.listWorktrees).not.toHaveBeenCalled();
+    expect(native.listWorktrees).toHaveBeenCalledWith(remote.workspaceId);
     expect(native.watchDagProject).not.toHaveBeenCalled();
   });
 
@@ -285,7 +296,8 @@ describe("App SSH project lifecycle", () => {
     const restore = deferred<null>();
     native.loadSession.mockReturnValueOnce(restore.promise);
     native.registerRemoteProject.mockReturnValueOnce(registration.promise);
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /build SSH/ })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "repo build" })); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     await act(async () => { registration.resolve(registered); await registration.promise; });
@@ -293,9 +305,10 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { restore.resolve(null); await restore.promise; });
     expect(native.spawnTerminal).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot }));
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
-    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("local");
+    expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(local.workspaceId);
     expect(native.registerProject.mock.calls.every(([request]) => request.workspaceId === "local")).toBe(true);
-    expect(native.listWorktrees.mock.calls.every(([workspaceId]) => workspaceId === "local")).toBe(true);
+    expect(native.listWorktrees).toHaveBeenCalledWith("local");
+    expect(native.listWorktrees).toHaveBeenCalledWith(remote.workspaceId);
   });
 
   it("leaves a rejected host unavailable instead of spawning locally", async () => {

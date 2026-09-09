@@ -71,17 +71,20 @@ export function useInactiveProjectWorktrees(
     if (!subscribe) return;
     let cancelled = false;
     const unlistenPromise = subscribe((payload: WorktreeChangedPayload) => {
-      if (
-        payload.kind !== "deleted" &&
-        payload.kind !== "destructivelyDeleted" &&
-        payload.kind !== "pruned"
-      ) {
-        return;
-      }
-      if (!inactiveTargetsRef.current.some((project) => project.workspaceId === payload.workspaceId)) return;
       const workspaceId = payload.workspaceId;
       const target = inactiveTargetsRef.current.find((project) => project.workspaceId === workspaceId);
-      if (target?.target?.kind === "ssh") return;
+      if (!target) return;
+
+      const isSsh = target.target?.kind === "ssh";
+      if (!isSsh) {
+        if (
+          payload.kind !== "deleted" &&
+          payload.kind !== "destructivelyDeleted" &&
+          payload.kind !== "pruned"
+        ) {
+          return;
+        }
+      }
       switchDebug("inactive-worktrees.relist", { workspaceId, kind: payload.kind });
       void servicesRef.current
         .listWorktrees(workspaceId)
@@ -123,9 +126,20 @@ export function useInactiveProjectWorktrees(
     void (async () => {
       const resolved = await Promise.all(
         targets.map(async (project) => {
-          // Inactive SSH rows are metadata, not local Git worktrees. Selecting
-          // one revalidates the host/path through App's remote registration.
-          if (project.target?.kind === "ssh") return [project.workspaceId, [plainRootWorktree(project)]] as const;
+          // Inactive SSH targets skip local project registration, but git-backed
+          // SSH projects still list their remote worktrees on initial load.
+          if (project.target?.kind === "ssh") {
+            if (project.gitRoot === null) {
+              return [project.workspaceId, [plainRootWorktree(project)]] as const;
+            }
+            try {
+              const listed = await services.listWorktrees(project.workspaceId);
+              const worktrees = listed.length > 0 ? listed : [plainRootWorktree(project)];
+              return [project.workspaceId, worktrees] as const;
+            } catch {
+              return [project.workspaceId, [plainRootWorktree(project)]] as const;
+            }
+          }
           try {
             // A rejection means this ID is bound to a different root, so listing
             // would report another repository's worktrees under this project.

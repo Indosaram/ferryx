@@ -1,8 +1,13 @@
+use super::runtime::{
+    parse_fields, powershell_data, RemoteEnvironment, RemotePlatform, POWERSHELL_GIT,
+};
+use super::{direct, SshHost};
+use crate::ipc::{IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
-use super::SshHost;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteWorktree {
     pub path: String,
     pub head: Option<String>,
@@ -58,61 +63,238 @@ pub fn parse_worktree_porcelain(output: &str) -> Vec<RemoteWorktree> {
     worktrees
 }
 
-pub fn remote_list_argv(host: &SshHost) -> Vec<String> {
-    let mut argv = vec!["ssh".to_string()];
-    argv.push(host.target());
-    argv.push("git worktree list --porcelain".to_string());
-    argv
-}
-
-pub fn remote_add_argv(
-    host: &SshHost,
-    path: &str,
-    ws_id: &str,
-    slug: &str,
-    base: Option<&str>,
-) -> Result<Vec<String>, String> {
-    let branch = crate::worktree::manager::WorktreeManager::format_branch_name(ws_id, slug)
-        .map_err(|worktree_error| worktree_error.to_string())?;
-    let mut argv = vec!["ssh".to_string()];
-    argv.push(host.target());
-    let mut command = format!("git worktree add -b {branch} {path}");
-    if let Some(base_ref) = base {
-        command.push(' ');
-        command.push_str(base_ref);
+/// Derives a sanitized worktree branch namespace segment from a remote workspace ID (`ssh:<hex>`).
+/// Takes up to 12 leading hex characters and formats as `ssh-{segment}`.
+pub fn derive_ws_segment(workspace_id: &str) -> Result<String, IpcError> {
+    let hex = workspace_id
+        .strip_prefix(crate::ssh::projects::REMOTE_PREFIX)
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidNamespace,
+                format!(
+                    "Remote workspace ID must start with '{}'",
+                    crate::ssh::projects::REMOTE_PREFIX
+                ),
+            )
+        })?;
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidNamespace,
+            "Remote workspace ID contains invalid hex characters",
+        ));
     }
-    argv.push(command);
-    Ok(argv)
+    let segment = if hex.len() > 12 { &hex[..12] } else { hex };
+    Ok(format!("ssh-{segment}"))
 }
 
-pub fn remote_remove_argv(host: &SshHost, path: &str) -> Vec<String> {
-    vec![
-        "ssh".to_string(),
-        host.target(),
-        format!("git worktree remove {path}"),
-    ]
+pub fn remote_worktree_path(platform: RemotePlatform, repo_root: &str, slug: &str) -> String {
+    match platform {
+        RemotePlatform::Posix => {
+            let root = repo_root.trim_end_matches('/');
+            format!("{root}/.orca-worktrees/wt-{slug}")
+        }
+        RemotePlatform::Windows => {
+            let root = repo_root.trim_end_matches(['/', '\\']);
+            format!("{root}\\.orca-worktrees\\wt-{slug}")
+        }
+    }
+}
+
+pub fn validate_base_ref(base_ref: Option<&str>) -> Result<(), IpcError> {
+    if let Some(base) = base_ref {
+        if base.starts_with('-') {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "base_ref must not start with '-'",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_path_inside_root(
+    platform: RemotePlatform,
+    root: &str,
+    path: &str,
+) -> Result<(), IpcError> {
+    match platform {
+        RemotePlatform::Posix => {
+            let norm_root = root.trim_end_matches('/');
+            let norm_path = path.trim_end_matches('/');
+            if norm_path.split('/').any(|seg| seg == "..")
+                || !norm_path.starts_with(&format!("{norm_root}/"))
+            {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidPath,
+                    "Worktree path must be inside the project repository root",
+                ));
+            }
+        }
+        RemotePlatform::Windows => {
+            let norm_root = root.replace('\\', "/").trim_end_matches('/').to_lowercase();
+            let norm_path = path.replace('\\', "/").trim_end_matches('/').to_lowercase();
+            if norm_path.split('/').any(|seg| seg == "..")
+                || !norm_path.starts_with(&format!("{norm_root}/"))
+            {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidPath,
+                    "Worktree path must be inside the project repository root",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn worktree_list_script(platform: RemotePlatform, repo_root: &str, marker: &str) -> String {
+    match platform {
+        RemotePlatform::Posix => {
+            let quoted_root = direct::quote_posix(repo_root);
+            format!(
+                "out=$(git -C {quoted_root} worktree list --porcelain 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}; printf '{marker}\\000%s\\000' \"$out\""
+            )
+        }
+        RemotePlatform::Windows => {
+            let p = powershell_data(repo_root);
+            format!(
+                "{POWERSHELL_GIT}\n$p={p}; \
+                 $g=Invoke-FerryxGit @('-C',$p,'worktree','list','--porcelain'); \
+                 if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree list failed' }}; throw $err }}; \
+                 [Console]::Write(('{marker}',$g.Output,'' -join [char]0))"
+            )
+        }
+    }
+}
+
+pub fn worktree_create_script(
+    platform: RemotePlatform,
+    repo_root: &str,
+    branch: &str,
+    path: &str,
+    base_ref: Option<&str>,
+) -> String {
+    match platform {
+        RemotePlatform::Posix => {
+            let quoted_root = direct::quote_posix(repo_root);
+            let quoted_branch = direct::quote_posix(branch);
+            let quoted_path = direct::quote_posix(path);
+            let quoted_base = match base_ref {
+                Some(base) => format!(" {}", direct::quote_posix(base)),
+                None => String::new(),
+            };
+            format!(
+                "out=$(git -C {quoted_root} worktree add -b {quoted_branch} {quoted_path}{quoted_base} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
+            )
+        }
+        RemotePlatform::Windows => {
+            let p = powershell_data(repo_root);
+            let wt = powershell_data(path);
+            let br = powershell_data(branch);
+            let base_code = match base_ref {
+                Some(base) => format!(" $args += {};", powershell_data(base)),
+                None => String::new(),
+            };
+            format!(
+                "{POWERSHELL_GIT}\n$p={p}; $wt={wt}; $br={br}; \
+                 $args=@('-C',$p,'worktree','add','-b',$br,$wt);{base_code} \
+                 $g=Invoke-FerryxGit $args; \
+                 if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree add failed' }}; throw $err }}"
+            )
+        }
+    }
+}
+
+pub fn worktree_remove_script(platform: RemotePlatform, repo_root: &str, path: &str) -> String {
+    match platform {
+        RemotePlatform::Posix => {
+            let quoted_root = direct::quote_posix(repo_root);
+            let quoted_path = direct::quote_posix(path);
+            format!(
+                "out=$(git -C {quoted_root} worktree remove {quoted_path} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
+            )
+        }
+        RemotePlatform::Windows => {
+            let p = powershell_data(repo_root);
+            let wt = powershell_data(path);
+            format!(
+                "{POWERSHELL_GIT}\n$p={p}; $wt={wt}; \
+                 $g=Invoke-FerryxGit @('-C',$p,'worktree','remove',$wt); \
+                 if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree remove failed' }}; throw $err }}"
+            )
+        }
+    }
+}
+
+fn tag_error(mut err: IpcError, stage: &'static str) -> IpcError {
+    match err.details.as_mut() {
+        Some(details) => {
+            details["stage"] = stage.into();
+        }
+        None => {
+            err = err.with_details(serde_json::json!({"stage": stage}));
+        }
+    }
+    err
+}
+
+pub async fn list_remote(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    repo_root: &str,
+) -> Result<Vec<RemoteWorktree>, IpcError> {
+    environment.platform.validate_path(repo_root)?;
+    let marker = format!("FERRYX_WT_LIST_V1_{}", uuid::Uuid::new_v4().simple());
+    let script = worktree_list_script(environment.platform, repo_root, &marker);
+    let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    let output = direct::bounded_output(&plan, Duration::from_secs(30))
+        .await
+        .map_err(|err| tag_error(err, "worktree-list"))?;
+    let fields = parse_fields(&output, &marker, 1).map_err(|err| tag_error(err, "worktree-list"))?;
+    Ok(parse_worktree_porcelain(fields[0]))
+}
+
+pub async fn create_remote(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    repo_root: &str,
+    ws_segment: &str,
+    slug: &str,
+    base_ref: Option<&str>,
+    path: &str,
+) -> Result<(), IpcError> {
+    validate_base_ref(base_ref)?;
+    environment.platform.validate_path(repo_root)?;
+    environment.platform.validate_path(path)?;
+    let branch = crate::worktree::manager::WorktreeManager::format_branch_name(ws_segment, slug)
+        .map_err(|err| IpcError::new(IpcErrorCode::InvalidNamespace, err.to_string()))?;
+    let script = worktree_create_script(environment.platform, repo_root, &branch, path, base_ref);
+    let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    direct::bounded_output(&plan, Duration::from_secs(30))
+        .await
+        .map_err(|err| tag_error(err, "worktree-create"))?;
+    Ok(())
+}
+
+pub async fn remove_remote(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    repo_root: &str,
+    path: &str,
+) -> Result<(), IpcError> {
+    environment.platform.validate_path(repo_root)?;
+    environment.platform.validate_path(path)?;
+    let script = worktree_remove_script(environment.platform, repo_root, path);
+    let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    direct::bounded_output(&plan, Duration::from_secs(30))
+        .await
+        .map_err(|err| tag_error(err, "worktree-remove"))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh::SshAuthMethod;
-    use crate::ssh::SshHostSource;
-
-    fn host() -> SshHost {
-        SshHost {
-            id: "h".into(),
-            label: "l".into(),
-            hostname: "maho-win".into(),
-            username: Some("sook".into()),
-            port: None,
-            identity_file: None,
-            jump_host: None,
-            source: SshHostSource::Config,
-            auth_method: SshAuthMethod::Agent,
-            disabled: None,
-        }
-    }
+    use crate::worktree::manager::WorktreeManager;
 
     #[test]
     fn red_parse_porcelain_entries() {
@@ -136,34 +318,224 @@ mod tests {
     }
 
     #[test]
-    fn red_remote_argv_shapes() {
-        assert_eq!(
-            remote_list_argv(&host()),
-            vec!["ssh", "sook@maho-win", "git worktree list --porcelain"]
-        );
-        let add = remote_add_argv(&host(), "/srv/wt", "ws1", "slug-a", Some("origin/main"))
-            .expect("valid");
-        assert_eq!(
-            add,
-            vec![
-                "ssh",
-                "sook@maho-win",
-                "git worktree add -b orca/ws1/slug-a /srv/wt origin/main"
-            ]
-        );
-        let no_base = remote_add_argv(&host(), "/srv/wt2", "ws1", "slug-b", None).expect("valid");
-        assert_eq!(
-            no_base.last().map(String::as_str),
-            Some("git worktree add -b orca/ws1/slug-b /srv/wt2")
-        );
-        assert_eq!(
-            remote_remove_argv(&host(), "/srv/wt"),
-            vec!["ssh", "sook@maho-win", "git worktree remove /srv/wt"]
-        );
+    fn red_list_script_marker_framed_both_platforms() {
+        let posix = worktree_list_script(RemotePlatform::Posix, "/home/user/repo", "MARKER_LIST");
+        assert!(posix.contains("git -C '/home/user/repo' worktree list --porcelain"));
+        assert!(posix.contains("MARKER_LIST\\000%s\\000"));
+
+        let windows = worktree_list_script(RemotePlatform::Windows, r"C:\Users\sook\repo", "MARKER_WIN");
+        assert!(windows.contains("Invoke-FerryxGit"));
+        assert!(windows.contains("'worktree','list','--porcelain'"));
+        assert!(windows.contains("MARKER_WIN"));
     }
 
     #[test]
-    fn red_invalid_slug_rejected() {
-        assert!(remote_add_argv(&host(), "/srv/wt", "ws1", "bad..slug", None).is_err());
+    fn red_create_script_quoting_and_sanitized_branch() {
+        let raw_ws_id = "ssh:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ws_segment = derive_ws_segment(raw_ws_id).expect("valid segment");
+        assert_eq!(ws_segment, "ssh-0123456789ab");
+
+        let branch = WorktreeManager::format_branch_name(&ws_segment, "my-feature").expect("valid branch");
+        assert_eq!(branch, "orca/ssh-0123456789ab/my-feature");
+
+        // Posix create script with base_ref
+        let posix = worktree_create_script(
+            RemotePlatform::Posix,
+            "/home/user/repo with spaces",
+            &branch,
+            "/home/user/repo with spaces/.orca-worktrees/wt-my-feature",
+            Some("origin/main"),
+        );
+        // The raw hash with colon must never reach the script
+        assert!(!posix.contains("ssh:0123456789ab"));
+        assert!(posix.contains("orca/ssh-0123456789ab/my-feature"));
+        assert!(posix.contains("'/home/user/repo with spaces'"));
+        assert!(posix.contains("'/home/user/repo with spaces/.orca-worktrees/wt-my-feature'"));
+        assert!(posix.contains("'origin/main'"));
+
+        // Windows create script without base_ref
+        let win = worktree_create_script(
+            RemotePlatform::Windows,
+            r"C:\Users\sook\repo",
+            &branch,
+            r"C:\Users\sook\repo\.orca-worktrees\wt-my-feature",
+            None,
+        );
+        assert!(!win.contains("ssh:0123456789ab"));
+        assert!(win.contains("Invoke-FerryxGit"));
+    }
+
+    #[test]
+    fn red_derive_ws_segment_malformed_rejected() {
+        assert!(derive_ws_segment("not-ssh:1234").is_err());
+        assert!(derive_ws_segment("ssh:").is_err());
+        assert!(derive_ws_segment("ssh:bad..hex").is_err());
+        assert!(derive_ws_segment("ssh:0123456789abcdef").is_ok());
+        assert_eq!(
+            derive_ws_segment("ssh:0123456789abcdef").unwrap(),
+            "ssh-0123456789ab"
+        );
+        assert_eq!(derive_ws_segment("ssh:abc").unwrap(), "ssh-abc");
+    }
+
+    #[test]
+    fn red_path_inside_root_guard() {
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo/.orca-worktrees/wt-1").is_ok());
+        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:\Users\sook\repo", r"C:\Users\sook\repo\.orca-worktrees\wt-1").is_ok());
+        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:/Users/sook/repo", r"C:\Users\sook\repo\.orca-worktrees\wt-1").is_ok());
+
+        // Repo root itself cannot be deleted
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo").is_err());
+        // Sibling folder cannot be deleted
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo-other/wt").is_err());
+        // Traversal cannot be deleted
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo/../secret").is_err());
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/etc/passwd").is_err());
+
+        // Fix 1 Regression tests:
+        // Posix: no backslash translation
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", r"/srv/repo\outside").is_err());
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo-other/x").is_err());
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo/.orca-worktrees/wt-1").is_ok());
+        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo").is_err());
+        // Windows: case and separator insensitive, traversal rejected
+        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:\Repo", r"c:\repo\.orca-worktrees\wt-1").is_ok());
+        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:\Repo", r"C:\Repo\..\secret").is_err());
+    }
+
+    #[test]
+    fn red_create_remote_rejects_base_ref_option_injection() {
+        assert_eq!(
+            validate_base_ref(Some("--no-checkout")).unwrap_err().code,
+            IpcErrorCode::InvalidArgument
+        );
+        assert!(validate_base_ref(Some("origin/main")).is_ok());
+        assert!(validate_base_ref(None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn red_create_remote_option_injection_async_guard() {
+        use crate::ssh::runtime::RemoteExecutor;
+        use crate::ssh::{SshAuthMethod, SshHostSource};
+
+        let host = SshHost {
+            id: "h1".into(),
+            label: "test".into(),
+            hostname: "localhost".into(),
+            username: None,
+            port: None,
+            identity_file: None,
+            jump_host: None,
+            source: SshHostSource::Config,
+            auth_method: SshAuthMethod::Agent,
+            disabled: None,
+        };
+        let env = RemoteEnvironment {
+            platform: RemotePlatform::Posix,
+            executor: RemoteExecutor::Sh,
+            version: "test".into(),
+            home: "/home/user".into(),
+            temp: "/tmp".into(),
+            git: true,
+        };
+        let err = create_remote(
+            &host,
+            &env,
+            "/srv/repo",
+            "ssh-abc",
+            "wt-1",
+            Some("--no-checkout"),
+            "/srv/repo/.orca-worktrees/wt-1",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn red_posix_script_builders_executable_behavior() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_root_path = dir.path().canonicalize().expect("canonicalize");
+        let repo_root = repo_root_path.to_str().expect("repo root str");
+
+        let init_status = std::process::Command::new("git")
+            .args(["init", repo_root])
+            .status()
+            .expect("git init");
+        assert!(init_status.success());
+
+        let name_status = std::process::Command::new("git")
+            .args(["-C", repo_root, "config", "user.name", "test"])
+            .status()
+            .expect("git config user.name");
+        assert!(name_status.success());
+
+        let email_status = std::process::Command::new("git")
+            .args(["-C", repo_root, "config", "user.email", "test@example.com"])
+            .status()
+            .expect("git config user.email");
+        assert!(email_status.success());
+
+        let commit_status = std::process::Command::new("git")
+            .args(["-C", repo_root, "commit", "--allow-empty", "-m", "init"])
+            .status()
+            .expect("git commit");
+        assert!(commit_status.success());
+
+        let ws_segment = derive_ws_segment("ssh:0123456789abcdef").expect("valid segment");
+        let branch = WorktreeManager::format_branch_name(&ws_segment, "feat-test").expect("valid branch");
+        let wt_path = format!("{repo_root}/.orca-worktrees/wt-feat-test");
+
+        let create_script = worktree_create_script(
+            RemotePlatform::Posix,
+            repo_root,
+            &branch,
+            &wt_path,
+            None,
+        );
+
+        let create_output = std::process::Command::new("bash")
+            .args(["-c", &create_script])
+            .output()
+            .expect("run create_script");
+        assert!(
+            create_output.status.success(),
+            "create_script failed: {}",
+            String::from_utf8_lossy(&create_output.stderr)
+        );
+
+        let marker = format!("FERRYX_WT_LIST_V1_{}", uuid::Uuid::new_v4().simple());
+        let list_script = worktree_list_script(RemotePlatform::Posix, repo_root, &marker);
+
+        let list_output = std::process::Command::new("bash")
+            .args(["-c", &list_script])
+            .output()
+            .expect("run list_script");
+        assert!(
+            list_output.status.success(),
+            "list_script failed: {}",
+            String::from_utf8_lossy(&list_output.stderr)
+        );
+
+        let fields = parse_fields(&list_output.stdout, &marker, 1).expect("parse_fields");
+        let worktrees = parse_worktree_porcelain(fields[0]);
+
+        let created_wt = worktrees
+            .iter()
+            .find(|wt| wt.path == wt_path)
+            .expect("created worktree in porcelain listing");
+        assert_eq!(created_wt.branch.as_deref(), Some("orca/ssh-0123456789ab/feat-test"));
+    }
+
+    #[test]
+    fn red_porcelain_parsing_of_created_output() {
+        let output = "worktree /srv/repo/.orca-worktrees/wt-new\nHEAD e4d8c2\nbranch refs/heads/orca/ssh-abc/new\n\n";
+        let parsed = parse_worktree_porcelain(output);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, "/srv/repo/.orca-worktrees/wt-new");
+        assert_eq!(parsed[0].head.as_deref(), Some("e4d8c2"));
+        assert_eq!(parsed[0].branch.as_deref(), Some("orca/ssh-abc/new"));
+        assert!(!parsed[0].bare);
+        assert!(!parsed[0].detached);
     }
 }

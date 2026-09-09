@@ -20,8 +20,8 @@ async fn remote_registration_preserves_git_identity_and_execution_path() {
     let path = std::env::var("FERRYX_IDENTITY_PATH").unwrap();
     let environment = runtime::detect(&host).await.unwrap();
     let probed = operations::probe(&host, &environment, &path).await.unwrap();
-    assert!(probed.1.is_some(), "fixture must be a Git checkout");
-    assert!(probed.3.is_some(), "Git common directory must be resolved");
+    assert!(probed.git_root.is_some(), "fixture must be a Git checkout");
+    assert!(probed.git_common_dir.is_some(), "Git common directory must be resolved");
     let isolated = tempfile::tempdir().unwrap();
     let store = isolated.path().join("ssh_hosts.json");
     std::fs::write(

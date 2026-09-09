@@ -6,13 +6,23 @@ use crate::ipc::{IpcError, IpcErrorCode};
 use crate::terminal::shell::ShellCommandPlan;
 use std::time::Duration;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectProbe {
+    pub repo_root: String,
+    pub git_root: Option<String>,
+    pub git_remote: Option<String>,
+    pub git_common_dir: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_head: Option<String>,
+}
+
 pub async fn probe(
     host: &SshHost,
     environment: &RemoteEnvironment,
     path: &str,
-) -> Result<(String, Option<String>, Option<String>, Option<String>), IpcError> {
+) -> Result<ProjectProbe, IpcError> {
     environment.platform.validate_path(path)?;
-    let marker = format!("FERRYX_DIR_V1_{}", uuid::Uuid::new_v4().simple());
+    let marker = format!("FERRYX_DIR_V2_{}", uuid::Uuid::new_v4().simple());
     let script = project_probe_script(environment.platform, path, &marker);
     let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
     let output = direct::bounded_output(&plan, Duration::from_secs(12))
@@ -23,19 +33,23 @@ pub async fn probe(
             }
             err
         })?;
-    let fields = parse_fields(&output, &marker, 4)?;
+    let fields = parse_fields(&output, &marker, 6)?;
     environment.platform.validate_path(fields[0])?;
     for path in [fields[1], fields[3]] {
         if !path.is_empty() {
             environment.platform.validate_path(path)?;
         }
     }
-    Ok((
-        fields[0].into(),
-        (!fields[1].is_empty()).then(|| fields[1].into()),
-        crate::worktree::git::select_project_remote(fields[2]),
-        (!fields[3].is_empty()).then(|| fields[3].into()),
-    ))
+    let git_branch = (!fields[4].is_empty()).then(|| fields[4].trim().to_string());
+    let git_head = (!fields[5].is_empty()).then(|| fields[5].trim().to_string());
+    Ok(ProjectProbe {
+        repo_root: fields[0].into(),
+        git_root: (!fields[1].is_empty()).then(|| fields[1].into()),
+        git_remote: crate::worktree::git::select_project_remote(fields[2]),
+        git_common_dir: (!fields[3].is_empty()).then(|| fields[3].into()),
+        git_branch,
+        git_head,
+    })
 }
 
 fn project_probe_script(platform: RemotePlatform, path: &str, marker: &str) -> String {
@@ -46,13 +60,16 @@ fn project_probe_script(platform: RemotePlatform, path: &str, marker: &str) -> S
              remotes=$(git remote -v 2>/dev/null) || remotes=; \
              common=$(git rev-parse --git-common-dir 2>/dev/null) || common=; \
              if [ -n \"$common\" ]; then common=$(cd \"$common\" && pwd -P) || common=; fi; \
-             printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000' \"$root\" \"$gitroot\" \"$remotes\" \"$common\"",
+             branch=$(git branch --show-current 2>/dev/null) || branch=; \
+             if [ -z \"$branch\" ]; then branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=; fi; \
+             head=$(git rev-parse --verify HEAD 2>/dev/null) || head=; \
+             printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000%s\\000%s\\000' \"$root\" \"$gitroot\" \"$remotes\" \"$common\" \"$branch\" \"$head\"",
             direct::quote_posix(path)
         ),
         RemotePlatform::Windows => format!(
             "{POWERSHELL_GIT}\n$p={}; $item=Get-Item -LiteralPath $p -Force; \
              if (!$item.PSIsContainer) {{ throw 'Remote path is not a directory' }}; \
-             $root=$item.FullName; $gitroot=''; $remotes=''; $common=''; \
+             $root=$item.FullName; $gitroot=''; $remotes=''; $common=''; $branch=''; $head=''; \
              if (Get-Command git -ErrorAction SilentlyContinue) {{ \
                  $g=Invoke-FerryxGit @('-C',$root,'rev-parse','--show-toplevel'); \
                  if ($g.Code -eq 0) {{ $gitroot=$g.Output.TrimEnd([char[]]\"`r`n\"); \
@@ -62,9 +79,17 @@ fn project_probe_script(platform: RemotePlatform, path: &str, marker: &str) -> S
                      if ($g.Code -eq 0) {{ $c=$g.Output.TrimEnd([char[]]\"`r`n\"); \
                          if (![IO.Path]::IsPathRooted($c)) {{ $c=Join-Path $root $c }}; \
                          $common=(Get-Item -LiteralPath $c -Force).FullName \
-                     }} \
+                     }}; \
+                     $g=Invoke-FerryxGit @('-C',$root,'branch','--show-current'); \
+                     if ($g.Code -eq 0) {{ $branch=$g.Output.TrimEnd([char[]]\"`r`n\") }}; \
+                     if (!$branch) {{ \
+                         $g=Invoke-FerryxGit @('-C',$root,'symbolic-ref','--quiet','--short','HEAD'); \
+                         if ($g.Code -eq 0) {{ $branch=$g.Output.TrimEnd([char[]]\"`r`n\") }} \
+                     }}; \
+                     $g=Invoke-FerryxGit @('-C',$root,'rev-parse','--verify','HEAD'); \
+                     if ($g.Code -eq 0) {{ $head=$g.Output.TrimEnd([char[]]\"`r`n\") }} \
                  }} \
-             }}; [Console]::Write(('{marker}',$root,$gitroot,$remotes,$common,'' -join [char]0))",
+             }}; [Console]::Write(('{marker}',$root,$gitroot,$remotes,$common,$branch,$head,'' -join [char]0))",
             powershell_data(path)
         ),
     }

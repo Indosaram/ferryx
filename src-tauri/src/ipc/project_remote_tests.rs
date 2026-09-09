@@ -30,11 +30,11 @@ async fn all_local_git_boundaries_reject_remote_namespace_even_without_loaded_me
         slug: "feature".into(),
     };
     assert_eq!(
-        cmd_worktree_list(app.state(), id.clone())
+        cmd_worktree_list(app.handle().clone(), app.state(), id.clone())
             .await
             .unwrap_err()
             .code,
-        IpcErrorCode::Unsupported
+        IpcErrorCode::WorkspaceNotFound
     );
     assert_eq!(
         cmd_project_branches(

@@ -18,7 +18,7 @@ async fn posix_environment_directory_and_real_pty() {
     };
     let environment = runtime::detect(&host).await.unwrap();
     assert_eq!(environment.platform, runtime::RemotePlatform::Posix);
-    let root = operations::probe(&host, &environment, &environment.home).await.unwrap().0;
+    let root = operations::probe(&host, &environment, &environment.home).await.unwrap().repo_root;
     let service = ferryx_lib::terminal::TerminalService::default();
     let clone = service.clone();
     let expected = format!("FXQA{root}");

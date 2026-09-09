@@ -20,6 +20,10 @@ pub struct RemoteProject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<super::runtime::RemotePlatform>,
 }
 

@@ -113,8 +113,8 @@ async fn exercise_windows(
     root: &str,
 ) -> Result<(), ferryx_lib::ipc::IpcError> {
     let found = operations::probe(host, environment, root).await?;
-    assert_eq!(found.0, root);
-    assert_eq!(found.1, None);
+    assert_eq!(found.repo_root, root);
+    assert_eq!(found.git_root, None);
     operations::git(host, environment, root, &["init"]).await?;
     operations::git(
         host,
@@ -124,8 +124,8 @@ async fn exercise_windows(
     )
     .await?;
     let found = operations::probe(host, environment, root).await?;
-    assert_eq!(found.1.as_deref(), Some(root.replace('\\', "/").as_str()));
-    assert_eq!(found.2.as_deref(), Some("https://example.test/qa.git"));
+    assert_eq!(found.git_root.as_deref(), Some(root.replace('\\', "/").as_str()));
+    assert_eq!(found.git_remote.as_deref(), Some("https://example.test/qa.git"));
 
     let state = tempfile::tempdir().unwrap();
     let store = state.path().join("ssh_hosts.json");
@@ -165,7 +165,7 @@ async fn exercise_windows(
     );
     let mut core = environment.clone();
     core.executor = runtime::RemoteExecutor::Pwsh;
-    assert_eq!(operations::probe(host, &core, root).await?.0, root);
+    assert_eq!(operations::probe(host, &core, root).await?.repo_root, root);
 
     let payload: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
     let file = operations::upload(

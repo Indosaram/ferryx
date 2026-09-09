@@ -53,6 +53,7 @@ pub enum IpcErrorCode {
     CliParentSymlinkDenied,
     CliPlatformUnsupported,
     CliExecutableNotFound,
+    InvalidArgument,
     InternalError,
     Unsupported,
 }

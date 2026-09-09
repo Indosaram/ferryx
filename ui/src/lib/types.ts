@@ -9,6 +9,7 @@ export type Worktree = {
   /** Explicit owner for SSH roots, whose paths can equal paths on other hosts. */
   workspaceId?: string;
   hostLabel?: string;
+  hostSummary?: string;
   path: string;
   head: string;
   branch: string | null;
@@ -640,6 +641,9 @@ export interface PersistedWorkspace {
   gitRoot?: string | null;
   gitRemote?: string | null;
   gitCommonDir?: string | null;
+  gitBranch?: string | null;
+  gitHead?: string | null;
+  hostLabel?: string;
   worktrees: PersistedWorktree[];
   activeWorktreePath: string | null;
   layout: PersistedLayout;

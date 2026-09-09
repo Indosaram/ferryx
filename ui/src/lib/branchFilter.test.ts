@@ -59,6 +59,12 @@ describe("displayWorkspaceTitle", () => {
     ).toBe("notes-app");
   });
 
+  it("shows the folder basename for a Windows path with backslashes", () => {
+    expect(
+      displayWorkspaceTitle(worktree({ branch: null, path: "C:\\Users\\sook\\code\\katok-windows" })),
+    ).toBe("katok-windows");
+  });
+
   it("ignores trailing slashes when deriving the folder basename", () => {
     expect(
       displayWorkspaceTitle(worktree({ branch: null, path: "/Users/dev/code/notes-app///" })),
@@ -81,6 +87,17 @@ describe("displayWorkspaceTitle", () => {
       expect(displayWorkspaceTitle(worktree({ branch }))).toBe("main");
     },
   );
+
+  it.each(["ferryx", "rorca", "orca-lite"])(
+    "preserves remote branch names even if named %s",
+    (branch) => {
+      expect(displayWorkspaceTitle(worktree({ workspaceId: "ssh:opaque", branch }))).toBe(branch);
+    },
+  );
+
+  it("returns detached HEAD when worktree is detached", () => {
+    expect(displayWorkspaceTitle(worktree({ workspaceId: "ssh:opaque", branch: null, detached: true }))).toBe("detached HEAD");
+  });
 
   it("exposes workspaceName as an alias of displayWorkspaceTitle", () => {
     expect(workspaceName).toBe(displayWorkspaceTitle);

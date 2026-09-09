@@ -13,6 +13,8 @@ export interface RegisteredRemoteProject {
   gitRoot: string | null;
   gitRemote?: string | null;
   gitCommonDir?: string | null;
+  gitBranch?: string | null;
+  gitHead?: string | null;
   hostId: string;
   hostLabel: string;
 }
@@ -49,6 +51,9 @@ export function toRegisteredProject(remote: RegisteredRemoteProject): Registered
     gitRoot: remote.gitRoot ?? null,
     ...(remote.gitRemote ? { gitRemote: remote.gitRemote } : {}),
     ...(remote.gitCommonDir ? { gitCommonDir: remote.gitCommonDir } : {}),
+    gitBranch: remote.gitBranch ?? null,
+    gitHead: remote.gitHead ?? null,
+    hostLabel: remote.hostLabel,
     target: {
       kind: "ssh",
       hostId: remote.hostId,
@@ -64,3 +69,47 @@ export async function registerRemoteProject(
   }
   return invoke<RegisteredRemoteProject>("cmd_project_register_remote", { request });
 }
+
+export interface RemoteWorktree {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  bare: boolean;
+  detached: boolean;
+}
+
+export async function listRemoteWorktrees(workspaceId: string): Promise<RemoteWorktree[]> {
+  if (!isTauri()) {
+    return [];
+  }
+  return invoke<RemoteWorktree[]>("cmd_ssh_list_remote_worktrees", { workspaceId });
+}
+
+export async function createRemoteWorktree(options: {
+  workspaceId: string;
+  slug: string;
+  baseRef?: string | null;
+}): Promise<RemoteWorktree> {
+  if (!isTauri()) {
+    throw new Error("Remote worktree creation is available only in the Ferryx desktop runtime");
+  }
+  return invoke<RemoteWorktree>("cmd_ssh_create_remote_worktree", {
+    workspaceId: options.workspaceId,
+    slug: options.slug,
+    baseRef: options.baseRef ?? null,
+  });
+}
+
+export async function deleteRemoteWorktree(options: {
+  workspaceId: string;
+  path: string;
+}): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("Remote worktree deletion is available only in the Ferryx desktop runtime");
+  }
+  return invoke<void>("cmd_ssh_delete_remote_worktree", {
+    workspaceId: options.workspaceId,
+    path: options.path,
+  });
+}
+

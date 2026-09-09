@@ -149,6 +149,8 @@ function recoverProjectBootstrap(session: PersistedWorkspaceSession | null): Pro
         workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot,
         target: workspace.target, gitRoot: workspace.gitRoot,
         gitRemote: workspace.gitRemote, gitCommonDir: workspace.gitCommonDir,
+        gitBranch: workspace.gitBranch, gitHead: workspace.gitHead,
+        hostLabel: workspace.hostLabel,
       });
     }
     return recovered;
@@ -450,7 +452,7 @@ function matchWorktreeBySlug(worktrees: Worktree[], slug: string): Worktree | un
     if (ident && (ident.slug === slug || ident.slug.endsWith("/" + slug))) return true;
     const branchName = wt.branch?.replace(/^refs\/heads\//, "");
     if (branchName === slug || branchName?.endsWith("/" + slug)) return true;
-    const lastComponent = wt.path.split("/").filter(Boolean).pop();
+    const lastComponent = wt.path.split(/[\\/]/).filter(Boolean).pop();
     if (lastComponent === slug) return true;
     return false;
   });
@@ -686,7 +688,7 @@ function WorkspaceApp({
     // Plain (non-Git) projects have no git worktrees; their folder root acts
     // as the primary "worktree" so a terminal opens there like anywhere else.
     plainRootWorktree,
-    rootOnly: activeProject.target?.kind === "ssh",
+    rootOnly: activeProject.target?.kind === "ssh" && activeProject.gitRoot === null,
     registeredWorkspaceId: registeredProjectId,
   });
   reportRuntimeErrorRef.current = reportRuntimeError;
@@ -884,6 +886,9 @@ function WorkspaceApp({
                 candidate.gitRoot === registered.gitRoot &&
                 candidate.gitRemote === registered.gitRemote &&
                 candidate.gitCommonDir === registered.gitCommonDir &&
+                candidate.gitBranch === registered.gitBranch &&
+                candidate.gitHead === registered.gitHead &&
+                candidate.hostLabel === registered.hostLabel &&
                 JSON.stringify(candidate.target) === JSON.stringify(registered.target),
             )
           ) {
@@ -1770,10 +1775,6 @@ function WorkspaceApp({
   const handleCloseAddProject = useCallback(() => setIsAddProjectOpen(false), []);
   const handleOpenCreateWorktree = useCallback((project?: RegisteredProject) => {
     const target = project ?? activeProjectRef.current;
-    if (target.target?.kind === "ssh") {
-      toast.error("Git worktrees are unavailable for direct SSH projects.");
-      return;
-    }
     setCreateTargetProject(target);
     setIsCreateOpen(true);
   }, []);
@@ -2327,7 +2328,13 @@ function listVisibleWorktrees(
         ? (owned.length > 0 ? owned : cached)
         : [...cached, ...owned];
     if (project.target?.kind === "ssh" && group.memberProjects.length === 1) {
-      rows = [projectRootWorktree(project)];
+      if (!rows.some((candidate) => candidate.path === project.repoRoot && candidate.workspaceId === project.workspaceId)) {
+        const target = project.target;
+        const hostLabel = typeof getCachedSshHosts === "function"
+          ? getCachedSshHosts()?.find((h) => h.id === target.hostId)?.label ?? target.hostId
+          : target.hostId;
+        rows.push(projectRootWorktree(project, hostLabel));
+      }
     } else {
       if (project.gitRoot === null && rows.length === 0) rows = [projectRootWorktree(project)];
       for (const member of group.memberProjects) {

@@ -11,9 +11,19 @@ export function hasValidProjectTarget(project: { workspaceId: string; target?: u
 }
 
 export function projectRootWorktree(project: RegisteredProject, hostLabel?: string): Worktree {
+  const isRemote = project.target?.kind === "ssh";
+  const branch = isRemote && project.gitBranch !== undefined ? project.gitBranch : null;
+  const head = isRemote && project.gitHead ? project.gitHead : "";
+  const detached = Boolean(head && !branch);
+  const resolvedHostLabel = hostLabel ?? project.hostLabel;
   return {
-    ...(project.target?.kind === "ssh" ? { workspaceId: project.workspaceId, hostLabel } : {}),
-    path: project.repoRoot, head: "", branch: null, bare: false,
-    detached: false, locked: null, prunable: null,
+    ...(isRemote ? { workspaceId: project.workspaceId, hostLabel: resolvedHostLabel } : {}),
+    path: project.repoRoot,
+    head,
+    branch,
+    bare: false,
+    detached,
+    locked: null,
+    prunable: null,
   };
 }

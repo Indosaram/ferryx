@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
-import { registerRemoteProject, toRegisteredProject } from "../lib/remoteProject";
+import { createRemoteWorktree, registerRemoteProject, toRegisteredProject } from "../lib/remoteProject";
 import { formatSshTarget, useSshHosts } from "../lib/sshHosts";
 import {
   createWorktree,
@@ -732,16 +732,27 @@ type AddWorktreeDialogProps = {
 };
 
 export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDialogProps) {
+  const remoteTarget = project.target?.kind === "ssh" ? project.target : null;
+  const isRemote = remoteTarget !== null;
   const isGitBacked = project.gitRoot !== null;
+  const { hosts } = useSshHosts();
   const [branches, setBranches] = useState<LocalBranch[]>([]);
   const [baseRef, setBaseRef] = useState("");
   const [slug, setSlug] = useState("");
-  const [loadingBranches, setLoadingBranches] = useState(true);
+  const [loadingBranches, setLoadingBranches] = useState(!isRemote && isGitBacked);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const remoteHostId = remoteTarget?.hostId ?? null;
+  const hostLabel = remoteHostId
+    ? hosts.find((h) => h.id === remoteHostId)?.label ?? remoteHostId
+    : null;
+  const dialogTitle = isRemote && hostLabel
+    ? `Add Worktree · ${hostLabel}`
+    : `Add Worktree · ${project.workspaceId}`;
+
   useEffect(() => {
-    if (!isGitBacked) {
+    if (isRemote || !isGitBacked) {
       setBranches([]);
       setBaseRef("");
       setLoadingBranches(false);
@@ -767,21 +778,40 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
     return () => {
       alive = false;
     };
-  }, [project.workspaceId, isGitBacked]);
+  }, [project.workspaceId, isGitBacked, isRemote]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const trimmedSlug = slug.trim();
-    if (!trimmedSlug || !baseRef || submitting) return;
+    if (!trimmedSlug || submitting) return;
+    if (!isRemote && !baseRef) return;
     setSubmitting(true);
     setError(null);
     try {
-      const worktree = await createWorktree({
-        workspaceId: project.workspaceId,
-        worktree: { wsId: project.workspaceId, slug: trimmedSlug },
-        baseRef,
-      });
-      await onCreated(worktree);
+      if (isRemote) {
+        const created = await createRemoteWorktree({
+          workspaceId: project.workspaceId,
+          slug: trimmedSlug,
+        });
+        const worktree: Worktree = {
+          workspaceId: project.workspaceId,
+          path: created.path,
+          head: created.head ?? "",
+          branch: created.branch ? "refs/heads/" + created.branch : null,
+          bare: created.bare,
+          detached: created.detached,
+          locked: null,
+          prunable: null,
+        };
+        await onCreated(worktree);
+      } else {
+        const worktree = await createWorktree({
+          workspaceId: project.workspaceId,
+          worktree: { wsId: project.workspaceId, slug: trimmedSlug },
+          baseRef,
+        });
+        await onCreated(worktree);
+      }
       onClose();
     } catch (cause) {
       setError(extractErrorMessage(cause, "Could not create the worktree."));
@@ -799,7 +829,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
       >
         <div className="flex h-9 items-center border-b border-border px-3">
           <GitBranch className="mr-2 size-3.5 text-muted-foreground" />
-          <h2 className="min-w-0 flex-1 truncate text-[13px] font-medium">Add Worktree · {project.workspaceId}</h2>
+          <h2 className="min-w-0 flex-1 truncate text-[13px] font-medium">{dialogTitle}</h2>
           <button
             type="button"
             aria-label="Close Add Worktree"
@@ -823,22 +853,24 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
                   autoFocus
                 />
               </label>
-              <label className="block space-y-1 text-[11px] text-muted-foreground">
-                <span>Base branch</span>
-                <select
-                  aria-label="Base branch"
-                  className={fieldClass}
-                  value={baseRef}
-                  disabled={loadingBranches || branches.length === 0}
-                  onChange={(event) => setBaseRef(event.target.value)}
-                >
-                  {branches.map((branch) => (
-                    <option key={branch.name} value={branch.name}>
-                      {branch.name}{branch.isCurrent ? " (current)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {!isRemote ? (
+                <label className="block space-y-1 text-[11px] text-muted-foreground">
+                  <span>Base branch</span>
+                  <select
+                    aria-label="Base branch"
+                    className={fieldClass}
+                    value={baseRef}
+                    disabled={loadingBranches || branches.length === 0}
+                    onChange={(event) => setBaseRef(event.target.value)}
+                  >
+                    {branches.map((branch) => (
+                      <option key={branch.name} value={branch.name}>
+                        {branch.name}{branch.isCurrent ? " (current)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
             </>
           ) : (
             <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -856,7 +888,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
           {isGitBacked ? (
             <button
               type="submit"
-              disabled={submitting || loadingBranches || !slug.trim() || !baseRef}
+              disabled={submitting || (!isRemote && (loadingBranches || !baseRef)) || !slug.trim()}
               className="h-7 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
             >
               Create Worktree

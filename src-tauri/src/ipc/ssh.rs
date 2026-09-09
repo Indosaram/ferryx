@@ -315,29 +315,110 @@ pub async fn cmd_ssh_paste_clipboard_image<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn cmd_ssh_list_remote_worktrees(
-    host: SshHost,
+pub async fn cmd_ssh_list_remote_worktrees<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
 ) -> Result<Vec<crate::ssh::worktree::RemoteWorktree>, IpcError> {
-    let _ = host;
-    Err(crate::ssh::projects::unsupported())
+    let store = get_ssh_store_path(&app)?;
+    let id = workspace_id.clone();
+    let (project, host) =
+        run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await
 }
 
 #[tauri::command]
-pub async fn cmd_ssh_create_remote_worktree(
-    host: SshHost,
-    path: String,
-    ws_id: String,
+pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
     slug: String,
     base_ref: Option<String>,
-) -> Result<(), IpcError> {
-    let _ = (host, path, ws_id, slug, base_ref);
-    Err(crate::ssh::projects::unsupported())
+) -> Result<crate::ssh::worktree::RemoteWorktree, IpcError> {
+    let store = get_ssh_store_path(&app)?;
+    let id = workspace_id.clone();
+    let (project, host) =
+        run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    let ws_segment = crate::ssh::worktree::derive_ws_segment(&workspace_id)?;
+    let wt_path = crate::ssh::worktree::remote_worktree_path(
+        environment.platform,
+        &project.repo_root,
+        &slug,
+    );
+    crate::ssh::worktree::create_remote(
+        &host,
+        &environment,
+        &project.repo_root,
+        &ws_segment,
+        &slug,
+        base_ref.as_deref(),
+        &wt_path,
+    )
+    .await?;
+    let worktrees =
+        crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await?;
+    let norm_wt_path = wt_path.replace('\\', "/").trim_end_matches('/').to_string();
+    let created = worktrees
+        .into_iter()
+        .find(|wt| {
+            wt.path == wt_path
+                || wt.path.replace('\\', "/").trim_end_matches('/') == norm_wt_path
+        })
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::ParseError,
+                format!("Created worktree not found at {wt_path} after creation"),
+            )
+        })?;
+
+    let identity = crate::worktree::WorktreeIdentity {
+        ws_id: workspace_id.clone(),
+        slug,
+    };
+    crate::ipc::worktree::emit_worktree_changed(
+        &app,
+        workspace_id,
+        identity,
+        crate::ipc::worktree::WorktreeChangeKind::Created,
+    )?;
+    Ok(created)
 }
 
 #[tauri::command]
-pub async fn cmd_ssh_delete_remote_worktree(host: SshHost, path: String) -> Result<(), IpcError> {
-    let _ = (host, path);
-    Err(crate::ssh::projects::unsupported())
+pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    path: String,
+) -> Result<(), IpcError> {
+    let store = get_ssh_store_path(&app)?;
+    let id = workspace_id.clone();
+    let (project, host) =
+        run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    crate::ssh::worktree::validate_path_inside_root(
+        environment.platform,
+        &project.repo_root,
+        &path,
+    )?;
+    crate::ssh::worktree::remove_remote(&host, &environment, &project.repo_root, &path).await?;
+    let slug = path
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .last()
+        .and_then(|name| name.strip_prefix("wt-"))
+        .unwrap_or("")
+        .to_string();
+    let identity = crate::worktree::WorktreeIdentity {
+        ws_id: workspace_id.clone(),
+        slug,
+    };
+    crate::ipc::worktree::emit_worktree_changed(
+        &app,
+        workspace_id,
+        identity,
+        crate::ipc::worktree::WorktreeChangeKind::Deleted,
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -75,9 +75,8 @@ export const WorktreeRow = memo(function WorktreeRow({
   const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:"));
   const primary = !isRemote && isPrimaryWorktree(worktree);
   const canDelete = !primary && !isRemote;
-  const displayName = isRemote
-    ? (worktree.hostLabel ? `${worktree.hostLabel}` : workspaceName(worktree))
-    : workspaceName(worktree);
+  const managedSlug = worktreeIdentity(worktree)?.slug;
+  const displayName = managedSlug ?? workspaceName(worktree);
   const displaySummary = activitySummary
     ? activitySummary.hasUnread === unread
       ? activitySummary
@@ -184,14 +183,18 @@ export const WorktreeRow = memo(function WorktreeRow({
                   primary
                 </span>
               ) : null}
-              {isRemote ? (
-                <span className="shrink-0 rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]">
-                  SSH
-                </span>
-              ) : null}
               {status?.isDirty ? (
                 <span className="shrink-0 text-[10px] text-status-warning">
                   Dirty · {status.files.length} {status.files.length === 1 ? "file" : "files"}
+                </span>
+              ) : null}
+              {isRemote ? (
+                <span
+                  data-testid="remote-machine-badge"
+                  title={worktree.hostSummary ? `${worktree.hostLabel ?? "Remote"} (${worktree.hostSummary})` : (worktree.hostLabel ?? "Remote")}
+                  className="ml-auto max-w-[88px] shrink-0 truncate rounded bg-[#4a4a4a] px-1.5 py-px text-[10px] font-medium leading-none text-[#d8d8d8]"
+                >
+                  {worktree.hostLabel ?? worktree.hostSummary ?? "Remote"}
                 </span>
               ) : null}
             </span>
@@ -205,7 +208,7 @@ export const WorktreeRow = memo(function WorktreeRow({
 
         <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/worktree-row:opacity-100">
           {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
-          {onCreateWorktree && !isRemote ? (
+          {onCreateWorktree ? (
             <IconButton
               label="Add worktree"
               size="sm"

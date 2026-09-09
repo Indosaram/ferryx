@@ -90,6 +90,9 @@ describe("remoteProject adapter", () => {
       workspaceId: "ssh:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       repoRoot: "/var/www/site",
       gitRoot: "/var/www/site",
+      gitBranch: null,
+      gitHead: null,
+      hostLabel: "Production Web",
       target: {
         kind: "ssh",
         hostId: "host-prod",
@@ -109,6 +112,7 @@ describe("remoteProject adapter", () => {
     const project = toRegisteredProject(response);
 
     expect(project.gitRoot).toBeNull();
+    expect(project.hostLabel).toBe("Data Store");
     expect(project.workspaceId).toBe(
       "ssh:cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce",
     );
@@ -127,7 +131,21 @@ describe("remoteProject adapter", () => {
     expect(toRegisteredProject(response)).toEqual({
       workspaceId: "ssh:linked", repoRoot: "/srv/feature", gitRoot: "/srv/feature",
       gitRemote: "git@github.com:org/app.git", gitCommonDir: "/srv/main/.git",
+      gitBranch: null, gitHead: null, hostLabel: "Linux",
       target: { kind: "ssh", hostId: "linux" },
+    });
+  });
+
+  it("maps remote gitBranch and gitHead through to RegisteredProject", () => {
+    const response = {
+      workspaceId: "ssh:branch-test", repoRoot: "/srv/app", gitRoot: "/srv/app",
+      gitBranch: "feature/new-ui", gitHead: "deadbeef123",
+      hostId: "server", hostLabel: "Server",
+    };
+    expect(toRegisteredProject(response)).toEqual({
+      workspaceId: "ssh:branch-test", repoRoot: "/srv/app", gitRoot: "/srv/app",
+      gitBranch: "feature/new-ui", gitHead: "deadbeef123", hostLabel: "Server",
+      target: { kind: "ssh", hostId: "server" },
     });
   });
 });

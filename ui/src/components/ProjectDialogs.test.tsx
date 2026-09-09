@@ -15,6 +15,7 @@ const dialog = vi.hoisted(() => ({
 
 const remote = vi.hoisted(() => ({
   registerRemoteProject: vi.fn(),
+  createRemoteWorktree: vi.fn(),
   toRegisteredProject: (r: {
     workspaceId: string;
     repoRoot: string;
@@ -1175,6 +1176,63 @@ describe("AddWorktreeDialog flow", () => {
     expect(screen.getByText(/not a Git repository/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Create Worktree" })).toBeNull();
     expect(screen.getByRole("button", { name: "Close Add Worktree" })).toBeInTheDocument();
+  });
+
+  it("renders slug-only in remote mode and calls createRemoteWorktree without invoking listProjectBranches", async () => {
+    remote.createRemoteWorktree.mockResolvedValue({
+      path: "/srv/repo/.orca-worktrees/wt-feat-remote",
+      head: "abc1234",
+      branch: "orca/ssh-123456/feat-remote",
+      bare: false,
+      detached: false,
+    });
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    ssh.useSshHosts.mockReturnValue({ hosts: [mockHost1] });
+
+    render(
+      <AddWorktreeDialog
+        project={{
+          workspaceId: "ssh:opaque-hash",
+          repoRoot: "/srv/repo",
+          gitRoot: "/srv/repo",
+          target: { kind: "ssh", hostId: "host-1" },
+        }}
+        onClose={onClose}
+        onCreated={onCreated}
+      />,
+    );
+
+    expect(native.listProjectBranches).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Add Worktree · Dev Server" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Base branch" })).not.toBeInTheDocument();
+
+    const slugInput = screen.getByLabelText("Worktree slug");
+    expect(slugInput).toBeInTheDocument();
+
+    const createBtn = screen.getByRole("button", { name: "Create Worktree" });
+    expect(createBtn).toBeDisabled();
+
+    fireEvent.change(slugInput, { target: { value: "feat-remote" } });
+    expect(createBtn).not.toBeDisabled();
+
+    fireEvent.click(createBtn);
+
+    await act(async () => {});
+
+    expect(remote.createRemoteWorktree).toHaveBeenCalledWith({
+      workspaceId: "ssh:opaque-hash",
+      slug: "feat-remote",
+    });
+    expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ssh:opaque-hash",
+        path: "/srv/repo/.orca-worktrees/wt-feat-remote",
+        head: "abc1234",
+        branch: "refs/heads/orca/ssh-123456/feat-remote",
+      }),
+    );
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
 

@@ -40,6 +40,8 @@ pub(crate) fn project(host: &SshHost, root: &str) -> RemoteProject {
         repo_root: root.into(),
         git_root: None,
         git_remote: None,
+        git_branch: None,
+        git_head: None,
         platform: None,
     }
 }

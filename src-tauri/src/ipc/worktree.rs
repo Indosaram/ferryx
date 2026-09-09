@@ -50,7 +50,7 @@ pub struct WorktreeChangedPayload {
     pub kind: WorktreeChangeKind,
 }
 
-fn emit_worktree_changed<R: Runtime>(
+pub(crate) fn emit_worktree_changed<R: Runtime>(
     app: &AppHandle<R>,
     workspace_id: String,
     worktree: WorktreeIdentity,
@@ -68,10 +68,34 @@ fn emit_worktree_changed<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn cmd_worktree_list(
+pub async fn cmd_worktree_list<R: Runtime>(
+    app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
     workspace_id: String,
 ) -> Result<Vec<Worktree>, IpcError> {
+    if crate::ssh::projects::is_remote(&workspace_id) {
+        let store = crate::ipc::ssh::get_ssh_store_path(&app)?;
+        let id = workspace_id.clone();
+        let (project, host) =
+            run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+        let environment = crate::ssh::runtime::detect(&host).await?;
+        let remote_worktrees =
+            crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await?;
+        let worktrees = remote_worktrees
+            .into_iter()
+            .map(|wt| Worktree {
+                path: std::path::PathBuf::from(wt.path),
+                head: wt.head.unwrap_or_default(),
+                branch: wt.branch,
+                bare: wt.bare,
+                detached: wt.detached,
+                locked: None,
+                prunable: None,
+            })
+            .collect();
+        return Ok(worktrees);
+    }
+
     let registry = (*registry).clone();
     run_blocking(move || {
         let manager = registry.manager(&workspace_id).map_err(IpcError::from)?;

@@ -25,6 +25,10 @@ pub struct RegisteredRemoteProject {
     pub git_remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_common_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_head: Option<String>,
     pub host_id: String,
     pub host_label: String,
 }
@@ -50,14 +54,15 @@ pub async fn register_remote_project(
     let lookup = host_store.clone();
     let host = run_blocking(move || projects::enabled_host(&lookup, &request.host_id)).await?;
     let environment = crate::ssh::runtime::detect(&host).await?;
-    let (repo_root, git_root, git_remote, git_common_dir) =
-        crate::ssh::operations::probe(&host, &environment, &request.repo_path).await?;
+    let probed = crate::ssh::operations::probe(&host, &environment, &request.repo_path).await?;
     let project = projects::RemoteProject {
-        workspace_id: projects::identity(&host.id, &repo_root),
+        workspace_id: projects::identity(&host.id, &probed.repo_root),
         host_id: host.id.clone(),
-        repo_root,
-        git_root,
-        git_remote,
+        repo_root: probed.repo_root.clone(),
+        git_root: probed.git_root.clone(),
+        git_remote: probed.git_remote.clone(),
+        git_branch: probed.git_branch.clone(),
+        git_head: probed.git_head.clone(),
         platform: Some(environment.platform),
     };
     let probed_host = host.clone();
@@ -76,7 +81,9 @@ pub async fn register_remote_project(
         repo_root: project.repo_root,
         git_root: project.git_root,
         git_remote: project.git_remote,
-        git_common_dir,
+        git_common_dir: probed.git_common_dir,
+        git_branch: project.git_branch,
+        git_head: project.git_head,
         host_id: project.host_id,
         host_label: host.label,
     })

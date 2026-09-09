@@ -287,7 +287,11 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
         slug: "task-ipc".into(),
     };
 
-    let initial = cmd_worktree_list(registry_state.clone(), "workspace-test".into())
+    let initial = cmd_worktree_list(
+        app.handle().clone(),
+        registry_state.clone(),
+        "workspace-test".into(),
+    )
         .await
         .expect("initial list");
     assert_eq!(initial.len(), 1);
@@ -333,7 +337,11 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
     let branches = run_git(repo.path(), &["branch", "--list"]).expect("list branches");
     assert!(!branches.contains("orca/ws-ipc/task-ipc"));
 
-    let final_list = cmd_worktree_list(registry_state, "workspace-test".into())
+    let final_list = cmd_worktree_list(
+        app.handle().clone(),
+        registry_state,
+        "workspace-test".into(),
+    )
         .await
         .expect("final list");
     assert_eq!(final_list.len(), 1);

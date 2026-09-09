@@ -5,6 +5,9 @@ export function branchName(worktree: Worktree): string {
 }
 
 export function displayWorkspaceTitle(worktree: Worktree): string {
+  if (worktree.detached) {
+    return "detached HEAD";
+  }
   const parts = branchName(worktree).split("/");
   if (parts[0] === "orca" && parts.length > 2) {
     return parts.slice(2).join("/");
@@ -12,12 +15,15 @@ export function displayWorkspaceTitle(worktree: Worktree): string {
   // A plain-folder project has no branch at all; its row must show the folder
   // name rather than a fabricated "main".
   if (worktree.branch == null) {
-    const basename = worktree.path.replace(/\/+$/, "").split("/").pop();
+    const basename = worktree.path.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
     if (basename) return basename;
   }
   const branch = branchName(worktree);
-  if (branch && branch !== "detached HEAD" && branch !== "ferryx" && branch !== "rorca" && branch !== "orca-lite") {
-    return branch;
+  if (branch && branch !== "detached HEAD") {
+    const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:"));
+    if (isRemote || (branch !== "ferryx" && branch !== "rorca" && branch !== "orca-lite")) {
+      return branch;
+    }
   }
   return "main";
 }

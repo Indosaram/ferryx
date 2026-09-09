@@ -401,4 +401,76 @@ describe("WorktreeList actions", () => {
     expect(deleteItem?.label).toBe("Delete Worktree");
     expect(deleteItem?.enabled).toBe(false);
   });
+
+  it("displays managed slug for remote worktree with orca identity and renders + button", () => {
+    const onCreateWorktree = vi.fn();
+    const remoteWorktree: Worktree = {
+      workspaceId: "ssh:opaque-hash",
+      path: "/srv/repo/.orca-worktrees/wt-my-slug",
+      head: "def456",
+      branch: "refs/heads/orca/ssh-123456/my-slug",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      hostLabel: "Build machine",
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[remoteWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        onCreateWorktree={onCreateWorktree}
+      />,
+    );
+
+    // Displays managed slug rather than hostLabel
+    expect(screen.getByText("my-slug")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-machine-badge")).toHaveTextContent("Build machine");
+
+    // Renders the + button for remote worktree
+    const addBtn = screen.getByRole("button", { name: "Add worktree" });
+    expect(addBtn).toBeInTheDocument();
+    fireEvent.click(addBtn);
+    expect(onCreateWorktree).toHaveBeenCalledWith(remoteWorktree);
+
+    // Delete button should NOT be rendered for remote worktree
+    expect(screen.queryByRole("button", { name: "Delete worktree" })).not.toBeInTheDocument();
+  });
+
+  it("renders branch on the left and hostLabel as machine badge on the right for remote worktree", () => {
+    const remoteRootWorktree: Worktree = {
+      workspaceId: "ssh:opaque-hash",
+      path: "/srv/repo",
+      head: "abc123",
+      branch: "refs/heads/main",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      hostLabel: "Build machine",
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[remoteRootWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        onCreateWorktree={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("main")).toBeInTheDocument();
+    const badge = screen.getByTestId("remote-machine-badge");
+    expect(badge).toHaveTextContent("Build machine");
+    expect(badge).toHaveClass("truncate");
+    expect(screen.queryByText("SSH")).not.toBeInTheDocument();
+  });
 });
