@@ -869,6 +869,20 @@ impl NativeTerminalSurfaceHostState {
         }
     }
 
+    pub fn reapply_scrollback_to_sessions(&self) {
+        let scrollback = cached_terminal_preferences().scrollback;
+        let mut sessions = self.sessions.lock();
+        for (session_id, session) in sessions.iter_mut() {
+            if let Err(error) = session.terminal.set_scrollback_limit_lines(Some(scrollback)) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    ?error,
+                    "ghostty scrollback limit update failed on reapply"
+                );
+            }
+        }
+    }
+
     /// Rejects geometry work for a session with no mounted compositor surface.
     ///
     /// Returns [`NativeTerminalError::SessionDetached`] for both a closed session and one that is
@@ -926,14 +940,14 @@ impl NativeTerminalSurfaceHostState {
             Some(session) => (session, false),
             None => {
                 let mut terminal = NativeTerminal::new(layout.cols, layout.rows)?;
-                if let Err(error) =
-                    terminal.apply_theme_preferences(&cached_terminal_preferences().theme)
-                {
+                let prefs = cached_terminal_preferences();
+                if let Err(error) = terminal.apply_theme_preferences(&prefs.theme) {
                     tracing::warn!(
                         ?error,
                         "ghostty theme injection failed; using built-in palette"
                     );
                 }
+                let _ = terminal.set_scrollback_limit_lines(Some(prefs.scrollback));
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
                 sessions.insert(
@@ -1258,14 +1272,14 @@ impl NativeTerminalSurfaceHostState {
                 let initial_cols = attachment.pty_cols.unwrap_or(initial_dims.0);
                 let initial_rows = attachment.pty_rows.unwrap_or(initial_dims.1);
                 let mut terminal = NativeTerminal::new(initial_cols, initial_rows)?;
-                if let Err(error) =
-                    terminal.apply_theme_preferences(&cached_terminal_preferences().theme)
-                {
+                let prefs = cached_terminal_preferences();
+                if let Err(error) = terminal.apply_theme_preferences(&prefs.theme) {
                     tracing::warn!(
                         ?error,
                         "ghostty theme injection failed; using built-in palette"
                     );
                 }
+                let _ = terminal.set_scrollback_limit_lines(Some(prefs.scrollback));
                 feed_attachment_history(
                     &mut terminal,
                     &attachment.history,
@@ -1763,7 +1777,8 @@ impl NativeTerminalSurfaceHostState {
         let session = match sessions.get_mut(session_id) {
             Some(session) => session,
             None => {
-                let terminal = NativeTerminal::new(80, 24)?;
+                let mut terminal = NativeTerminal::new(80, 24)?;
+                let _ = terminal.set_scrollback_limit_lines(Some(cached_terminal_preferences().scrollback));
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
                 sessions.insert(

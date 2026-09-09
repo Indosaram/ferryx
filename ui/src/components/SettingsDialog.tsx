@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 import { isMacShortcutPlatform } from "../lib/shortcuts";
-import { useTerminalSettings } from "../lib/terminalSettings";
+import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
 import { AgentsSection } from "./settings/AgentsSection";
 import { AppearanceSection } from "./settings/AppearanceSection";
 import { BrowserSection } from "./settings/BrowserSection";
@@ -107,7 +107,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject }: Setti
     settings.fontFamilySource === "local" ||
     settings.macosOptionAsAltSource === "local" ||
     settings.fontSizeSource === "local" ||
-    localSettings.shell !== null;
+    localSettings.shell !== null ||
+    localSettings.scrollback !== DEFAULT_TERMINAL_SETTINGS.scrollback;
   let terminalSource = "Built-in defaults";
   if (hasLocalTerminalOverride) {
     terminalSource = "Local override";
@@ -163,14 +164,22 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject }: Setti
               fontSize={settings.fontSize}
               macosOptionAsAlt={settings.macosOptionAsAlt}
               shell={localSettings.shell}
+              scrollback={localSettings.scrollback}
               source={terminalSource}
               sourcePath={nativePreferences.sourcePath}
               onFontFamily={(fontFamily) => updateSettings({ fontFamily })}
               onFontSize={(fontSize) => updateSettings({ fontSize })}
               onOptionAsAlt={(macosOptionAsAlt) => updateSettings({ macosOptionAsAlt })}
               onShell={(shell) => updateSettings({ shell })}
+              onScrollback={(scrollback) => updateSettings({ scrollback })}
               onUseImported={() => {
-                updateSettings({ fontFamily: null, macosOptionAsAlt: null, fontSize: null, shell: null });
+                updateSettings({
+                  fontFamily: null,
+                  macosOptionAsAlt: null,
+                  fontSize: null,
+                  shell: null,
+                  scrollback: DEFAULT_TERMINAL_SETTINGS.scrollback,
+                });
                 void refreshNativePreferences();
               }}
             />

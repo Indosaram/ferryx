@@ -15,12 +15,14 @@ export interface TerminalSectionProps {
   fontSize: number;
   macosOptionAsAlt: boolean;
   shell?: string | null;
+  scrollback?: number;
   source: string;
   sourcePath: string | null;
   onFontFamily: (fontFamily: string) => void;
   onFontSize: (fontSize: number) => void;
   onOptionAsAlt: (enabled: boolean) => void;
   onShell?: (shell: string | null) => void;
+  onScrollback?: (scrollback: number) => void;
   onUseImported: () => void;
 }
 

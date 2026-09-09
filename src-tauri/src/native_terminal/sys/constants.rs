@@ -42,6 +42,8 @@ pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 12;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: c_int = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_PALETTE: c_int = 14;
 pub const GHOSTTY_TERMINAL_OPT_SELECTION: c_int = 21;
+pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES: c_int = 27;
+pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES: c_int = 28;
 pub const GHOSTTY_TERMINAL_OPT_MODE: c_int = 34;
 
 // GhosttyTerminalScrollViewportTag matching `ghostty/vt/terminal.h`.

@@ -101,6 +101,7 @@ export type TerminalPreferences = {
   status: "imported" | "absent" | "malformed";
   sourcePath: string | null;
   defaultShell?: string | null;
+  scrollback?: number;
 };
 
 type WorktreeStatusRequest = {
@@ -218,6 +219,7 @@ export async function getTerminalPreferences(): Promise<TerminalPreferences> {
       status: "absent",
       sourcePath: null,
       defaultShell: null,
+      scrollback: 10_000,
     };
   }
   return invokeCommand<TerminalPreferences>("cmd_terminal_preferences");
@@ -228,6 +230,7 @@ export type TerminalOverrides = {
   fontSize: number | null;
   macosOptionAsAlt: boolean | null;
   shell?: string | null;
+  scrollback?: number | null;
 };
 
 export type TerminalOverridesRequest = TerminalOverrides;
@@ -240,6 +243,7 @@ export async function applyTerminalOverrides(
     overrides: {
       ...overrides,
       shell: overrides.shell ?? null,
+      scrollback: overrides.scrollback ?? null,
     },
   });
 }

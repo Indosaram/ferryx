@@ -214,3 +214,30 @@ fn mouse_tracking_query_reflects_vt_modes() {
     term.feed_str("\x1b[?1000h").expect("enable mouse tracking");
     assert!(term.mouse_tracking_enabled().expect("query enabled mode"));
 }
+
+#[test]
+fn scrollback_retains_thousands_of_lines_and_obeys_configured_limit() {
+    let mut term = NativeTerminal::new(80, 24).expect("create terminal");
+
+    // Feed 3,000 lines. Previously clamped to ~300-500 lines due to default 10 KB byte limit.
+    let lines = (0..3000)
+        .map(|index| format!("terminal log output line {index:05}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    term.feed_str(&lines).expect("feed 3000 lines");
+
+    let rows = term.scrollback_rows().expect("query scrollback rows");
+    assert!(
+        rows >= 2970,
+        "default terminal should retain thousands of lines without 10KB premature pruning (got {rows})"
+    );
+
+    // Now lower limit to 1,000 lines. Ghostty prunes on page boundaries.
+    term.set_scrollback_limit_lines(Some(1000))
+        .expect("set scrollback limit");
+    let pruned_rows = term.scrollback_rows().expect("query pruned rows");
+    assert!(
+        pruned_rows <= 1500,
+        "pruned scrollback should obey configured line limit (got {pruned_rows})"
+    );
+}

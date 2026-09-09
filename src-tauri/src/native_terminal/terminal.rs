@@ -42,7 +42,8 @@ use super::sys::types::{
     GHOSTTY_MODE_SYNCHRONIZED_OUTPUT, GHOSTTY_TERMINAL_DATA_MODE,
     GHOSTTY_TERMINAL_OPT_MODE, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
     GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
-    GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, GHOSTTY_TERMINAL_OPT_TITLE,
+    GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_TITLE,
 };
 use crate::terminal::TerminalThemeColors;
 
@@ -279,6 +280,44 @@ impl NativeTerminal {
         }
         self.set_palette(full_palette(theme))
     }
+
+    /// Update maximum physical scrollback lines retained in memory.
+    pub fn set_scrollback_limit_lines(
+        &mut self,
+        limit_lines: Option<usize>,
+    ) -> Result<(), NativeTerminalError> {
+        let ptr = limit_lines
+            .as_ref()
+            .map(|val| val as *const usize as *const c_void)
+            .unwrap_or(std::ptr::null());
+        let result = unsafe {
+            ghostty_terminal_set(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                ptr,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_set(ScrollbackMaxLines)")
+    }
+
+    /// Update maximum scrollback size in bytes (None = unlimited).
+    pub fn set_scrollback_limit_bytes(
+        &mut self,
+        limit_bytes: Option<usize>,
+    ) -> Result<(), NativeTerminalError> {
+        let ptr = limit_bytes
+            .as_ref()
+            .map(|val| val as *const usize as *const c_void)
+            .unwrap_or(std::ptr::null());
+        let result = unsafe {
+            ghostty_terminal_set(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                ptr,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_set(ScrollbackMaxBytes)")
+    }
 }
 
 impl TerminalEngine for NativeTerminal {
@@ -417,6 +456,13 @@ impl TerminalEngine for NativeTerminal {
     fn scroll_viewport(&mut self, behavior: ScrollViewport) -> Result<(), NativeTerminalError> {
         scroll_viewport(self.handle, behavior);
         Ok(())
+    }
+
+    fn set_scrollback_limit_lines(
+        &mut self,
+        limit_lines: Option<usize>,
+    ) -> Result<(), NativeTerminalError> {
+        self.set_scrollback_limit_lines(limit_lines)
     }
 
     fn select_all(&mut self) -> Result<(), NativeTerminalError> {

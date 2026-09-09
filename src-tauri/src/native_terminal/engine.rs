@@ -73,6 +73,12 @@ pub trait TerminalEngine {
     /// Move the visible viewport within retained scrollback.
     fn scroll_viewport(&mut self, behavior: ScrollViewport) -> Result<(), NativeTerminalError>;
 
+    /// Set maximum physical lines retained in scrollback (None = unlimited).
+    fn set_scrollback_limit_lines(
+        &mut self,
+        limit_lines: Option<usize>,
+    ) -> Result<(), NativeTerminalError>;
+
     /// Select all selectable content and install it as the active selection.
     fn select_all(&mut self) -> Result<(), NativeTerminalError>;
 

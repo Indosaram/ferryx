@@ -163,6 +163,7 @@ describe("terminal settings", () => {
       fontSize: null,
       macosOptionAsAlt: null,
       shell: null,
+      scrollback: 10_000,
     });
 
     act(() => result.current.updateSettings({ fontSize: 17 }));
@@ -172,6 +173,7 @@ describe("terminal settings", () => {
         fontSize: 17,
         macosOptionAsAlt: null,
         shell: null,
+        scrollback: 10_000,
       }),
     );
 
@@ -182,6 +184,7 @@ describe("terminal settings", () => {
         fontSize: 17,
         macosOptionAsAlt: null,
         shell: "pwsh",
+        scrollback: 10_000,
       }),
     );
 

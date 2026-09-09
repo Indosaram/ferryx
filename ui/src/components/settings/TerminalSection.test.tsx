@@ -18,9 +18,28 @@ describe("TerminalSection", () => {
     onUseImported: vi.fn(),
   };
 
-  it("does not render a Scrollback control", () => {
-    render(<TerminalSection {...defaultProps} />);
-    expect(screen.queryByLabelText(/scrollback/i)).toBeNull();
+  it("renders Scrollback control and commits changes on blur or Enter", () => {
+    const onScrollback = vi.fn();
+    render(<TerminalSection {...defaultProps} scrollback={10_000} onScrollback={onScrollback} />);
+
+    const scrollbackInput = screen.getByLabelText(/scrollback lines/i);
+    expect(scrollbackInput).toBeInTheDocument();
+    expect(scrollbackInput).toHaveValue(10_000);
+
+    fireEvent.change(scrollbackInput, { target: { value: "25000" } });
+    expect(onScrollback).not.toHaveBeenCalled();
+
+    fireEvent.blur(scrollbackInput);
+    expect(onScrollback).toHaveBeenCalledWith(25_000);
+
+    fireEvent.change(scrollbackInput, { target: { value: "50000" } });
+    fireEvent.keyDown(scrollbackInput, { key: "Enter" });
+    expect(onScrollback).toHaveBeenCalledWith(50_000);
+
+    // Clamps out of range numbers
+    fireEvent.change(scrollbackInput, { target: { value: "200000" } });
+    fireEvent.blur(scrollbackInput);
+    expect(onScrollback).toHaveBeenCalledWith(100_000);
   });
 
   it("buffers font family changes and commits only on blur or Enter", () => {

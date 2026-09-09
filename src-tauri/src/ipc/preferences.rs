@@ -33,6 +33,8 @@ pub struct TerminalOverridesRequest {
     pub macos_option_as_alt: Option<bool>,
     #[serde(default)]
     pub shell: Option<String>,
+    #[serde(default)]
+    pub scrollback: Option<usize>,
 }
 
 impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
@@ -42,6 +44,7 @@ impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
             font_size: request.font_size,
             macos_option_as_alt: request.macos_option_as_alt,
             shell: request.shell,
+            scrollback: request.scrollback,
         }
     }
 }
@@ -55,6 +58,7 @@ async fn rerender_native_sessions<R: Runtime>(
     state: &NativeTerminalSurfaceHostState,
 ) -> Result<(), IpcError> {
     state.reapply_theme_to_sessions();
+    state.reapply_scrollback_to_sessions();
 
     let sessions: Vec<(String, LogicalBounds)> = state
         .registered_session_ids()

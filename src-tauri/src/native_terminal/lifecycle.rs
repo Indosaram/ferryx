@@ -9,6 +9,7 @@ use super::error::NativeTerminalError;
 use super::sys::ffi::{ghostty_terminal_free, ghostty_terminal_new, ghostty_terminal_set};
 use super::sys::types::{
     GhosttyTerminal, GhosttyTerminalImpl, GHOSTTY_TERMINAL_OPT_BELL,
+    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
     GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, GHOSTTY_TERMINAL_OPT_USERDATA,
 };
 
@@ -75,6 +76,34 @@ pub fn create_native_terminal(
         )
     };
     if let Err(e) = NativeTerminalError::from_c_result(reg_title, "set(OPT_TITLE_CHANGED)") {
+        unsafe { ghostty_terminal_free(non_null.as_ptr()) };
+        return Err(e);
+    }
+
+    // By default, libghostty-vt sets max_scrollback_bytes to 10,000 (~10 KiB),
+    // which prematurely prunes scrollback after only ~300-500 lines.
+    // Unset the byte limit so the line limit governs scrollback retention.
+    let reg_bytes = unsafe {
+        ghostty_terminal_set(
+            non_null.as_ptr(),
+            GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+            std::ptr::null(),
+        )
+    };
+    if let Err(e) = NativeTerminalError::from_c_result(reg_bytes, "set(OPT_SCROLLBACK_MAX_BYTES)") {
+        unsafe { ghostty_terminal_free(non_null.as_ptr()) };
+        return Err(e);
+    }
+
+    let default_lines: usize = crate::terminal::DEFAULT_SCROLLBACK_LINES;
+    let reg_lines = unsafe {
+        ghostty_terminal_set(
+            non_null.as_ptr(),
+            GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+            &default_lines as *const usize as *const c_void,
+        )
+    };
+    if let Err(e) = NativeTerminalError::from_c_result(reg_lines, "set(OPT_SCROLLBACK_MAX_LINES)") {
         unsafe { ghostty_terminal_free(non_null.as_ptr()) };
         return Err(e);
     }

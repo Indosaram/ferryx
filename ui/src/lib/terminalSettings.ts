@@ -84,6 +84,7 @@ export const FALLBACK_PREFERENCES: TerminalPreferences = {
   status: "absent",
   sourcePath: null,
   defaultShell: null,
+  scrollback: 10_000,
 };
 
 export function loadTerminalSettings(storage: Pick<Storage, "getItem" | "setItem"> | null = browserStorage()): TerminalSettings {
@@ -191,6 +192,7 @@ async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
     fontSize: settings.fontSize,
     macosOptionAsAlt: settings.macosOptionAsAlt,
     shell: settings.shell,
+    scrollback: settings.scrollback,
   };
   const serialized = JSON.stringify(payload);
   if (pushedOverrides === serialized) return;

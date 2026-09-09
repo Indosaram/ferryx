@@ -13,16 +13,19 @@ export function TerminalSection({
   fontSize,
   macosOptionAsAlt,
   shell = null,
+  scrollback = 10_000,
   source,
   sourcePath,
   onFontFamily,
   onFontSize,
   onOptionAsAlt,
   onShell,
+  onScrollback,
   onUseImported,
 }: TerminalSectionProps) {
   const [familyDraft, setFamilyDraft] = useState(fontFamily);
   const [sizeDraft, setSizeDraft] = useState(String(fontSize));
+  const [scrollbackDraft, setScrollbackDraft] = useState(String(scrollback));
 
   const knownShells = ["pwsh", "powershell", "cmd", "wsl"];
   const isKnownShell = shell !== null && knownShells.includes(shell);
@@ -42,6 +45,10 @@ export function TerminalSection({
   useEffect(() => {
     setSizeDraft(String(fontSize));
   }, [fontSize]);
+
+  useEffect(() => {
+    setScrollbackDraft(String(scrollback));
+  }, [scrollback]);
 
   useEffect(() => {
     if (shell === null || shell === "") {
@@ -73,6 +80,21 @@ export function TerminalSection({
       return;
     }
     onFontSize(parsed);
+  };
+
+  const handleScrollbackChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setScrollbackDraft(event.target.value);
+  };
+
+  const commitScrollback = () => {
+    const parsed = Number(scrollbackDraft);
+    if (scrollbackDraft.trim() === "" || !Number.isFinite(parsed)) {
+      setScrollbackDraft(String(scrollback));
+      return;
+    }
+    const clamped = Math.min(100_000, Math.max(1_000, Math.round(parsed)));
+    setScrollbackDraft(String(clamped));
+    onScrollback?.(clamped);
   };
 
   const handleShellChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -174,6 +196,31 @@ export function TerminalSection({
             }}
             className="h-8 text-[11px]"
           />
+        </div>
+        <div>
+          <Label
+            htmlFor="terminal-scrollback"
+            className="mb-1.5 block text-[11px] font-medium"
+          >
+            Scrollback lines
+          </Label>
+          <Input
+            id="terminal-scrollback"
+            type="number"
+            min={1000}
+            max={100000}
+            step={1000}
+            value={scrollbackDraft}
+            onChange={handleScrollbackChange}
+            onBlur={commitScrollback}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commitScrollback();
+            }}
+            className="h-8 text-[11px]"
+          />
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Maximum scrollback lines retained in memory (1,000 – 100,000).
+          </p>
         </div>
         <div>
           <Label

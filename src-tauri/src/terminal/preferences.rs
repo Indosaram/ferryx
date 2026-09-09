@@ -9,6 +9,11 @@ use thiserror::Error;
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "monospace";
 pub const DEFAULT_MACOS_OPTION_AS_ALT: bool = false;
 pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 13.0;
+pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
+fn default_scrollback() -> usize {
+    DEFAULT_SCROLLBACK_LINES
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +90,7 @@ pub struct GhosttyTerminalConfig {
     pub selection_foreground: Option<String>,
     pub palette: HashMap<u8, String>,
     pub theme_name: Option<String>,
+    pub scrollback_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -123,6 +129,8 @@ pub struct TerminalPreferences {
     pub source_path: Option<PathBuf>,
     #[serde(default)]
     pub default_shell: Option<String>,
+    #[serde(default = "default_scrollback")]
+    pub scrollback: usize,
 }
 
 impl TerminalPreferences {
@@ -137,6 +145,7 @@ impl TerminalPreferences {
             status,
             source_path,
             default_shell: None,
+            scrollback: DEFAULT_SCROLLBACK_LINES,
         }
     }
 
@@ -220,6 +229,7 @@ impl TerminalPreferences {
             status: TerminalPreferencesStatus::Imported,
             source_path: Some(source_path),
             default_shell: None,
+            scrollback: config.scrollback_limit.unwrap_or(DEFAULT_SCROLLBACK_LINES),
         }
     }
 }
@@ -258,6 +268,7 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
     let mut selection_foreground: Option<String> = None;
     let mut palette: HashMap<u8, String> = HashMap::new();
     let mut theme_name: Option<String> = None;
+    let mut scrollback_limit: Option<usize> = None;
 
     for (index, raw_line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -360,6 +371,14 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
                     theme_name = Some(cleaned.to_string());
                 }
             }
+            "scrollback-limit" | "scrollback-limit-lines" => {
+                let cleaned = unquote(value).trim();
+                if cleaned == "unlimited" {
+                    scrollback_limit = Some(100_000);
+                } else if let Ok(parsed) = cleaned.parse::<usize>() {
+                    scrollback_limit = Some(parsed.clamp(1_000, 500_000));
+                }
+            }
             "palette" => {
                 let cleaned = unquote(value).trim();
                 if let Some((idx_str, color_str)) = cleaned.split_once('=') {
@@ -404,6 +423,7 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
         selection_foreground,
         palette,
         theme_name,
+        scrollback_limit,
     })
 }
 
@@ -681,6 +701,7 @@ pub struct TerminalPreferenceOverrides {
     pub font_size: Option<f32>,
     pub macos_option_as_alt: Option<bool>,
     pub shell: Option<String>,
+    pub scrollback: Option<usize>,
 }
 
 struct PreferenceCache {
@@ -720,6 +741,12 @@ pub fn apply_terminal_preference_overrides(
         } else {
             effective.default_shell = Some(trimmed.to_string());
         }
+    }
+    if let Some(scrollback) = overrides
+        .scrollback
+        .filter(|lines| *lines >= 1_000 && *lines <= 500_000)
+    {
+        effective.scrollback = scrollback;
     }
     effective
 }
@@ -937,5 +964,28 @@ mod tests {
         };
         let effective_empty = apply_terminal_preference_overrides(&base, &empty_overrides);
         assert_eq!(effective_empty.default_shell, None);
+    }
+
+    #[test]
+    fn test_scrollback_parsing_and_overrides() {
+        let config_text = r#"
+font-family = "Fira Code"
+scrollback-limit-lines = 25000
+"#;
+        let config = parse_ghostty_config(config_text).expect("parse config");
+        assert_eq!(config.scrollback_limit, Some(25_000));
+
+        let imported = TerminalPreferences::imported(
+            config,
+            PathBuf::from("/tmp/config"),
+        );
+        assert_eq!(imported.scrollback, 25_000);
+
+        let overrides = TerminalPreferenceOverrides {
+            scrollback: Some(50_000),
+            ..Default::default()
+        };
+        let effective = apply_terminal_preference_overrides(&imported, &overrides);
+        assert_eq!(effective.scrollback, 50_000);
     }
 }
