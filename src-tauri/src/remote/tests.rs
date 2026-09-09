@@ -764,18 +764,23 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
         .expect("pair view");
 
     // 1. Without active selection set:
-    // GET /api/v1/sessions must return empty vec (no background sessions exposed)
+    // GET /api/v1/sessions must still return ALL running daemon sessions: listing
+    // is decoupled from desktop active selection, which only supplies label metadata.
     let (status, body) =
         http_request(addr, "GET", "/api/v1/sessions", Some(&token_ctrl), None).await;
     assert_eq!(status, 200);
     let sessions: Vec<RemoteTerminalSession> = serde_json::from_str(&body).expect("parse sessions");
-    assert!(
-        sessions.is_empty(),
-        "Must not expose background sessions when no active desktop selection is declared, got: {:?}",
+    let mut listed_ids: Vec<_> = sessions.iter().map(|s| s.session_id.clone()).collect();
+    listed_ids.sort();
+    let mut expected_ids = vec![s1.clone(), s2.clone()];
+    expected_ids.sort();
+    assert_eq!(
+        listed_ids, expected_ids,
+        "Running daemon sessions must be listed regardless of active desktop selection, got: {:?}",
         sessions
     );
 
-    // GET /api/v1/workspace/state must also have empty sessions
+    // GET /api/v1/workspace/state must also list all running sessions
     let (status, body) = http_request(
         addr,
         "GET",
@@ -786,9 +791,11 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
     .await;
     assert_eq!(status, 200);
     let ws_state: RemoteWorkspaceState = serde_json::from_str(&body).expect("parse ws state");
-    assert!(
-        ws_state.sessions.is_empty(),
-        "Workspace state must not expose background sessions, got: {:?}",
+    let mut ws_listed_ids: Vec<_> = ws_state.sessions.iter().map(|s| s.session_id.clone()).collect();
+    ws_listed_ids.sort();
+    assert_eq!(
+        ws_listed_ids, expected_ids,
+        "Workspace state must list all running sessions regardless of active desktop selection, got: {:?}",
         ws_state.sessions
     );
 
@@ -809,19 +816,27 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
         ..Default::default()
     });
 
-    // GET /api/v1/sessions must return ONLY s1, s2 is excluded
+    // GET /api/v1/sessions must still return BOTH s1 and s2: setting active selection
+    // only supplies extra label metadata for the matching session, it never filters
+    // the other running sessions out of the list.
     let (status, body) =
         http_request(addr, "GET", "/api/v1/sessions", Some(&token_ctrl), None).await;
     assert_eq!(status, 200);
     let sessions: Vec<RemoteTerminalSession> = serde_json::from_str(&body).expect("parse sessions");
+    let mut listed_ids: Vec<_> = sessions.iter().map(|s| s.session_id.clone()).collect();
+    listed_ids.sort();
     assert_eq!(
-        sessions.len(),
-        1,
-        "Only declared active session should be returned"
+        listed_ids, expected_ids,
+        "Active selection must not filter the running session list, got: {:?}",
+        sessions
     );
-    assert_eq!(sessions[0].session_id, s1);
+    let active_entry = sessions
+        .iter()
+        .find(|s| s.session_id == s1)
+        .expect("active session listed");
+    assert_eq!(active_entry.workspace_id.as_deref(), Some("ws1"));
 
-    // GET /api/v1/workspace/state sessions must return ONLY s1
+    // GET /api/v1/workspace/state sessions must also still return BOTH s1 and s2
     let (status, body) = http_request(
         addr,
         "GET",
@@ -832,8 +847,9 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
     .await;
     assert_eq!(status, 200);
     let ws_state: RemoteWorkspaceState = serde_json::from_str(&body).expect("parse ws state");
-    assert_eq!(ws_state.sessions.len(), 1);
-    assert_eq!(ws_state.sessions[0].session_id, s1);
+    let mut ws_listed_ids: Vec<_> = ws_state.sessions.iter().map(|s| s.session_id.clone()).collect();
+    ws_listed_ids.sort();
+    assert_eq!(ws_listed_ids, expected_ids);
 
     // Attach to s2 (background session) MUST return 403 Forbidden even though PTY exists
     let ws_status_s2 =
@@ -953,16 +969,23 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
     .await;
     assert_eq!(status, 400);
 
-    // 4. Test active session termination: when active session exits, sessions list becomes empty
+    // 4. Test active session termination: when the active session actually exits
+    // (not merely deselected), it stops being listed, but the still-running
+    // background session s2 remains listed.
     pty.close_session(&s1).await.unwrap();
     let (status, body) =
         http_request(addr, "GET", "/api/v1/sessions", Some(&token_ctrl), None).await;
     assert_eq!(status, 200);
     let sessions_after_close: Vec<RemoteTerminalSession> =
         serde_json::from_str(&body).expect("parse sessions");
-    assert!(
-        sessions_after_close.is_empty(),
-        "Terminated active session must not be exposed"
+    let ids_after_close: Vec<_> = sessions_after_close
+        .iter()
+        .map(|s| s.session_id.clone())
+        .collect();
+    assert_eq!(
+        ids_after_close,
+        vec![s2.clone()],
+        "Terminated session must no longer be listed, but other running sessions remain"
     );
 
     handle.stop();
@@ -1524,7 +1547,7 @@ async fn test_occupied_port_enable_does_not_persist_enabled_intent() {
     ));
 
     // Bind a separate TCP listener on 0.0.0.0 to occupy a port
-    let occupied_listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+    let occupied_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind occupied port");
     let occupied_port = occupied_listener.local_addr().unwrap().port();

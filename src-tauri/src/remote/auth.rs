@@ -167,6 +167,55 @@ impl AuthManager {
         Ok((token, info))
     }
 
+    /// Approves a pairing PIN from a headless/CLI context (e.g. `ferryx pair approve <pin>`).
+    /// Validates the 6-digit numeric code against active pairing codes and registers an
+    /// approved CLI device, mirroring [`Self::exchange_pairing_code`] but without issuing a
+    /// bearer token, since CLI approval only needs to confirm the device was registered.
+    pub fn approve_pairing_code_cli(&self, code: &str) -> Result<DeviceInfo, AuthError> {
+        if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+            return Err(AuthError::InvalidPairingCode);
+        }
+
+        let pairing = {
+            let mut window = self.pairing_window.write();
+            window.refresh(Instant::now());
+            if window.failures >= PAIRING_FAILURE_BUDGET {
+                return Err(AuthError::PairingRateLimited);
+            }
+            let Some(pairing) = window.codes.remove(code) else {
+                window.failures += 1;
+                return Err(AuthError::InvalidPairingCode);
+            };
+            if pairing.created_at.elapsed() >= PAIRING_EXPIRY {
+                window.failures += 1;
+                return Err(AuthError::ExpiredPairingCode);
+            }
+            pairing
+        };
+
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let token: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(64)
+            .map(char::from)
+            .collect();
+
+        let now = unix_now();
+        let info = DeviceInfo {
+            id: device_id.clone(),
+            name: "cli-paired-device".to_string(),
+            permission: pairing.default_permission,
+            created_at: now,
+            last_seen_at: now,
+            revoked: false,
+        };
+
+        self.devices.write().insert(device_id.clone(), info.clone());
+        self.tokens.write().insert(token, device_id);
+        self.persist_best_effort();
+        Ok(info)
+    }
+
     pub fn validate_token(&self, token: &str) -> Result<DeviceInfo, AuthError> {
         let device_id = {
             let tokens = self.tokens.read();
@@ -318,6 +367,27 @@ pub enum AuthError {
 #[cfg(test)]
 #[path = "auth_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_pair_approve() {
+        let manager = AuthManager::new();
+        let code = manager.create_pairing_code(DevicePermission::Control);
+
+        let device = manager
+            .approve_pairing_code_cli(&code)
+            .expect("approving a freshly created pairing code must succeed");
+        assert_eq!(device.name, "cli-paired-device");
+        assert_eq!(device.permission, DevicePermission::Control);
+        assert_eq!(manager.list_devices().len(), 1);
+
+        let invalid = manager.approve_pairing_code_cli("000000");
+        assert!(matches!(invalid, Err(AuthError::InvalidPairingCode)));
+    }
+}
 
 #[cfg(test)]
 mod persistence_tests {

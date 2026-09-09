@@ -533,12 +533,9 @@ pub(crate) async fn get_active_running_sessions(
         let workspace_id = derived_ws
             .or(details.workspace_id)
             .or_else(|| selected.and_then(|selection| selection.workspace_id.clone()));
-        let Some(workspace_id) = workspace_id else {
-            continue;
-        };
-        if selected.is_none() && state.workspace_registry.manager(&workspace_id).is_err() {
-            continue;
-        }
+        // Sessions are listed for authenticated remote callers regardless of
+        // desktop active selection; `active_selection` only supplies extra
+        // label metadata when it matches this session, it never filters.
         let worktree_label = derived_label.or(details.worktree_label).or_else(|| {
             selected.and_then(|selection| {
                 selection
@@ -550,7 +547,7 @@ pub(crate) async fn get_active_running_sessions(
         sessions.push(RemoteTerminalSession {
             session_id: details.session_id,
             title: None,
-            workspace_id: Some(workspace_id),
+            workspace_id,
             worktree_label,
             running: true,
         });
@@ -1704,27 +1701,31 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
 
 pub struct RemoteServerHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    // Keeps every spawned listener task alive for the handle's lifetime; each
+    // task independently unwinds `is_running`/`bound_address` on shutdown, so
+    // handles are not required for correctness, only to avoid detached-task
+    // warnings and to make the fan-out explicit at the call site.
+    _extra_shutdown_txs: Vec<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl RemoteServerHandle {
     pub fn stop(self) {
         let _ = self.shutdown_tx.send(());
+        for tx in self._extra_shutdown_txs {
+            let _ = tx.send(());
+        }
     }
 }
 
-pub async fn start_remote_server(
+/// Binds a single listener and spawns the axum server loop on it, wiring the
+/// shutdown receiver and `is_running`/`bound_address` bookkeeping. Returns
+/// the bound local address and a shutdown sender for the caller to hold.
+async fn bind_and_serve(
+    bind_addr: SocketAddr,
     state: Arc<RemoteGatewayState>,
-) -> Result<(RemoteServerHandle, SocketAddr), String> {
-    let config = state.config.read().clone();
-    let bind_host = match config.mode {
-        RemoteNetworkMode::Off => return Err("Remote gateway is OFF".into()),
-        _ => "0.0.0.0",
-    };
-
-    let bind_addr: SocketAddr = format!("{bind_host}:{}", config.port)
-        .parse()
-        .map_err(|e| format!("Invalid bind address: {e}"))?;
-
+    router: Router,
+    track_bound_address: bool,
+) -> Result<(SocketAddr, tokio::sync::oneshot::Sender<()>), String> {
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .map_err(|e| format!("Failed to bind to {bind_addr}: {e}"))?;
@@ -1733,11 +1734,11 @@ pub async fn start_remote_server(
         .local_addr()
         .map_err(|e| format!("Failed to get local address: {e}"))?;
 
-    let router = create_remote_router(Arc::clone(&state));
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    *state.is_running.write() = true;
-    *state.bound_address.write() = Some(local_addr.to_string());
+    if track_bound_address {
+        *state.bound_address.write() = Some(local_addr.to_string());
+    }
 
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
@@ -1748,9 +1749,231 @@ pub async fn start_remote_server(
             .await
             .ok();
 
-        *state_clone.is_running.write() = false;
-        *state_clone.bound_address.write() = None;
+        if track_bound_address {
+            *state_clone.is_running.write() = false;
+            *state_clone.bound_address.write() = None;
+        }
     });
 
-    Ok((RemoteServerHandle { shutdown_tx }, local_addr))
+    Ok((local_addr, shutdown_tx))
+}
+
+/// Starts the remote gateway HTTP/WebSocket server.
+///
+/// The server ALWAYS binds a loopback (`127.0.0.1`) listener, regardless of
+/// mode, so that same-machine callers (e.g. companion tooling) keep working.
+/// When the configured mode requires exposing the gateway on an external
+/// interface (`LocalNetwork` or `Tailscale`), an additional listener is
+/// bound on that specific resolved interface address. The server never binds
+/// the wildcard address `0.0.0.0`: doing so would expose the gateway on every
+/// interface, including ones the user did not opt into.
+pub async fn start_remote_server(
+    state: Arc<RemoteGatewayState>,
+) -> Result<(RemoteServerHandle, SocketAddr), String> {
+    start_remote_server_with_resolver(state, Arc::new(crate::remote::state::SystemInterfaceResolver))
+        .await
+}
+
+/// Same as [`start_remote_server`] but takes an explicit
+/// [`InterfaceResolver`], primarily so tests can inject deterministic
+/// addresses instead of depending on the host's real network interfaces.
+pub async fn start_remote_server_with_resolver(
+    state: Arc<RemoteGatewayState>,
+    resolver: Arc<dyn crate::remote::state::InterfaceResolver>,
+) -> Result<(RemoteServerHandle, SocketAddr), String> {
+    let config = state.config.read().clone();
+    if config.mode == RemoteNetworkMode::Off {
+        return Err("Remote gateway is OFF".into());
+    }
+
+    // Baseline listener: always loopback, never the wildcard address.
+    let loopback_addr: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, config.port).into();
+    let router = create_remote_router(Arc::clone(&state));
+    let (primary_local_addr, shutdown_tx) =
+        bind_and_serve(loopback_addr, Arc::clone(&state), router, true).await?;
+
+    *state.is_running.write() = true;
+    *state.bound_address.write() = Some(primary_local_addr.to_string());
+
+    let mut extra_shutdown_txs = Vec::new();
+
+    // Extra listener on the specific external interface the mode requires.
+    // Resolution or bind failures abort startup and tear down the loopback
+    // listener that was already bound above, rather than ever widening the
+    // bind to 0.0.0.0 as a fallback.
+    let resolved = resolver.resolve(config.mode);
+    match resolved {
+        // The baseline loopback listener already covers loopback addresses;
+        // skip binding a second listener on the same address/port rather
+        // than attempting (and failing) a duplicate bind.
+        Ok(Some(extra_ip)) if extra_ip.is_loopback() => {}
+        Ok(Some(extra_ip)) => {
+            // Use the actual bound loopback port when the caller requested
+            // an OS-assigned port (0), so the external listener matches it.
+            let extra_addr: SocketAddr = (extra_ip, primary_local_addr.port()).into();
+            let extra_router = create_remote_router(Arc::clone(&state));
+            match bind_and_serve(extra_addr, Arc::clone(&state), extra_router, false).await {
+                Ok((_extra_local_addr, extra_shutdown_tx)) => {
+                    extra_shutdown_txs.push(extra_shutdown_tx);
+                }
+                Err(err) => {
+                    let _ = shutdown_tx.send(());
+                    *state.is_running.write() = false;
+                    *state.bound_address.write() = None;
+                    return Err(err);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let _ = shutdown_tx.send(());
+            *state.is_running.write() = false;
+            *state.bound_address.write() = None;
+            return Err(err);
+        }
+    }
+
+    Ok((
+        RemoteServerHandle {
+            shutdown_tx,
+            _extra_shutdown_txs: extra_shutdown_txs,
+        },
+        primary_local_addr,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::state::RemoteGatewayState;
+    use crate::terminal::TerminalOutputHub;
+    use crate::terminal::TerminalService;
+    use crate::worktree::WorkspaceRegistry;
+
+    /// Running daemon sessions must be listed for authenticated remote callers
+    /// regardless of desktop active selection. `active_selection` may only supply
+    /// extra label metadata for a matching session; it must never filter the
+    /// session list itself, in particular when it is `None`.
+    #[tokio::test]
+    async fn test_get_active_running_sessions_independent_of_desktop() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+        let state = RemoteGatewayState::new(Arc::clone(&terminal_service), registry.clone());
+
+        let (session_id, mut rx) = pty
+            .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn session");
+        hub.register_session(&session_id);
+        let session_id_clone = session_id.clone();
+        let hub_clone = Arc::clone(&hub);
+        tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                hub_clone.publish(&session_id_clone, chunk);
+            }
+        });
+
+        // No active desktop selection at all.
+        assert!(state.active_selection().is_none());
+
+        let cache = WorkspaceSnapshotCache::build(&registry);
+        let sessions = get_active_running_sessions(&state, &cache, &[]).await;
+
+        assert_eq!(
+            sessions.len(),
+            1,
+            "running daemon sessions must be returned even when active_selection is None, got: {:?}",
+            sessions
+        );
+        assert_eq!(sessions[0].session_id, session_id);
+        assert!(sessions[0].running);
+
+        pty.close_session(&session_id).await.expect("close fixture PTY");
+    }
+
+    /// Starting the gateway in `Loopback`-equivalent (`Off`-free, no
+    /// external interface requested) mode with an OS-assigned port (0) must
+    /// bind loopback only, never the wildcard address `0.0.0.0`.
+    #[tokio::test]
+    async fn test_listener_bind_loopback() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+
+        // Scenario 1: the external-interface resolver errors (e.g. "no LAN
+        // interface available"). Startup must fail rather than silently
+        // widening the loopback bind to 0.0.0.0.
+        struct NoExternalInterfaceResolver;
+        impl crate::remote::state::InterfaceResolver for NoExternalInterfaceResolver {
+            fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Err("no active local network IPv4 interface found".into())
+            }
+            fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Err("no active Tailscale IPv4 interface found".into())
+            }
+        }
+
+        let state_no_external = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+        {
+            let mut config = state_no_external.config.write();
+            config.mode = RemoteNetworkMode::LocalNetwork;
+            config.port = 0;
+        }
+        let result = start_remote_server_with_resolver(
+            Arc::clone(&state_no_external),
+            Arc::new(NoExternalInterfaceResolver),
+        )
+        .await;
+        assert!(result.is_err(), "expected resolver error to propagate");
+        assert!(
+            !*state_no_external.is_running.read(),
+            "failed startup must not leave the gateway marked as running"
+        );
+
+        // Scenario 2: the external-interface resolver succeeds. The primary
+        // (loopback) listener returned to the caller must still be bound to
+        // 127.0.0.1 with an OS-assigned port, never 0.0.0.0.
+        struct LoopbackOnlyResolver;
+        impl crate::remote::state::InterfaceResolver for LoopbackOnlyResolver {
+            fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Ok(std::net::Ipv4Addr::new(127, 0, 0, 1))
+            }
+            fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Err("no active Tailscale IPv4 interface found".into())
+            }
+        }
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::LocalNetwork;
+            config.port = 0;
+        }
+
+        let (handle, local_addr) =
+            start_remote_server_with_resolver(Arc::clone(&state), Arc::new(LoopbackOnlyResolver))
+                .await
+                .expect("server should start with a loopback-resolving resolver");
+
+        assert!(
+            local_addr.ip().is_loopback(),
+            "primary listener must bind a loopback address, got {}",
+            local_addr.ip()
+        );
+        assert_ne!(
+            local_addr.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            "primary listener must never bind the wildcard address 0.0.0.0"
+        );
+
+        handle.stop();
+    }
 }

@@ -144,6 +144,88 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairCliCommand {
+    GeneratePin,
+    Approve { pin: String },
+}
+
+pub fn parse_pair_cli<I, T>(args: I) -> Result<PairCliCommand, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "pair") {
+        return Err("expected `ferryx pair <--generate-pin|approve>`".into());
+    }
+    match args.get(2).map(String::as_str) {
+        Some("--generate-pin") => Ok(PairCliCommand::GeneratePin),
+        Some("approve") => {
+            let pin = args
+                .get(3)
+                .cloned()
+                .ok_or_else(|| "missing <pin> for `ferryx pair approve`".to_string())?;
+            Ok(PairCliCommand::Approve { pin })
+        }
+        _ => Err("expected `ferryx pair <--generate-pin|approve>`".into()),
+    }
+}
+
+fn remote_auth_manager() -> ferryx_lib::remote::AuthManager {
+    let data_dir = std::env::var_os("FERRYX_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join("remote"))
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE").map(|dir| {
+                            std::path::PathBuf::from(dir)
+                                .join(".ferryx")
+                                .join("remote")
+                        })
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME").map(|dir| {
+                    std::path::PathBuf::from(dir)
+                        .join(".ferryx")
+                        .join("remote")
+                })
+            }
+        });
+    let auth_path = data_dir.map(|dir| dir.join("remote-auth.json"));
+    ferryx_lib::remote::AuthManager::with_persistence(auth_path)
+}
+
+pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
+    match command {
+        PairCliCommand::GeneratePin => {
+            let manager = remote_auth_manager();
+            let pin = manager.create_pairing_code(ferryx_lib::remote::DevicePermission::Control);
+            println!("{pin}");
+            Ok(())
+        }
+        PairCliCommand::Approve { pin } => {
+            let manager = remote_auth_manager();
+            match manager.approve_pairing_code_cli(&pin) {
+                Ok(_device) => {
+                    println!("Pairing approved for {pin}");
+                    Ok(())
+                }
+                Err(error) => Err(format!("Failed to approve pairing: {error}")),
+            }
+        }
+    }
+}
+
 fn print_browser_cli_error(code: &str, message: impl AsRef<str>) {
     eprintln!(
         "{}",
@@ -254,6 +336,15 @@ fn main() {
             Err(error) => {
                 print_browser_cli_error("BROWSER_CLI_INVALID_OR_UNAVAILABLE", error);
                 std::process::exit(2);
+            }
+        }
+    }
+    if args.get(1).is_some_and(|arg| arg == "pair") {
+        match parse_pair_cli(&args).and_then(|command| run_pair_cli(command)) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
             }
         }
     }

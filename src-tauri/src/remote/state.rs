@@ -71,6 +71,98 @@ impl RemoteGatewayConfig {
     }
 }
 
+/// Resolves the network interface address a `RemoteNetworkMode` should bind
+/// to, beyond the always-on loopback listener.
+///
+/// Implementations must never return a wildcard (`0.0.0.0`) or loopback
+/// address for [`RemoteNetworkMode::LocalNetwork`] or
+/// [`RemoteNetworkMode::Tailscale`]: those modes exist specifically to expose
+/// the gateway on a *specific* external interface, not on every interface.
+pub trait InterfaceResolver: Send + Sync {
+    /// Returns the primary non-loopback IPv4 address of this machine on the
+    /// local network (e.g. a `192.168.x.x` or `10.x.x.x` address).
+    fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String>;
+
+    /// Returns the Tailscale CGNAT IPv4 address (`100.64.0.0/10`) of this
+    /// machine, or an error if no Tailscale interface is active.
+    fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String>;
+
+    /// Resolves the extra bind address (if any) required for `mode`, on top
+    /// of the baseline loopback listener. Returns `Ok(None)` for modes that
+    /// only need loopback (`Off`).
+    fn resolve(&self, mode: RemoteNetworkMode) -> Result<Option<std::net::Ipv4Addr>, String> {
+        match mode {
+            RemoteNetworkMode::Off => Ok(None),
+            RemoteNetworkMode::LocalNetwork => self.local_network_address().map(Some),
+            RemoteNetworkMode::Tailscale => self.tailscale_address().map(Some),
+        }
+    }
+}
+
+/// Returns `true` for addresses in the Tailscale/CGNAT range `100.64.0.0/10`
+/// (i.e. `100.64.0.0` through `100.127.255.255`).
+pub fn is_tailscale_cgnat_address(addr: &std::net::Ipv4Addr) -> bool {
+    let octets = addr.octets();
+    octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
+}
+
+/// Enumerates active, non-loopback IPv4 interface addresses on this machine.
+#[cfg(unix)]
+fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    use std::net::Ipv4Addr;
+
+    let mut addrs = Vec::new();
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return Err("failed to enumerate network interfaces".into());
+        }
+        let mut cursor = head;
+        while !cursor.is_null() {
+            let iface = &*cursor;
+            if !iface.ifa_addr.is_null() && (*iface.ifa_addr).sa_family as i32 == libc::AF_INET {
+                let flags = iface.ifa_flags as i32;
+                let up = flags & libc::IFF_UP != 0;
+                let loopback = flags & libc::IFF_LOOPBACK != 0;
+                if up && !loopback {
+                    let sockaddr_in = iface.ifa_addr as *const libc::sockaddr_in;
+                    let raw = (*sockaddr_in).sin_addr.s_addr;
+                    addrs.push(Ipv4Addr::from(u32::from_be(raw)));
+                }
+            }
+            cursor = iface.ifa_next;
+        }
+        libc::freeifaddrs(head);
+    }
+    Ok(addrs)
+}
+
+#[cfg(not(unix))]
+fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    Err("interface enumeration is not supported on this platform".into())
+}
+
+/// Default [`InterfaceResolver`] backed by the operating system's network
+/// interface list.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemInterfaceResolver;
+
+impl InterfaceResolver for SystemInterfaceResolver {
+    fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+        enumerate_ipv4_interface_addresses()?
+            .into_iter()
+            .find(|addr| !is_tailscale_cgnat_address(addr))
+            .ok_or_else(|| "no active local network IPv4 interface found".into())
+    }
+
+    fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+        enumerate_ipv4_interface_addresses()?
+            .into_iter()
+            .find(is_tailscale_cgnat_address)
+            .ok_or_else(|| "no active Tailscale IPv4 interface found".into())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedRemoteGatewayConfig {
@@ -469,6 +561,68 @@ mod tests {
             Some(auth_path),
         );
         (state, registry, terminal)
+    }
+
+    /// Test-only [`InterfaceResolver`] returning fixed, injected addresses so
+    /// resolution logic can be exercised without depending on the host's
+    /// actual network configuration.
+    struct MockInterfaceResolver {
+        local_network: Result<std::net::Ipv4Addr, String>,
+        tailscale: Result<std::net::Ipv4Addr, String>,
+    }
+
+    impl InterfaceResolver for MockInterfaceResolver {
+        fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+            self.local_network.clone()
+        }
+
+        fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+            self.tailscale.clone()
+        }
+    }
+
+    #[test]
+    fn test_interface_resolver_address_selection() {
+        use std::net::Ipv4Addr;
+
+        let resolver = MockInterfaceResolver {
+            local_network: Ok(Ipv4Addr::new(192, 168, 1, 42)),
+            tailscale: Ok(Ipv4Addr::new(100, 88, 12, 4)),
+        };
+
+        // Off never needs an extra bind address.
+        assert_eq!(resolver.resolve(RemoteNetworkMode::Off), Ok(None));
+
+        // LocalNetwork resolves to the detected LAN address.
+        assert_eq!(
+            resolver.resolve(RemoteNetworkMode::LocalNetwork),
+            Ok(Some(Ipv4Addr::new(192, 168, 1, 42)))
+        );
+
+        // Tailscale resolves to the detected CGNAT address.
+        assert_eq!(
+            resolver.resolve(RemoteNetworkMode::Tailscale),
+            Ok(Some(Ipv4Addr::new(100, 88, 12, 4)))
+        );
+
+        // Tailscale resolution surfaces an error when no interface is found,
+        // it must never silently fall back to a wildcard bind.
+        let no_tailscale = MockInterfaceResolver {
+            local_network: Ok(Ipv4Addr::new(10, 0, 0, 5)),
+            tailscale: Err("no active Tailscale IPv4 interface found".into()),
+        };
+        assert!(no_tailscale.resolve(RemoteNetworkMode::Tailscale).is_err());
+
+        // CGNAT range classification: 100.64.0.0/10 only.
+        assert!(is_tailscale_cgnat_address(&Ipv4Addr::new(100, 64, 0, 0)));
+        assert!(is_tailscale_cgnat_address(&Ipv4Addr::new(100, 100, 1, 1)));
+        assert!(is_tailscale_cgnat_address(&Ipv4Addr::new(
+            100, 127, 255, 255
+        )));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(100, 63, 0, 0)));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(100, 128, 0, 0)));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(127, 0, 0, 1)));
     }
 
     #[test]
