@@ -1,11 +1,13 @@
-import { ChevronDown } from "lucide-react";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, Laptop } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
   clearRemoteAuthToken,
   getRemoteAuthToken,
   setRemoteAuthToken,
 } from "../lib/remoteClient";
+import { remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
+import { hostAgentTotals, MobileHostDrawer } from "./MobileHostDrawer";
 import { PairingPage } from "./PairingPage";
 import {
   contextName,
@@ -190,7 +192,11 @@ export const RemoteApp: React.FC = () => {
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const activeHost = useMemo(() => selectActiveHost(remoteHostState), [remoteHostState]);
+  const hostAgentSummary = useMemo(() => hostAgentTotals(remoteHostState), [remoteHostState]);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
   const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
   const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
@@ -302,6 +308,22 @@ export const RemoteApp: React.FC = () => {
     if (!retryFailedSocket) optimisticSocketSessionIdRef.current = null;
     optimisticSocketClosedRef.current = false;
   }, []);
+
+  // Switching the active host is a connection change: any pending selection or optimistic
+  // terminal socket belonged to the previous connection and must be dropped before the
+  // workspace state for the newly active host is loaded. The initial mount is skipped since
+  // the token-load effect above already fetches the first workspace snapshot.
+  const previousHostIdRef = useRef(remoteHostState.activeHostId);
+  useEffect(() => {
+    if (previousHostIdRef.current === remoteHostState.activeHostId) return;
+    previousHostIdRef.current = remoteHostState.activeHostId;
+    if (!token) return;
+    clearPendingSelection();
+    setModel(EMPTY_MODEL);
+    workspaceRefreshVersionRef.current += 1;
+    void refreshWorkspace();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remoteHostState.activeHostId]);
 
   const handleTerminalSocketLifecycle = useCallback((sessionId: string, state: "open" | "closed") => {
     if (optimisticSocketSessionIdRef.current !== sessionId) return;
@@ -507,6 +529,46 @@ export const RemoteApp: React.FC = () => {
           <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
         <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            aria-label="Switch host"
+            aria-haspopup="dialog"
+            aria-expanded={hostDrawerOpen}
+            data-testid="mobile-host-drawer-trigger"
+            onClick={() => setHostDrawerOpen(true)}
+            className="flex h-5 items-center gap-1 rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {activeHost ? (
+              <span
+                data-testid="active-host-online-indicator"
+                className={`size-1.5 shrink-0 rounded-full ${activeHost.online ? "bg-status-success" : "bg-status-idle"}`}
+                aria-hidden="true"
+              />
+            ) : (
+              <Laptop className="size-3 shrink-0" aria-hidden="true" />
+            )}
+            <span data-testid="active-host-name" className="max-w-20 truncate sm:max-w-32">
+              {activeHost ? activeHost.name : "Local"}
+            </span>
+            {hostAgentSummary.waiting > 0 ? (
+              <span
+                data-testid="host-agent-status-pill"
+                aria-label={`${hostAgentSummary.waiting} agent${hostAgentSummary.waiting === 1 ? "" : "s"} waiting`}
+                className="flex items-center gap-1 rounded bg-status-warning/15 px-1 text-[10px] font-mono leading-tight text-status-warning"
+              >
+                <span className="size-1.5 rounded-full bg-status-warning ring-2 ring-status-warning/20" aria-hidden="true" />
+                {hostAgentSummary.waiting}
+              </span>
+            ) : hostAgentSummary.running > 0 ? (
+              <span
+                data-testid="host-agent-status-pill"
+                aria-label={`${hostAgentSummary.running} agent${hostAgentSummary.running === 1 ? "" : "s"} running`}
+                className="flex items-center gap-1 rounded bg-status-working/15 px-1 text-[10px] font-mono leading-tight text-status-working"
+              >
+                {hostAgentSummary.running}
+              </span>
+            ) : null}
+          </button>
           {firstWaiting ? (
             <button
               type="button"
@@ -585,6 +647,8 @@ export const RemoteApp: React.FC = () => {
           />
         ) : null}
       </RemoteWorkspaceMirror>
+
+      <MobileHostDrawer open={hostDrawerOpen} onOpenChange={setHostDrawerOpen} />
     </div>
   );
 };

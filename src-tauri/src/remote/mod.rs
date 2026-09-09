@@ -3,6 +3,7 @@ pub mod backend;
 pub mod discovery;
 pub mod mirror;
 pub mod protocol;
+pub mod push;
 pub mod server;
 mod ssh;
 pub mod state;

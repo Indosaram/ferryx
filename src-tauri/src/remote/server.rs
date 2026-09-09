@@ -10,6 +10,7 @@ use crate::remote::protocol::{
     RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
     RemoteWorkspaceState, RemoteWorktreeInfo,
 };
+use crate::remote::push::{global_push_store, PushSubscriptionInfo};
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
 };
@@ -1669,6 +1670,25 @@ async fn get_terminal_preferences(
     Ok(Json(crate::terminal::load_terminal_preferences()))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PushUnsubscribeRequest {
+    endpoint: String,
+}
+
+async fn push_subscribe(
+    Json(payload): Json<PushSubscriptionInfo>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    global_push_store().subscribe(payload);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn push_unsubscribe(
+    Json(payload): Json<PushUnsubscribeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    global_push_store().unsubscribe(&payload.endpoint);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -1694,6 +1714,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
+        .route("/api/push/subscribe", post(push_subscribe))
+        .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(get(serve_static_or_index))
         .layer(cors)
         .with_state(state)
