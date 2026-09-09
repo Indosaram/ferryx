@@ -28,6 +28,7 @@ pub enum RemoteNetworkMode {
     Off,
     LocalNetwork,
     Tailscale,
+    Relay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -44,6 +45,8 @@ pub struct RemoteGatewayConfig {
     pub mode: RemoteNetworkMode,
     pub port: u16,
     pub allow_control: bool,
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 impl Default for RemoteGatewayConfig {
@@ -52,6 +55,7 @@ impl Default for RemoteGatewayConfig {
             mode: RemoteNetworkMode::Off,
             port: REMOTE_GATEWAY_PORT,
             allow_control: true,
+            relay_url: None,
         }
     }
 }
@@ -67,6 +71,7 @@ impl RemoteGatewayConfig {
             port: self.port,
             allow_control: self.allow_control,
             restart_policy: self.restart_policy(),
+            relay_url: self.relay_url.clone(),
         }
     }
 }
@@ -95,6 +100,7 @@ pub trait InterfaceResolver: Send + Sync {
             RemoteNetworkMode::Off => Ok(None),
             RemoteNetworkMode::LocalNetwork => self.local_network_address().map(Some),
             RemoteNetworkMode::Tailscale => self.tailscale_address().map(Some),
+            RemoteNetworkMode::Relay => Ok(None),
         }
     }
 }
@@ -171,6 +177,8 @@ struct PersistedRemoteGatewayConfig {
     allow_control: bool,
     #[serde(default)]
     restart_policy: RemoteRestartPolicy,
+    #[serde(default)]
+    relay_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +293,7 @@ impl RemoteGatewayState {
                 // Port is fixed; ignore persisted value so stale custom ports heal on load.
                 port: REMOTE_GATEWAY_PORT,
                 allow_control: persisted.allow_control,
+                relay_url: persisted.relay_url,
             })
             .unwrap_or_default();
         Self {
@@ -579,6 +588,66 @@ mod tests {
         fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
             self.tailscale.clone()
         }
+    }
+
+    #[test]
+    fn test_relay_mode_configuration() {
+        // RemoteNetworkMode::Relay serializes to the expected camelCase wire value.
+        let mode_json = serde_json::to_string(&RemoteNetworkMode::Relay).expect("serialize mode");
+        assert_eq!(mode_json, "\"relay\"");
+        let mode_back: RemoteNetworkMode =
+            serde_json::from_str(&mode_json).expect("deserialize mode");
+        assert_eq!(mode_back, RemoteNetworkMode::Relay);
+
+        // RemoteGatewayConfig with a relay_url round-trips through JSON.
+        let config = RemoteGatewayConfig {
+            mode: RemoteNetworkMode::Relay,
+            port: REMOTE_GATEWAY_PORT,
+            allow_control: true,
+            relay_url: Some("https://relay.example.com".to_string()),
+        };
+        let config_json = serde_json::to_string(&config).expect("serialize config");
+        assert!(config_json.contains(r#""mode":"relay""#));
+        assert!(config_json.contains(r#""relayUrl":"https://relay.example.com""#));
+        let config_back: RemoteGatewayConfig =
+            serde_json::from_str(&config_json).expect("deserialize config");
+        assert_eq!(config_back.mode, RemoteNetworkMode::Relay);
+        assert_eq!(
+            config_back.relay_url,
+            Some("https://relay.example.com".to_string())
+        );
+
+        // The relay URL persists to disk and is restored on reopen.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.json");
+        let auth_path = dir.path().join("auth.json");
+        let (state, registry, terminal) = test_state(config_path.clone(), auth_path.clone());
+
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::Relay;
+            config.relay_url = Some("https://relay.example.com".to_string());
+        }
+        state.persist_config().expect("persist");
+
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).expect("read persisted config"))
+                .expect("parse persisted config");
+        assert_eq!(on_disk["mode"], "relay");
+        assert_eq!(on_disk["relayUrl"], "https://relay.example.com");
+
+        let reopened = RemoteGatewayState::new_with_paths(
+            terminal,
+            registry,
+            Some(config_path),
+            Some(auth_path),
+        );
+        let reopened_config = reopened.config.read().clone();
+        assert_eq!(reopened_config.mode, RemoteNetworkMode::Relay);
+        assert_eq!(
+            reopened_config.relay_url,
+            Some("https://relay.example.com".to_string())
+        );
     }
 
     #[test]

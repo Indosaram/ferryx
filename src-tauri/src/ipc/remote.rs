@@ -105,6 +105,7 @@ pub struct RemoteGatewayStatusResponse {
     pub bound_address: Option<String>,
     pub local_ip: Option<String>,
     pub restart_policy: RemoteRestartPolicy,
+    pub relay_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +115,8 @@ pub struct EnableRemoteGatewayRequest {
     /// Deprecated, kept for wire compatibility, always ignored; gateway port is fixed to REMOTE_GATEWAY_PORT.
     pub port: Option<u16>,
     pub allow_control: Option<bool>,
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +142,7 @@ pub async fn cmd_remote_status(
                 bound_address: status.bound_address,
                 local_ip,
                 restart_policy: RemoteRestartPolicy::RestoreListener,
+                relay_url: status.relay_url,
             })
         }
         RemoteGatewayManagerInner::State { state, .. } => {
@@ -152,6 +156,7 @@ pub async fn cmd_remote_status(
                 bound_address,
                 local_ip,
                 restart_policy: config.restart_policy(),
+                relay_url: config.relay_url,
             })
         }
     }
@@ -169,6 +174,7 @@ pub async fn cmd_remote_enable(
                 mode: request.mode,
                 port: REMOTE_GATEWAY_PORT,
                 allow_control: request.allow_control.unwrap_or(current.allow_control),
+                relay_url: request.relay_url.or(current.relay_url),
             };
             client.remote_configure(config).await?;
         }
@@ -185,6 +191,9 @@ pub async fn cmd_remote_enable(
                 config.port = REMOTE_GATEWAY_PORT;
                 if let Some(allow_ctrl) = request.allow_control {
                     config.allow_control = allow_ctrl;
+                }
+                if request.relay_url.is_some() {
+                    config.relay_url = request.relay_url;
                 }
             }
             let _ = state.persist_config();
@@ -211,6 +220,7 @@ pub async fn cmd_remote_disable(
                 mode: RemoteNetworkMode::Off,
                 port: current.port,
                 allow_control: current.allow_control,
+                relay_url: current.relay_url,
             };
             client.remote_configure(config).await?;
         }

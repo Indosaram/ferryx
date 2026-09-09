@@ -10,6 +10,7 @@ import {
   revokeRemoteDevice,
   type DeviceInfo,
   type RemoteGatewayStatus,
+  type RemoteNetworkMode,
 } from "../../lib/tauri";
 
 import { SettingRow, SettingsHeading } from "./primitives";
@@ -18,6 +19,14 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Switch } from "../ui/switch";
+
+type ConnectionMode = Extract<RemoteNetworkMode, "localNetwork" | "tailscale" | "relay">;
+
+const CONNECTION_MODES: Array<{ value: ConnectionMode; label: string }> = [
+  { value: "localNetwork", label: "Local Network" },
+  { value: "tailscale", label: "Tailscale" },
+  { value: "relay", label: "Relay Server" },
+];
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
   try {
@@ -54,6 +63,9 @@ export function RemoteAccessSection() {
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [pinCopied, setPinCopied] = useState(false);
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("localNetwork");
+  const [relayUrl, setRelayUrl] = useState("");
+  const [connectUrl, setConnectUrl] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
   const clearCopyTimer = useCallback(() => {
@@ -95,11 +107,23 @@ export function RemoteAccessSection() {
       setPairingCode(res.code);
 
       const port = s?.port ?? 43821;
-      const host = s?.localIp ? `${s.localIp}:${port}` : `localhost:${port}`;
+      const mode = s?.mode ?? connectionMode;
+      const effectiveRelayUrl = s?.relayUrl ?? relayUrl;
 
-      const connectUrl = `http://${host}/#pair=${res.code}`;
+      let url: string;
+      if (mode === "relay" && effectiveRelayUrl) {
+        url = `${effectiveRelayUrl.replace(/\/+$/, "")}/#pair=${res.code}`;
+      } else if (mode === "tailscale") {
+        const host = s?.boundAddress ?? s?.localIp ?? "localhost";
+        url = `http://${host}:${port}/#pair=${res.code}`;
+      } else {
+        const host = s?.localIp ? `${s.localIp}:${port}` : `localhost:${port}`;
+        url = `http://${host}/#pair=${res.code}`;
+      }
+      setConnectUrl(url);
+
       const QRCode = (await import("qrcode")).default;
-      const dataUrl = await QRCode.toDataURL(connectUrl, {
+      const dataUrl = await QRCode.toDataURL(url, {
         width: 180,
         margin: 1,
         color: { dark: "#ffffff", light: "#171717" },
@@ -109,10 +133,11 @@ export function RemoteAccessSection() {
       setQrError(error instanceof Error ? error.message : "Failed to generate pairing QR code");
       setPairingCode(null);
       setQrDataUrl(null);
+      setConnectUrl(null);
     } finally {
       setIsGeneratingQr(false);
     }
-  }, []);
+  }, [connectionMode, relayUrl]);
 
   const handleGeneratePairing = () => {
     setActionError(null);
@@ -137,9 +162,13 @@ export function RemoteAccessSection() {
         setQrDataUrl(null);
         setQrError(null);
         setPinCopied(false);
+        setConnectUrl(null);
         await refreshStatus();
       } else {
-        const s = await enableRemoteGateway({ mode: "localNetwork" });
+        const s = await enableRemoteGateway({
+          mode: connectionMode,
+          relayUrl: connectionMode === "relay" ? relayUrl : undefined,
+        });
         statusRef.current = s;
         setStatus(s);
         await refreshStatus();
@@ -202,6 +231,40 @@ export function RemoteAccessSection() {
 
         {status?.enabled && (
           <>
+            <SettingRow
+              label="Connection Mode"
+              description="Choose how devices reach this desktop: your local network, a Tailscale tailnet, or a relay server."
+            >
+              <div className="flex flex-col items-end gap-2">
+                <div role="radiogroup" aria-label="Connection Mode" className="flex items-center gap-1">
+                  {CONNECTION_MODES.map(({ value, label }) => (
+                    <Button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={connectionMode === value}
+                      variant={connectionMode === value ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setConnectionMode(value)}
+                      className="h-7 px-2.5 text-[11px] font-medium"
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+                {connectionMode === "relay" ? (
+                  <input
+                    type="url"
+                    aria-label="Relay Server URL"
+                    placeholder="https://relay.example.com"
+                    value={relayUrl}
+                    onChange={(e) => setRelayUrl(e.target.value)}
+                    className="h-7 w-56 rounded border border-border bg-background px-2 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                ) : null}
+              </div>
+            </SettingRow>
+
             <SettingRow
               label="Instant QR Connect"
               description="Scan this QR code with your phone camera to pair and connect immediately without typing."
@@ -281,6 +344,18 @@ export function RemoteAccessSection() {
                   >
                     Generate Code
                   </Button>
+                ) : null}
+                {connectUrl ? (
+                  <div
+                    data-testid="active-connection-url"
+                    className="w-full break-all rounded bg-muted px-2 py-1 text-center text-[10px] text-muted-foreground"
+                  >
+                    <span className="font-semibold uppercase tracking-wide">
+                      {connectionMode === "relay" ? "Relay" : connectionMode === "tailscale" ? "Tailscale" : "Local LAN"}
+                    </span>
+                    {": "}
+                    <span className="font-mono">{connectUrl}</span>
+                  </div>
                 ) : null}
               </Card>
             </SettingRow>

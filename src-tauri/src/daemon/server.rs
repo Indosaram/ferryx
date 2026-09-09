@@ -1700,6 +1700,7 @@ impl DaemonServer {
                             allow_control: config.allow_control,
                             is_running,
                             bound_address,
+                            relay_url: config.relay_url,
                         },
                     }
                 }
@@ -3525,6 +3526,7 @@ mod tests {
             mode: RemoteNetworkMode::LocalNetwork,
             port: 0,
             allow_control: true,
+            relay_url: None,
         };
         let (handle, addr) = start_remote_server(Arc::clone(&server.remote_state))
             .await

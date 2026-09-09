@@ -98,6 +98,7 @@ async fn test_remote_server_health_and_lifecycle() {
         mode: RemoteNetworkMode::Tailscale,
         port: 0, // OS assigns available port
         allow_control: true,
+        relay_url: None,
     };
 
     let (handle, addr) = start_remote_server(Arc::clone(&state))
@@ -143,6 +144,7 @@ async fn test_terminal_preferences_requires_a_valid_unrevoked_remote_token() {
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     let (handle, addr) = start_remote_server(Arc::clone(&state))
         .await
@@ -205,6 +207,7 @@ async fn test_active_selection_change_is_broadcast_to_authenticated_event_client
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     let (handle, addr) = start_remote_server(Arc::clone(&state))
         .await
@@ -253,6 +256,7 @@ async fn test_authenticated_event_clients_receive_the_current_active_selection_o
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     state.set_active_selection(RemoteActiveDesktopSelection {
         workspace_id: Some("remote-e2e".into()),
@@ -300,6 +304,7 @@ async fn test_authenticated_event_clients_receive_selection_changes_after_the_sn
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     state.set_active_selection(RemoteActiveDesktopSelection {
         workspace_id: Some("first-workspace".into()),
@@ -366,6 +371,7 @@ async fn test_remote_server_serves_spa_index_html() {
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
 
     let (handle, addr) = start_remote_server(Arc::clone(&state))
@@ -741,6 +747,7 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
 
     let (handle, addr) = start_remote_server(Arc::clone(&state))
@@ -1230,6 +1237,7 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
             mode: RemoteNetworkMode::LocalNetwork,
             port: Some(0),
             allow_control: Some(true),
+            relay_url: None,
         },
     )
     .await
@@ -1384,6 +1392,7 @@ async fn test_daemon_pairing_and_revocation_authority() {
             mode: RemoteNetworkMode::LocalNetwork,
             port: 0,
             allow_control: true,
+            relay_url: None,
         })
         .await
         .expect("configure daemon");
@@ -1467,6 +1476,7 @@ async fn test_successful_enable_restores_and_disable_remains_off() {
                 mode: RemoteNetworkMode::LocalNetwork,
                 port: 0,
                 allow_control: true,
+                relay_url: None,
             })
             .await
             .expect("enable server 1");
@@ -1509,6 +1519,7 @@ async fn test_successful_enable_restores_and_disable_remains_off() {
                 mode: RemoteNetworkMode::Off,
                 port: 0,
                 allow_control: true,
+                relay_url: None,
             })
             .await
             .expect("disable server 2");
@@ -1564,6 +1575,7 @@ async fn test_occupied_port_enable_does_not_persist_enabled_intent() {
             mode: RemoteNetworkMode::LocalNetwork,
             port: occupied_port,
             allow_control: true,
+            relay_url: None,
         })
         .await;
 
@@ -1772,6 +1784,7 @@ impl GridSocketTestHarness {
             mode: RemoteNetworkMode::LocalNetwork,
             port: 0,
             allow_control: true,
+            relay_url: None,
         };
         state.set_active_selection(RemoteActiveDesktopSelection {
             workspace_id: None,
@@ -1870,6 +1883,7 @@ async fn test_grid_render_attach_sends_full_frame_with_session_dimensions() {
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     state.set_active_selection(RemoteActiveDesktopSelection {
         workspace_id: None,
@@ -2124,6 +2138,7 @@ async fn test_connected_terminal_websocket_closed_when_active_selection_changes(
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
 
     let (handle, addr) = start_remote_server(Arc::clone(&state))
@@ -2266,6 +2281,7 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
             mode: RemoteNetworkMode::LocalNetwork,
             port: 0,
             allow_control: true,
+            relay_url: None,
         })
         .await
         .expect("configure remote listener");
@@ -2349,6 +2365,7 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
             mode: RemoteNetworkMode::Off,
             port: 0,
             allow_control: true,
+            relay_url: None,
         })
         .await
         .expect("disable remote listener");
@@ -2423,6 +2440,7 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
             mode: RemoteNetworkMode::LocalNetwork,
             port: 0,
             allow_control: true,
+            relay_url: None,
         })
         .await
         .expect("configure remote listener");
@@ -2635,6 +2653,7 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
             mode: RemoteNetworkMode::Off,
             port: 0,
             allow_control: true,
+            relay_url: None,
         })
         .await
         .expect("disable remote listener");
@@ -2852,6 +2871,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     let (_handle, addr) = start_remote_server(Arc::clone(&state))
         .await
@@ -3100,6 +3120,7 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     let (handle, addr) = start_remote_server(Arc::clone(&state))
         .await
@@ -3475,6 +3496,7 @@ async fn test_repeated_workspace_state_reads_do_not_rerun_git_discovery_and_refr
         mode: RemoteNetworkMode::LocalNetwork,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     let (handle, addr) = start_remote_server(Arc::clone(&state))
         .await
@@ -3958,6 +3980,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
         mode: RemoteNetworkMode::Tailscale,
         port: 0,
         allow_control: true,
+        relay_url: None,
     };
     let pairing_code = state
         .auth_manager
