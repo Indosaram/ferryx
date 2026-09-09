@@ -29,10 +29,35 @@ pub struct SystemSshConfigResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SshHostStore {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_resilient_hosts")]
     pub hosts: Vec<SshHost>,
     #[serde(default)]
     pub tombstones: Vec<String>,
+}
+
+pub fn deserialize_resilient_hosts<'de, D>(deserializer: D) -> Result<Vec<SshHost>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<Vec<serde_json::Value>> = Option::deserialize(deserializer)?;
+    let Some(values) = opt else {
+        return Ok(Vec::new());
+    };
+    let mut hosts = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        let id_hint = value
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        match serde_json::from_value::<SshHost>(value) {
+            Ok(host) => hosts.push(host),
+            Err(e) => {
+                let id_display = id_hint.as_deref().unwrap_or("<unknown>");
+                tracing::warn!("Skipping unparseable SSH host at index {index} (id: {id_display}): {e}");
+            }
+        }
+    }
+    Ok(hosts)
 }
 
 pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
@@ -601,5 +626,31 @@ Host dev-box
         assert_eq!(hosts[0].hostname, "10.0.0.1");
         assert_eq!(hosts[0].username, Some("ubuntu".into()));
         assert_eq!(hosts[0].port, Some(2222));
+    }
+
+    #[test]
+    fn resilient_store_skips_malformed_host_and_retains_valid() {
+        let json = r#"{
+            "hosts": [
+                {
+                    "invalidField": "completely broken entry",
+                    "port": "not-a-number"
+                },
+                {
+                    "id": "valid-1",
+                    "name": "omaki",
+                    "host": "100.91.254.71",
+                    "user": "indo",
+                    "port": 22
+                }
+            ],
+            "tombstones": []
+        }"#;
+        let store: SshHostStore = serde_json::from_str(json).expect("deserialize resilient store");
+        assert_eq!(store.hosts.len(), 1);
+        assert_eq!(store.hosts[0].id, "valid-1");
+        assert_eq!(store.hosts[0].label, "omaki");
+        assert_eq!(store.hosts[0].hostname, "100.91.254.71");
+        assert_eq!(store.hosts[0].username.as_deref(), Some("indo"));
     }
 }

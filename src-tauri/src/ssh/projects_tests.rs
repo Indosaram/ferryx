@@ -206,3 +206,74 @@ fn failed_atomic_save_cleans_temporary_file() {
     );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
 }
+
+#[test]
+fn persisted_resolve_and_enabled_host_succeeds_with_legacy_keys_mixed_keys_and_unrelated_malformed_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let host_store = dir.path().join("ssh_hosts.json");
+
+    // Raw JSON containing malformed entry, legacy entry, and mixed-key entry
+    let raw_hosts_json = r#"{
+        "hosts": [
+            {
+                "invalidField": true,
+                "port": "not-a-number"
+            },
+            {
+                "id": "omaki-1",
+                "name": "omaki",
+                "host": "100.91.254.71",
+                "user": "indo",
+                "port": 22,
+                "authMethod": "agent",
+                "source": "manual",
+                "remoteContinuity": "on"
+            },
+            {
+                "id": "mixed-1",
+                "label": "CanonicalBox",
+                "name": "LegacyBox",
+                "hostname": "127.0.0.1",
+                "authMethod": "agent"
+            }
+        ],
+        "tombstones": []
+    }"#;
+    std::fs::write(&host_store, raw_hosts_json.as_bytes()).unwrap();
+
+    // 1. enabled_host succeeds for legacy entry despite malformed entry at index 0
+    let omaki = enabled_host(&host_store, "omaki-1").expect("resolve omaki host");
+    assert_eq!(omaki.id, "omaki-1");
+    assert_eq!(omaki.label, "omaki");
+    assert_eq!(omaki.hostname, "100.91.254.71");
+    assert_eq!(omaki.username.as_deref(), Some("indo"));
+
+    // 2. enabled_host succeeds for mixed-key entry preferring canonical label
+    let mixed = enabled_host(&host_store, "mixed-1").expect("resolve mixed host");
+    assert_eq!(mixed.id, "mixed-1");
+    assert_eq!(mixed.label, "CanonicalBox");
+    assert_eq!(mixed.hostname, "127.0.0.1");
+
+    // 3. projects::resolve works end-to-end with legacy host and with unknown fields in RemoteProject
+    let ws_id = identity("mixed-1", "/srv/repo");
+    let raw_projects_json = serde_json::json!({
+        ws_id.clone(): {
+            "workspaceId": ws_id.clone(),
+            "hostId": "mixed-1",
+            "repoRoot": "/srv/repo",
+            "gitRoot": null,
+            "platform": "posix",
+            "unknownFutureField": "resilient"
+        }
+    });
+    std::fs::write(
+        store_path(&host_store),
+        serde_json::to_vec_pretty(&raw_projects_json).unwrap(),
+    )
+    .unwrap();
+
+    let (resolved_project, resolved_host) = resolve(&host_store, &ws_id).expect("resolve project with extra fields");
+    assert_eq!(resolved_project.workspace_id, ws_id);
+    assert_eq!(resolved_project.host_id, "mixed-1");
+    assert_eq!(resolved_host.label, "CanonicalBox");
+}

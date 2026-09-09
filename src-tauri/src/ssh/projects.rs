@@ -11,7 +11,7 @@ static MUTATION: Mutex<()> = Mutex::new(());
 pub const REMOTE_PREFIX: &str = "ssh:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteProject {
     pub workspace_id: String,
     pub host_id: String,
