@@ -2,6 +2,11 @@ import { ChevronDown, Laptop } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
+  selectBestDirectCandidate,
+  type CandidateEndpoint,
+  type CandidateEndpointType,
+} from "../lib/directPathUpgrade";
+import {
   clearRemoteAuthToken,
   getRemoteAuthToken,
   setRemoteAuthToken,
@@ -182,9 +187,102 @@ function modelConfirmsSelection(option: RemoteContextOption, model: RemoteWorksp
   return workspaceMatches && worktreeMatches && tabMatches;
 }
 
-function eventsSocketUrl(token: string): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/v1/events?token=${encodeURIComponent(token)}`;
+/**
+ * Direct-path upgrade
+ * ===================
+ * The page is always served over the relay, so the relay endpoint is the only one
+ * guaranteed to work and is what the first render connects through. LAN / Tailscale
+ * endpoints are *hints* published by the desktop (query string on the pairing link,
+ * or a previously stored hint) and are only trusted once a probe confirms them, at
+ * which point the active transport URL flips to the direct endpoint.
+ *
+ * Probing costs a request per candidate, so it only runs when at least one hint
+ * exists: a relay-only client never issues a probe.
+ */
+
+const DIRECT_HINT_STORAGE_KEY = "ferryx_remote_direct_candidates";
+/** LAN beats Tailscale beats relay; see `selectBestDirectCandidate`. */
+const CANDIDATE_PRIORITY: Record<CandidateEndpointType, number> = {
+  lan: 30,
+  tailscale: 20,
+  relay: 10,
+};
+const CONNECTION_BADGE_LABEL: Record<CandidateEndpointType, string> = {
+  relay: "Relay (Proxy)",
+  lan: "LAN (Direct)",
+  tailscale: "Tailscale (Direct)",
+};
+
+function normalizeEndpointUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const url = new URL(value.trim(), window.location.origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function directCandidate(type: "lan" | "tailscale", value: unknown): CandidateEndpoint | null {
+  const url = normalizeEndpointUrl(value);
+  return url ? { type, url, priority: CANDIDATE_PRIORITY[type] } : null;
+}
+
+/**
+ * Reads direct-endpoint hints from the current URL first (a freshly scanned pairing
+ * link carries the desktop's addresses) and falls back to the last hints this device
+ * stored. Any hint found in the URL is persisted so later loads keep the fast path.
+ */
+function readDirectCandidateHints(): CandidateEndpoint[] {
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = [
+    directCandidate("lan", params.get("lan")),
+    directCandidate("tailscale", params.get("ts") ?? params.get("tailscale")),
+  ].filter((candidate): candidate is CandidateEndpoint => candidate !== null);
+
+  if (fromUrl.length > 0) {
+    try {
+      localStorage.setItem(DIRECT_HINT_STORAGE_KEY, JSON.stringify(fromUrl));
+    } catch {
+      // Private-mode storage denial must not block the upgrade for this session.
+    }
+    return fromUrl;
+  }
+
+  let stored: unknown;
+  try {
+    stored = JSON.parse(localStorage.getItem(DIRECT_HINT_STORAGE_KEY) ?? "null");
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(stored)) return [];
+  return stored
+    .map((entry) => {
+      const row = record(entry);
+      const type = row?.type;
+      if (type !== "lan" && type !== "tailscale") return null;
+      return directCandidate(type, row?.url);
+    })
+    .filter((candidate): candidate is CandidateEndpoint => candidate !== null);
+}
+
+function relayEndpoint(): CandidateEndpoint {
+  return { type: "relay", url: window.location.origin, priority: CANDIDATE_PRIORITY.relay };
+}
+
+function eventsSocketUrl(token: string, transportUrl: string): string {
+  const base = new URL(transportUrl);
+  const protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${base.host}/api/v1/events?token=${encodeURIComponent(token)}`;
+}
+
+/**
+ * Same-origin transport keeps request paths relative so nothing changes for the
+ * relay case; only a verified direct upgrade produces absolute URLs.
+ */
+function apiUrl(transportUrl: string, path: string): string {
+  return transportUrl === window.location.origin ? path : `${transportUrl}${path}`;
 }
 
 export const RemoteApp: React.FC = () => {
@@ -194,6 +292,8 @@ export const RemoteApp: React.FC = () => {
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
+  const [transport, setTransport] = useState<CandidateEndpoint>(relayEndpoint);
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = useMemo(() => selectActiveHost(remoteHostState), [remoteHostState]);
   const hostAgentSummary = useMemo(() => hostAgentTotals(remoteHostState), [remoteHostState]);
@@ -232,7 +332,7 @@ export const RemoteApp: React.FC = () => {
     if (!token) return null;
     try {
       const response = await fetch(
-        `/api/v1/workspace/state?token=${encodeURIComponent(token)}`,
+        apiUrl(transport.url, `/api/v1/workspace/state?token=${encodeURIComponent(token)}`),
       );
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
@@ -244,7 +344,7 @@ export const RemoteApp: React.FC = () => {
     } catch {
       return null;
     }
-  }, [disconnect, token]);
+  }, [disconnect, token, transport.url]);
 
   const refreshWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
     const refreshVersion = workspaceRefreshVersionRef.current;
@@ -279,6 +379,23 @@ export const RemoteApp: React.FC = () => {
   useEffect(() => {
     if (token) void refreshWorkspace();
   }, [refreshWorkspace, token]);
+
+  // Background upgrade: the relay session above is already live, so a failed or slow
+  // probe costs nothing but a stay on the relay. Runs once per token, and not at all
+  // when the desktop published no direct endpoint hints.
+  useEffect(() => {
+    if (!token || typeof fetch !== "function") return;
+    const candidates = readDirectCandidateHints();
+    if (candidates.length === 0) return;
+    let cancelled = false;
+    void selectBestDirectCandidate(candidates).then((best) => {
+      if (cancelled || !best) return;
+      setTransport((current) => (current.url === best.url ? current : best));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   useEffect(() => {
     if (!token) {
@@ -377,7 +494,7 @@ export const RemoteApp: React.FC = () => {
     const connect = () => {
       if (disposed) return;
       retry = null;
-      const current = new WebSocket(eventsSocketUrl(token));
+      const current = new WebSocket(eventsSocketUrl(token, transport.url));
       socket = current;
       current.onmessage = (event) => {
         if (!disposed && socket === current) onMessage(event);
@@ -416,7 +533,7 @@ export const RemoteApp: React.FC = () => {
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
     };
-  }, [clearPendingSelection, confirmSelection, refreshWorkspace, token]);
+  }, [clearPendingSelection, confirmSelection, refreshWorkspace, token, transport.url]);
 
   // A desktop that never republishes a matching selection (stale listener,
   // closed window) must not strand the picker: every chip is disabled while a
@@ -445,7 +562,7 @@ export const RemoteApp: React.FC = () => {
 
     try {
       const response = await fetch(
-        `/api/v1/workspace/select?token=${encodeURIComponent(token)}`,
+        apiUrl(transport.url, `/api/v1/workspace/select?token=${encodeURIComponent(token)}`),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -465,7 +582,7 @@ export const RemoteApp: React.FC = () => {
     } catch {
       clearPendingSelection();
     }
-  }, [armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, token]);
+  }, [armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, token, transport.url]);
 
   const tabs = model.context.terminalTabs;
   const activeIndex = tabs && model.context.activeTabId
@@ -521,14 +638,38 @@ export const RemoteApp: React.FC = () => {
           aria-label="Change workspace context"
           aria-expanded={selectorOpen}
           onClick={() => setSelectorOpen((open) => !open)}
-          className="flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <span className="flex size-4 shrink-0 items-center justify-center rounded bg-primary text-[10px] font-bold text-primary-foreground" aria-hidden="true">F</span>
-          <span className="shrink-0 text-xs font-semibold leading-none">Ferryx Remote</span>
+          {/* The brand word is the first thing to go when the status cluster grows;
+              the workspace context stays legible longer than the app name. */}
+          <span className="hidden shrink-0 text-xs font-semibold leading-none sm:inline">Ferryx Remote</span>
           <span className="min-w-0 truncate font-mono text-[11px] leading-none text-muted-foreground" aria-label="Current desktop context">{contextName(model.context)}</span>
           <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-muted-foreground transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <span
+            data-testid="remote-connection-badge"
+            data-connection={transport.type}
+            aria-label={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
+            title={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
+            className={`flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px] font-medium leading-none ${
+              transport.type === "relay"
+                ? "bg-status-idle/15 text-muted-foreground"
+                : "bg-status-success/15 text-status-success"
+            }`}
+          >
+            <span
+              className={`size-1.5 shrink-0 rounded-full ${
+                transport.type === "relay" ? "bg-status-idle" : "bg-status-success"
+              }`}
+              aria-hidden="true"
+            />
+            <span className="hidden sm:inline">{CONNECTION_BADGE_LABEL[transport.type]}</span>
+            <span className="sm:hidden">
+              {transport.type === "relay" ? "Relay" : transport.type === "lan" ? "LAN" : "Tailscale"}
+            </span>
+          </span>
           <button
             type="button"
             aria-label="Switch host"
