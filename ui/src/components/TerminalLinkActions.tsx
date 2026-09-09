@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { ExternalLink, Globe, X } from "lucide-react";
 
+import { saveBrowserSettings } from "../lib/browserSettings";
 import {
   routeHttpLink,
   TERMINAL_LINK_ACTION_EVENT,
@@ -15,12 +16,19 @@ export function TerminalLinkActions() {
       const url = detail?.url;
       if (!url) return;
 
+      let rememberChoice = false;
       toast.custom(
         (t) => {
           const open = async (destination: "builtin" | "external") => {
             toast.dismiss(t);
             try {
               await routeHttpLink(url, { source: "terminal", destination });
+              if (rememberChoice) {
+                saveBrowserSettings({
+                  openLinksInBuiltInBrowser: destination === "builtin",
+                  showTerminalLinkActions: false,
+                });
+              }
             } catch {
               // ignore routing error
             }
@@ -48,6 +56,18 @@ export function TerminalLinkActions() {
                 >
                   <X className="size-3.5" />
                 </button>
+              </div>
+              <label className="mt-3 flex cursor-pointer items-center gap-2 text-[11px]">
+                <input
+                  type="checkbox"
+                  defaultChecked={false}
+                  onChange={(event) => { rememberChoice = event.currentTarget.checked; }}
+                  className="size-3.5 accent-foreground focus-visible:ring-1 focus-visible:ring-ring"
+                />
+                Remember this choice
+              </label>
+              <div className="mt-1 text-[10px] text-muted-foreground">
+                Change later in Settings &gt; Browser &gt; Link Routing.
               </div>
               <div className="mt-3 flex justify-end gap-2">
                 <button
