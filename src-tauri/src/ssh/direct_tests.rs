@@ -17,6 +17,14 @@ fn host() -> SshHost {
 }
 
 #[test]
+fn ssh_reconnect_safety_plan_does_not_update_host_keys() {
+    for interactive in [false, true] {
+        let plan = ssh_plan(&host(), "true".into(), interactive).unwrap();
+        assert!(plan.args.windows(2).any(|args| args == ["-o", "UpdateHostKeys=no"]));
+    }
+}
+
+#[test]
 fn automated_commands_disable_tty_even_when_ssh_config_requests_one() {
     let plan = ssh_plan(&host(), "echo probe".into(), false).unwrap();
     assert!(plan.args.iter().any(|arg| arg == "-T"));

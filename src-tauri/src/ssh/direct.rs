@@ -68,6 +68,7 @@ pub fn ssh_plan(
     let mut options = vec![
         "BatchMode=yes",
         "StrictHostKeyChecking=yes",
+        "UpdateHostKeys=no",
         "ConnectTimeout=5",
         "ConnectionAttempts=1",
         "ServerAliveInterval=15",
