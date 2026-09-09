@@ -15,7 +15,7 @@ use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
 };
 use crate::terminal::{AttachmentSnapshot, OutputChunk, SessionAttachment, TerminalSignal};
-use crate::worktree::{CreateWorktreeOptions, WorktreeIdentity};
+use crate::worktree::{parse_host_scoped_session_id, CreateWorktreeOptions, WorktreeIdentity};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -937,11 +937,18 @@ async fn handle_events_socket(
 
 async fn ws_terminal_handler(
     ws: WebSocketUpgrade,
-    AxumPath(session_id): AxumPath<String>,
+    AxumPath(requested_session_id): AxumPath<String>,
     Query(query): Query<AuthQuery>,
     headers: HeaderMap,
     State(state): State<Arc<RemoteGatewayState>>,
 ) -> Result<Response, (StatusCode, String)> {
+    // Callers may address a session by its raw ID or by a host-scoped ID of the form
+    // "<host_id>::<session_id>" (see `worktree::parse_host_scoped_session_id`). The
+    // session backend itself only knows about raw session IDs, so unwrap the scope
+    // (if present) before doing any lookups or routing.
+    let session_id = parse_host_scoped_session_id(&requested_session_id)
+        .map(|(_host_id, session_id)| session_id.to_string())
+        .unwrap_or(requested_session_id);
     let token = extract_token(&headers, Some(&query))
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state

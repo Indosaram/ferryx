@@ -14,6 +14,30 @@ use std::sync::Arc;
 
 const ORCA_WORKTREE_DIR: &str = ".orca-worktrees";
 
+/// Formats a worktree session ID scoped to a remote host, e.g. `"host-abc::sess-123"`.
+pub fn format_host_scoped_session_id(host_id: &str, session_id: &str) -> String {
+    format!("{host_id}::{session_id}")
+}
+
+/// Parses a host-scoped session ID produced by [`format_host_scoped_session_id`].
+///
+/// Returns `Some((host_id, session_id))` when `scoped` contains the `::` separator,
+/// otherwise `None` (e.g. for raw, unscoped session IDs).
+pub fn parse_host_scoped_session_id(scoped: &str) -> Option<(&str, &str)> {
+    let mut parts = scoped.splitn(2, "::");
+    let host_id = parts.next()?;
+    let session_id = parts.next()?;
+    Some((host_id, session_id))
+}
+
+/// A local->remote port forward for a dev server running inside a worktree on a remote host.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct DevServerPortForward {
+    pub host_id: String,
+    pub local_port: u16,
+    pub remote_port: u16,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WriterLeaseRegistry {
     writers: Arc<Mutex<HashMap<PathBuf, String>>>,
@@ -700,5 +724,45 @@ impl WorktreeManager {
     ) -> Result<(), WorktreeError> {
         self.delete_worktree_and_branch_inner(worktree_path, delete_branch, true)
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod host_scoped_session_id_tests {
+    use super::*;
+
+    #[test]
+    fn test_host_scoped_worktree_session_id() {
+        // Round-trip: format then parse recovers the original host/session IDs.
+        let scoped = format_host_scoped_session_id("host-abc", "sess-123");
+        assert_eq!(scoped, "host-abc::sess-123");
+        assert_eq!(
+            parse_host_scoped_session_id(&scoped),
+            Some(("host-abc", "sess-123"))
+        );
+
+        // Session IDs may themselves contain "::"; splitn(2, ..) keeps the remainder intact.
+        let nested = format_host_scoped_session_id("host-1", "sess::with::colons");
+        assert_eq!(nested, "host-1::sess::with::colons");
+        assert_eq!(
+            parse_host_scoped_session_id(&nested),
+            Some(("host-1", "sess::with::colons"))
+        );
+
+        // Invalid / unscoped strings (no "::" separator) return None.
+        assert_eq!(parse_host_scoped_session_id("raw-session-id"), None);
+        assert_eq!(parse_host_scoped_session_id(""), None);
+        assert_eq!(parse_host_scoped_session_id("no-separator-here"), None);
+
+        // DevServerPortForward serializes and deserializes losslessly.
+        let forward = DevServerPortForward {
+            host_id: "host-abc".to_string(),
+            local_port: 4200,
+            remote_port: 3000,
+        };
+        let json = serde_json::to_string(&forward).expect("serialize DevServerPortForward");
+        let round_tripped: DevServerPortForward =
+            serde_json::from_str(&json).expect("deserialize DevServerPortForward");
+        assert_eq!(forward, round_tripped);
     }
 }

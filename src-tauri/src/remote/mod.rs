@@ -17,3 +17,5 @@ pub use state::*;
 
 #[cfg(all(test, unix))]
 mod tests;
+
+pub mod design_mode;
