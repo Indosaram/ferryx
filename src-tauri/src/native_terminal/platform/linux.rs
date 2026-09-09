@@ -22,7 +22,7 @@ use raw_window_handle::{
     RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle, XcbDisplayHandle,
     XcbWindowHandle, XlibDisplayHandle, XlibWindowHandle,
 };
-use tauri::{Runtime, WebviewWindow};
+use tauri::{Runtime, Window};
 
 use crate::native_terminal::child_surface::{
     ChildSurfaceGeometry, ChildSurfaceVisibility, WaylandSubsurfaceGeometry,
@@ -248,7 +248,7 @@ unsafe impl Sync for LinuxCompositorTarget {}
 
 impl LinuxCompositorTarget {
     /// Creates a compositor target for the given Tauri window.
-    pub fn new<R: Runtime>(window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
+    pub fn new<R: Runtime>(window: &Window<R>) -> Result<Self, NativeTerminalError> {
         let window_handle = window.window_handle().map_err(|e| {
             NativeTerminalError::GpuPipelineError(format!("Failed to get window handle: {e}"))
         })?;

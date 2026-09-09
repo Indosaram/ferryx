@@ -183,7 +183,7 @@ unsafe extern "system" fn mouse_ll_hook_proc(n_code: i32, wparam: usize, lparam:
 pub fn install_windows_terminal_focus_monitor<R: Runtime>(
     app: &tauri::App<R>,
 ) -> tauri::Result<()> {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_window("main") else {
         tracing::debug!("install_windows_terminal_focus_monitor: main window not found");
         return Ok(());
     };
@@ -213,7 +213,7 @@ pub fn install_windows_terminal_focus_monitor<R: Runtime>(
 
     let app_handle = app.handle().clone();
     let emit_focus = Box::new(move |session_id: String| {
-        if let Some(window) = app_handle.get_webview_window("main") {
+        if let Some(window) = app_handle.get_window("main") {
             let _ = window.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);
         } else {
             let _ = app_handle.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);

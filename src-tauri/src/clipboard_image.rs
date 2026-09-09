@@ -172,7 +172,7 @@ pub async fn read_clipboard_image_for_app<R: tauri::Runtime>(
     {
         use tauri::Manager;
         let window = app
-            .get_webview_window("main")
+            .get_window("main")
             .ok_or_else(|| crate::ipc::IpcError::internal("Main Ferryx window is unavailable"))?;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         window

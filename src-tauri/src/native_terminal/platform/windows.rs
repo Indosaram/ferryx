@@ -22,7 +22,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
 };
-use tauri::{Runtime, WebviewWindow};
+use tauri::{Runtime, Window};
 
 use crate::native_terminal::child_surface::{ChildSurfaceGeometry, ChildSurfaceVisibility};
 use crate::native_terminal::composition::{
@@ -215,7 +215,7 @@ unsafe impl Sync for WindowsCompositorTarget {}
 
 impl WindowsCompositorTarget {
     /// Creates a hidden child HWND parented to the Tauri window for isolated wgpu rendering.
-    pub fn new<R: Runtime>(window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
+    pub fn new<R: Runtime>(window: &Window<R>) -> Result<Self, NativeTerminalError> {
         let window_handle = window.window_handle().map_err(|e| {
             NativeTerminalError::GpuPipelineError(format!("Failed to get window handle: {e}"))
         })?;

@@ -74,7 +74,7 @@ async fn rerender_native_sessions<R: Runtime>(
     }
 
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
         .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
     let state_inner = state.clone();
     let surface_window = window.clone();

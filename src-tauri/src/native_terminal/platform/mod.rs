@@ -19,7 +19,7 @@ mod wayland_child;
 pub mod fallback;
 
 use std::sync::Arc;
-use tauri::{Runtime, WebviewWindow};
+use tauri::{Runtime, Window};
 
 use crate::native_terminal::composition::{
     LogicalBounds, PlatformCompositorDescriptor, SurfacePresentationGeometry,
@@ -62,7 +62,7 @@ impl PlatformCompositorTarget {
     }
 
     /// Creates and attaches the platform compositor target for the given window.
-    pub fn new<R: Runtime>(window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
+    pub fn new<R: Runtime>(window: &Window<R>) -> Result<Self, NativeTerminalError> {
         #[cfg(target_os = "macos")]
         {
             let inner = macos::MacosCompositorTarget::new(window)?;
@@ -113,7 +113,7 @@ impl PlatformCompositorTarget {
     }
 
     /// Restores the hosting WKWebView as the window's first responder on macOS.
-    pub fn restore_first_responder<R: Runtime>(&self, _window: &WebviewWindow<R>) {
+    pub fn restore_first_responder<R: Runtime>(&self, _window: &Window<R>) {
         #[cfg(target_os = "macos")]
         self.inner.restore_webview_first_responder(_window);
     }

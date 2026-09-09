@@ -4,7 +4,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 use std::sync::Arc;
-use tauri::{Runtime, WebviewWindow};
+use tauri::{Runtime, Window};
 
 use crate::native_terminal::composition::{
     CompositorTargetKind, LogicalBounds, PlatformCompositorDescriptor,
@@ -35,7 +35,7 @@ pub struct FallbackCompositorTarget {
 }
 
 impl FallbackCompositorTarget {
-    pub fn new<R: Runtime>(_window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
+    pub fn new<R: Runtime>(_window: &Window<R>) -> Result<Self, NativeTerminalError> {
         Ok(Self {
             handle: Arc::new(NativeChildViewHandle),
         })

@@ -29,7 +29,7 @@ use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
 };
-use tauri::{Runtime, WebviewWindow};
+use tauri::{Runtime, Window};
 
 use crate::native_terminal::composition::{
     CompositorTargetKind, LogicalBounds, PlatformCompositorDescriptor,
@@ -243,7 +243,7 @@ unsafe fn configure_terminal_layers(view: &AnyObject, scale_factor: f64) {
 
 impl MacosCompositorTarget {
     /// Creates a layer-backed child view above WKWebView in the window content view.
-    pub fn new<R: Runtime>(window: &WebviewWindow<R>) -> Result<Self, NativeTerminalError> {
+    pub fn new<R: Runtime>(window: &Window<R>) -> Result<Self, NativeTerminalError> {
         let raw_ns_window = window.ns_window().map_err(|e| {
             NativeTerminalError::GpuPipelineError(format!("Failed to get NSWindow: {e}"))
         })?;
@@ -352,7 +352,7 @@ impl MacosCompositorTarget {
         }
     }
 
-    pub fn restore_webview_first_responder<R: Runtime>(&self, window: &WebviewWindow<R>) {
+    pub fn restore_webview_first_responder<R: Runtime>(&self, window: &Window<R>) {
         let view_ptr = self.view_ptr.as_ptr() as usize;
         let window_clone = window.clone();
         let restore = move || unsafe {
