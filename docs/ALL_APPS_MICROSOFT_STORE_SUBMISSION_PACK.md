@@ -24,8 +24,8 @@
 
 ### [Properties 단계]
 * **Category**: `Developer Tools` -> `Development Utilities`
-* **Privacy Policy URL**: `https://ferryx.app/privacy`
-* **Website URL**: `https://ferryx.app`
+* **Privacy Policy URL**: `https://indosaram.github.io/ferryx/privacy/`
+* **Website URL**: `https://indosaram.github.io/ferryx/`
 * **Support Contact**: `https://github.com/Indosaram/ferryx/issues`
 * **Restricted Capabilities (`runFullTrust` 권한 사유)**:
   ```text

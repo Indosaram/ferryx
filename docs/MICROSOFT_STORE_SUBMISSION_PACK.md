@@ -32,11 +32,11 @@
 - **하위 카테고리 (Subcategory)**: `Development Utilities` (개발 유틸리티)
 - **개인정보처리방침 URL (Privacy Policy URL)**:
   ```text
-  https://ferryx.app/privacy
+  https://indosaram.github.io/ferryx/privacy/
   ```
 - **웹사이트 URL (Website URL)**:
   ```text
-  https://ferryx.app
+  https://indosaram.github.io/ferryx/
   ```
 - **지원 연락처 URL (Support Contact)**:
   ```text

@@ -197,4 +197,4 @@ This project is licensed under the [MIT License](LICENSE).
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
 - **Maintainer**: [@Indosaram](https://github.com/Indosaram)
-- **Privacy**: Ferryx does not collect, store, or transmit telemetry or personal data to remote servers.
+- **Privacy**: Ferryx stores workspace data locally. Remote access, embedded websites, external coding agents, and update services can exchange data over the network. See the [Ferryx Privacy Policy](https://indosaram.github.io/ferryx/privacy/) for data handling and deletion choices.

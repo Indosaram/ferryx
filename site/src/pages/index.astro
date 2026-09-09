@@ -86,7 +86,7 @@ const socialImage = new URL(`${baseUrl}og-image.png`, Astro.site ?? Astro.url).h
         <Features client:load />
         <Benchmarks client:load />
       </main>
-      <Footer client:load />
+      <Footer client:load basePath={baseUrl} />
     </div>
   </body>
 </html>

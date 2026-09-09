@@ -69,8 +69,8 @@
 
 ## 5. 법적 및 정책 필수 URL (스토어 등록정보 기재 항목)
 
-- **공식 웹사이트 (Website URL)**: `https://ferryx.app`
-- **개인정보처리방침 (Privacy Policy URL)**: `https://ferryx.app/privacy`
+- **공식 웹사이트 (Website URL)**: `https://indosaram.github.io/ferryx/`
+- **개인정보처리방침 (Privacy Policy URL)**: `https://indosaram.github.io/ferryx/privacy/`
 - **지원/이슈 트래커 (Support URL)**: `https://github.com/Indosaram/ferryx/issues`
 - **저작권 문구 (Copyright)**: `Copyright © 2026 Ferryx`
 - **게시자 표시 (Publisher)**: `Project Maho`

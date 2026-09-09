@@ -5,7 +5,7 @@ import ferryxIcon from "@/assets/ferryx-icon.png";
 
 const iconSrc = typeof ferryxIcon === 'object' && ferryxIcon !== null && 'src' in ferryxIcon ? (ferryxIcon as { src: string }).src : String(ferryxIcon);
 
-export function Footer() {
+export function Footer({ basePath }: { readonly basePath: string }) {
   return (
     <footer className="border-t border-line bg-page py-12 text-[13px] text-ink-faint">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-6">
@@ -16,7 +16,7 @@ export function Footer() {
           <span>Ultra-lightweight Rust Native AI Workspace</span>
         </div>
 
-        <div className="flex items-center space-x-6">
+        <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
           <a
             href="https://github.com/Indosaram/ferryx"
             target="_blank"
@@ -46,6 +46,12 @@ export function Footer() {
             className="hover:text-ink transition-colors"
           >
             Architecture
+          </a>
+          <a
+            href={`${basePath}privacy/`}
+            className="text-ink-soft hover:text-ink transition-colors whitespace-nowrap"
+          >
+            Privacy Policy
           </a>
         </div>
 

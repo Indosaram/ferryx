@@ -63,8 +63,8 @@ powershell -ExecutionPolicy Bypass -File scripts/build-msix.ps1 -Version "0.1.0"
    - The Partner Center validator will verify the `AppxManifest.xml`, architecture (`x64`), capabilities (`runFullTrust`), and assets.
 4. **App Properties**:
    - Category: `Developer Tools` -> `Development Utilities` / `Productivity`
-   - Privacy Policy URL: `https://ferryx.app/privacy`
-   - Website URL: `https://ferryx.app`
+   - Privacy Policy URL: `https://indosaram.github.io/ferryx/privacy/`
+   - Website URL: `https://indosaram.github.io/ferryx/`
 5. **Age Ratings**:
    - Complete the IARC rating questionnaire (General developer/terminal application).
 6. **Store Listings**:
