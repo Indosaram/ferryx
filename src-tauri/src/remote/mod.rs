@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod backend;
+pub mod discovery;
 pub mod mirror;
 pub mod protocol;
 pub mod server;

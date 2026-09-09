@@ -233,6 +233,121 @@ fn print_browser_cli_error(code: &str, message: impl AsRef<str>) {
     );
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteCliCommand {
+    Status { json: bool },
+}
+
+pub fn parse_remote_cli<I, T>(args: I) -> Result<RemoteCliCommand, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "remote") {
+        return Err("expected `ferryx remote status`".into());
+    }
+    match args.get(2).map(String::as_str) {
+        Some("status") => {
+            let json = args.iter().skip(3).any(|arg| arg == "--json");
+            Ok(RemoteCliCommand::Status { json })
+        }
+        _ => Err("expected `ferryx remote status`".into()),
+    }
+}
+
+/// Resolves the base directory Ferryx stores remote gateway state under,
+/// mirroring the resolution used by [`remote_auth_manager`].
+fn remote_state_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("FERRYX_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join("remote"))
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE").map(|dir| {
+                            std::path::PathBuf::from(dir)
+                                .join(".ferryx")
+                                .join("remote")
+                        })
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME").map(|dir| {
+                    std::path::PathBuf::from(dir)
+                        .join(".ferryx")
+                        .join("remote")
+                })
+            }
+        })
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RemoteStatusOutput {
+    status: &'static str,
+    port: u16,
+    mode: String,
+}
+
+/// Reads the persisted remote gateway config (`remote-config.json`) if one
+/// exists, otherwise falls back to the default config, and reports the
+/// configured port and mode. This does not require the daemon to be running.
+fn remote_status_output() -> RemoteStatusOutput {
+    let persisted = remote_state_dir()
+        .map(|dir| dir.join("remote-config.json"))
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+
+    let default_config = ferryx_lib::remote::RemoteGatewayConfig::default();
+    let mode = persisted
+        .as_ref()
+        .and_then(|value| value.get("mode"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            serde_json::to_value(default_config.mode)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "off".to_string())
+        });
+    let port = persisted
+        .as_ref()
+        .and_then(|value| value.get("port"))
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(default_config.port);
+
+    RemoteStatusOutput {
+        status: "ok",
+        port,
+        mode,
+    }
+}
+
+pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
+    match command {
+        RemoteCliCommand::Status { json } => {
+            let output = remote_status_output();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&output).map_err(|error| error.to_string())?
+                );
+            } else {
+                println!("status={} port={} mode={}", output.status, output.port, output.mode);
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -341,6 +456,15 @@ fn main() {
     }
     if args.get(1).is_some_and(|arg| arg == "pair") {
         match parse_pair_cli(&args).and_then(|command| run_pair_cli(command)) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.get(1).is_some_and(|arg| arg == "remote") {
+        match parse_remote_cli(&args).and_then(run_remote_cli) {
             Ok(()) => return,
             Err(error) => {
                 eprintln!("{error}");
