@@ -327,7 +327,9 @@ describe("Tauri IPC wrapper contract", () => {
     });
     const handler = vi.fn();
 
-    await expect(onNewTerminalTabMenu(handler)).resolves.toBe(unlisten);
+    const dispose = await onNewTerminalTabMenu(handler);
+    dispose();
+    expect(unlisten).toHaveBeenCalledOnce();
     expect(listener).toBeTypeOf("function");
     if (typeof listener === "function") {
       (listener as (event: { payload: void }) => void)({ payload: undefined });
@@ -345,7 +347,9 @@ describe("Tauri IPC wrapper contract", () => {
     });
     const handler = vi.fn();
 
-    await expect(onCloseTabMenu(handler)).resolves.toBe(unlisten);
+    const dispose = await onCloseTabMenu(handler);
+    dispose();
+    expect(unlisten).toHaveBeenCalledOnce();
     expect(listener).toBeTypeOf("function");
     if (typeof listener === "function") {
       (listener as (event: { payload: void }) => void)({ payload: undefined });
@@ -363,7 +367,9 @@ describe("Tauri IPC wrapper contract", () => {
     });
     const handler = vi.fn();
 
-    await expect(onNativeTerminalCopyOrInterrupt(handler)).resolves.toBe(unlisten);
+    const dispose = await onNativeTerminalCopyOrInterrupt(handler);
+    dispose();
+    expect(unlisten).toHaveBeenCalledOnce();
     expect(listener).toBeTypeOf("function");
     if (typeof listener === "function") {
       (listener as (event: { payload: void }) => void)({ payload: undefined });

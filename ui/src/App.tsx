@@ -20,7 +20,7 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots } from "./lib/dagWatchRoots";
 import { newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, type BrowserShortcutAction } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction } from "./lib/browserTauri";
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
@@ -59,6 +59,14 @@ import {
   loadSession,
   onCloseTabMenu,
   onSelectWorktreeMenu,
+  onSelectTabMenu,
+  onNextTabMenu,
+  onPrevTabMenu,
+  onSplitRightMenu,
+  onSplitDownMenu,
+  onCommandPaletteMenu,
+  onToggleSidebarMenu,
+  onOpenSettingsMenu,
   onNewTerminalTabMenu,
   onRemoteSelectionRequested,
   publishFocusedTerminal,
@@ -1394,7 +1402,7 @@ function WorkspaceApp({
       setPendingRemoteSlug(null);
       return;
     }
-    if (state.workspaceId !== pendingRemoteSlug.workspaceId) return;
+    if (state.workspaceId && state.workspaceId !== pendingRemoteSlug.workspaceId) return;
     if (activeProject.target?.kind === "ssh" &&
       (registeredProjectId !== activeProject.workspaceId ||
         workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading")) return;
@@ -1965,11 +1973,174 @@ function WorkspaceApp({
     };
   }, [handleSelectWorktreeByIndex]);
 
+  useEffect(() => {
+    let unlistenSelectTab: (() => void) | null = null;
+    let unlistenNextTab: (() => void) | null = null;
+    let unlistenPrevTab: (() => void) | null = null;
+    let unlistenSplitRight: (() => void) | null = null;
+    let unlistenSplitDown: (() => void) | null = null;
+    let unlistenCmdPalette: (() => void) | null = null;
+    let unlistenSidebar: (() => void) | null = null;
+    let unlistenSettings: (() => void) | null = null;
+    let cancelled = false;
+
+    void onSelectTabMenu((digit) => {
+      handleSelectTerminalTabByIndex(digit - 1);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenSelectTab = dispose;
+    });
+
+    void onNextTabMenu(() => {
+      handleCycleTab(1);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenNextTab = dispose;
+    });
+
+    void onPrevTabMenu(() => {
+      handleCycleTab(-1);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenPrevTab = dispose;
+    });
+
+    void onSplitRightMenu(() => {
+      handleSplitActive("horizontal");
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenSplitRight = dispose;
+    });
+
+    void onSplitDownMenu(() => {
+      handleSplitActive("vertical");
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenSplitDown = dispose;
+    });
+
+    void onCommandPaletteMenu(() => {
+      setIsCommandPaletteOpen(true);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenCmdPalette = dispose;
+    });
+
+    void onToggleSidebarMenu(() => {
+      toggleSidebar();
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenSidebar = dispose;
+    });
+
+    void onOpenSettingsMenu(() => {
+      setIsSettingsOpen(true);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenSettings = dispose;
+    });
+
+    return () => {
+      cancelled = true;
+      unlistenSelectTab?.();
+      unlistenNextTab?.();
+      unlistenPrevTab?.();
+      unlistenSplitRight?.();
+      unlistenSplitDown?.();
+      unlistenCmdPalette?.();
+      unlistenSidebar?.();
+      unlistenSettings?.();
+    };
+  }, [
+    handleSelectTerminalTabByIndex,
+    handleCycleTab,
+    handleSplitActive,
+    setIsCommandPaletteOpen,
+    toggleSidebar,
+    setIsSettingsOpen,
+  ]);
+
   const activeShortcutTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? null;
   const browserShortcutsActive = activeShortcutTab?.kind === "browser";
   const dispatchBrowserShortcut = (action: BrowserShortcutAction) => {
     window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { action } }));
   };
+
+  // Child browser webviews own OS focus, so the main window never sees these
+  // The embedded browser webview owns native keyboard focus while active, which
+  // stops the main application webview from receiving DOM keydown events. The
+  // guest bridge forwards app and tab shortcuts as shortcut events; route them
+  // here (page actions like find/reload/focus-address are consumed by
+  // BrowserPane/BrowserToolbar listeners on the same event).
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserShortcutRequested((payload) => {
+      const action = payload.action;
+      if (action === "tab-next") {
+        handleCycleTab(1);
+        return;
+      }
+      if (action === "tab-previous") {
+        handleCycleTab(-1);
+        return;
+      }
+      if (action === "tab-new-terminal") {
+        handleAddTerminalTab();
+        return;
+      }
+      if (action === "tab-close") {
+        handleCloseActiveSurface();
+        return;
+      }
+      if (action === "command-palette") {
+        setIsCommandPaletteOpen(true);
+        return;
+      }
+      if (action === "sidebar-toggle") {
+        toggleSidebar();
+        return;
+      }
+      if (action === "settings-toggle") {
+        setIsSettingsOpen(true);
+        return;
+      }
+      if (action === "split-right") {
+        handleSplitActive("horizontal");
+        return;
+      }
+      if (action === "split-down") {
+        handleSplitActive("vertical");
+        return;
+      }
+      const selectIndex = browserTabSelectIndex(action);
+      if (selectIndex !== null) {
+        handleSelectTerminalTabByIndex(selectIndex);
+        return;
+      }
+      const wsIndex = browserWorkspaceSelectIndex(action);
+      if (wsIndex !== null) {
+        handleSelectWorktreeByIndex(wsIndex);
+        return;
+      }
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [
+    handleCycleTab,
+    handleSelectTerminalTabByIndex,
+    handleAddTerminalTab,
+    handleCloseActiveSurface,
+    toggleSidebar,
+    handleSplitActive,
+    handleSelectWorktreeByIndex,
+    reportRuntimeError,
+  ]);
 
   const shortcutHandlers = useMemo(
     () => ({

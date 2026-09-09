@@ -1,4 +1,9 @@
 import { useEffect } from "react";
+import { switchDebug } from "./switchDebug";
+import { shortcutChord, shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
+
+// TEMPORARY-DIAGNOSTIC: distinguish concurrent hooks and StrictMode remounts.
+let shortcutRegistration = 0;
 
 export type ShortcutActionId =
   | "tab.newTerminal"
@@ -392,32 +397,56 @@ export function useShortcuts(
   const isMac = options.isMac ?? detectMacPlatform();
 
   useEffect(() => {
+    const registration = ++shortcutRegistration;
+    switchDebug("shortcut.hook.register", { registration, isMac, ...shortcutContext(),
+      enabled: SHORTCUTS.filter(({ id }) => handlers[id]).map(({ id }) => id),
+      disabled: SHORTCUTS.filter(({ id }) => !handlers[id]).map(({ id }) => id) });
     const handleKeyDown = (event: KeyboardEvent) => {
+      const chord = shortcutChord(event);
+      const trace = (stage: string, details: Record<string, unknown> = {}) => {
+        if (chord) switchDebug(`shortcut.hook.${stage}`, { registration, isMac, ...chord, ...details });
+      };
+      trace("receipt");
       for (const shortcut of SHORTCUTS) {
         const handler = handlers[shortcut.id];
-        if (!handler) continue;
+        if (!handler) {
+          trace("reject", { action: shortcut.id, reason: "handler-disabled" });
+          continue;
+        }
 
         const matches =
           matchesBinding(event, shortcut.binding, isMac) ||
           Boolean(shortcut.aliases?.some((alias) => matchesBinding(event, alias, isMac)));
 
-        if (!matches) continue;
+        if (!matches) {
+          const reason = event.isComposing || event.keyCode === 229 || event.key === "Process" || event.key === "Dead"
+            ? "ime" : event.getModifierState("AltGraph") ? "alt-graph" : "binding-mismatch";
+          trace("reject", { action: shortcut.id, reason, binding: shortcut.binding, aliases: shortcut.aliases });
+          continue;
+        }
+        trace("match", { action: shortcut.id });
         if (
           isEditableTarget(event.target) &&
           !isTerminalTarget(event.target) &&
           shortcut.id !== "commandPalette.open" &&
           !shortcut.id.startsWith("browser.") &&
           shortcut.id !== "settings.toggle"
-        )
+        ) {
+          trace("reject", { action: shortcut.id, reason: "editable-target" });
           continue;
+        }
         event.preventDefault();
-        handler();
+        traceShortcutAction(shortcut.id, handler, { registration, source: "keydown" });
         return;
       }
+      trace("unhandled");
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      switchDebug("shortcut.hook.unregister", { registration });
+    };
   }, [handlers, isMac]);
 }
 

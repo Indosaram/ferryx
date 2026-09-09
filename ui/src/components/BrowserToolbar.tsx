@@ -136,6 +136,9 @@ export function BrowserToolbar({
         case "find":
           // BrowserPane owns the find overlay and receives the same event.
           break;
+        default:
+          // Tab navigation actions are routed at the App level; ignore here.
+          break;
       }
     };
 

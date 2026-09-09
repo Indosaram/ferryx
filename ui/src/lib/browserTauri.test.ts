@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   browserAutomationAct,
   browserAutomationSnapshot,
+  browserTabSelectIndex,
+  browserWorkspaceSelectIndex,
   closeBrowser,
+  isBrowserTabShortcutAction,
   setBrowserBounds,
   setBrowserVisible,
 } from "./browserTauri";
@@ -21,6 +24,33 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+describe("browser tab shortcut helpers", () => {
+  it("classifies guest-forwarded tab actions", () => {
+    expect(isBrowserTabShortcutAction("tab-next")).toBe(true);
+    expect(isBrowserTabShortcutAction("tab-previous")).toBe(true);
+    expect(isBrowserTabShortcutAction("tab-select-1")).toBe(true);
+    expect(isBrowserTabShortcutAction("tab-select-9")).toBe(true);
+    expect(isBrowserTabShortcutAction("tab-select-0")).toBe(false);
+    expect(isBrowserTabShortcutAction("tab-select-10")).toBe(false);
+    expect(isBrowserTabShortcutAction("find")).toBe(false);
+  });
+
+  it("maps tab-select actions to zero-based indices", () => {
+    expect(browserTabSelectIndex("tab-select-1")).toBe(0);
+    expect(browserTabSelectIndex("tab-select-9")).toBe(8);
+    expect(browserTabSelectIndex("tab-select-0")).toBeNull();
+    expect(browserTabSelectIndex("tab-next")).toBeNull();
+    expect(browserTabSelectIndex("find")).toBeNull();
+  });
+
+  it("maps workspace-select actions to zero-based indices", () => {
+    expect(browserWorkspaceSelectIndex("workspace-select-1")).toBe(0);
+    expect(browserWorkspaceSelectIndex("workspace-select-9")).toBe(8);
+    expect(browserWorkspaceSelectIndex("workspace-select-0")).toBeNull();
+    expect(browserWorkspaceSelectIndex("tab-next")).toBeNull();
+  });
+});
 
 describe("browser native lifecycle queue", () => {
   beforeEach(() => {

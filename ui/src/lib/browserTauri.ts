@@ -27,7 +27,62 @@ export type BrowserDownloadRequestedPayload = {
   targetUrl: string;
 };
 
-export type BrowserShortcutAction = "focus-address" | "reload" | "back" | "forward" | "find";
+export type BrowserShortcutAction =
+  | "focus-address"
+  | "reload"
+  | "back"
+  | "forward"
+  | "find"
+  | "tab-next"
+  | "tab-previous"
+  | "tab-select-1"
+  | "tab-select-2"
+  | "tab-select-3"
+  | "tab-select-4"
+  | "tab-select-5"
+  | "tab-select-6"
+  | "tab-select-7"
+  | "tab-select-8"
+  | "tab-select-9"
+  | "tab-new-terminal"
+  | "tab-close"
+  | "command-palette"
+  | "sidebar-toggle"
+  | "settings-toggle"
+  | "split-right"
+  | "split-down"
+  | `workspace-select-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9}`;
+
+export const BROWSER_TAB_SHORTCUT_EVENT = "ferryx:browser-tab-shortcut";
+
+export type BrowserTabShortcutDetail =
+  | { action: "tab-next" }
+  | { action: "tab-previous" }
+  | { action: `tab-select-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9}` };
+
+export function isBrowserTabShortcutAction(action: string): action is BrowserTabShortcutDetail["action"] {
+  return (
+    action === "tab-next" ||
+    action === "tab-previous" ||
+    (action.startsWith("tab-select-") &&
+      (() => {
+        const digit = Number(action.slice("tab-select-".length));
+        return Number.isInteger(digit) && digit >= 1 && digit <= 9;
+      })())
+  );
+}
+
+export function browserTabSelectIndex(action: string): number | null {
+  if (!action.startsWith("tab-select-")) return null;
+  const digit = Number(action.slice("tab-select-".length));
+  return Number.isInteger(digit) && digit >= 1 && digit <= 9 ? digit - 1 : null;
+}
+
+export function browserWorkspaceSelectIndex(action: string): number | null {
+  if (!action.startsWith("workspace-select-")) return null;
+  const digit = Number(action.slice("workspace-select-".length));
+  return Number.isInteger(digit) && digit >= 1 && digit <= 9 ? digit - 1 : null;
+}
 
 export type BrowserShortcutRequestedPayload = {
   browserId: string;

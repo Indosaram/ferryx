@@ -697,9 +697,28 @@ export function NativeTerminalPane({
     if (active) {
       lastFocusedNativeTerminalSessionId = targetSessionId;
       inputRef.current?.focus();
+      const frame = requestAnimationFrame(() => {
+        inputRef.current?.focus();
+      });
+      const timer = window.setTimeout(() => {
+        inputRef.current?.focus();
+      }, 40);
       if (isTauri()) {
         sendFocus(true);
       }
+
+      const handleWindowFocus = () => {
+        inputRef.current?.focus();
+      };
+      window.addEventListener("focus", handleWindowFocus);
+      window.addEventListener("ferryx:window-focused", handleWindowFocus);
+
+      return () => {
+        cancelAnimationFrame(frame);
+        clearTimeout(timer);
+        window.removeEventListener("focus", handleWindowFocus);
+        window.removeEventListener("ferryx:window-focused", handleWindowFocus);
+      };
     } else {
       if (isTauri()) {
         sendFocus(false);

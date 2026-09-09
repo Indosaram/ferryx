@@ -106,16 +106,84 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
     }
   }, true);
 
+  const isMac = typeof navigator !== 'undefined' && (
+    /Mac|iPhone|iPod|iPad/.test(navigator.platform || '') ||
+    /Macintosh/.test(navigator.userAgent || '')
+  );
+
   addDocumentListener('keydown', (event) => {
-    const mod = event.metaKey || event.ctrlKey;
     let action = null;
-    if (mod && event.key.toLowerCase() === 'l') action = 'focus-address';
-    else if (mod && event.key.toLowerCase() === 'r') action = 'reload';
-    else if (mod && event.key === '[') action = 'back';
-    else if (mod && event.key === ']') action = 'forward';
-    else if (mod && event.key.toLowerCase() === 'f') action = 'find';
-    else if (event.altKey && !event.metaKey && !event.ctrlKey && event.key === 'ArrowLeft') action = 'back';
-    else if (event.altKey && !event.metaKey && !event.ctrlKey && event.key === 'ArrowRight') action = 'forward';
+    const composing = event.isComposing || event.keyCode === 229;
+    if (composing) return;
+
+    const code = event.code || '';
+    const key = event.key ? event.key.toLowerCase() : '';
+    const primaryMod = isMac ? (event.metaKey && !event.ctrlKey) : (event.ctrlKey && !event.metaKey);
+
+    // Global app commands (new tab, close tab, command palette, sidebar toggle,
+    // settings, pane split, tab select, tab cycle, workspace select) work
+    // everywhere in the child webview, even while typing in text inputs or
+    // textareas, matching native desktop browser expectations.
+    if (primaryMod && !event.altKey) {
+      if (!event.shiftKey) {
+        if (key === 't' || code === 'KeyT') action = 'tab-new-terminal';
+        else if (key === 'w' || code === 'KeyW') action = 'tab-close';
+        else if (key === 'k' || code === 'KeyK') action = 'command-palette';
+        else if (key === 'b' || code === 'KeyB') action = 'sidebar-toggle';
+        else if (key === ',' || code === 'Comma') action = 'settings-toggle';
+        else if (key === 'd' || code === 'KeyD') action = 'split-right';
+      } else {
+        if (key === 'd' || code === 'KeyD') action = 'split-down';
+      }
+    }
+
+    // Workspace selection: Cmd+1..9 on macOS, Alt+1..9 on Windows/Linux
+    if (!action && !event.shiftKey) {
+      const isWsMod = isMac ? (event.metaKey && !event.ctrlKey && !event.altKey) : (event.altKey && !event.ctrlKey && !event.metaKey);
+      if (isWsMod) {
+        const digit = /^[1-9]$/.test(event.key) ? event.key : (code.match(/^Digit([1-9])$/) || [])[1];
+        if (digit) action = 'workspace-select-' + digit;
+      }
+    }
+
+    // Tab selection (Ctrl+1..9 on all platforms)
+    if (!action && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      const digit = /^[1-9]$/.test(event.key) ? event.key : (code.match(/^Digit([1-9])$/) || [])[1];
+      if (digit) action = 'tab-select-' + digit;
+    }
+
+    // Tab cycling (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+PageUp/Down, Cmd+Shift+[/])
+    if (!action) {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && (key === 'tab' || code === 'Tab')) {
+        action = event.shiftKey ? 'tab-previous' : 'tab-next';
+      } else if (event.ctrlKey && !event.metaKey && !event.altKey && (key === 'pagedown' || code === 'PageDown')) {
+        action = 'tab-next';
+      } else if (event.ctrlKey && !event.metaKey && !event.altKey && (key === 'pageup' || code === 'PageUp')) {
+        action = 'tab-previous';
+      } else if (primaryMod && event.shiftKey && !event.altKey && (code === 'BracketRight' || key === ']' || key === '}')) {
+        action = 'tab-next';
+      } else if (primaryMod && event.shiftKey && !event.altKey && (code === 'BracketLeft' || key === '[' || key === '{')) {
+        action = 'tab-previous';
+      }
+    }
+
+    // Browser in-page navigation (only outside editable fields to not interfere with typing)
+    const keyTarget = event.target;
+    const inEditable = keyTarget instanceof Element && (
+      keyTarget.tagName === 'INPUT' || keyTarget.tagName === 'TEXTAREA' ||
+      keyTarget.tagName === 'SELECT' || keyTarget.isContentEditable
+    );
+
+    if (!action && !inEditable) {
+      if (primaryMod && (key === 'l' || code === 'KeyL')) action = 'focus-address';
+      else if (primaryMod && (key === 'r' || code === 'KeyR')) action = 'reload';
+      else if (primaryMod && key === '[') action = 'back';
+      else if (primaryMod && key === ']') action = 'forward';
+      else if (primaryMod && (key === 'f' || code === 'KeyF')) action = 'find';
+      else if (event.altKey && !event.metaKey && !event.ctrlKey && event.key === 'ArrowLeft') action = 'back';
+      else if (event.altKey && !event.metaKey && !event.ctrlKey && event.key === 'ArrowRight') action = 'forward';
+    }
+
     if (!action) return;
     event.preventDefault();
     route('shortcut.ferryx.invalid', 'action', action);
@@ -188,6 +256,33 @@ mod tests {
             parse_browser_guest_action(&shortcut, TEST_NONCE),
             Some(BrowserGuestAction::Shortcut("find".into()))
         );
+
+        // App-level and tab navigation chords ride the same shortcut host so the main
+        // webview (which never sees the keydown) can still switch tabs and run app commands.
+        for action in [
+            "tab-next",
+            "tab-previous",
+            "tab-select-1",
+            "tab-select-9",
+            "tab-new-terminal",
+            "tab-close",
+            "command-palette",
+            "sidebar-toggle",
+            "settings-toggle",
+            "split-right",
+            "split-down",
+            "workspace-select-1",
+            "workspace-select-9",
+        ] {
+            let forwarded = Url::parse(&format!(
+                "https://shortcut.ferryx.invalid/?action={action}&nonce={TEST_NONCE}"
+            ))
+            .unwrap();
+            assert_eq!(
+                parse_browser_guest_action(&forwarded, TEST_NONCE),
+                Some(BrowserGuestAction::Shortcut(action.into()))
+            );
+        }
 
         assert_eq!(
             parse_browser_guest_action(&Url::parse("https://example.com/").unwrap(), TEST_NONCE),

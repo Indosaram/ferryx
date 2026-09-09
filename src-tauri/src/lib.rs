@@ -96,8 +96,17 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
     menu.append(&window_menu)?;
     app.set_menu(menu)?;
 
+    // TEMPORARY-DIAGNOSTIC: same opt-in as switchDebug's native sink.
+    let shortcut_debug = crate::ipc::debug::switch_debug_sink_enabled(
+        cfg!(debug_assertions), std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref());
     app.on_menu_event(move |app, event| {
         let event_id = event.id().as_ref();
+        if shortcut_debug {
+            let wall_time_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            tracing::info!(event = "shortcut.native.menu", action = event_id,
+                pid = std::process::id(), wall_time_ms, "TEMPORARY-DIAGNOSTIC before menu dispatch");
+        }
         if let Some(window) = app.get_webview_window("main") {
             match event_id {
                 "tab.newTerminal" => {
@@ -140,6 +149,30 @@ pub const ANSI_KEY_CODE_W: u16 = 13;
 pub const ANSI_KEY_CODE_V: u16 = 9;
 
 #[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_T: u16 = 17;
+
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_D: u16 = 2;
+
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_K: u16 = 40;
+
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_B: u16 = 11;
+
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_COMMA: u16 = 43;
+
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_TAB: u16 = 48;
+
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_RIGHT_BRACKET: u16 = 30;
+
+#[cfg(target_os = "macos")]
+pub const ANSI_KEY_CODE_LEFT_BRACKET: u16 = 33;
+
+#[cfg(target_os = "macos")]
 pub const NATIVE_TERMINAL_COPY_OR_INTERRUPT_EVENT: &str = "native_terminal_copy_or_interrupt";
 
 #[cfg(target_os = "macos")]
@@ -152,6 +185,104 @@ pub const ANSI_KEY_CODE_9: u16 = 25;
 /// macOS keyCodes for the top-row digits 1..9, in order.
 #[cfg(target_os = "macos")]
 const ANSI_DIGIT_KEY_CODES: [u16; 9] = [18, 19, 20, 21, 23, 22, 26, 28, 25];
+
+/// Returns the pressed digit when the event is a Ctrl+1..9 tab selection.
+#[cfg(target_os = "macos")]
+pub fn ctrl_digit(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    characters: Option<&str>,
+    key_code: u16,
+) -> Option<u8> {
+    if !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Shift)
+    {
+        return None;
+    }
+
+    if let Some(digit) = characters
+        .and_then(|chars| chars.chars().next())
+        .and_then(|char| char.to_digit(10))
+    {
+        if (1..=9).contains(&digit) {
+            return Some(digit as u8);
+        }
+    }
+
+    ANSI_DIGIT_KEY_CODES
+        .iter()
+        .position(|candidate| *candidate == key_code)
+        .map(|index| index as u8 + 1)
+}
+
+/// Returns Some(true) for next tab (Ctrl+Tab), Some(false) for prev tab (Ctrl+Shift+Tab).
+#[cfg(target_os = "macos")]
+pub fn is_ctrl_tab(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    key_code: u16,
+) -> Option<bool> {
+    if !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
+        || key_code != ANSI_KEY_CODE_TAB
+    {
+        return None;
+    }
+    Some(!flags.contains(objc2_app_kit::NSEventModifierFlags::Shift))
+}
+
+/// Returns Some(true) for next tab (Cmd+Shift+]), Some(false) for prev tab (Cmd+Shift+[).
+#[cfg(target_os = "macos")]
+pub fn is_cmd_shift_bracket(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    key_code: u16,
+) -> Option<bool> {
+    if !flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+        || !flags.contains(objc2_app_kit::NSEventModifierFlags::Shift)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
+    {
+        return None;
+    }
+    if key_code == ANSI_KEY_CODE_RIGHT_BRACKET {
+        Some(true)
+    } else if key_code == ANSI_KEY_CODE_LEFT_BRACKET {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Returns Some(false) for split right (Cmd+D), Some(true) for split down (Cmd+Shift+D).
+#[cfg(target_os = "macos")]
+pub fn is_cmd_d_split(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    key_code: u16,
+) -> Option<bool> {
+    if !flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+        || flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
+        || key_code != ANSI_KEY_CODE_D
+    {
+        return None;
+    }
+    Some(flags.contains(objc2_app_kit::NSEventModifierFlags::Shift))
+}
+
+/// Returns true when flags match an unshifted Command modifier for a specific key code.
+#[cfg(target_os = "macos")]
+pub fn is_unshifted_cmd_key(
+    flags: objc2_app_kit::NSEventModifierFlags,
+    key_code: u16,
+    target_code: u16,
+) -> bool {
+    flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+        && !flags.contains(objc2_app_kit::NSEventModifierFlags::Shift)
+        && !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
+        && !flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
+        && key_code == target_code
+}
 
 /// Returns the pressed digit when the event is an unshifted Cmd+1..9.
 ///
@@ -300,10 +431,25 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
         .inner()
         .clone();
     let paste_latch = Cell::new(NativeTerminalPasteLatch::new());
+    // TEMPORARY-DIAGNOSTIC: opt-in outside callback; no added locks or file I/O.
+    let shortcut_debug = crate::ipc::debug::switch_debug_sink_enabled(
+        cfg!(debug_assertions), std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref());
+    let trace_pid = std::process::id();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
         let event_type = event.r#type();
         let flags = event.modifierFlags();
+        let trace_chord = shortcut_debug && event_type == NSEventType::KeyDown
+            && flags.intersects(objc2_app_kit::NSEventModifierFlags::Command
+                | objc2_app_kit::NSEventModifierFlags::Control
+                | objc2_app_kit::NSEventModifierFlags::Option);
+        if trace_chord {
+            let wall_time_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            tracing::info!(event = "shortcut.native.keydown", pid = trace_pid, wall_time_ms,
+                key_code = event.keyCode(), modifier_flags = flags.bits(), platform = "macos",
+                "TEMPORARY-DIAGNOSTIC before routing/focus lock");
+        }
         let chars = if native_key_event_has_characters(event_type) {
             event.charactersIgnoringModifiers()
         } else {
@@ -320,16 +466,63 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
         if event_type == NSEventType::KeyDown
             && is_unshifted_cmd_w(flags, chars_str.as_deref(), key_code)
         {
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_close_tab", "TEMPORARY-DIAGNOSTIC"); }
             if let Some(window) = app_handle.get_webview_window("main") {
                 let _ = window.emit("menu_close_tab", ());
             }
             ptr::null_mut()
         } else if let Some(digit) = worktree_digit {
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_select_worktree", digit, "TEMPORARY-DIAGNOSTIC"); }
             if let Some(window) = app_handle.get_webview_window("main") {
                 let _ = window.emit("menu_select_worktree", digit);
             }
             ptr::null_mut()
+        } else if let Some(digit) = if event_type == NSEventType::KeyDown { ctrl_digit(flags, chars_str.as_deref(), key_code) } else { None } {
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_select_tab", digit, "TEMPORARY-DIAGNOSTIC"); }
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit("menu_select_tab", digit);
+            }
+            ptr::null_mut()
+        } else if let Some(is_next) = if event_type == NSEventType::KeyDown { is_ctrl_tab(flags, key_code).or_else(|| is_cmd_shift_bracket(flags, key_code)) } else { None } {
+            let action = if is_next { "menu_next_tab" } else { "menu_prev_tab" };
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action, "TEMPORARY-DIAGNOSTIC"); }
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit(action, ());
+            }
+            ptr::null_mut()
+        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_T) {
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_new_terminal_tab", "TEMPORARY-DIAGNOSTIC"); }
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit("menu_new_terminal_tab", ());
+            }
+            ptr::null_mut()
+        } else if let Some(is_down) = if event_type == NSEventType::KeyDown { is_cmd_d_split(flags, key_code) } else { None } {
+            let action = if is_down { "menu_split_down" } else { "menu_split_right" };
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action, "TEMPORARY-DIAGNOSTIC"); }
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit(action, ());
+            }
+            ptr::null_mut()
+        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_K) {
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_command_palette", "TEMPORARY-DIAGNOSTIC"); }
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit("menu_command_palette", ());
+            }
+            ptr::null_mut()
+        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_B) {
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_toggle_sidebar", "TEMPORARY-DIAGNOSTIC"); }
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit("menu_toggle_sidebar", ());
+            }
+            ptr::null_mut()
+        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_COMMA) {
+            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_open_settings", "TEMPORARY-DIAGNOSTIC"); }
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.emit("menu_open_settings", ());
+            }
+            ptr::null_mut()
         } else {
+            if trace_chord { tracing::info!(event = "shortcut.native.focus.start", "TEMPORARY-DIAGNOSTIC"); }
             let has_focused_terminal = {
                 #[cfg(feature = "native-terminal")]
                 {
@@ -340,41 +533,13 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                     false
                 }
             };
+            if trace_chord { tracing::info!(event = "shortcut.native.focus.return", has_focused_terminal, "TEMPORARY-DIAGNOSTIC"); }
             if event_type == NSEventType::KeyDown
                 && is_unshifted_cmd_c(flags, chars_str.as_deref(), key_code)
             {
-                if cfg!(debug_assertions)
-                    || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1")
-                {
-                    use std::io::Write;
-                    let action_str = if has_focused_terminal {
-                        "EmitAndConsume"
-                    } else {
-                        "PassThrough"
-                    };
-                    let wall_time_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let record = serde_json::json!({
-                        "runId": "rust-monitor",
-                        "sequence": 0,
-                        "event": "terminal.surface.copy_or_interrupt.monitor",
-                        "wallTimeMs": wall_time_ms,
-                        "details": {
-                            "action": action_str,
-                            "hasFocusedTerminal": has_focused_terminal,
-                            "keyCode": key_code,
-                            "characters": chars_str.as_deref(),
-                        }
-                    });
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/ferryx-switch-debug.jsonl")
-                    {
-                        let _ = writeln!(file, "{}", record);
-                    }
+                if trace_chord {
+                    tracing::info!(event = "shortcut.native.copy", has_focused_terminal, key_code,
+                        "TEMPORARY-DIAGNOSTIC");
                 }
                 if has_focused_terminal {
                     if let Some(window) = app_handle.get_window("main") {
@@ -394,40 +559,9 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                     has_focused_terminal,
                 );
                 paste_latch.set(latch);
-                if (cfg!(debug_assertions)
-                    || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1"))
-                    && event_type == NSEventType::KeyDown
-                    && is_unshifted_cmd_v(flags, chars_str.as_deref(), key_code)
-                {
-                    use std::io::Write;
-                    let action_str = match action {
-                        NativeTerminalPasteAction::EmitAndConsume => "EmitAndConsume",
-                        NativeTerminalPasteAction::ConsumeOnly => "ConsumeOnly",
-                        NativeTerminalPasteAction::PassThrough => "PassThrough",
-                    };
-                    let wall_time_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let record = serde_json::json!({
-                        "runId": "rust-monitor",
-                        "sequence": 0,
-                        "event": "terminal.surface.paste.monitor",
-                        "wallTimeMs": wall_time_ms,
-                        "details": {
-                            "action": action_str,
-                            "hasFocusedTerminal": has_focused_terminal,
-                            "keyCode": key_code,
-                            "characters": chars_str.as_deref(),
-                        }
-                    });
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/ferryx-switch-debug.jsonl")
-                    {
-                        let _ = writeln!(file, "{}", record);
-                    }
+                if trace_chord {
+                    tracing::info!(event = "shortcut.native.paste", ?action, has_focused_terminal, key_code,
+                        "TEMPORARY-DIAGNOSTIC");
                 }
                 match action {
                     NativeTerminalPasteAction::EmitAndConsume => {
@@ -851,17 +985,31 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = (window, event);
         })
         .setup(move |app| {
-            #[cfg(all(target_os = "macos", feature = "native-terminal"))]
+            #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
-                let raw_window = window.ns_window()?;
-                // SAFETY: Tauri owns this NSWindow; setup executes on the AppKit main thread.
-                let native_window = unsafe {
-                    (raw_window as *const objc2_app_kit::NSWindow).as_ref()
-                }.ok_or_else(|| std::io::Error::other("Main NSWindow is unavailable"))?;
-                crate::native_terminal::platform::macos::configure_window_background(
-                    native_window,
-                    crate::native_terminal::renderer::RendererTheme::default().background,
-                );
+                if let Ok(raw_window) = window.ns_window() {
+                    if !raw_window.is_null() {
+                        let native_window = unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
+                        #[cfg(feature = "native-terminal")]
+                        crate::native_terminal::platform::macos::configure_window_background(
+                            native_window,
+                            crate::native_terminal::renderer::RendererTheme::default().background,
+                        );
+                        if let Ok(raw_webview) = window.ns_view() {
+                            if !raw_webview.is_null() {
+                                unsafe {
+                                    let webview_view = &*(raw_webview as *const objc2_app_kit::NSView);
+                                    let _ = native_window.makeFirstResponder(Some(webview_view));
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = window.set_focus();
+            }
+            #[cfg(not(target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
             }
             #[cfg(target_os = "macos")]
             install_app_menu(app)?;
@@ -1048,6 +1196,90 @@ mod tests {
                 None => std::env::remove_var("FERRYX_DATA_DIR"),
             }
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn ctrl_digit_matches_top_row_digits() {
+        use objc2_app_kit::NSEventModifierFlags;
+
+        for (digit, key_code) in [
+            (1u8, ANSI_KEY_CODE_1),
+            (5u8, ANSI_KEY_CODE_5),
+            (9u8, ANSI_KEY_CODE_9),
+        ] {
+            let label = digit.to_string();
+            assert_eq!(
+                ctrl_digit(
+                    NSEventModifierFlags::Control,
+                    Some(label.as_str()),
+                    key_code,
+                ),
+                Some(digit),
+                "Ctrl+{digit} must map to tab index {digit}"
+            );
+        }
+
+        assert_eq!(
+            ctrl_digit(
+                NSEventModifierFlags::Control | NSEventModifierFlags::Shift,
+                Some("1"),
+                ANSI_KEY_CODE_1,
+            ),
+            None,
+        );
+        assert_eq!(
+            ctrl_digit(
+                NSEventModifierFlags::Control | NSEventModifierFlags::Command,
+                Some("1"),
+                ANSI_KEY_CODE_1,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn tab_navigation_and_split_predicates_work() {
+        use objc2_app_kit::NSEventModifierFlags;
+
+        assert_eq!(is_ctrl_tab(NSEventModifierFlags::Control, ANSI_KEY_CODE_TAB), Some(true));
+        assert_eq!(
+            is_ctrl_tab(
+                NSEventModifierFlags::Control | NSEventModifierFlags::Shift,
+                ANSI_KEY_CODE_TAB
+            ),
+            Some(false)
+        );
+
+        assert_eq!(
+            is_cmd_shift_bracket(
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+                ANSI_KEY_CODE_RIGHT_BRACKET
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            is_cmd_shift_bracket(
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+                ANSI_KEY_CODE_LEFT_BRACKET
+            ),
+            Some(false)
+        );
+
+        assert_eq!(is_cmd_d_split(NSEventModifierFlags::Command, ANSI_KEY_CODE_D), Some(false));
+        assert_eq!(
+            is_cmd_d_split(
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+                ANSI_KEY_CODE_D
+            ),
+            Some(true)
+        );
+
+        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_T, ANSI_KEY_CODE_T));
+        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_K, ANSI_KEY_CODE_K));
+        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_B, ANSI_KEY_CODE_B));
+        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_COMMA, ANSI_KEY_CODE_COMMA));
     }
 
     #[test]

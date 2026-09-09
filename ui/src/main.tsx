@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { installSettingsRuntimeBridge } from "./lib/settingsRuntimeBridge";
 import { isMacShortcutPlatform } from "./lib/shortcuts";
+import { installShortcutDiagnostics } from "./lib/shortcutDiagnostics";
+import { switchDebug } from "./lib/switchDebug";
 import { bootTrace } from "./lib/tauri";
 import { applyCachedTerminalBackground } from "./lib/terminalSettings";
 import "./index.css";
@@ -12,8 +14,14 @@ installSettingsRuntimeBridge();
 applyCachedTerminalBackground();
 
 const isTauriApp = typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
+// TEMPORARY-DIAGNOSTIC: install before App import, without changing routing.
+if (isTauriApp) {
+  const stop = installShortcutDiagnostics();
+  import.meta.hot?.dispose(stop);
+}
 void bootTrace(isTauriApp ? "tauri.detected" : "tauri.absent", { href: location.href });
 window.addEventListener("error", (event) => {
+  switchDebug("shortcut.webview.error", { errorType: event.error instanceof Error ? event.error.name : typeof event.error });
   void bootTrace("window.error", {
     message: event.message,
     filename: event.filename?.split("/").pop(),
@@ -21,6 +29,7 @@ window.addEventListener("error", (event) => {
   });
 });
 window.addEventListener("unhandledrejection", (event) => {
+  switchDebug("shortcut.webview.unhandledrejection", { errorType: event.reason instanceof Error ? event.reason.name : typeof event.reason });
   void bootTrace("unhandled.rejection", { reason: String(event.reason).slice(0, 200) });
 });
 

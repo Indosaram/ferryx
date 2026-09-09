@@ -5,6 +5,7 @@ import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { switchDebug } from "./switchDebug";
+import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
 
 export type {
   AttachTerminalRequest,
@@ -588,9 +589,31 @@ export async function onNativeTerminalFocus(
  * AppKit can consume Cmd+V before Korean IME/WebKit emits either `keydown` or `paste`.
  * The native key monitor forwards that physical shortcut here.
  */
+// TEMPORARY-DIAGNOSTIC: shared menu/monitor path, no payload/text logging.
+let nativeShortcutRegistration = 0;
+async function listenShortcut<T>(action: string, handler: (payload: T) => void): Promise<UnlistenFn> {
+  const registration = ++nativeShortcutRegistration;
+  switchDebug("shortcut.native.register.start", { action, registration });
+  try {
+    const dispose = await listen<T>(action, (event) => {
+      const details = { action, registration, ...shortcutContext() };
+      switchDebug("shortcut.native.receipt", details);
+      return traceShortcutAction(action, () => handler(event.payload), { registration, source: "native-event" });
+    });
+    switchDebug("shortcut.native.register.ready", { action, registration });
+    return () => {
+      dispose();
+      switchDebug("shortcut.native.unregister", { action, registration });
+    };
+  } catch (error) {
+    switchDebug("shortcut.native.register.error", { action, registration, errorType: error instanceof Error ? error.name : typeof error });
+    throw error;
+  }
+}
+
 export async function onNativeTerminalPaste(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<void>("native_terminal_paste", () => handler());
+  return listenShortcut<void>("native_terminal_paste", () => handler());
 }
 
 /**
@@ -600,17 +623,17 @@ export async function onNativeTerminalPaste(handler: () => void): Promise<Unlist
  */
 export async function onNativeTerminalCopyOrInterrupt(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<void>("native_terminal_copy_or_interrupt", () => handler());
+  return listenShortcut<void>("native_terminal_copy_or_interrupt", () => handler());
 }
 
 export async function onNewTerminalTabMenu(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<void>("menu_new_terminal_tab", () => handler());
+  return listenShortcut<void>("menu_new_terminal_tab", () => handler());
 }
 
 export async function onCloseTabMenu(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<void>("menu_close_tab", () => handler());
+  return listenShortcut<void>("menu_close_tab", () => handler());
 }
 
 /**
@@ -620,7 +643,47 @@ export async function onCloseTabMenu(handler: () => void): Promise<UnlistenFn> {
  */
 export async function onSelectWorktreeMenu(handler: (digit: number) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<number>("menu_select_worktree", (event) => handler(event.payload));
+  return listenShortcut<number>("menu_select_worktree", handler);
+}
+
+export async function onSelectTabMenu(handler: (digit: number) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<number>("menu_select_tab", handler);
+}
+
+export async function onNextTabMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_next_tab", () => handler());
+}
+
+export async function onPrevTabMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_prev_tab", () => handler());
+}
+
+export async function onSplitRightMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_split_right", () => handler());
+}
+
+export async function onSplitDownMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_split_down", () => handler());
+}
+
+export async function onCommandPaletteMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_command_palette", () => handler());
+}
+
+export async function onToggleSidebarMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_toggle_sidebar", () => handler());
+}
+
+export async function onOpenSettingsMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_open_settings", () => handler());
 }
 
 export async function onWorktreeChanged(handler: (payload: WorktreeChangedPayload) => void): Promise<UnlistenFn> {

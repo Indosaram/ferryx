@@ -916,6 +916,8 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
 
         let guest_bridge_nonce = uuid::Uuid::new_v4().to_string();
         let nonce = guest_bridge_nonce.clone();
+        let eval_bridge_script = browser_guest_bridge_script(&guest_bridge_nonce);
+        let page_load_bridge_script = eval_bridge_script.clone();
         let (creation_sender, creation_receiver) =
             tokio::sync::oneshot::channel::<Result<(), String>>();
 
@@ -971,6 +973,9 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                 .on_page_load(move |webview, payload| {
                     let loading = matches!(payload.event(), PageLoadEvent::Started);
                     let page_url = payload.url().to_string();
+                    if !loading {
+                        let _ = webview.eval(&page_load_bridge_script);
+                    }
                     let current_state = page_manager.get_state(&page_browser_id).ok();
                     let fallback_to_blank = page_url == "about:blank"
                         && current_state
@@ -1045,6 +1050,7 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                         creation_manager.get_state(&browser_id).is_ok(),
                     ) {
                         Ok(()) => {
+                            let _ = child.eval(&eval_bridge_script);
                             let _ = child.set_zoom(zoom_factor);
                             if let Ok(Some(current_bounds)) =
                                 creation_manager.get_bounds(&browser_id)
