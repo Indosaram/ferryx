@@ -240,15 +240,23 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
                 .enable_all()
                 .build()
                 .map_err(|error| error.to_string())?;
-            let from_daemon = daemon_runtime.block_on(async {
-                let client = ferryx_lib::daemon::client::DaemonClient::new();
-                client
-                    .remote_create_pairing_code(Some(
-                        ferryx_lib::remote::auth::DevicePermission::Control,
-                    ))
-                    .await
-                    .ok()
-            });
+            // Only defer to a daemon that is ALREADY running. DaemonClient will happily
+            // start one on demand, but silently spawning a daemon is not this command's
+            // job, and it would also make the message below untrue.
+            let daemon_socket = ferryx_lib::daemon::server::get_socket_path();
+            let from_daemon = if daemon_socket.exists() {
+                daemon_runtime.block_on(async {
+                    let client = ferryx_lib::daemon::client::DaemonClient::new();
+                    client
+                        .remote_create_pairing_code(Some(
+                            ferryx_lib::remote::auth::DevicePermission::Control,
+                        ))
+                        .await
+                        .ok()
+                })
+            } else {
+                None
+            };
             if let Some(code) = from_daemon {
                 println!("{code}");
                 std::io::stdout().flush().map_err(|error| error.to_string())?;
