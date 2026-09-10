@@ -19,6 +19,22 @@ pub struct MachineIdentity {
     pub private_key: String,
 }
 
+pub(crate) fn canonical_identity_dir() -> Result<PathBuf, String> {
+    if let Some(base) = std::env::var_os("FERRYX_DATA_DIR") {
+        return Ok(PathBuf::from(base));
+    }
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+        .map(|base| base.join(".ferryx/remote"))
+        .ok_or_else(|| "Cannot resolve machine identity directory".to_string())
+}
+
+pub(crate) fn canonical_auth_path() -> Option<PathBuf> {
+    std::env::var_os("FERRYX_DATA_DIR")
+        .map(|base| PathBuf::from(base).join("remote"))
+        .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|base| PathBuf::from(base).join(".ferryx/remote")))
+        .map(|base| base.join("remote-auth.json"))
+}
+
 pub fn load_or_generate_machine_identity(base_dir: &Path) -> Result<MachineIdentity, String> {
     let path = base_dir.join("identity.json");
     match std::fs::read(&path) {
@@ -283,6 +299,27 @@ impl AuthManager {
         drop(window);
         self.persist_best_effort();
         code
+    }
+
+    /// Installs the relay capability in the same single-use authority as local PINs.
+    pub(crate) fn register_pairing_capability(&self, token: &str) {
+        let _transaction = self.begin_transaction();
+        let mut window = self.pairing_window.write();
+        window.refresh(Instant::now());
+        window.codes.insert(token.to_owned(), PairingCode {
+            _code: token.to_owned(),
+            created_at: Instant::now(),
+            default_permission: DevicePermission::Control,
+            approved_token: None,
+        });
+        drop(window);
+        self.persist_best_effort();
+    }
+
+    pub(crate) fn cancel_pairing_capability(&self, token: &str) {
+        let _transaction = self.begin_transaction();
+        self.pairing_window.write().codes.remove(token);
+        self.persist_best_effort();
     }
 
     pub fn exchange_pairing_code(
@@ -652,6 +689,21 @@ mod tests {
         assert!(sign_challenge(&invalid, nonce, timestamp).is_err());
         invalid.private_key = STANDARD.encode([0u8; 31]);
         assert!(sign_challenge(&invalid, nonce, timestamp).is_err());
+    }
+
+    #[test]
+    fn relay_capability_is_single_use_persisted_and_cancellable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-auth.json");
+        let gateway = AuthManager::with_persistence(Some(path.clone()));
+        let coordinator = AuthManager::with_persistence(Some(path));
+        coordinator.register_pairing_capability("capability");
+        let (token, device) = gateway.exchange_pairing_code("capability", "browser").unwrap();
+        assert_eq!(gateway.validate_token(&token).unwrap().id, device.id);
+        assert!(gateway.exchange_pairing_code("capability", "replay").is_err());
+        coordinator.register_pairing_capability("cancelled");
+        coordinator.cancel_pairing_capability("cancelled");
+        assert!(gateway.exchange_pairing_code("cancelled", "browser").is_err());
     }
 
     #[test]

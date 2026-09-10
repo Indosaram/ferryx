@@ -157,9 +157,12 @@ struct PairExchangeRequest {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PairExchangeResponse {
     token: String,
     device: DeviceInfo,
+    machine_id: String,
+    display_name: String,
 }
 
 #[derive(Deserialize)]
@@ -201,6 +204,12 @@ async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
     Json(payload): Json<PairExchangeRequest>,
 ) -> Result<Json<PairExchangeResponse>, Response> {
+    let identity = crate::remote::auth::canonical_identity_dir()
+        .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir))
+        .map_err(|error| {
+            tracing::error!(%error, "Unable to load pairing machine identity");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Machine identity unavailable").into_response()
+        })?;
     let (token, device) = state
         .auth_manager
         .exchange_pairing_code(&payload.code, &payload.device_name)
@@ -219,7 +228,9 @@ async fn pair_exchange(
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
         })?;
 
-    Ok(Json(PairExchangeResponse { token, device }))
+    Ok(Json(PairExchangeResponse {
+        token, device, machine_id: identity.machine_id, display_name: identity.display_name,
+    }))
 }
 
 /// Canonicalize a filesystem path for comparison purposes. When the path itself
@@ -1844,30 +1855,13 @@ pub async fn start_remote_server_with_resolver(
     let relay_token = std::env::var("FERRYX_MACHINE_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
-    if relay_url.is_some() && relay_token.is_none() {
-        let ferryx_data_dir = std::env::var_os("FERRYX_DATA_DIR")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                #[cfg(windows)]
-                {
-                    std::env::var_os("LOCALAPPDATA")
-                        .map(|base| std::path::PathBuf::from(base).join("Ferryx"))
-                        .or_else(|| std::env::var_os("USERPROFILE")
-                            .map(|base| std::path::PathBuf::from(base).join(".ferryx")))
-                }
-                #[cfg(not(windows))]
-                {
-                    std::env::var_os("HOME")
-                        .map(|base| std::path::PathBuf::from(base).join(".ferryx"))
-                }
-            })
-            .ok_or_else(|| "Cannot resolve a per-user directory for machine identity".to_string())?;
-        let identity = crate::remote::auth::load_or_generate_machine_identity(&ferryx_data_dir)?;
-        // Identity is not a bearer token. Keep the local daemon available without
-        // exposing the private seed or passing a public identifier as a credential.
-        tracing::warn!(machine_id = %identity.machine_id,
-            "machine identity ready; relay connection awaits challenge authentication support");
-    }
+    let relay_identity = if config.mode == RemoteNetworkMode::Relay && relay_token.is_none() {
+        Some(crate::remote::auth::load_or_generate_machine_identity(
+            &crate::remote::auth::canonical_identity_dir()?,
+        )?)
+    } else {
+        None
+    };
 
     // Baseline listener: always loopback, never the wildcard address.
     let loopback_addr: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, config.port).into();
@@ -1916,12 +1910,16 @@ pub async fn start_remote_server_with_resolver(
         }
     }
 
-    let relay_task = relay_url.zip(relay_token).map(|(url, token)| {
-        let client = crate::remote::relay_client::RelayClient::with_gateway(
-            url,
-            token,
-            primary_local_addr.to_string(),
-        );
+    let relay_task = relay_url.filter(|_| config.mode == RemoteNetworkMode::Relay).map(|url| {
+        let client = match relay_token {
+            Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                url, token, primary_local_addr.to_string(),
+            ),
+            None => crate::remote::relay_client::RelayClient::with_identity(
+                url, relay_identity.expect("relay identity loaded before binding"), primary_local_addr.to_string(),
+            ),
+        }.with_auth_manager((*state.auth_manager).clone());
+        // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
         tokio::spawn(async move { client.run().await })
     });
 
@@ -1942,6 +1940,46 @@ mod tests {
     use crate::terminal::TerminalOutputHub;
     use crate::terminal::TerminalService;
     use crate::worktree::WorkspaceRegistry;
+
+    #[tokio::test]
+    async fn relay_startup_connects_without_machine_token() {
+        use futures_util::{SinkExt, StreamExt};
+        use crate::remote::protocol::{ControlAuth, ControlChallenge, ControlAuthResponse};
+        assert!(std::env::var("FERRYX_MACHINE_TOKEN").unwrap_or_default().trim().is_empty(),
+            "run zero-config regression without FERRYX_MACHINE_TOKEN");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let (authenticated_tx, authenticated_rx) = tokio::sync::oneshot::channel();
+        let relay = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let challenge = ControlChallenge { nonce: "startup-challenge".into(), timestamp: 1234 };
+            socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&challenge).unwrap().into())).await.unwrap();
+            let frame = socket.next().await.unwrap().unwrap();
+            let auth: ControlAuth = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert!(crate::remote::auth::verify_machine_signature(&auth.public_key, &challenge.nonce, auth.timestamp, &auth.signature));
+            socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&ControlAuthResponse { success: true, error: None }).unwrap().into())).await.unwrap();
+            authenticated_tx.send(auth.machine_id).unwrap();
+            while let Some(frame) = socket.next().await { if frame.is_err() { break; } }
+        });
+        let terminal = Arc::new(TerminalService::new(
+            Arc::new(crate::terminal::PtyManager::new()), Arc::new(TerminalOutputHub::default()),
+        ));
+        let state = Arc::new(RemoteGatewayState::new_with_paths(terminal, WorkspaceRegistry::new(), None, None));
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::Relay;
+            config.port = 0;
+            config.relay_url = Some(format!("http://{relay_addr}"));
+        }
+        let (handle, address) = start_remote_server(state).await.unwrap();
+        assert!(address.ip().is_loopback());
+        let machine = tokio::time::timeout(std::time::Duration::from_secs(5), authenticated_rx).await.unwrap().unwrap();
+        let identity = crate::remote::auth::load_or_generate_machine_identity(&crate::remote::auth::canonical_identity_dir().unwrap()).unwrap();
+        assert_eq!(machine, identity.machine_id);
+        handle.stop();
+        relay.abort();
+    }
 
     /// Running daemon sessions must be listed for authenticated remote callers
     /// regardless of desktop active selection. `active_selection` may only supply

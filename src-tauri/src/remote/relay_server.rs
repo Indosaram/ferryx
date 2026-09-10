@@ -106,12 +106,13 @@ struct RegisteredPairing {
     state: PairingState,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PairExchange {
-    pin: Option<String>,
-    pairing_token: Option<String>,
-    device_name: String,
+pub struct PublicPairExchangeRequest {
+    pub pin: Option<String>,
+    pub code: Option<String>,
+    pub pairing_token: Option<String>,
+    pub device_name: String,
 }
 
 /// Also cleans up failed upgrades and cancelled connection tasks.
@@ -410,7 +411,7 @@ impl RelayState {
     fn claim_pairing(
         &self,
         ip: IpAddr,
-        payload: &PairExchange,
+        payload: &PublicPairExchangeRequest,
         machine: Option<&str>,
     ) -> Result<(String, String, String), StatusCode> {
         let now = Instant::now();
@@ -433,7 +434,12 @@ impl RelayState {
             if let Some(token) = &payload.pairing_token {
                 &p.registration.pairing_token == token
             } else {
-                payload.pin.as_ref() == Some(&p.registration.pin)
+                payload.pin.as_ref().map_or_else(
+                    || payload.code.as_ref().is_some_and(|code| {
+                        code == &p.registration.pin || code == &p.registration.pairing_token
+                    }),
+                    |pin| pin == &p.registration.pin,
+                )
             }
         });
         if let Some(p) = pairing {
@@ -723,7 +729,7 @@ async fn exchange_http(
     let body = to_bytes(request.into_body(), MAX_MESSAGE_SIZE)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
-    let payload: PairExchange =
+    let payload: PublicPairExchangeRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let (machine, pin, token) = state.claim_pairing(ip, &payload, machine)?;
     // The loopback gateway calls its pairing secret `code`.
@@ -1609,6 +1615,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinator_pairs_through_relay_to_real_gateway() {
+        use crate::remote::{relay_client::RelayClient, state::RemoteGatewayState};
+        let (base, relay) = spawn_test_relay().await;
+        let terminal = Arc::new(crate::terminal::TerminalService::new(
+            Arc::new(crate::terminal::PtyManager::new()),
+            Arc::new(crate::terminal::TerminalOutputHub::default()),
+        ));
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            terminal, crate::worktree::WorkspaceRegistry::new(), None, None,
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = listener.local_addr().unwrap();
+        let router = crate::remote::server::create_remote_router(state.clone());
+        let gateway = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = RelayClient::with_identity(&base, identity(19, "real-gateway"), gateway_addr.to_string())
+            .with_auth_manager((*state.auth_manager).clone());
+        let coordinator = client.pairing_coordinator();
+        let control = tokio::spawn(async move { client.run().await });
+        let session = coordinator.generate_pairing(Duration::from_secs(60)).await.unwrap();
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let url = format!("{}/api/v1/pair/exchange", base.replace("ws://", "http://"));
+        let response = http.post(&url).header("content-type", "application/json")
+            .body(serde_json::json!({
+                "code": session.pairing_token, "deviceName": "real browser"
+            }).to_string()).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        assert!(body["machineId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(body["displayName"].as_str().is_some_and(|name| !name.is_empty()));
+        let device = state.auth_manager.validate_token(body["token"].as_str().unwrap()).unwrap();
+        assert_eq!(device.name, "real browser");
+        assert!(state.auth_manager.exchange_pairing_code(&session.pairing_token, "replay").is_err());
+        control.abort(); gateway.abort(); relay.abort();
+    }
+
+    #[tokio::test]
     async fn test_relay_pair_exchange_success() {
         let (base, server) = spawn_test_relay().await;
         let (mut control, auth) =
@@ -1631,6 +1673,8 @@ mod tests {
                 "/host/pair-machine/api/v1/pair/exchange",
                 serde_json::json!({"pairingToken":"secret-two"}),
             ),
+            ("345678", "secret-three", "/api/v1/pair/exchange", serde_json::json!({"code":"345678"})),
+            ("456789", "secret-four", "/api/v1/pair/exchange", serde_json::json!({"code":"secret-four"})),
         ] {
             let registration = RegisterPairingPin {
                 pin: pin.into(),

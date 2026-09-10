@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use rand::Rng;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use crate::remote::auth::{MachineIdentity, sign_challenge};
+use crate::remote::auth::{AuthManager, MachineIdentity, canonical_auth_path, sign_challenge};
 use crate::remote::protocol::{ControlChallenge, ControlAuth, ControlAuthResponse, RegisterPairingPin, RegisterPairingPinAck, PairingState, PairingPinClaimed};
 
 type ControlSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
@@ -44,11 +44,12 @@ pub struct PairingCoordinator {
     active_token: Arc<RwLock<Option<String>>>,
     register_tx: mpsc::Sender<RegisterPairingPinRequest>,
     machine_id: String,
+    auth: AuthManager,
 }
 
 impl PairingCoordinator {
     pub fn new(machine_id: impl Into<String>, register_tx: mpsc::Sender<RegisterPairingPinRequest>) -> Self {
-        Self { state: Arc::new(RwLock::new(PairingState::Created)), active_pin: Arc::new(RwLock::new(None)), active_token: Arc::new(RwLock::new(None)), register_tx, machine_id: machine_id.into() }
+        Self { state: Arc::new(RwLock::new(PairingState::Created)), active_pin: Arc::new(RwLock::new(None)), active_token: Arc::new(RwLock::new(None)), register_tx, machine_id: machine_id.into(), auth: AuthManager::with_persistence(canonical_auth_path()) }
     }
 
     pub fn state(&self) -> PairingState { *self.state.read() }
@@ -61,13 +62,17 @@ impl PairingCoordinator {
         *state = target;
         if matches!(target, PairingState::Consumed | PairingState::Expired | PairingState::Cancelled) {
             *self.active_pin.write() = None;
-            *self.active_token.write() = None;
+            if let Some(token) = self.active_token.write().take() {
+                self.auth.cancel_pairing_capability(&token);
+            }
         }
         Ok(())
     }
 
     /// `timeout` is the PIN lifetime; registration itself has a five-second deadline.
     pub async fn generate_pairing(&self, timeout: Duration) -> Result<PairingSessionInfo, String> {
+        // Gateway pairing credentials have a maximum lifetime of sixty seconds.
+        let timeout = timeout.min(Duration::from_secs(60));
         let expires_at = SystemTime::now().checked_add(timeout)
             .ok_or("Invalid pairing lifetime")?.duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?.as_secs();
@@ -76,6 +81,7 @@ impl PairingCoordinator {
         let pairing_token = format!("{:032x}", rand::rngs::OsRng.gen::<u128>());
         *self.active_pin.write() = Some(pin.clone());
         *self.active_token.write() = Some(pairing_token.clone());
+        self.auth.register_pairing_capability(&pairing_token);
         let registration = RegisterPairingPin { pin: pin.clone(), pairing_token: pairing_token.clone(), machine_id: self.machine_id.clone(), expires_at };
         let (ack, rx) = oneshot::channel();
         let result = tokio::time::timeout(REGISTER_ACK_TIMEOUT.min(timeout), async {
@@ -183,6 +189,12 @@ impl RelayClient {
         client.pairing.machine_id = identity.machine_id.clone();
         client.identity = Some(identity);
         client
+    }
+
+    /// Shares the daemon's authority, including in-memory gateway configurations.
+    pub fn with_auth_manager(mut self, auth: AuthManager) -> Self {
+        self.pairing.auth = auth;
+        self
     }
 
     pub fn pairing_coordinator(&self) -> PairingCoordinator { self.pairing.clone() }
