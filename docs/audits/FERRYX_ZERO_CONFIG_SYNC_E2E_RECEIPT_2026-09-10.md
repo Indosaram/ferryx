@@ -330,3 +330,53 @@ locally and `main.rs` still builds its own client. Also unaddressed: claim-to-
 dispatch replacement racing, direct-path WebSocket query credentials, cross-
 process ownership transactions, fsync durability, and the constant `relay`
 audience.
+
+## Addendum 7: Gen3 approval conditions closed and deployed
+
+All three conditions the Gen3 verdict withheld approval on are closed:
+
+1. Client attempt identifiers separated from relay-owned control generations
+   (`93dc006`).
+2. Claim-to-dispatch replacement behavior closed (`050e8a6`): the validated
+   generation travels with the claim and `open_session_channel` refuses a channel
+   that no longer holds it.
+3. GUI and CLI pairing both served by the daemon's single relay-registered
+   coordinator (`fcd0f48`, `050e8a6`).
+
+### Test-quality disclosure
+
+The first claim-to-dispatch test was VACUOUS: it passed with the dispatch guard
+removed, because `claim_pairing` already rejected the stale claim before dispatch
+was reached, so the guard was never exercised. It was discarded rather than kept.
+The committed test exercises the guard directly and carries a positive control
+proving a matching generation passes it. With the guard removed it fails with
+`left: Some(504), right: Some(410)` - the superseded claim is accepted and only
+fails later on timeout.
+
+### Verification at `050e8a6`
+
+- `cargo test --lib remote::` - 172 passed, 0 failed (exit 0).
+- `cargo test --test relay_pairing_generation_regression -- --test-threads=1` -
+  2 passed, 0 failed (exit 0).
+- `bun run test src/remote/` - 134 passed across 11 files (exit 0).
+- `bun run build` - exit 0.
+
+### Deployment
+
+- On-host `relay_server.rs` hashes
+  `5213297d80db16c67dc205c69a5d38a9efa40ee94b0000811b75a9b28fbd6a9e`, identical to
+  `git show HEAD:src-tauri/src/remote/relay_server.rs`.
+- Installed binary sha256:
+  `3ab49cb57d84b101d7082f39cb66cc0dce6fdfd8257ba4065e89fddd8295e964`; service
+  `active`.
+- As in Addendum 4, this establishes which build is serving. No daemon holds a
+  control channel on that relay, so no end-to-end ticket flow was re-exercised
+  against production; the pairing behavior rests on the in-process and real-socket
+  suites.
+
+### Still open (not claimed as done)
+
+Direct-path WebSocket query credentials (needs direct-gateway ticket issuance),
+cross-process ownership transactions and fsync durability, and the constant
+`relay` audience. The F10 harness remains in-process; the multi-machine case is
+covered by `relay_pairing_generation_regression.rs` rather than by F10.
