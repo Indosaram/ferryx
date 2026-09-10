@@ -157,7 +157,9 @@ fn routed_ipv4_address(destination: &str) -> Result<std::net::Ipv4Addr, String> 
         {
             Ok(*addr.ip())
         }
-        _ => Err(format!("route probe to {destination} found no external IPv4 address")),
+        _ => Err(format!(
+            "route probe to {destination} found no external IPv4 address"
+        )),
     }
 }
 
@@ -267,6 +269,13 @@ pub struct RemoteGatewayState {
     pub bound_address: RwLock<Option<String>>,
     config_path: Option<PathBuf>,
     pub desktop_event_sink: RwLock<Option<DesktopEventSink>>,
+    /// The single relay pairing authority owned by the running gateway.
+    ///
+    /// Populated when the relay client starts. A pairing code is only redeemable
+    /// remotely if the PIN was registered with the relay, so GUI and CLI pairing must
+    /// go through this one coordinator instead of each minting a local-only code or
+    /// standing up a competing RelayClient for the same machine identity.
+    pub relay_pairing: RwLock<Option<crate::remote::relay_client::PairingCoordinator>>,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     snapshot_refreshing: AtomicBool,
@@ -372,6 +381,7 @@ impl RemoteGatewayState {
             bound_address: RwLock::new(None),
             config_path,
             desktop_event_sink: RwLock::new(None),
+            relay_pairing: RwLock::new(None),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
             snapshot_refreshing: AtomicBool::new(false),
@@ -614,6 +624,46 @@ fn remote_data_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// The pairing authority the daemon serves GUI/CLI requests from must be the one
+    /// registered with the relay. A code minted only in the local AuthManager is not
+    /// redeemable remotely, because the relay never learns its PIN.
+    #[tokio::test]
+    async fn relay_pairing_coordinator_registers_the_pin_with_the_relay() {
+        use crate::remote::relay_client::PairingCoordinator;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let coordinator = PairingCoordinator::new("daemon-machine", tx);
+
+        // Answer the registration the way a connected relay control channel would.
+        let relay = tokio::spawn(async move {
+            let request = rx.recv().await.expect("pairing must be registered with the relay");
+            let pin = request.registration.pin.clone();
+            let machine = request.registration.machine_id.clone();
+            let _ = request.ack.send(Ok(
+                crate::remote::protocol::RegisterPairingPinAck {
+                    generation: request.registration.generation,
+                    pin: pin.clone(),
+                    machine_id: machine.clone(),
+                    status: "ready".into(),
+                },
+            ));
+            (pin, machine)
+        });
+
+        let info = coordinator
+            .generate_pairing(std::time::Duration::from_secs(60))
+            .await
+            .expect("pairing generation must succeed once the relay ACKs");
+
+        let (registered_pin, machine) = relay.await.unwrap();
+        assert_eq!(
+            registered_pin, info.pin,
+            "the PIN handed to the user must be the PIN registered with the relay"
+        );
+        assert_eq!(machine, "daemon-machine");
+        assert_eq!(info.pin.len(), 6);
+    }
+
     use super::*;
     use crate::remote::auth::DevicePermission;
     use crate::terminal::{PtyManager, TerminalOutputHub};

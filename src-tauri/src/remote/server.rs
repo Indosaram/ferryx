@@ -1,5 +1,5 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
-use crate::remote::backend::{RemoteSessionBackend, RecoveryStream, RemoteRecoveryStatus};
+use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
 #[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
 #[cfg(feature = "native-terminal")]
@@ -64,10 +64,21 @@ pub(crate) struct RemoteTerminalFrameMetadata {
 pub(crate) fn encode_remote_terminal_output_frame(chunk: &OutputChunk) -> Vec<u8> {
     encode_remote_terminal_frame(
         RemoteTerminalFrameMetadata {
-            kind: if chunk.replay_gap.is_some() { "replayGap" } else { "output" }.into(),
+            kind: if chunk.replay_gap.is_some() {
+                "replayGap"
+            } else {
+                "output"
+            }
+            .into(),
             sequence: Some(chunk.sequence.to_string()),
-            requested_after_sequence: chunk.replay_gap.as_ref().map(|gap| gap.requested_after_sequence.to_string()),
-            available_from_sequence: chunk.replay_gap.as_ref().map(|gap| gap.available_from_sequence.to_string()),
+            requested_after_sequence: chunk
+                .replay_gap
+                .as_ref()
+                .map(|gap| gap.requested_after_sequence.to_string()),
+            available_from_sequence: chunk
+                .replay_gap
+                .as_ref()
+                .map(|gap| gap.available_from_sequence.to_string()),
             start_sequence: None,
             end_sequence: None,
         },
@@ -208,7 +219,11 @@ async fn pair_exchange(
         .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir))
         .map_err(|error| {
             tracing::error!(%error, "Unable to load pairing machine identity");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Machine identity unavailable").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Machine identity unavailable",
+            )
+                .into_response()
         })?;
     let (token, device) = state
         .auth_manager
@@ -229,7 +244,10 @@ async fn pair_exchange(
         })?;
 
     Ok(Json(PairExchangeResponse {
-        token, device, machine_id: identity.machine_id, display_name: identity.display_name,
+        token,
+        device,
+        machine_id: identity.machine_id,
+        display_name: identity.display_name,
     }))
 }
 
@@ -525,8 +543,15 @@ pub(crate) async fn get_active_running_sessions(
         if !details.running {
             continue;
         }
-        if let Some(id) = details.workspace_id.as_deref().filter(|id| crate::ssh::projects::is_remote(id)) {
-            if let Some(project) = ssh_projects.iter().find(|project| project.workspace_id == id) {
+        if let Some(id) = details
+            .workspace_id
+            .as_deref()
+            .filter(|id| crate::ssh::projects::is_remote(id))
+        {
+            if let Some(project) = ssh_projects
+                .iter()
+                .find(|project| project.workspace_id == id)
+            {
                 sessions.push(RemoteTerminalSession {
                     session_id: details.session_id,
                     title: None,
@@ -584,8 +609,12 @@ async fn list_sessions(
         .workspace_snapshot()
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    let ssh_projects = super::ssh::projects(&state).await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
+    let ssh_projects = super::ssh::projects(&state).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SSH inventory unavailable".into(),
+        )
+    })?;
     let sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
 
     Ok(Json(sessions))
@@ -608,12 +637,18 @@ async fn get_workspace_state(
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
-    let ssh_projects = super::ssh::projects(&state).await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
+    let ssh_projects = super::ssh::projects(&state).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SSH inventory unavailable".into(),
+        )
+    })?;
     let active_selection = state.active_selection.read().clone().filter(|selection| {
         selection.workspace_id.as_deref().is_none_or(|id| {
             !crate::ssh::projects::is_remote(id)
-                || ssh_projects.iter().any(|project| project.workspace_id == id)
+                || ssh_projects
+                    .iter()
+                    .any(|project| project.workspace_id == id)
         })
     });
     let mut projects = cache.projects(active_selection.as_ref());
@@ -676,23 +711,38 @@ async fn select_workspace(
 
     let is_ssh = crate::ssh::projects::is_remote(&payload.workspace_id);
     if is_ssh {
-        let projects = super::ssh::projects(&state).await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
-        if !projects.iter().any(|project| project.workspace_id == payload.workspace_id)
-            || payload.worktree.is_some() || payload.worktree_slug.is_some()
+        let projects = super::ssh::projects(&state).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SSH inventory unavailable".into(),
+            )
+        })?;
+        if !projects
+            .iter()
+            .any(|project| project.workspace_id == payload.workspace_id)
+            || payload.worktree.is_some()
+            || payload.worktree_slug.is_some()
         {
             return Err((StatusCode::BAD_REQUEST, "SSH project is unavailable".into()));
         }
     } else {
-        state.workspace_registry.manager(&payload.workspace_id)
+        state
+            .workspace_registry
+            .manager(&payload.workspace_id)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
 
     if let Some(session_id) = payload.session_id.as_deref() {
-        let details = state.session_backend.describe_session(session_id).await
+        let details = state
+            .session_backend
+            .describe_session(session_id)
+            .await
             .map_err(|_| (StatusCode::BAD_REQUEST, "Session unavailable".into()))?;
         if !details.running || details.workspace_id.as_deref() != Some(&payload.workspace_id) {
-            return Err((StatusCode::BAD_REQUEST, "Session does not belong to project".into()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Session does not belong to project".into(),
+            ));
         }
     }
 
@@ -731,8 +781,15 @@ async fn select_workspace(
             selection.workspace_id.as_deref() == Some(payload.workspace_id.as_str())
                 && selection.terminal_tabs.iter().any(|tab| {
                     tab.id == tab_id
-                        && tab.worktree_slug.as_deref().or(selection.worktree_slug.as_deref()) == worktree_slug.as_deref()
-                        && payload.session_id.as_deref().is_none_or(|id| tab.session_id.as_deref() == Some(id))
+                        && tab
+                            .worktree_slug
+                            .as_deref()
+                            .or(selection.worktree_slug.as_deref())
+                            == worktree_slug.as_deref()
+                        && payload
+                            .session_id
+                            .as_deref()
+                            .is_none_or(|id| tab.session_id.as_deref() == Some(id))
                 })
         });
         if !tab_is_available {
@@ -992,9 +1049,14 @@ async fn ws_terminal_handler(
     }
 
     let attachment = while_device_authorized(&mut revocation, async {
-        if let Some((cols, rows)) = requested_geometry.filter(|_| device.permission == DevicePermission::Control) {
+        if let Some((cols, rows)) =
+            requested_geometry.filter(|_| device.permission == DevicePermission::Control)
+        {
             if state.session_backend.recovery(&session_id).await?.is_none() {
-            state.session_backend.resize(&session_id, cols, rows).await?;
+                state
+                    .session_backend
+                    .resize(&session_id, cols, rows)
+                    .await?;
             }
         }
         state
@@ -1030,14 +1092,27 @@ async fn handle_terminal_socket(
     };
     let is_ssh = recovery.is_some();
     if let Some(stream) = recovery.as_mut() {
-        let Some(status) = stream.next().await else { return; };
+        let Some(status) = stream.next().await else {
+            return;
+        };
         *recovery_state.write() = Some(status.clone());
-        if socket.send(recovery_message(status)).await.is_err() { return; }
+        if socket.send(recovery_message(status)).await.is_err() {
+            return;
+        }
     }
     if render_grid {
         #[cfg(feature = "native-terminal")]
         {
-            handle_terminal_grid_socket(socket, session_id, attachment, device, state, recovery, recovery_state).await;
+            handle_terminal_grid_socket(
+                socket,
+                session_id,
+                attachment,
+                device,
+                state,
+                recovery,
+                recovery_state,
+            )
+            .await;
             return;
         }
         #[cfg(not(feature = "native-terminal"))]
@@ -1078,7 +1153,9 @@ async fn handle_terminal_socket(
             };
             match output {
                 Ok(chunk) => {
-                    if chunk.replay_gap.is_none() && last_emitted_sequence.is_some_and(|last| chunk.sequence <= last) {
+                    if chunk.replay_gap.is_none()
+                        && last_emitted_sequence.is_some_and(|last| chunk.sequence <= last)
+                    {
                         continue;
                     }
                     let frame = encode_remote_terminal_output_frame(&chunk);
@@ -1137,11 +1214,18 @@ async fn handle_terminal_socket(
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
-                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control).await;
-                            if !matches!(ctrl, ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping) { continue; }
+                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control)
+                                .await;
+                            if !matches!(
+                                ctrl,
+                                ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                            ) {
+                                continue;
+                            }
                         }
                         match ctrl {
-                            ClientControlMessage::RemoteWrite { .. } | ClientControlMessage::RemoteResize { .. } => {}
+                            ClientControlMessage::RemoteWrite { .. }
+                            | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
@@ -1188,9 +1272,16 @@ async fn handle_terminal_socket(
 }
 
 fn recovery_message(status: RemoteRecoveryStatus) -> Message {
-    Message::Text(serde_json::to_string(&crate::remote::protocol::ServerControlMessage::RemoteStatus {
-        state: status.state, generation: status.generation.to_string(),
-    }).expect("recovery status serializes").into())
+    Message::Text(
+        serde_json::to_string(
+            &crate::remote::protocol::ServerControlMessage::RemoteStatus {
+                state: status.state,
+                generation: status.generation.to_string(),
+            },
+        )
+        .expect("recovery status serializes")
+        .into(),
+    )
 }
 
 async fn next_recovery(stream: &mut Option<RecoveryStream>) -> Option<RemoteRecoveryStatus> {
@@ -1202,16 +1293,32 @@ async fn next_recovery(stream: &mut Option<RecoveryStream>) -> Option<RemoteReco
 
 /// SSH input always carries the generation chosen by the client, never one sampled
 /// by the gateway after buffering or recovery. The runtime performs atomic admission.
-async fn ssh_control(backend: &Arc<dyn RemoteSessionBackend>, id: &str, control: &ClientControlMessage, can_control: bool) {
-    if !can_control { return; }
+async fn ssh_control(
+    backend: &Arc<dyn RemoteSessionBackend>,
+    id: &str,
+    control: &ClientControlMessage,
+    can_control: bool,
+) {
+    if !can_control {
+        return;
+    }
     match control {
         ClientControlMessage::RemoteWrite { generation, data } => {
             if let Ok(generation) = generation.parse::<u64>() {
-                let _ = backend.write_generation(id, generation, data.as_bytes()).await;
+                let _ = backend
+                    .write_generation(id, generation, data.as_bytes())
+                    .await;
             }
         }
-        ClientControlMessage::RemoteResize { generation, cols, rows } => {
-            if let (Ok(generation), Some((cols, rows))) = (generation.parse::<u64>(), validated_grid_geometry(*cols, *rows)) {
+        ClientControlMessage::RemoteResize {
+            generation,
+            cols,
+            rows,
+        } => {
+            if let (Ok(generation), Some((cols, rows))) = (
+                generation.parse::<u64>(),
+                validated_grid_geometry(*cols, *rows),
+            ) {
                 let _ = backend.resize_generation(id, generation, cols, rows).await;
             }
         }
@@ -1297,7 +1404,9 @@ async fn handle_terminal_grid_socket(
     let mut status_task = std::pin::pin!(async move {
         while let Some(status) = next_recovery(&mut recovery).await {
             *status_recovery_state.write() = Some(status.clone());
-            if status_tx.send(recovery_message(status)).is_err() { break; }
+            if status_tx.send(recovery_message(status)).is_err() {
+                break;
+            }
         }
     });
     let mut writer_task = std::pin::pin!(async move {
@@ -1478,11 +1587,18 @@ async fn handle_terminal_grid_socket(
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
-                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control).await;
-                            if !matches!(ctrl, ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping) { continue; }
+                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control)
+                                .await;
+                            if !matches!(
+                                ctrl,
+                                ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                            ) {
+                                continue;
+                            }
                         }
                         match ctrl {
-                            ClientControlMessage::RemoteWrite { .. } | ClientControlMessage::RemoteResize { .. } => {}
+                            ClientControlMessage::RemoteWrite { .. }
+                            | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
@@ -1832,8 +1948,11 @@ async fn bind_and_serve(
 pub async fn start_remote_server(
     state: Arc<RemoteGatewayState>,
 ) -> Result<(RemoteServerHandle, SocketAddr), String> {
-    start_remote_server_with_resolver(state, Arc::new(crate::remote::state::SystemInterfaceResolver))
-        .await
+    start_remote_server_with_resolver(
+        state,
+        Arc::new(crate::remote::state::SystemInterfaceResolver),
+    )
+    .await
 }
 
 /// Same as [`start_remote_server`] but takes an explicit
@@ -1848,7 +1967,11 @@ pub async fn start_remote_server_with_resolver(
         return Err("Remote gateway is OFF".into());
     }
 
-    let relay_url = config.relay_url.as_deref().map(str::trim).filter(|url| !url.is_empty());
+    let relay_url = config
+        .relay_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
     if config.mode == RemoteNetworkMode::Relay && relay_url.is_none() {
         return Err("Relay mode requires a non-empty relay URL".into());
     }
@@ -1910,18 +2033,28 @@ pub async fn start_remote_server_with_resolver(
         }
     }
 
-    let relay_task = relay_url.filter(|_| config.mode == RemoteNetworkMode::Relay).map(|url| {
-        let client = match relay_token {
-            Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
-                url, token, primary_local_addr.to_string(),
-            ),
-            None => crate::remote::relay_client::RelayClient::with_identity(
-                url, relay_identity.expect("relay identity loaded before binding"), primary_local_addr.to_string(),
-            ),
-        }.with_auth_manager((*state.auth_manager).clone());
-        // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
-        tokio::spawn(async move { client.run().await })
-    });
+    let relay_task = relay_url
+        .filter(|_| config.mode == RemoteNetworkMode::Relay)
+        .map(|url| {
+            let client = match relay_token {
+                Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                    url,
+                    token,
+                    primary_local_addr.to_string(),
+                ),
+                None => crate::remote::relay_client::RelayClient::with_identity(
+                    url,
+                    relay_identity.expect("relay identity loaded before binding"),
+                    primary_local_addr.to_string(),
+                ),
+            }
+            .with_auth_manager((*state.auth_manager).clone());
+            // Publish the one relay pairing authority so daemon/GUI pairing registers
+            // its PIN with the relay instead of minting a local-only code.
+            *state.relay_pairing.write() = Some(client.pairing_coordinator());
+            // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
+            tokio::spawn(async move { client.run().await })
+        });
 
     Ok((
         RemoteServerHandle {
@@ -1943,29 +2076,69 @@ mod tests {
 
     #[tokio::test]
     async fn relay_startup_connects_without_machine_token() {
+        use crate::remote::protocol::{ControlAuth, ControlAuthResponse, ControlChallenge};
         use futures_util::{SinkExt, StreamExt};
-        use crate::remote::protocol::{ControlAuth, ControlChallenge, ControlAuthResponse};
-        assert!(std::env::var("FERRYX_MACHINE_TOKEN").unwrap_or_default().trim().is_empty(),
-            "run zero-config regression without FERRYX_MACHINE_TOKEN");
+        assert!(
+            std::env::var("FERRYX_MACHINE_TOKEN")
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "run zero-config regression without FERRYX_MACHINE_TOKEN"
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = listener.local_addr().unwrap();
         let (authenticated_tx, authenticated_rx) = tokio::sync::oneshot::channel();
         let relay = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            let challenge = ControlChallenge { nonce: "startup-challenge".into(), timestamp: 1234 };
-            socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&challenge).unwrap().into())).await.unwrap();
+            let challenge = ControlChallenge {
+                nonce: "startup-challenge".into(),
+                timestamp: 1234,
+            };
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&challenge).unwrap().into(),
+                ))
+                .await
+                .unwrap();
             let frame = socket.next().await.unwrap().unwrap();
             let auth: ControlAuth = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            assert!(crate::remote::auth::verify_control_challenge(&auth.public_key, &auth.machine_id, "relay", &challenge.nonce, auth.timestamp, &auth.signature));
-            socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&ControlAuthResponse { success: true, error: None }).unwrap().into())).await.unwrap();
+            assert!(crate::remote::auth::verify_control_challenge(
+                &auth.public_key,
+                &auth.machine_id,
+                "relay",
+                &challenge.nonce,
+                auth.timestamp,
+                &auth.signature
+            ));
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&ControlAuthResponse {
+                        success: true,
+                        error: None,
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
             authenticated_tx.send(auth.machine_id).unwrap();
-            while let Some(frame) = socket.next().await { if frame.is_err() { break; } }
+            while let Some(frame) = socket.next().await {
+                if frame.is_err() {
+                    break;
+                }
+            }
         });
         let terminal = Arc::new(TerminalService::new(
-            Arc::new(crate::terminal::PtyManager::new()), Arc::new(TerminalOutputHub::default()),
+            Arc::new(crate::terminal::PtyManager::new()),
+            Arc::new(TerminalOutputHub::default()),
         ));
-        let state = Arc::new(RemoteGatewayState::new_with_paths(terminal, WorkspaceRegistry::new(), None, None));
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            terminal,
+            WorkspaceRegistry::new(),
+            None,
+            None,
+        ));
         {
             let mut config = state.config.write();
             config.mode = RemoteNetworkMode::Relay;
@@ -1974,8 +2147,14 @@ mod tests {
         }
         let (handle, address) = start_remote_server(state).await.unwrap();
         assert!(address.ip().is_loopback());
-        let machine = tokio::time::timeout(std::time::Duration::from_secs(5), authenticated_rx).await.unwrap().unwrap();
-        let identity = crate::remote::auth::load_or_generate_machine_identity(&crate::remote::auth::canonical_identity_dir().unwrap()).unwrap();
+        let machine = tokio::time::timeout(std::time::Duration::from_secs(5), authenticated_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let identity = crate::remote::auth::load_or_generate_machine_identity(
+            &crate::remote::auth::canonical_identity_dir().unwrap(),
+        )
+        .unwrap();
         assert_eq!(machine, identity.machine_id);
         handle.stop();
         relay.abort();
@@ -2020,7 +2199,9 @@ mod tests {
         assert_eq!(sessions[0].session_id, session_id);
         assert!(sessions[0].running);
 
-        pty.close_session(&session_id).await.expect("close fixture PTY");
+        pty.close_session(&session_id)
+            .await
+            .expect("close fixture PTY");
     }
 
     /// Starting the gateway in `Loopback`-equivalent (`Off`-free, no
@@ -2157,7 +2338,8 @@ mod tests {
             }),
         )
         .await;
-        let (status, _) = unsubscribe_result.expect_err("unauthenticated unsubscribe must be rejected");
+        let (status, _) =
+            unsubscribe_result.expect_err("unauthenticated unsubscribe must be rejected");
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         assert!(
