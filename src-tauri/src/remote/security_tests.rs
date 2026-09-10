@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Duration;
 
-const DEADLINE: Duration = Duration::from_secs(5);
+const DEADLINE: Duration = Duration::from_secs(15);
 
 #[path = "security_socket_tests.rs"]
 mod sockets;

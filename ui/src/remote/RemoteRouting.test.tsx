@@ -113,9 +113,13 @@ it("migrates a single-host inventory and its scoped token without borrowing an o
 
 it("parses fragment PIN and hints separately and rolls a failed terminal back to relay", async () => {
   window.history.replaceState(null, "", "/#pair=123456&hints=" + encodeURIComponent("http://192.168.1.20:8787,https://evil.example"));
-  const fetcher = vi.fn(async (url: string) => {
+  const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.includes("pair/exchange")) return new Response(JSON.stringify({ token: "paired" }));
-    if (url.endsWith("/api/v1/health")) return new Response("ok");
+    if (url.endsWith("/api/v1/health")) {
+      return new Response("ok", {
+        status: new Headers(init?.headers).get("Authorization") === "Bearer paired" ? 200 : 401,
+      });
+    }
     return workspace();
   });
   vi.stubGlobal("fetch", fetcher);

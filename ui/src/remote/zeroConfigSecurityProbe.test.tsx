@@ -19,13 +19,18 @@ class Socket {
 }
 
 function fetcher(machineId = "audit-a") {
-  return vi.fn(async (url: string, _init?: RequestInit) => {
+  return vi.fn(async (url: string, init?: RequestInit) => {
     if (url.includes("socket-ticket")) return Response.json({ ticket: "audit-ticket" });
     if (url.includes("pair/exchange")) return Response.json({
       token: "audit-device", device: { id: "audit-device-id", name: "Browser Device", permission: "control" },
       machineId: "audit-new", displayName: "New",
     });
-    if (url.endsWith("/api/v1/health")) return Response.json({ machineId });
+    if (url.endsWith("/api/v1/health")) {
+      if (new Headers(init?.headers).get("Authorization") !== "Bearer audit-device-a") {
+        return new Response(null, { status: 401 });
+      }
+      return Response.json({ machineId });
+    }
     return Response.json({
       activeContext: { workspaceId: "audit-workspace", sessionId: "audit-terminal", terminalTabs: [] },
       projects: [], sessions: [],
@@ -116,13 +121,14 @@ it("retains the machine prefix, ticket and grid geometry in the real terminal so
   }));
 });
 
-it.each(["audit-a", "impostor"])("validates direct candidate machineId %s before releasing credentials", async (machineId) => {
+it.each(["audit-a", "impostor"])("authenticates the direct probe and validates machineId %s before upgrading transport", async (machineId) => {
   const direct = "https://192.168.1.99:8787";
   paired([{ type: "lan", url: direct, priority: 30 }]);
   const fetch = fetcher(machineId);
   await mount(fetch);
   expect(fetch).toHaveBeenCalledWith(`${direct}/api/v1/health`, expect.objectContaining({
-    credentials: "omit", redirect: "error", cache: "no-store",
+    credentials: "omit", redirect: "error", cache: "no-store", mode: "cors",
+    headers: { Authorization: "Bearer audit-device-a" },
   }));
   const directCalls = fetch.mock.calls.filter(([url]) => url.startsWith(direct) && !url.endsWith("/health"));
   if (machineId === "audit-a") {

@@ -451,11 +451,12 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     const timeout = setTimeout(() => controller.abort(), DEFAULT_PROBE_TIMEOUT_MS);
     void Promise.all(candidates.map(async (candidate) => {
       try {
-        // Probe without credentials or redirects; known hosts must match their identity.
+        // Authenticate with the device token, omit cookies and reject redirects; known hosts must match their identity.
         const response = await fetch(`${candidate.url}/api/v1/health`, {
           signal: controller.signal,
           cache: "no-store",
           credentials: "omit",
+          headers: { Authorization: `Bearer ${token}` },
           redirect: "error",
           mode: "cors",
         });
