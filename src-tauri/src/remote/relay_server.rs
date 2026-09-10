@@ -37,15 +37,15 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Path as AxumPath, Query, State,
     },
-    http::{HeaderMap, Method, Request, StatusCode},
-    response::Response,
+    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
+    response::{IntoResponse, Response},
     routing::{any, get, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -137,6 +137,7 @@ impl Drop for SessionGuard {
 #[derive(Clone)]
 pub struct RelayState {
     inner: Arc<RelayInner>,
+    paired_tokens: Arc<Mutex<HashMap<String, HashSet<String>>>>,
 }
 
 struct RelayInner {
@@ -200,6 +201,7 @@ impl RelayState {
             Err(error) => return Err(error),
         };
         Ok(Self {
+            paired_tokens: Arc::new(Mutex::new(HashMap::new())),
             inner: Arc::new(RelayInner {
                 machine_tokens,
                 next_generation: AtomicU64::new(1),
@@ -213,6 +215,16 @@ impl RelayState {
                 pending_socket_tickets: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Register a token issued by this machine's authenticated gateway.
+    pub fn register_device_token(&self, machine_id: &str, token: &str) {
+        self.paired_tokens.lock().entry(machine_id.to_owned()).or_default().insert(token.to_owned());
+    }
+
+    /// Machines not yet paired through this relay retain gateway-side authentication.
+    pub fn is_valid_device_token(&self, machine_id: &str, token: &str) -> bool {
+        self.paired_tokens.lock().get(machine_id).is_none_or(|tokens| tokens.contains(token))
     }
 
     fn bind_machine_key(&self, auth: &ControlAuth) -> Result<(), String> {
@@ -429,7 +441,8 @@ impl RelayState {
             || registration.machine_id != machine
             || registration.pin.len() != 6
             || !registration.pin.bytes().all(|b| b.is_ascii_digit())
-            || registration.pairing_token.is_empty()
+            || !(16..=64).contains(&registration.pairing_token.len())
+            || !registration.pairing_token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
             || registration.expires_at <= current_time_secs()
         {
             return Err("Invalid pairing registration");
@@ -567,7 +580,7 @@ async fn socket_ticket_handler(
     AxumPath(machine): AxumPath<String>,
     headers: HeaderMap,
     Json(mut body): Json<serde_json::Value>,
-) -> Result<Json<SocketTicketResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
     let device_token = headers.get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
@@ -585,6 +598,11 @@ async fn socket_ticket_handler(
     if !state.inner.control_channels.lock().get(&machine).is_some_and(|c| !c.tx.is_closed()) {
         return Err(StatusCode::NOT_FOUND);
     }
+    if !state.is_valid_device_token(&machine, &device_token) {
+        return Ok((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
+            "error": "Device token not authorized for this machine"
+        }))).into_response());
+    }
     let now = current_time_secs();
     let mut tickets = state.inner.pending_socket_tickets.lock();
     tickets.retain(|_, (_, _, _, expiry)| *expiry > now);
@@ -594,12 +612,12 @@ async fn socket_ticket_handler(
     let ticket = uuid::Uuid::new_v4().to_string();
     let expires_at = now + SOCKET_TICKET_TTL;
     tickets.insert(ticket.clone(), (machine, request.target, device_token, expires_at));
-    Ok(Json(SocketTicketResponse { ticket, expires_at }))
+    Ok(Json(SocketTicketResponse { ticket, expires_at }).into_response())
 }
 
 fn valid_socket_target(target: &str) -> bool {
     target == "/api/v1/events" || target.strip_prefix("/api/v1/terminal/").is_some_and(|id| {
-        !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':'))
     })
 }
 
@@ -777,7 +795,10 @@ async fn host_http_handler(
     request: Request<Body>,
 ) -> Result<Response, StatusCode> {
     if !(matches!(path.as_str(), "events" | "socket-ticket" | "pair/exchange")
-        || ["workspace/", "terminal/", "push/"].iter().any(|prefix| path.starts_with(prefix)))
+        || ["workspace/", "terminal/", "push/"].iter().any(|prefix| path.starts_with(prefix))
+        || path.strip_prefix("session/").is_some_and(|id| {
+            !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':'))
+        }))
         || path.split('/').any(|part| matches!(part, "." | "..") || part.contains(['%', '\\']))
     {
         return Err(StatusCode::FORBIDDEN);
@@ -837,11 +858,21 @@ async fn exchange_http(
     )
     .await?;
     if response.status().is_success() {
+        #[derive(Deserialize)]
+        struct IssuedDeviceToken { token: String }
+        let (parts, body) = response.into_parts();
+        let body = to_bytes(body, MAX_HTTP_SIZE).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let issued: IssuedDeviceToken = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_GATEWAY)?;
+        if issued.token.is_empty() {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        state.register_device_token(&machine, &issued.token);
         if let Some(p) = state.inner.pairings.lock().get_mut(&pin) {
             if p.state == PairingState::Claimed && p.registration.pairing_token == token {
                 p.state = PairingState::Consumed;
             }
         }
+        return Ok(Response::from_parts(parts, Body::from(body)));
     }
     Ok(response)
 }
@@ -1015,6 +1046,9 @@ fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Respo
         }
     }
     let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store, private"));
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.remove("clear-site-data");
     headers.remove("set-cookie");
     headers.remove("service-worker-allowed");
     if headers.get_all("content-type").iter().any(|value| {
@@ -1434,8 +1468,9 @@ mod tests {
     async fn issue_test_ticket(state: &RelayState, target: &str) -> SocketTicketResponse {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer test-device-token".parse().unwrap());
-        socket_ticket_handler(State(state.clone()), AxumPath("browser-machine".into()), headers,
-            Json(serde_json::json!({"target": target}))).await.unwrap().0
+        let response = socket_ticket_handler(State(state.clone()), AxumPath("browser-machine".into()), headers,
+            Json(serde_json::json!({"target": target}))).await.unwrap();
+        serde_json::from_slice(&to_bytes(response.into_body(), MAX_MESSAGE_SIZE).await.unwrap()).unwrap()
     }
 
     fn ticket_query(ticket: &str) -> Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection> {
@@ -1594,13 +1629,13 @@ mod tests {
             let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
             assert_eq!(body["code"], "security-pairing-secret");
             assert_eq!(body["deviceName"], "isolated-client");
-            data.send(TMessage::Binary(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\ndaemon_1".to_vec().into())).await.unwrap();
+            data.send(TMessage::Binary(b"HTTP/1.1 200 OK\r\nContent-Length: 29\r\n\r\n{\"token\":\"test-device-token\"}".to_vec().into())).await.unwrap();
             let _ = timeout(Duration::from_secs(5), data.next()).await.unwrap();
         };
         let (response, ()) = timeout(Duration::from_secs(5), async { tokio::join!(request, daemon) }).await.unwrap();
         let response = response.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.text().await.unwrap(), "daemon_1");
+        assert_eq!(response.text().await.unwrap(), r#"{"token":"test-device-token"}"#);
         assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Consumed);
         for target in ["/api/v1/events", "/api/v1/terminal/t1"] {
             let response = client.post(format!("{}/host/daemon_1/api/v1/socket-ticket", base.replace("ws://", "http://")))
@@ -1753,6 +1788,15 @@ mod tests {
         assert!(body["displayName"].as_str().is_some_and(|name| !name.is_empty()));
         let device = state.auth_manager.validate_token(body["token"].as_str().unwrap()).unwrap();
         assert_eq!(device.name, "real browser");
+        // Given a completed exchange, only its issued device token may get tickets.
+        for (token, expected) in [("unissued-device-token", StatusCode::UNAUTHORIZED), (body["token"].as_str().unwrap(), StatusCode::OK)] {
+            // When requesting a socket ticket through the public HTTP surface.
+            let ticket = http.post(format!("{}/host/real-gateway/api/v1/socket-ticket", base.replace("ws://", "http://")))
+                .bearer_auth(token).header("content-type", "application/json")
+                .body(r#"{"target":"/api/v1/events"}"#).send().await.unwrap();
+            // Then issuance reflects the authenticated device identity.
+            assert_eq!(ticket.status(), expected);
+        }
         assert!(state.auth_manager.exchange_pairing_code(&session.pairing_token, "replay").is_err());
         control.abort(); gateway.abort(); relay.abort();
     }
@@ -1770,18 +1814,18 @@ mod tests {
         for (pin, token, route, credential) in [
             (
                 "123456",
-                "secret-one",
+                "pairing-secret-one",
                 "/api/v1/pair/exchange",
                 serde_json::json!({"pin":"123456"}),
             ),
             (
                 "234567",
-                "secret-two",
+                "pairing-secret-two",
                 "/host/pair-machine/api/v1/pair/exchange",
-                serde_json::json!({"pairingToken":"secret-two"}),
+                serde_json::json!({"pairingToken":"pairing-secret-two"}),
             ),
-            ("345678", "secret-three", "/api/v1/pair/exchange", serde_json::json!({"code":"345678"})),
-            ("456789", "secret-four", "/api/v1/pair/exchange", serde_json::json!({"code":"secret-four"})),
+            ("345678", "pairing-secret-three", "/api/v1/pair/exchange", serde_json::json!({"code":"345678"})),
+            ("456789", "pairing-secret-four", "/api/v1/pair/exchange", serde_json::json!({"code":"pairing-secret-four"})),
         ] {
             let registration = RegisterPairingPin {
                 generation: None,
@@ -1899,6 +1943,58 @@ mod tests {
             );
         }
         server.abort();
+    }
+
+    #[test]
+    fn rejects_registration_when_capability_format_is_invalid() {
+        // Given an authenticated machine and malformed capabilities.
+        for token in ["short", "abcdefghijklmnop_", "abcdefghijklmnop/", "éabcdefghijklmnop", &"a".repeat(65)] {
+            let state = test_state(vec![]);
+            let (generation, _notices) = state.register_control_channel("machine".into());
+            let mut registration = security_registration("machine");
+            registration.pairing_token = token.into();
+            // When registering the pairing capability.
+            let result = state.register_pairing("machine", generation, registration);
+            // Then the registration is rejected.
+            assert!(result.is_err(), "accepted {token}");
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_session_when_path_is_colon_scoped() {
+        // Given a valid scoped session path and an offline machine.
+        let state = test_state(vec![]);
+        let path = "session/workspace:session-1";
+        let request = Request::builder().uri(format!("/host/machine/api/v1/{path}"))
+            .body(Body::empty()).unwrap();
+        // When proxying the session request.
+        let result = host_http_handler(State(state), AxumPath(("machine".into(), path.into())), None, request).await;
+        // Then routing succeeds and the offline machine is reported, not forbidden.
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn accepts_target_when_session_is_colon_scoped() {
+        // Given a workspace-scoped terminal session.
+        let target = "/api/v1/terminal/workspace:session-1";
+        // When checking the socket target.
+        let valid = valid_socket_target(target);
+        // Then the target is accepted.
+        assert!(valid);
+    }
+
+    #[test]
+    fn protects_origin_when_gateway_sends_sensitive_headers() {
+        // Given a gateway response that attempts to mutate shared-origin state.
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nCache-Control: public\r\nPragma: cache\r\nClear-Site-Data: *\r\nSet-Cookie: sid=secret\r\nService-Worker-Allowed: /\r\n\r\n";
+        // When filtering the gateway response.
+        let response = parse_http_response(raw, false, false).unwrap().unwrap();
+        // Then caching and origin-mutating headers are blocked.
+        assert_eq!(response.headers()["cache-control"], "no-store, private");
+        assert_eq!(response.headers()["pragma"], "no-cache");
+        for name in ["clear-site-data", "set-cookie", "service-worker-allowed"] {
+            assert!(!response.headers().contains_key(name));
+        }
     }
 
     #[tokio::test]
