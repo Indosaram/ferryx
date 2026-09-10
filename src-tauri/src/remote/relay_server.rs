@@ -26,7 +26,7 @@
 //! Pending and active sessions share a 100-entry budget. Pairing expires
 //! after 30 seconds; sends time out after 30 seconds and sessions after one hour.
 
-use crate::remote::auth::verify_machine_signature;
+use crate::remote::auth::{verify_control_challenge, write_private_json};
 use crate::remote::protocol::{
     ControlAuth, ControlAuthResponse, ControlChallenge, PairingState, RegisterPairingPin,
     RegisterPairingPinAck, SocketTicketRequest, SocketTicketResponse,
@@ -143,6 +143,7 @@ struct RelayInner {
     machine_tokens: Vec<String>,
     control_channels: Mutex<HashMap<String, ControlChannel>>,
     machine_public_keys: Mutex<HashMap<String, String>>,
+    key_store_path: Option<std::path::PathBuf>,
     admission: Mutex<HashMap<IpAddr, AttemptTracker>>,
     pairing_admission: Mutex<HashMap<IpAddr, AttemptTracker>>,
     pairings: Mutex<HashMap<String, RegisteredPairing>>,
@@ -178,19 +179,62 @@ enum PairingOutcome {
 
 impl RelayState {
     pub fn new(machine_tokens: Vec<String>) -> Self {
-        Self {
+        let path = std::env::var_os("FERRYX_RELAY_KEY_FILE").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("FERRYX_RELAY_DATA_DIR").map(|dir| std::path::PathBuf::from(dir).join("machine_keys.json")))
+            .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|dir| std::path::PathBuf::from(dir).join(".ferryx/relay/machine_keys.json")))
+            .expect("Cannot resolve relay machine key store");
+        Self::new_with_key_store(machine_tokens, path).expect("Failed to load relay machine key store")
+    }
+
+    pub fn new_with_key_store(machine_tokens: Vec<String>, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        Self::with_key_store(machine_tokens, Some(path.as_ref().to_path_buf()))
+    }
+
+    fn with_key_store(machine_tokens: Vec<String>, key_store_path: Option<std::path::PathBuf>) -> std::io::Result<Self> {
+        let keys = match key_store_path.as_ref().map(std::fs::read).transpose() {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+            Ok(None) => HashMap::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(error),
+        };
+        Ok(Self {
             inner: Arc::new(RelayInner {
                 machine_tokens,
                 next_generation: AtomicU64::new(1),
                 control_channels: Mutex::new(HashMap::new()),
-                machine_public_keys: Mutex::new(HashMap::new()),
+                machine_public_keys: Mutex::new(keys),
+                key_store_path,
                 admission: Mutex::new(HashMap::new()),
                 pairing_admission: Mutex::new(HashMap::new()),
                 pairings: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
             }),
+        })
+    }
+
+    fn bind_machine_key(&self, auth: &ControlAuth) -> Result<(), String> {
+        // Serialize ownership checks and durable enrollment under the same lock.
+        let mut keys = self.inner.machine_public_keys.lock();
+        if let Some(key) = keys.get(&auth.machine_id) {
+            return if key == &auth.public_key { Ok(()) } else {
+                Err("Machine ID already claimed by another public key".into())
+            };
         }
+        if !self.inner.machine_tokens.is_empty()
+            && !auth.enrollment_token.as_deref().is_some_and(|token| self.validate_machine_token(token))
+        {
+            return Err("Enrollment token required for private relay".into());
+        }
+        let mut enrolled = keys.clone();
+        enrolled.insert(auth.machine_id.clone(), auth.public_key.clone());
+        if let Some(path) = &self.inner.key_store_path {
+            write_private_json(path, &enrolled).map_err(|error| format!("Failed to persist machine ownership: {error}"))?;
+        }
+        *keys = enrolled;
+        Ok(())
     }
 
     fn admit(&self, ip: IpAddr, now: Instant) -> bool {
@@ -1043,24 +1087,17 @@ async fn authenticate_control_socket(
         if current_time_secs().abs_diff(auth.timestamp) > 60 {
             return Err("Authentication timestamp expired".to_string());
         }
-        if !verify_machine_signature(
+        if auth.timestamp != challenge.timestamp || !verify_control_challenge(
             &auth.public_key,
+            &auth.machine_id,
+            "relay",
             &challenge.nonce,
             auth.timestamp,
             &auth.signature,
         ) {
             return Err("Invalid machine signature".to_string());
         }
-        // Check and bind under one lock: concurrent first registrations cannot
-        // both claim the same machine ID with different keys.
-        let mut keys = state.inner.machine_public_keys.lock();
-        if keys
-            .get(&auth.machine_id)
-            .is_some_and(|key| key != &auth.public_key)
-        {
-            return Err("Machine ID already claimed by another public key".to_string());
-        }
-        keys.insert(auth.machine_id.clone(), auth.public_key);
+        state.bind_machine_key(&auth)?;
         Ok(auth.machine_id)
     };
     let result = match timeout(CONTROL_AUTH_TIMEOUT, authenticate).await {
@@ -1126,6 +1163,7 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
                             }
                             Ok(ControlRequest::RegisterPairingPin(registration)) => {
                                 let ack = RegisterPairingPinAck {
+                                    generation: registration.generation,
                                     pin: registration.pin.clone(),
                                     machine_id: machine_token.clone(),
                                     status: if state.register_pairing(&machine_token, generation, registration) { "ready" } else { "rejected" }.into(),
@@ -1298,6 +1336,9 @@ async fn proxy_sockets(a: WebSocket, b: WebSocket) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn test_state(tokens: Vec<String>) -> RelayState {
+        RelayState::with_key_store(tokens, None).unwrap()
+    }
     use super::*;
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message as TMessage;
@@ -1306,7 +1347,7 @@ mod tests {
     /// port and returns its base `ws://` URL along with a handle that
     /// keeps the server task alive for the duration of the test.
     async fn spawn_test_relay() -> (String, tokio::task::JoinHandle<()>) {
-        let state = RelayState::new(vec!["test-machine-token".to_string()]);
+        let state = test_state(vec!["test-machine-token".to_string()]);
         spawn_test_relay_with_state(state).await
     }
 
@@ -1350,6 +1391,7 @@ mod tests {
 
     fn security_registration(machine: &str) -> RegisterPairingPin {
         RegisterPairingPin {
+            generation: None,
             machine_id: machine.into(),
             pin: "123456".into(),
             pairing_token: "security-pairing-secret".into(),
@@ -1377,7 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_security_machine_id_hijack_rejection() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let (base, server) = spawn_test_relay_with_state(state.clone()).await;
         let owner = identity(31, "machine_alpha");
         let (mut original, auth) = authenticate(&base, &owner, false, false).await;
@@ -1399,7 +1441,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_security_fleet_pin_brute_force_lockout() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
         assert!(state.register_pairing("machine_alpha", generation, security_registration("machine_alpha")));
         for pin in ["000001", "000002", "000003", "000004", "000005"] {
@@ -1418,7 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_security_expired_pin_claim_rejected() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
         let mut expired = security_registration("machine_alpha");
         expired.expires_at = current_time_secs() - 10;
@@ -1435,7 +1477,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_security_role_swap_prevention() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let (base, server) = spawn_test_relay_with_state(state.clone()).await;
         let (mut daemon, auth) = authenticate(&base, &identity(33, "machine_alpha"), false, false).await;
         assert!(auth.success);
@@ -1460,7 +1502,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_security_concurrent_two_daemon_isolation() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let (base, server) = spawn_test_relay_with_state(state.clone()).await;
         let first = identity(34, "daemon_1");
         let second = identity(35, "daemon_2");
@@ -1514,7 +1556,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_relay_socket_ticket_issuance_and_single_use() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let (_generation, _control) = state.register_control_channel("browser-machine".into());
         let ticket = issue_test_ticket(&state, "/api/v1/events").await;
         assert_eq!(uuid::Uuid::parse_str(&ticket.ticket).unwrap().get_version_num(), 4);
@@ -1531,7 +1573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_relay_socket_ticket_expired_rejected() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let (_generation, _control) = state.register_control_channel("browser-machine".into());
         let ticket = issue_test_ticket(&state, "/api/v1/events").await;
         state.inner.pending_socket_tickets.lock().get_mut(&ticket.ticket).unwrap().2 = current_time_secs() - 1;
@@ -1630,6 +1672,7 @@ mod tests {
         let router = crate::remote::server::create_remote_router(state.clone());
         let gateway = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let client = RelayClient::with_identity(&base, identity(19, "real-gateway"), gateway_addr.to_string())
+            .with_enrollment_token("test-machine-token")
             .with_auth_manager((*state.auth_manager).clone());
         let coordinator = client.pairing_coordinator();
         let control = tokio::spawn(async move { client.run().await });
@@ -1677,6 +1720,7 @@ mod tests {
             ("456789", "secret-four", "/api/v1/pair/exchange", serde_json::json!({"code":"secret-four"})),
         ] {
             let registration = RegisterPairingPin {
+                generation: None,
                 pin: pin.into(),
                 pairing_token: token.into(),
                 machine_id: "pair-machine".into(),
@@ -1839,6 +1883,16 @@ mod tests {
         wrong_signature: bool,
         stale: bool,
     ) -> (TestSocket, ControlAuthResponse) {
+        authenticate_with_token(base, identity, wrong_signature, stale, Some("test-machine-token")).await
+    }
+
+    async fn authenticate_with_token(
+        base: &str,
+        identity: &crate::remote::auth::MachineIdentity,
+        wrong_signature: bool,
+        stale: bool,
+        enrollment_token: Option<&str>,
+    ) -> (TestSocket, ControlAuthResponse) {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
             .await
             .unwrap();
@@ -1849,12 +1903,14 @@ mod tests {
             challenge.timestamp
         };
         let auth = ControlAuth {
+            enrollment_token: enrollment_token.map(str::to_owned),
             machine_id: identity.machine_id.clone(),
             display_name: identity.display_name.clone(),
             public_key: identity.public_key.clone(),
             timestamp,
-            signature: crate::remote::auth::sign_challenge(
+            signature: crate::remote::auth::sign_control_challenge(
                 identity,
+                "relay",
                 if wrong_signature {
                     "different-nonce"
                 } else {
@@ -1878,6 +1934,74 @@ mod tests {
             .await
             .unwrap();
         receive_json(socket).await
+    }
+
+    #[test]
+    fn test_control_challenge_domain_separation() {
+        use crate::remote::auth::{sign_challenge, sign_control_challenge};
+        let owner = identity(1, "machine-a");
+        let signature = sign_control_challenge(&owner, "relay", "nonce", 42).unwrap();
+        assert!(verify_control_challenge(&owner.public_key, "machine-a", "relay", "nonce", 42, &signature));
+        for (machine, audience, nonce, timestamp) in [
+            ("machine-b", "relay", "nonce", 42),
+            ("machine-a", "gateway", "nonce", 42),
+            ("machine-a", "relay", "different", 42),
+            ("machine-a", "relay", "nonce", 43),
+        ] {
+            assert!(!verify_control_challenge(&owner.public_key, machine, audience, nonce, timestamp, &signature));
+        }
+        let legacy = sign_challenge(&owner, "nonce", 42).unwrap();
+        assert!(!verify_control_challenge(&owner.public_key, "machine-a", "relay", "nonce", 42, &legacy));
+    }
+
+    #[tokio::test]
+    async fn test_machine_ownership_survives_restart_and_private_enrollment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine_keys.json");
+        let state = RelayState::new_with_key_store(vec!["enroll".into()], &path).unwrap();
+        let (base, server) = spawn_test_relay_with_state(state).await;
+        let owner = identity(1, "durable-machine");
+        for token in [None, Some("wrong")] {
+            let (_, response) = authenticate_with_token(&base, &owner, false, false, token).await;
+            assert!(!response.success);
+            assert!(!path.exists());
+        }
+        let (mut socket, response) = authenticate_with_token(&base, &owner, false, false, Some("enroll")).await;
+        assert!(response.success);
+        allocate(&mut socket).await;
+        socket.close(None).await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+
+        let state = RelayState::new_with_key_store(vec!["enroll".into()], &path).unwrap();
+        let (base, server) = spawn_test_relay_with_state(state).await;
+        let (mut socket, response) = authenticate_with_token(&base, &owner, false, false, None).await;
+        assert!(response.success);
+        allocate(&mut socket).await;
+        let impostor = identity(2, "durable-machine");
+        let (_, response) = authenticate_with_token(&base, &impostor, false, false, Some("enroll")).await;
+        assert!(!response.success);
+        let outsider = identity(3, "unlisted-machine");
+        let (_, response) = authenticate_with_token(&base, &outsider, false, false, None).await;
+        assert!(!response.success);
+        server.abort();
+    }
+
+    #[test]
+    fn test_key_store_corruption_and_write_failure_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine_keys.json");
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(RelayState::new_with_key_store(vec![], &path).is_err());
+        let blocked = dir.path().join("blocked");
+        let state = RelayState::new_with_key_store(vec![], blocked.join("keys.json")).unwrap();
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let auth = ControlAuth {
+            enrollment_token: None, machine_id: "machine".into(), display_name: "test".into(),
+            public_key: identity(1, "machine").public_key, signature: String::new(), timestamp: 0,
+        };
+        assert!(state.bind_machine_key(&auth).is_err());
+        assert!(state.inner.machine_public_keys.lock().is_empty());
     }
 
     #[tokio::test]
@@ -1972,7 +2096,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_relay_admission_rate_limiting() {
-        let state = RelayState::new(vec![]);
+        let state = test_state(vec![]);
         let ip = "127.0.0.1".parse().unwrap();
         let other_ip = "127.0.0.2".parse().unwrap();
         let now = Instant::now();
@@ -2157,7 +2281,7 @@ mod tests {
 
     #[test]
     fn test_relay_generation_safe_cleanup_and_limits() {
-        let state = RelayState::new(vec!["tok".into()]);
+        let state = test_state(vec!["tok".into()]);
         assert!(!state.notify_incoming_session("tok", "missing-control"));
         let (old, _old_rx) = state.register_control_channel("tok".into());
         let (new, mut rx) = state.register_control_channel("tok".into());

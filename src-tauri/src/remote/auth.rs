@@ -71,12 +71,36 @@ pub fn sign_challenge(
     nonce: &str,
     timestamp: u64,
 ) -> Result<String, String> {
+    sign_message(identity, &format!("{nonce}:{timestamp}"))
+}
+
+pub fn sign_control_challenge(
+    identity: &MachineIdentity,
+    audience: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<String, String> {
+    sign_message(identity, &format!("ferryx-control-v1:{}:{audience}:{nonce}:{timestamp}", identity.machine_id))
+}
+
+pub fn verify_control_challenge(
+    public_key: &str,
+    machine_id: &str,
+    audience: &str,
+    nonce: &str,
+    timestamp: u64,
+    signature: &str,
+) -> bool {
+    verify_message(public_key, &format!("ferryx-control-v1:{machine_id}:{audience}:{nonce}:{timestamp}"), signature)
+}
+
+fn sign_message(identity: &MachineIdentity, message: &str) -> Result<String, String> {
     let seed: [u8; 32] = STANDARD
         .decode(&identity.private_key)
         .map_err(|error| format!("Invalid machine private key encoding: {error}"))?
         .try_into()
         .map_err(|_| "Machine private key must contain 32 bytes".to_string())?;
-    let signature = SigningKey::from_bytes(&seed).sign(format!("{nonce}:{timestamp}").as_bytes());
+    let signature = SigningKey::from_bytes(&seed).sign(message.as_bytes());
     Ok(STANDARD.encode(signature.to_bytes()))
 }
 
@@ -86,6 +110,10 @@ pub fn verify_machine_signature(
     timestamp: u64,
     signature_b64: &str,
 ) -> bool {
+    verify_message(public_key_b64, &format!("{nonce}:{timestamp}"), signature_b64)
+}
+
+fn verify_message(public_key_b64: &str, message: &str, signature_b64: &str) -> bool {
     let Ok(bytes) = STANDARD.decode(public_key_b64) else {
         return false;
     };
@@ -101,7 +129,7 @@ pub fn verify_machine_signature(
     let Ok(signature) = Signature::from_slice(&bytes) else {
         return false;
     };
-    key.verify_strict(format!("{nonce}:{timestamp}").as_bytes(), &signature)
+    key.verify_strict(message.as_bytes(), &signature)
         .is_ok()
 }
 

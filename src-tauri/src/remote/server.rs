@@ -1957,7 +1957,7 @@ mod tests {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&challenge).unwrap().into())).await.unwrap();
             let frame = socket.next().await.unwrap().unwrap();
             let auth: ControlAuth = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            assert!(crate::remote::auth::verify_machine_signature(&auth.public_key, &challenge.nonce, auth.timestamp, &auth.signature));
+            assert!(crate::remote::auth::verify_control_challenge(&auth.public_key, &auth.machine_id, "relay", &challenge.nonce, auth.timestamp, &auth.signature));
             socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&ControlAuthResponse { success: true, error: None }).unwrap().into())).await.unwrap();
             authenticated_tx.send(auth.machine_id).unwrap();
             while let Some(frame) = socket.next().await { if frame.is_err() { break; } }

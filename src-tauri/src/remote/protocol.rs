@@ -12,6 +12,8 @@ pub struct ControlChallenge {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlAuth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token: Option<String>,
     pub machine_id: String,
     pub display_name: String,
     pub public_key: String,
@@ -29,6 +31,8 @@ pub struct ControlAuthResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterPairingPin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     pub pin: String,
     pub pairing_token: String,
     pub machine_id: String,
@@ -38,6 +42,8 @@ pub struct RegisterPairingPin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterPairingPinAck {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     pub pin: String,
     pub machine_id: String,
     pub status: String,
@@ -78,6 +84,8 @@ impl PairingState {
             _ => matches!(
                 (self, target),
                 (Self::Created, Self::Registering)
+                    | (Self::Expired, Self::Registering)
+                    | (Self::Consumed, Self::Registering)
                     | (Self::Registering, Self::Ready)
                     | (Self::Ready, Self::Claimed)
                     | (Self::Claimed, Self::Consumed)
@@ -371,6 +379,7 @@ mod tests {
         );
         assert_wire(
             ControlAuth {
+                enrollment_token: None,
                 machine_id: "machine".into(), display_name: "Desktop".into(),
                 public_key: "key".into(), signature: "signature".into(), timestamp: 42,
             },
@@ -390,11 +399,11 @@ mod tests {
     fn pairing_wire_roundtrips() {
         use serde_json::json;
         assert_wire(
-            RegisterPairingPin { pin: "001234".into(), pairing_token: "token".into(), machine_id: "machine".into(), expires_at: 100 },
+            RegisterPairingPin { generation: None, pin: "001234".into(), pairing_token: "token".into(), machine_id: "machine".into(), expires_at: 100 },
             json!({"pin": "001234", "pairingToken": "token", "machineId": "machine", "expiresAt": 100}),
         );
         assert_wire(
-            RegisterPairingPinAck { pin: "001234".into(), machine_id: "machine".into(), status: "ready".into() },
+            RegisterPairingPinAck { generation: None, pin: "001234".into(), machine_id: "machine".into(), status: "ready".into() },
             json!({"pin": "001234", "machineId": "machine", "status": "ready"}),
         );
         for pin in [None, Some("001234".to_owned())] {
@@ -471,8 +480,8 @@ mod tests {
             [false, false, true, false, false, true, true],
             [false, false, false, true, false, true, true],
             [false, false, false, false, true, true, true],
-            [false, false, false, false, false, false, false],
-            [false, false, false, false, false, true, true],
+            [false, true, false, false, false, false, false],
+            [false, true, false, false, false, true, true],
             [false, false, false, false, false, true, true],
         ];
         for (row, source) in states.iter().enumerate() {
