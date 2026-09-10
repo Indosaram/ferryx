@@ -279,3 +279,54 @@ in the default case the old code's `HOME`-based branch already appended
 `.ferryx/remote`, matching the other resolvers. The split therefore affected
 `FERRYX_DATA_DIR` deployments (including test and packaged layouts) rather than
 the default desktop install.
+
+## Addendum 6: Gen3 blocker fix, verified against the auditor's own reproduction
+
+The Gen3 audit (`FERRYX_ZERO_CONFIG_SYNC_FINAL_VERDICT_2026-09-11.md`) found a
+real defect introduced by my own F02 change and shipped a runnable reproduction
+at `src-tauri/tests/zero_config_final_audit.rs`. The finding was confirmed at
+source and fixed in `93dc006`.
+
+Running the auditor's suite against the fix:
+
+- `observes_unrelated_connection_blocks_a_second_machines_first_pairing` no
+  longer observes its defect. It asserts the exchange returns 404; the relay now
+  accepts the claim and forwards it to the owning daemon, and the test has no
+  responder for that success path, so it times out instead of passing.
+- `observes_absent_generation_claim_forwarded_after_control_replacement` and
+  `observes_caller_selected_future_generation_becomes_claimable_on_replacement`
+  likewise stop observing: no stale claim is forwarded, so their awaits expire.
+- `verifies_raw_half_from_superseded_control_is_rejected` (the positive control)
+  still passes: an old raw data half receives HTTP 410 after replacement.
+
+A timeout is a weaker signal than an assertion, so the same scenarios were
+re-expressed as permanent, non-ignored regressions over the same real loopback
+sockets in `src-tauri/tests/relay_pairing_generation_regression.rs`:
+
+- a second machine's first pairing (client attempt 1) behind an unrelated earlier
+  connection is accepted and forwarded to its daemon;
+- a registration whose owner's control channel was replaced is refused with 404,
+  for both an omitted and an arbitrary client attempt number.
+
+Both fail when the defect is reinstated, so they are not vacuous. Result:
+`2 passed; 0 failed`, alongside `cargo test --lib remote::` `170 passed`.
+
+### Deployment
+
+- Commit deployed: `93dc006` plus this receipt.
+- On-host `relay_server.rs` hashes
+  `00fb16fef6afb2955ac05209494d96dc15c79ebc49c345264d4cf93aaa955d81`, identical to
+  `git show HEAD:src-tauri/src/remote/relay_server.rs`.
+- Installed binary sha256:
+  `5e861ee64455f53505927151c386c05532ec697fde8f3aca6b8dec4e753fc564`; service
+  `active`.
+
+### Still open from the Gen3 verdict
+
+The daemon-owned single pairing authority (original F01 scope: GUI and CLI both
+pairing through one retained daemon coordinator rather than each constructing a
+RelayClient) is NOT addressed here. `ipc/remote.rs` still creates pairing codes
+locally and `main.rs` still builds its own client. Also unaddressed: claim-to-
+dispatch replacement racing, direct-path WebSocket query credentials, cross-
+process ownership transactions, fsync durability, and the constant `relay`
+audience.
