@@ -128,3 +128,35 @@ reverse-tunnel responder**, not from the real gateway.
   "setCookie": null
 }
 ```
+
+## Addendum: F04 cold-cache fail-open reproduced on the live relay
+
+The external Gen2 audit reported that relay ticket admission fails open when the relay has no
+cached device token for a machine. This was independently reproduced against the deployed
+production relay, confirming the finding and superseding this receipt's earlier
+"F04 verified" reading (which exercised only the warm-cache path).
+
+Method: complete a real Ed25519 control handshake for a fresh machine ID, then request a
+socket ticket **without performing any pair exchange**, presenting a bearer that was never
+issued anywhere.
+
+- Machine ID: `coldcache-e3508e3a` (ephemeral)
+- Request: `POST https://relay.checka.cc/host/coldcache-e3508e3a/api/v1/socket-ticket`
+  with `Authorization: Bearer never-issued-anywhere-000`
+- **Result: HTTP 200 with an issued ticket.** Expected: 401.
+
+Root cause, confirmed in source at `src-tauri/src/remote/relay_server.rs`:
+
+- line 227 `is_valid_device_token` returns the cache lookup combined with `is_none_or`, so a
+  cache **miss** yields `true`;
+- line 204 initializes `paired_tokens` as an empty in-memory `HashMap`, so the hole reopens
+  on every relay restart, not just before a machine's first exchange.
+
+The line 225 comment ("Machines not yet paired through this relay retain gateway-side
+authentication") does not hold for this path: the relay issues the ticket itself and never
+consults the gateway on a miss.
+
+Scope of impact: this is relay admission only. The gateway remains the authenticating and
+revocation-enforcing authority for the subsequent stream, so this reproduction does not
+demonstrate unauthorized terminal control. It does allow an unauthenticated caller to consume
+the shared ticket budget and induce backend work.
