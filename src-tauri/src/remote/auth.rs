@@ -391,6 +391,19 @@ impl AuthManager {
 
     /// Installs the relay capability in the same single-use authority as local PINs.
     pub(crate) fn register_pairing_capability(&self, token: &str) {
+        self.register_pairing_capability_with_permission(token, DevicePermission::Control);
+    }
+
+    /// Registers a relay pairing capability that issues exactly `permission`.
+    ///
+    /// The permission must travel with the capability: `exchange_pairing_code` copies
+    /// it onto the issued device, so defaulting to Control here would silently upgrade
+    /// a caller that asked for View.
+    pub(crate) fn register_pairing_capability_with_permission(
+        &self,
+        token: &str,
+        permission: DevicePermission,
+    ) {
         let _transaction = self.begin_transaction();
         let mut window = self.pairing_window.write();
         window.refresh(Instant::now());
@@ -399,7 +412,7 @@ impl AuthManager {
             PairingCode {
                 _code: token.to_owned(),
                 created_at: Instant::now(),
-                default_permission: DevicePermission::Control,
+                default_permission: permission,
                 approved_token: None,
             },
         );

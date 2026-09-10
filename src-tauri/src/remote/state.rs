@@ -256,6 +256,19 @@ struct WorkspaceCacheEntry {
 pub(crate) const WORKSPACE_SNAPSHOT_REFRESH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2);
 
+/// A pairing coordinator published by one relay owner.
+///
+/// `epoch` identifies the publishing owner so a stopping relay clears only its
+/// own entry and never a newer owner's.
+pub struct PublishedPairing {
+    pub coordinator: crate::remote::relay_client::PairingCoordinator,
+    pub epoch: u64,
+}
+
+/// Monotonic source for PublishedPairing::epoch.
+pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
@@ -275,7 +288,7 @@ pub struct RemoteGatewayState {
     /// remotely if the PIN was registered with the relay, so GUI and CLI pairing must
     /// go through this one coordinator instead of each minting a local-only code or
     /// standing up a competing RelayClient for the same machine identity.
-    pub relay_pairing: RwLock<Option<crate::remote::relay_client::PairingCoordinator>>,
+    pub relay_pairing: RwLock<Option<PublishedPairing>>,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     snapshot_refreshing: AtomicBool,
@@ -624,6 +637,96 @@ fn remote_data_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A pairing requested as View must not redeem into a Control device. The relay
+    /// capability carries the permission that `exchange_pairing_code` copies onto the
+    /// issued device, so dropping it silently escalates the recipient.
+    #[tokio::test]
+    async fn relay_pairing_preserves_the_requested_permission() {
+        use crate::remote::auth::{AuthManager, DevicePermission};
+        use crate::remote::relay_client::PairingCoordinator;
+
+        for permission in [DevicePermission::View, DevicePermission::Control] {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let auth = AuthManager::with_persistence(None);
+            let coordinator =
+                PairingCoordinator::new_with_auth("perm-machine", tx, auth.clone());
+
+            let relay = tokio::spawn(async move {
+                let request = rx.recv().await.expect("registration reaches the relay");
+                let ack = crate::remote::protocol::RegisterPairingPinAck {
+                    generation: request.registration.generation,
+                    pin: request.registration.pin.clone(),
+                    machine_id: request.registration.machine_id.clone(),
+                    status: "ready".into(),
+                };
+                let token = request.registration.pairing_token.clone();
+                let _ = request.ack.send(Ok(ack));
+                token
+            });
+
+            coordinator
+                .generate_pairing_with_permission(std::time::Duration::from_secs(60), permission)
+                .await
+                .expect("pairing generation succeeds once the relay ACKs");
+            let token = relay.await.unwrap();
+
+            let (_, device) = auth
+                .exchange_pairing_code(&token, "paired device")
+                .expect("the relay capability must be redeemable");
+            assert_eq!(
+                device.permission, permission,
+                "the issued device must carry the permission the pairing requested"
+            );
+        }
+    }
+
+    /// A stopped relay must not leave a dead coordinator selected: pairing would fail
+    /// with "Relay registration channel closed" instead of falling back to local.
+    #[test]
+    fn stopping_a_relay_clears_only_its_own_published_coordinator() {
+        use crate::remote::relay_client::PairingCoordinator;
+        use std::sync::atomic::Ordering;
+
+        let published = |epoch: u64| {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            PublishedPairing {
+                coordinator: PairingCoordinator::new("m", tx),
+                epoch,
+            }
+        };
+        let slot = parking_lot::RwLock::new(Some(published(1)));
+
+        // A newer owner replaced the publication; the older handle's cleanup must be
+        // a no-op rather than clearing the live coordinator.
+        *slot.write() = Some(published(2));
+        let stale_epoch = 1;
+        {
+            let mut guard = slot.write();
+            if guard.as_ref().is_some_and(|c| c.epoch == stale_epoch) {
+                *guard = None;
+            }
+        }
+        assert!(
+            slot.read().is_some(),
+            "an older handle must not clear a newer owner's coordinator"
+        );
+
+        // The owning handle clears its own publication.
+        let owning_epoch = slot.read().as_ref().unwrap().epoch;
+        {
+            let mut guard = slot.write();
+            if guard.as_ref().is_some_and(|c| c.epoch == owning_epoch) {
+                *guard = None;
+            }
+        }
+        assert!(
+            slot.read().is_none(),
+            "a stopping relay must clear the coordinator it published"
+        );
+
+        assert!(RELAY_PAIRING_EPOCH.fetch_add(1, Ordering::Relaxed) >= 1);
+    }
+
     /// The pairing authority the daemon serves GUI/CLI requests from must be the one
     /// registered with the relay. A code minted only in the local AuthManager is not
     /// redeemable remotely, because the relay never learns its PIN.

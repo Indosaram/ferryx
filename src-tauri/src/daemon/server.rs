@@ -1894,11 +1894,19 @@ impl DaemonServer {
                     // In relay mode a code is only redeemable remotely if its PIN was
                     // registered with the relay, so go through the gateway's single
                     // pairing coordinator rather than minting a local-only code.
-                    let coordinator = self.remote_state.relay_pairing.read().clone();
+                    let coordinator = self
+                        .remote_state
+                        .relay_pairing
+                        .read()
+                        .as_ref()
+                        .map(|published| published.coordinator.clone());
                     match coordinator {
                         Some(coordinator) => {
                             match coordinator
-                                .generate_pairing(std::time::Duration::from_secs(60))
+                                .generate_pairing_with_permission(
+                                    std::time::Duration::from_secs(60),
+                                    perm,
+                                )
                                 .await
                             {
                                 Ok(info) => DaemonResponse::RemotePairingCodeOk {

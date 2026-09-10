@@ -1881,12 +1881,25 @@ pub struct RemoteServerHandle {
     // handles are not required for correctness, only to avoid detached-task
     // warnings and to make the fan-out explicit at the call site.
     _extra_shutdown_txs: Vec<tokio::sync::oneshot::Sender<()>>,
+    /// State this handle published a pairing coordinator into, if any, plus the
+    /// coordinator's identity. Retained so stopping clears its own coordinator and
+    /// leaves a newer owner's in place.
+    published_pairing: Option<(Arc<RemoteGatewayState>, u64)>,
 }
 
 impl RemoteServerHandle {
     pub fn stop(self) {
         if let Some(task) = self.relay_task {
             task.abort();
+        }
+        // A stopped relay must not leave a dead coordinator selected for pairing:
+        // requests would fail with "Relay registration channel closed" instead of
+        // falling back to local pairing. Only clear our own publication.
+        if let Some((state, epoch)) = self.published_pairing {
+            let mut slot = state.relay_pairing.write();
+            if slot.as_ref().is_some_and(|current| current.epoch == epoch) {
+                *slot = None;
+            }
         }
         let _ = self.shutdown_tx.send(());
         for tx in self._extra_shutdown_txs {
@@ -2033,6 +2046,7 @@ pub async fn start_remote_server_with_resolver(
         }
     }
 
+    let mut published_pairing: Option<(Arc<RemoteGatewayState>, u64)> = None;
     let relay_task = relay_url
         .filter(|_| config.mode == RemoteNetworkMode::Relay)
         .map(|url| {
@@ -2051,7 +2065,13 @@ pub async fn start_remote_server_with_resolver(
             .with_auth_manager((*state.auth_manager).clone());
             // Publish the one relay pairing authority so daemon/GUI pairing registers
             // its PIN with the relay instead of minting a local-only code.
-            *state.relay_pairing.write() = Some(client.pairing_coordinator());
+            let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+                coordinator: client.pairing_coordinator(),
+                epoch,
+            });
+            published_pairing = Some((Arc::clone(&state), epoch));
             // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
             tokio::spawn(async move { client.run().await })
         });
@@ -2060,6 +2080,7 @@ pub async fn start_remote_server_with_resolver(
         RemoteServerHandle {
             shutdown_tx,
             relay_task,
+            published_pairing,
             _extra_shutdown_txs: extra_shutdown_txs,
         },
         primary_local_addr,

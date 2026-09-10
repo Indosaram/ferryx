@@ -244,26 +244,38 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             // start one on demand, but silently spawning a daemon is not this command's
             // job, and it would also make the message below untrue.
             let daemon_socket = ferryx_lib::daemon::server::get_socket_path();
-            let from_daemon = if daemon_socket.exists() {
-                daemon_runtime.block_on(async {
+            if daemon_socket.exists() {
+                // A daemon is present, so it owns this machine's relay identity. Its
+                // answer is authoritative: an explicit refusal must surface as an error
+                // rather than silently starting a competing relay owner, which would
+                // replace the daemon's control generation and invalidate its live PIN.
+                let answer = daemon_runtime.block_on(async {
                     let client = ferryx_lib::daemon::client::DaemonClient::new();
                     client
                         .remote_create_pairing_code(Some(
                             ferryx_lib::remote::auth::DevicePermission::Control,
                         ))
                         .await
-                        .ok()
-                })
-            } else {
-                None
-            };
-            if let Some(code) = from_daemon {
-                println!("{code}");
-                std::io::stdout().flush().map_err(|error| error.to_string())?;
-                eprintln!(
-                    "Pairing registered by the running daemon; it holds the relay control connection."
-                );
-                return Ok(());
+                });
+                match answer {
+                    Ok(code) => {
+                        println!("{code}");
+                        std::io::stdout().flush().map_err(|error| error.to_string())?;
+                        eprintln!(
+                            "Pairing registered by the running daemon; it holds the relay control connection."
+                        );
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "The running daemon refused this pairing request: {}. \
+                             It owns this machine's relay identity, so pairing standalone \
+                             would replace its control connection and invalidate any PIN it \
+                             already issued.",
+                            error.message
+                        ));
+                    }
+                }
             }
             eprintln!(
                 "No running daemon answered; pairing standalone from this process instead."

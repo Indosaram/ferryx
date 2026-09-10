@@ -13,16 +13,22 @@
 //! daemon process; if it drops (relay restart, network blip, ...) the
 //! client reconnects automatically with exponential backoff.
 
+use crate::remote::auth::{
+    canonical_auth_path, sign_control_challenge, AuthManager, DevicePermission, MachineIdentity,
+};
+use crate::remote::protocol::{
+    ControlAuth, ControlAuthResponse, ControlChallenge, PairingPinClaimed, PairingState,
+    RegisterPairingPin, RegisterPairingPinAck,
+};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use rand::Rng;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use crate::remote::auth::{AuthManager, MachineIdentity, canonical_auth_path, sign_control_challenge};
-use crate::remote::protocol::{ControlChallenge, ControlAuth, ControlAuthResponse, RegisterPairingPin, RegisterPairingPinAck, PairingState, PairingPinClaimed};
 
-type ControlSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+type ControlSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct RegisterPairingPinRequest {
@@ -49,19 +55,58 @@ pub struct PairingCoordinator {
 }
 
 impl PairingCoordinator {
-    pub fn new(machine_id: impl Into<String>, register_tx: mpsc::Sender<RegisterPairingPinRequest>) -> Self {
-        Self { generation_id: Arc::new(RwLock::new(0)), state: Arc::new(RwLock::new(PairingState::Created)), active_pin: Arc::new(RwLock::new(None)), active_token: Arc::new(RwLock::new(None)), register_tx, machine_id: machine_id.into(), auth: AuthManager::with_persistence(canonical_auth_path()) }
+    pub fn new(
+        machine_id: impl Into<String>,
+        register_tx: mpsc::Sender<RegisterPairingPinRequest>,
+    ) -> Self {
+        Self {
+            generation_id: Arc::new(RwLock::new(0)),
+            state: Arc::new(RwLock::new(PairingState::Created)),
+            active_pin: Arc::new(RwLock::new(None)),
+            active_token: Arc::new(RwLock::new(None)),
+            register_tx,
+            machine_id: machine_id.into(),
+            auth: AuthManager::with_persistence(canonical_auth_path()),
+        }
     }
 
-    pub fn state(&self) -> PairingState { *self.state.read() }
+    /// Builds a coordinator over an explicit [`AuthManager`].
+    ///
+    /// [`Self::new`] resolves the on-disk auth store, which a test must not touch;
+    /// this lets a caller supply an isolated one and then inspect what the pairing
+    /// capability actually issues.
+    pub fn new_with_auth(
+        machine_id: impl Into<String>,
+        register_tx: mpsc::Sender<RegisterPairingPinRequest>,
+        auth: AuthManager,
+    ) -> Self {
+        Self {
+            generation_id: Arc::new(RwLock::new(0)),
+            state: Arc::new(RwLock::new(PairingState::Created)),
+            active_pin: Arc::new(RwLock::new(None)),
+            active_token: Arc::new(RwLock::new(None)),
+            register_tx,
+            machine_id: machine_id.into(),
+            auth,
+        }
+    }
+
+    pub fn state(&self) -> PairingState {
+        *self.state.read()
+    }
 
     pub fn transition(&self, target: PairingState) -> Result<(), String> {
         let mut state = self.state.write();
         if !state.can_transition_to(&target) {
-            return Err(format!("Invalid pairing transition: {state:?} -> {target:?}"));
+            return Err(format!(
+                "Invalid pairing transition: {state:?} -> {target:?}"
+            ));
         }
         *state = target;
-        if matches!(target, PairingState::Consumed | PairingState::Expired | PairingState::Cancelled) {
+        if matches!(
+            target,
+            PairingState::Consumed | PairingState::Expired | PairingState::Cancelled
+        ) {
             *self.active_pin.write() = None;
             if let Some(token) = self.active_token.write().take() {
                 self.auth.cancel_pairing_capability(&token);
@@ -72,47 +117,99 @@ impl PairingCoordinator {
 
     /// `timeout` is the PIN lifetime; registration itself has a five-second deadline.
     pub async fn generate_pairing(&self, timeout: Duration) -> Result<PairingSessionInfo, String> {
+        self.generate_pairing_with_permission(timeout, DevicePermission::Control)
+            .await
+    }
+
+    /// Registers a pairing whose redeemed device receives exactly `permission`.
+    pub async fn generate_pairing_with_permission(
+        &self,
+        timeout: Duration,
+        permission: DevicePermission,
+    ) -> Result<PairingSessionInfo, String> {
         // Gateway pairing credentials have a maximum lifetime of sixty seconds.
         let timeout = timeout.min(Duration::from_secs(60));
-        let expires_at = SystemTime::now().checked_add(timeout)
-            .ok_or("Invalid pairing lifetime")?.duration_since(UNIX_EPOCH)
-            .map_err(|e| e.to_string())?.as_secs();
+        let expires_at = SystemTime::now()
+            .checked_add(timeout)
+            .ok_or("Invalid pairing lifetime")?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs();
         let (generation, pin, pairing_token) = {
             let mut generation = self.generation_id.write();
             self.transition(PairingState::Registering)?;
-            *generation = generation.checked_add(1).ok_or("Pairing generation exhausted")?;
+            *generation = generation
+                .checked_add(1)
+                .ok_or("Pairing generation exhausted")?;
             let pin = format!("{:06}", rand::rngs::OsRng.gen_range(0..1_000_000u32));
             let pairing_token = format!("{:032x}", rand::rngs::OsRng.gen::<u128>());
             *self.active_pin.write() = Some(pin.clone());
             *self.active_token.write() = Some(pairing_token.clone());
-            self.auth.register_pairing_capability(&pairing_token);
+            self.auth
+                .register_pairing_capability_with_permission(&pairing_token, permission);
             (*generation, pin, pairing_token)
         };
-        let registration = RegisterPairingPin { generation: Some(generation), pin: pin.clone(), pairing_token: pairing_token.clone(), machine_id: self.machine_id.clone(), expires_at };
+        let registration = RegisterPairingPin {
+            generation: Some(generation),
+            pin: pin.clone(),
+            pairing_token: pairing_token.clone(),
+            machine_id: self.machine_id.clone(),
+            expires_at,
+        };
         let (ack, rx) = oneshot::channel();
         let result = tokio::time::timeout(REGISTER_ACK_TIMEOUT.min(timeout), async {
-            self.register_tx.send(RegisterPairingPinRequest { registration, ack }).await.map_err(|_| "Relay registration channel closed".to_string())?;
-            let ack = rx.await.map_err(|_| "Relay disconnected before registration ACK".to_string())??;
-            if ack.generation != Some(generation) || ack.pin != pin || ack.machine_id != self.machine_id || ack.status != "ready" {
-                return Err(format!("Relay rejected pairing registration: {}", ack.status));
+            self.register_tx
+                .send(RegisterPairingPinRequest { registration, ack })
+                .await
+                .map_err(|_| "Relay registration channel closed".to_string())?;
+            let ack = rx
+                .await
+                .map_err(|_| "Relay disconnected before registration ACK".to_string())??;
+            if ack.generation != Some(generation)
+                || ack.pin != pin
+                || ack.machine_id != self.machine_id
+                || ack.status != "ready"
+            {
+                return Err(format!(
+                    "Relay rejected pairing registration: {}",
+                    ack.status
+                ));
             }
             Ok(())
-        }).await;
+        })
+        .await;
         let current_generation = self.generation_id.read();
-        if *current_generation != generation { return Err("Pairing registration superseded".into()); }
+        if *current_generation != generation {
+            return Err("Pairing registration superseded".into());
+        }
         match result {
             Ok(Ok(())) => self.transition(PairingState::Ready)?,
-            Ok(Err(error)) => { self.transition(PairingState::Cancelled)?; return Err(error); }
-            Err(_) => { self.transition(PairingState::Expired)?; return Err("Timed out waiting for relay registration ACK".into()); }
+            Ok(Err(error)) => {
+                self.transition(PairingState::Cancelled)?;
+                return Err(error);
+            }
+            Err(_) => {
+                self.transition(PairingState::Expired)?;
+                return Err("Timed out waiting for relay registration ACK".into());
+            }
         }
         drop(current_generation);
         let coordinator = self.clone();
         tokio::spawn(async move {
             let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
-            tokio::time::sleep(deadline.duration_since(SystemTime::now()).unwrap_or_default()).await;
+            tokio::time::sleep(
+                deadline
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default(),
+            )
+            .await;
             coordinator.expire_generation(generation);
         });
-        Ok(PairingSessionInfo { pin, pairing_token, expires_at })
+        Ok(PairingSessionInfo {
+            pin,
+            pairing_token,
+            expires_at,
+        })
     }
 
     fn expire_generation(&self, generation: u64) {
@@ -200,7 +297,11 @@ impl RelayClient {
         }
     }
 
-    pub fn with_identity(relay_url: impl Into<String>, identity: MachineIdentity, gateway_addr: impl Into<String>) -> Self {
+    pub fn with_identity(
+        relay_url: impl Into<String>,
+        identity: MachineIdentity,
+        gateway_addr: impl Into<String>,
+    ) -> Self {
         let mut client = Self::with_gateway(relay_url, "", gateway_addr);
         client.pairing.machine_id = identity.machine_id.clone();
         client.identity = Some(identity);
@@ -219,27 +320,49 @@ impl RelayClient {
         self
     }
 
-    pub fn pairing_coordinator(&self) -> PairingCoordinator { self.pairing.clone() }
+    pub fn pairing_coordinator(&self) -> PairingCoordinator {
+        self.pairing.clone()
+    }
 
     pub async fn connect_control(&self) -> anyhow::Result<ControlSocket> {
         let mut request = self.control_url().into_client_request()?;
         if self.identity.is_none() {
-            request.headers_mut().insert(AUTHORIZATION, format!("Bearer {}", self.machine_token).parse()?);
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", self.machine_token).parse()?,
+            );
         }
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
         if let Some(identity) = &self.identity {
             tokio::time::timeout(REGISTER_ACK_TIMEOUT, async {
                 let challenge: ControlChallenge = read_control_json(&mut socket).await?;
                 let auth = ControlAuth {
-                    enrollment_token: (!self.machine_token.is_empty()).then(|| self.machine_token.clone()),
-                    machine_id: identity.machine_id.clone(), display_name: identity.display_name.clone(), public_key: identity.public_key.clone(),
-                    signature: sign_control_challenge(identity, "relay", &challenge.nonce, challenge.timestamp).map_err(anyhow::Error::msg)?, timestamp: challenge.timestamp,
+                    enrollment_token: (!self.machine_token.is_empty())
+                        .then(|| self.machine_token.clone()),
+                    machine_id: identity.machine_id.clone(),
+                    display_name: identity.display_name.clone(),
+                    public_key: identity.public_key.clone(),
+                    signature: sign_control_challenge(
+                        identity,
+                        "relay",
+                        &challenge.nonce,
+                        challenge.timestamp,
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                    timestamp: challenge.timestamp,
                 };
-                socket.send(Message::Text(serde_json::to_string(&auth)?.into())).await?;
+                socket
+                    .send(Message::Text(serde_json::to_string(&auth)?.into()))
+                    .await?;
                 let response: ControlAuthResponse = read_control_json(&mut socket).await?;
-                anyhow::ensure!(response.success, "Relay authentication rejected: {}", response.error.unwrap_or_default());
+                anyhow::ensure!(
+                    response.success,
+                    "Relay authentication rejected: {}",
+                    response.error.unwrap_or_default()
+                );
                 Ok::<_, anyhow::Error>(())
-            }).await??;
+            })
+            .await??;
         }
         Ok(socket)
     }
@@ -249,11 +372,7 @@ impl RelayClient {
     }
 
     fn data_url(&self, session_id: &str) -> String {
-        format!(
-            "{}/tunnel/data/{}",
-            to_ws_base(&self.relay_url),
-            session_id
-        )
+        format!("{}/tunnel/data/{}", to_ws_base(&self.relay_url), session_id)
     }
 
     /// Runs the reverse tunnel client forever: connects the control
@@ -323,15 +442,22 @@ impl RelayClient {
             match message {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(ack) = serde_json::from_str::<RegisterPairingPinAck>(&text) {
-                        if pending.as_ref().is_some_and(|request| request.registration.generation == ack.generation && request.registration.pin == ack.pin && request.registration.machine_id == ack.machine_id) {
+                        if pending.as_ref().is_some_and(|request| {
+                            request.registration.generation == ack.generation
+                                && request.registration.pin == ack.pin
+                                && request.registration.machine_id == ack.machine_id
+                        }) {
                             if pending.take().unwrap().ack.send(Ok(ack)).is_err() {
-                                tracing::debug!("Registration ACK arrived after caller disconnected");
+                                tracing::debug!(
+                                    "Registration ACK arrived after caller disconnected"
+                                );
                             }
                         }
                         continue;
                     }
                     if let Ok(claim) = serde_json::from_str::<PairingPinClaimed>(&text) {
-                        let matches = claim.machine_id == self.pairing.machine_id && self.pairing.active_pin.read().as_ref() == Some(&claim.pin);
+                        let matches = claim.machine_id == self.pairing.machine_id
+                            && self.pairing.active_pin.read().as_ref() == Some(&claim.pin);
                         if matches {
                             if let Err(error) = self.pairing.transition(PairingState::Claimed) {
                                 tracing::warn!("Invalid relay pairing claim: {error}");
@@ -351,7 +477,9 @@ impl RelayClient {
                             });
                         }
                         Err(err) => {
-                            tracing::warn!("relay control channel sent unrecognized payload: {err}");
+                            tracing::warn!(
+                                "relay control channel sent unrecognized payload: {err}"
+                            );
                         }
                     }
                 }
@@ -380,7 +508,9 @@ impl RelayClient {
     }
 }
 
-async fn read_control_json<T: serde::de::DeserializeOwned>(socket: &mut ControlSocket) -> anyhow::Result<T> {
+async fn read_control_json<T: serde::de::DeserializeOwned>(
+    socket: &mut ControlSocket,
+) -> anyhow::Result<T> {
     loop {
         match socket.next().await {
             Some(Ok(Message::Text(text))) => return Ok(serde_json::from_str(&text)?),
@@ -445,7 +575,11 @@ async fn proxy_ws_to_tcp(
             match tcp_rx.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if ws_tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                    if ws_tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -466,30 +600,64 @@ mod tests {
         use base64::Engine;
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         MachineIdentity {
-            machine_id: "test-machine".into(), display_name: "test".into(),
-            public_key: base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes()),
+            machine_id: "test-machine".into(),
+            display_name: "test".into(),
+            public_key: base64::engine::general_purpose::STANDARD
+                .encode(key.verifying_key().to_bytes()),
             private_key: base64::engine::general_purpose::STANDARD.encode(key.to_bytes()),
         }
     }
 
     async fn auth_fixture(success: bool) -> (RelayClient, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = RelayClient::with_identity(format!("http://{}", listener.local_addr().unwrap()), test_identity(), LOCAL_GATEWAY_ADDR);
+        let client = RelayClient::with_identity(
+            format!("http://{}", listener.local_addr().unwrap()),
+            test_identity(),
+            LOCAL_GATEWAY_ADDR,
+        );
         let task = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_hdr_async(tcp, |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
-                assert_eq!(request.uri().path(), "/tunnel/control");
-                assert!(request.headers().get(AUTHORIZATION).is_none());
-                Ok(response)
-            }).await.unwrap();
-            let challenge = ControlChallenge { nonce: "unique-challenge".into(), timestamp: 1234 };
-            socket.send(Message::Text(serde_json::to_string(&challenge).unwrap().into())).await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                tcp,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                    assert_eq!(request.uri().path(), "/tunnel/control");
+                    assert!(request.headers().get(AUTHORIZATION).is_none());
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            let challenge = ControlChallenge {
+                nonce: "unique-challenge".into(),
+                timestamp: 1234,
+            };
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&challenge).unwrap().into(),
+                ))
+                .await
+                .unwrap();
             let frame = socket.next().await.unwrap().unwrap();
             let auth: ControlAuth = serde_json::from_str(frame.to_text().unwrap()).unwrap();
             assert_eq!(auth.machine_id, "test-machine");
-            assert!(crate::remote::auth::verify_control_challenge(&auth.public_key, &auth.machine_id, "relay", &challenge.nonce, auth.timestamp, &auth.signature));
-            let response = ControlAuthResponse { success, error: (!success).then(|| "denied".into()) };
-            socket.send(Message::Text(serde_json::to_string(&response).unwrap().into())).await.unwrap();
+            assert!(crate::remote::auth::verify_control_challenge(
+                &auth.public_key,
+                &auth.machine_id,
+                "relay",
+                &challenge.nonce,
+                auth.timestamp,
+                &auth.signature
+            ));
+            let response = ControlAuthResponse {
+                success,
+                error: (!success).then(|| "denied".into()),
+            };
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&response).unwrap().into(),
+                ))
+                .await
+                .unwrap();
         });
         (client, task)
     }
@@ -497,14 +665,22 @@ mod tests {
     #[tokio::test]
     async fn test_relay_client_ed25519_auth_success() {
         let (client, server) = auth_fixture(true).await;
-        assert!(tokio::time::timeout(Duration::from_secs(5), client.connect_control()).await.unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), client.connect_control())
+                .await
+                .unwrap()
+                .is_ok()
+        );
         server.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_relay_client_ed25519_auth_rejection() {
         let (client, server) = auth_fixture(false).await;
-        let error = tokio::time::timeout(Duration::from_secs(5), client.connect_control()).await.unwrap().unwrap_err();
+        let error = tokio::time::timeout(Duration::from_secs(5), client.connect_control())
+            .await
+            .unwrap()
+            .unwrap_err();
         assert!(error.to_string().contains("denied"));
         server.await.unwrap();
     }
@@ -512,7 +688,10 @@ mod tests {
     #[tokio::test]
     async fn test_pairing_coordinator_lifecycle_and_ack() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "machine");
+        let client = RelayClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "machine",
+        );
         let coordinator = client.pairing_coordinator();
         let (registered_tx, registered_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
@@ -520,17 +699,34 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
             let frame = socket.next().await.unwrap().unwrap();
-            let registration: RegisterPairingPin = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let registration: RegisterPairingPin =
+                serde_json::from_str(frame.to_text().unwrap()).unwrap();
             registered_tx.send(registration.clone()).unwrap();
             release_rx.await.unwrap();
-            let ack = RegisterPairingPinAck { generation: registration.generation, pin: registration.pin, machine_id: registration.machine_id, status: "ready".into() };
-            socket.send(Message::Text(serde_json::to_string(&ack).unwrap().into())).await.unwrap();
-            while let Some(message) = socket.next().await { if message.is_err() { break; } }
+            let ack = RegisterPairingPinAck {
+                generation: registration.generation,
+                pin: registration.pin,
+                machine_id: registration.machine_id,
+                status: "ready".into(),
+            };
+            socket
+                .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
+                .await
+                .unwrap();
+            while let Some(message) = socket.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
         });
         let control = tokio::spawn(async move { client.run_control_session().await });
         let generator = coordinator.clone();
-        let generation = tokio::spawn(async move { generator.generate_pairing(Duration::from_secs(60)).await });
-        let registration = tokio::time::timeout(Duration::from_secs(5), registered_rx).await.unwrap().unwrap();
+        let generation =
+            tokio::spawn(async move { generator.generate_pairing(Duration::from_secs(60)).await });
+        let registration = tokio::time::timeout(Duration::from_secs(5), registered_rx)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(coordinator.state(), PairingState::Registering);
         assert!(!generation.is_finished());
         assert_eq!(registration.pin.len(), 6);
@@ -539,17 +735,25 @@ mod tests {
         assert!(u128::from_str_radix(&registration.pairing_token, 16).is_ok());
         assert!(coordinator.transition(PairingState::Consumed).is_err());
         release_tx.send(()).unwrap();
-        let session = tokio::time::timeout(Duration::from_secs(5), generation).await.unwrap().unwrap().unwrap();
+        let session = tokio::time::timeout(Duration::from_secs(5), generation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(session.pin, registration.pin);
         assert_eq!(session.pairing_token, registration.pairing_token);
         assert_eq!(coordinator.state(), PairingState::Ready);
-        assert!(coordinator.generate_pairing(Duration::from_secs(60)).await.is_err());
+        assert!(coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .is_err());
         coordinator.transition(PairingState::Claimed).unwrap();
         coordinator.transition(PairingState::Consumed).unwrap();
         assert!(coordinator.transition(PairingState::Expired).is_err());
         assert!(coordinator.active_pin.read().is_none());
         assert!(coordinator.active_token.read().is_none());
-        control.abort(); server.abort();
+        control.abort();
+        server.abort();
     }
 
     #[tokio::test]
@@ -559,16 +763,27 @@ mod tests {
         coordinator.auth = AuthManager::with_persistence(None);
         let responder = tokio::spawn(async move {
             for generation in 1..=4 {
-                let request = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+                let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(request.registration.generation, Some(generation));
-                request.ack.send(Ok(RegisterPairingPinAck {
-                    generation: Some(generation), pin: request.registration.pin,
-                    machine_id: request.registration.machine_id, status: "ready".into(),
-                })).unwrap();
+                request
+                    .ack
+                    .send(Ok(RegisterPairingPinAck {
+                        generation: Some(generation),
+                        pin: request.registration.pin,
+                        machine_id: request.registration.machine_id,
+                        status: "ready".into(),
+                    }))
+                    .unwrap();
             }
         });
         for generation in 1..=4 {
-            coordinator.generate_pairing(Duration::from_secs(60)).await.unwrap();
+            coordinator
+                .generate_pairing(Duration::from_secs(60))
+                .await
+                .unwrap();
             assert_eq!(*coordinator.generation_id.read(), generation);
             coordinator.expire_generation(generation - 1);
             assert_eq!(coordinator.state(), PairingState::Ready);
@@ -589,13 +804,24 @@ mod tests {
         let mut coordinator = PairingCoordinator::new("machine", tx);
         coordinator.auth = AuthManager::with_persistence(None);
         let responder = tokio::spawn(async move {
-            let request = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
-            request.ack.send(Ok(RegisterPairingPinAck {
-                generation: Some(0), pin: request.registration.pin,
-                machine_id: request.registration.machine_id, status: "ready".into(),
-            })).unwrap();
+            let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            request
+                .ack
+                .send(Ok(RegisterPairingPinAck {
+                    generation: Some(0),
+                    pin: request.registration.pin,
+                    machine_id: request.registration.machine_id,
+                    status: "ready".into(),
+                }))
+                .unwrap();
         });
-        assert!(coordinator.generate_pairing(Duration::from_secs(60)).await.is_err());
+        assert!(coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .is_err());
         assert_eq!(coordinator.state(), PairingState::Cancelled);
         responder.await.unwrap();
     }
@@ -606,9 +832,20 @@ mod tests {
         let coordinator = PairingCoordinator::new("machine", tx);
         let reject = tokio::spawn(async move {
             let request = rx.recv().await.unwrap();
-            request.ack.send(Ok(RegisterPairingPinAck { generation: request.registration.generation, pin: request.registration.pin, machine_id: "machine".into(), status: "rejected".into() })).unwrap();
+            request
+                .ack
+                .send(Ok(RegisterPairingPinAck {
+                    generation: request.registration.generation,
+                    pin: request.registration.pin,
+                    machine_id: "machine".into(),
+                    status: "rejected".into(),
+                }))
+                .unwrap();
         });
-        assert!(coordinator.generate_pairing(Duration::from_secs(60)).await.is_err());
+        assert!(coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .is_err());
         assert_eq!(coordinator.state(), PairingState::Cancelled);
         reject.await.unwrap();
 
@@ -616,18 +853,34 @@ mod tests {
         let coordinator = PairingCoordinator::new("machine", tx);
         // Time is the behavior under test: retain the ACK sender without responding.
         let generator = coordinator.clone();
-        let generation = tokio::spawn(async move { generator.generate_pairing(Duration::from_millis(20)).await });
-        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(5), generation).await.unwrap().unwrap().is_err());
+        let generation =
+            tokio::spawn(
+                async move { generator.generate_pairing(Duration::from_millis(20)).await },
+            );
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), generation)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
         assert_eq!(coordinator.state(), PairingState::Expired);
         drop(request);
     }
 
     #[test]
     fn to_ws_base_rewrites_https_and_trims_trailing_slash() {
-        assert_eq!(to_ws_base("https://relay.example.com/"), "wss://relay.example.com");
+        assert_eq!(
+            to_ws_base("https://relay.example.com/"),
+            "wss://relay.example.com"
+        );
         assert_eq!(to_ws_base("http://localhost:8787"), "ws://localhost:8787");
-        assert_eq!(to_ws_base("wss://relay.example.com"), "wss://relay.example.com");
+        assert_eq!(
+            to_ws_base("wss://relay.example.com"),
+            "wss://relay.example.com"
+        );
     }
 
     #[test]
@@ -645,12 +898,19 @@ mod tests {
 
     #[test]
     fn with_gateway_preserves_address_and_credentials() {
-        let client = RelayClient::with_gateway("http://localhost:8787/", "machine", "127.0.0.1:54321");
+        let client =
+            RelayClient::with_gateway("http://localhost:8787/", "machine", "127.0.0.1:54321");
         assert_eq!(client.gateway_addr, "127.0.0.1:54321");
         assert_eq!(client.machine_token, "machine");
         assert_eq!(client.control_url(), "ws://localhost:8787/tunnel/control");
-        assert_eq!(client.data_url("session"), "ws://localhost:8787/tunnel/data/session");
-        assert_eq!(RelayClient::new("http://localhost", "tok").gateway_addr, LOCAL_GATEWAY_ADDR);
+        assert_eq!(
+            client.data_url("session"),
+            "ws://localhost:8787/tunnel/data/session"
+        );
+        assert_eq!(
+            RelayClient::new("http://localhost", "tok").gateway_addr,
+            LOCAL_GATEWAY_ADDR
+        );
     }
 
     #[tokio::test]
@@ -677,12 +937,17 @@ mod tests {
         let relay_task = tokio::spawn(async move {
             let (control, _) = listener.accept().await.unwrap();
             let mut control = tokio_tungstenite::accept_async(control).await.unwrap();
-            control.send(Message::Text(r#"{"session_id":"sess-1"}"#.into())).await.unwrap();
+            control
+                .send(Message::Text(r#"{"session_id":"sess-1"}"#.into()))
+                .await
+                .unwrap();
             let (data, _) = listener.accept().await.unwrap();
             let data = tokio_tungstenite::accept_async(data).await.unwrap();
             data_tx.send(data).unwrap();
             while let Some(message) = control.next().await {
-                if message.is_err() { break; }
+                if message.is_err() {
+                    break;
+                }
             }
         });
 
@@ -696,7 +961,9 @@ mod tests {
         });
 
         let mut client_ws = tokio::time::timeout(Duration::from_secs(5), data_rx)
-            .await.expect("data connection timed out").unwrap();
+            .await
+            .expect("data connection timed out")
+            .unwrap();
 
         client_ws
             .send(Message::Binary(b"hello".to_vec().into()))
