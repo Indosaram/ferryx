@@ -192,3 +192,48 @@ Deployed binary: `/home/indo/bin/ferryx-relay`, SHA-256
 Residual limits unchanged: the control peer and gateway responder are still a synthetic
 probe, so this validates relay-side admission and its gateway-consultation path, not the real
 daemon's token store or an authenticated terminal attachment. F10 remains open.
+
+## Addendum 3: commit-bound in-process E2E (F10)
+
+The auditor required an E2E receipt bound to a commit, covering a real
+browser/relay/gateway chain rather than a synthetic responder. The synthetic
+probes above cannot satisfy that, so the coverage now lives in an executable test
+instead of a hand-written transcript.
+
+- Commit: `a50a465` (extends `coordinator_pairs_through_relay_to_real_gateway` in
+  `src-tauri/src/remote/relay_server.rs`).
+- Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib remote::`
+  -> `test result: ok. 163 passed; 0 failed` (exit 0) at HEAD
+  `6261a9f0b1ed661fd2462bdaccf061a35081b162`.
+
+### What is real in that test
+
+- Real relay router and real `RelayClient` control channel (Ed25519 handshake).
+- Real `RemoteGatewayState` behind the real `create_remote_router`, on a real socket.
+- Real pairing via `PairingCoordinator`, real `/api/v1/pair/exchange` over the relay,
+  and the issued token validated through the gateway's own `auth_manager`.
+- Real PTY: `/bin/sh` spawned via `spawn_in_worktree` in a real `git init` worktree,
+  on the same `TerminalService`/`WorkspaceRegistry` the gateway serves.
+
+### Properties asserted
+
+- Unissued bearer is refused a socket ticket; the issued device token is granted one.
+- A pairing code cannot be exchanged twice (replay rejected).
+- A valid ticket streams no terminal data while the session is not the active desktop
+  selection.
+- After the desktop declares the selection, a fresh ticket attaches over the relay and
+  a marker written into the shell comes back out through the relay-proxied socket.
+- The single-use ticket cannot authorize a second attachment.
+- No permanent credential appears in the WebSocket URL; only the single-use ticket.
+
+### Proof the attachment assertion is not vacuous
+
+Writing a different marker into the shell makes the test consume its full 20s
+deadline and fail with "real PTY output must traverse the relay to the paired
+browser", so the echo is genuinely observed rather than assumed.
+
+### Residual gap
+
+This is an in-process Rust harness: the browser side is the relay's HTTP/WS client
+surface, not a real browser engine, and it does not cover two machines, revocation
+mid-stream, expiry, owner replacement, or restart recovery. Those remain open.
