@@ -533,6 +533,7 @@ async fn http_request(
     let mut stream = tokio::net::TcpStream::connect(addr)
         .await
         .expect("tcp connect");
+    let _ = stream.set_nodelay(true);
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
     if let Some(t) = token {
         req.push_str(&format!("Authorization: Bearer {t}\r\n"));
@@ -1746,6 +1747,7 @@ async fn write_client_ws_frame(stream: &mut tokio::net::TcpStream, opcode: u8, p
         .write_all(&frame)
         .await
         .expect("write masked websocket frame");
+    let _ = stream.flush().await;
 }
 
 struct GridSocketTestHarness {

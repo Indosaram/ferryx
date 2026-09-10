@@ -1130,7 +1130,7 @@ async fn handle_terminal_socket(
                                 | crate::terminal::remote::RemoteConnectionState::Expired
                         )
                     });
-                    if can_control && !is_outage {
+                    if can_control && !is_outage && !is_ssh {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }
@@ -1471,7 +1471,7 @@ async fn handle_terminal_grid_socket(
                                 | crate::terminal::remote::RemoteConnectionState::Expired
                         )
                     });
-                    if can_control && !is_outage {
+                    if can_control && !is_outage && !is_ssh {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }

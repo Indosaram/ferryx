@@ -111,7 +111,9 @@ impl RemoteSessionBackend for SocketBackend {
     }
     fn write_input<'a>(&'a self, _: &'a str, _: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            self.input_gate.wait().await;
+            if self.recovery_tx.is_none() {
+                self.input_gate.wait().await;
+            }
             self.completed_inputs.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -137,9 +139,15 @@ fn socket_state(backend: Arc<SocketBackend>) -> Arc<RemoteGatewayState> {
 }
 
 async fn frame(stream: &mut tokio::net::TcpStream) -> ServerWebSocketFrame {
-    tokio::time::timeout(DEADLINE, read_server_ws_frame(stream))
+    let f = tokio::time::timeout(DEADLINE, read_server_ws_frame(stream))
         .await
-        .expect("bounded socket frame/close")
+        .expect("bounded socket frame/close");
+    match &f {
+        ServerWebSocketFrame::Text(t) => eprintln!("[CLIENT_FRAME] Text: {}", t),
+        ServerWebSocketFrame::Binary(b) => eprintln!("[CLIENT_FRAME] Binary len: {}", b.len()),
+        ServerWebSocketFrame::Close => eprintln!("[CLIENT_FRAME] Close"),
+    }
+    f
 }
 
 #[tokio::test]
