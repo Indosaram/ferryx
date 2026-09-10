@@ -21,7 +21,14 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 
 const DEFAULT_PORT = 43821;
-const DEFAULT_RELAY_PLACEHOLDER = "https://relay.ferryx.dev";
+const DEFAULT_RELAY_PLACEHOLDER = "https://relay.checka.cc";
+const PAIRING_LIFETIME_SECONDS = 60;
+
+type PairingGatewayStatus = RemoteGatewayStatus & {
+  machineId?: string;
+  relayConnected?: boolean;
+  controlChannelConnected?: boolean;
+};
 
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, "");
@@ -44,19 +51,20 @@ function directCandidates(status: RemoteGatewayStatus | null): string[] {
  * hints, and a relay-less desktop falls back to its own LAN address.
  */
 export function buildPairingUrl(
-  status: RemoteGatewayStatus | null,
+  status: PairingGatewayStatus | null,
   relayUrl: string,
-  code: string,
+  token: string,
+  machineId = status?.machineId ?? "",
 ): string {
   const relay = trimTrailingSlashes((status?.relayUrl ?? relayUrl ?? "").trim());
   if (relay) {
     const candidates = directCandidates(status);
-    const hints = candidates.length > 0 ? `&hints=${encodeURIComponent(candidates.join(","))}` : "";
-    return `${relay}/#pair=${code}${hints}`;
+    const hints = encodeURIComponent(candidates.join(","));
+    return `${relay}/#pair=${encodeURIComponent(token)}&relay=${encodeURIComponent(relay)}&machine=${encodeURIComponent(machineId)}&hints=${hints}`;
   }
   const port = status?.port ?? DEFAULT_PORT;
   const host = status?.localIp ?? status?.boundAddress ?? "localhost";
-  return `http://${host.includes(":") ? host : `${host}:${port}`}/#pair=${code}`;
+  return `http://${host.includes(":") ? host : `${host}:${port}`}/#pair=${encodeURIComponent(token)}`;
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -81,12 +89,15 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
 }
 
 export function RemoteAccessSection() {
-  const [status, setStatus] = useState<RemoteGatewayStatus | null>(null);
-  const statusRef = useRef<RemoteGatewayStatus | null>(null);
+  const [status, setStatus] = useState<PairingGatewayStatus | null>(null);
+  const statusRef = useRef<PairingGatewayStatus | null>(null);
   statusRef.current = status;
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
+  const generationRef = useRef(0);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [isGeneratingQr, setIsGeneratingQr] = useState(false);
   const [qrError, setQrError] = useState<string | null>(null);
@@ -129,30 +140,65 @@ export function RemoteAccessSection() {
     return s;
   }, []);
 
+  useEffect(() => {
+    if (expiresAt === null) return;
+    const tick = () => {
+      const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      setRemainingSeconds(remaining);
+      if (remaining === 0) {
+        generationRef.current += 1;
+        setPairingCode(null);
+        setPairingUrl(null);
+        setQrDataUrl(null);
+        setIsGeneratingQr(false);
+        window.clearInterval(timer);
+      }
+    };
+    const timer = window.setInterval(tick, 1000);
+    tick();
+    return () => window.clearInterval(timer);
+  }, [expiresAt]);
+
+  useEffect(() => () => { generationRef.current += 1; }, []);
+
   const generatePairing = useCallback(async () => {
+    const generation = ++generationRef.current;
     setIsGeneratingQr(true);
     setQrError(null);
+    setPairingCode(null);
+    setPairingUrl(null);
+    setQrDataUrl(null);
+    setExpiresAt(null);
     try {
-      const res = await createPairingCode("control");
+      const res: Awaited<ReturnType<typeof createPairingCode>> & {
+        pairingToken?: string;
+        machineId?: string;
+      } = await createPairingCode("control");
+      if (generation !== generationRef.current) return;
+      const lifetime = Math.min(PAIRING_LIFETIME_SECONDS, res.expiresInSeconds);
+      setRemainingSeconds(lifetime);
+      setExpiresAt(Date.now() + lifetime * 1000);
       setPairingCode(res.code);
 
-      const url = buildPairingUrl(statusRef.current, relayUrl, res.code);
+      const url = buildPairingUrl(statusRef.current, relayUrl, res.pairingToken ?? res.code, res.machineId);
       setPairingUrl(url);
 
       const QRCode = (await import("qrcode")).default;
       const dataUrl = await QRCode.toDataURL(url, {
         width: 180,
-        margin: 1,
-        color: { dark: "#ffffff", light: "#171717" },
+        margin: 4,
       });
+      if (generation !== generationRef.current) return;
       setQrDataUrl(dataUrl);
     } catch (error: unknown) {
+      if (generation !== generationRef.current) return;
+      setExpiresAt(null);
       setQrError(error instanceof Error ? error.message : "Failed to generate pairing QR code");
       setPairingCode(null);
       setQrDataUrl(null);
       setPairingUrl(null);
     } finally {
-      setIsGeneratingQr(false);
+      if (generation === generationRef.current) setIsGeneratingQr(false);
     }
   }, [relayUrl]);
 
@@ -176,6 +222,9 @@ export function RemoteAccessSection() {
         const s = await disableRemoteGateway();
         statusRef.current = s;
         setStatus(s);
+        generationRef.current += 1;
+        setExpiresAt(null);
+        setIsGeneratingQr(false);
         setPairingCode(null);
         setQrDataUrl(null);
         setQrError(null);
@@ -230,6 +279,13 @@ export function RemoteAccessSection() {
           <AlertDescription className="text-[11px] leading-normal">{actionError}</AlertDescription>
         </Alert>
       ) : null}
+      {status?.enabled ? (
+        <Badge variant="secondary" role="status" className="mb-4 text-[11px] text-status-success">
+          {status.relayConnected && status.controlChannelConnected
+            ? "Relay Ready"
+            : status.localIp || status.boundAddress ? "Local Ready" : "Connecting"}
+        </Badge>
+      ) : null}
       <div className="border-y border-border">
         <SettingRow
           label="Remote Access"
@@ -265,7 +321,7 @@ export function RemoteAccessSection() {
           >
             <Card className="flex w-[220px] flex-col items-center gap-2 rounded-lg border border-border bg-card p-3 shadow-none">
               {qrDataUrl ? (
-                <img src={qrDataUrl} alt="Pairing QR Code" className="size-[160px] rounded-md" />
+                <img src={qrDataUrl} alt="Pairing QR Code" width={180} height={180} className="size-[180px]" />
               ) : isGeneratingQr ? (
                 <div className="flex size-[160px] items-center justify-center text-[11px] text-muted-foreground">
                   Generating...
@@ -292,10 +348,16 @@ export function RemoteAccessSection() {
                     onClick={handleGeneratePairing}
                     className="h-7 px-2.5 text-[11px] font-medium shadow-sm"
                   >
-                    Generate QR Code
+                    {expiresAt !== null ? "Regenerate" : "Generate QR Code"}
                   </Button>
                 </div>
               )}
+
+              {expiresAt !== null ? (
+                <span role="timer" className="text-[11px] tabular-nums text-muted-foreground">
+                  {remainingSeconds > 0 ? `Expires in ${remainingSeconds}s` : "Pairing code expired"}
+                </span>
+              ) : null}
 
               {pairingCode ? (
                 <div className="flex w-full items-center justify-between px-1">
@@ -310,7 +372,7 @@ export function RemoteAccessSection() {
                         showCopied(setPinCopied);
                       }
                     }}
-                    className="h-auto p-0 font-mono text-[11px] font-semibold text-status-success hover:bg-transparent hover:underline"
+                    className="h-auto p-0 font-mono text-[13px] font-semibold text-status-success hover:bg-transparent hover:underline"
                   >
                     {pinCopied ? "Copied" : `PIN: ${pairingCode}`}
                   </Button>
