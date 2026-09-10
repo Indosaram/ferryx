@@ -10,13 +10,8 @@ import {
   type TransportType,
 } from "../state/remoteHostStore";
 
-/**
- * Transports the drawer can render. `relay` reaches a host through the signaling/relay server
- * instead of a direct path, so it is not part of the discovery-oriented `TransportType` union
- * in `remoteHostStore` yet; widening here keeps store hosts assignable while the badge renders
- * relay-backed hosts too.
- */
-export type DrawerTransport = TransportType | "relay";
+/** Direct discovery endpoints and paired relay hosts share the same inventory. */
+export type DrawerTransport = TransportType;
 
 const TRANSPORT_LABEL: Record<DrawerTransport, string> = {
   tailscale: "Tailscale",
@@ -227,7 +222,7 @@ export function MobileHostDrawer({ open, onOpenChange }: MobileHostDrawerProps) 
                   >
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-1.5">
-                        <span className="min-w-0 flex-1 truncate text-sm font-medium">{host.name}</span>
+                        <span className="min-w-0 flex-1 truncate text-sm font-medium">{host.displayName ?? host.name}</span>
                         {active ? <Check className="size-4 shrink-0" aria-hidden="true" /> : null}
                       </span>
                       <span className="mt-1 flex flex-wrap items-center gap-1.5">

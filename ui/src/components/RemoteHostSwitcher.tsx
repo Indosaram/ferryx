@@ -14,12 +14,14 @@ const TRANSPORT_LABEL: Record<TransportType, string> = {
   tailscale: "Tailscale",
   mdns: "mDNS",
   sshTunnel: "SSH",
+  relay: "Relay",
 };
 
 const TRANSPORT_ICON: Record<TransportType, typeof Wifi> = {
   tailscale: Wifi,
   mdns: Radio,
   sshTunnel: Cable,
+  relay: Laptop,
 };
 
 function TransportBadge({ transport }: { transport: TransportType }) {

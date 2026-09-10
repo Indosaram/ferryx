@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
+import { remoteHostKey, remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
 import {
   hostAgentTotals,
   MobileHostDrawer,
@@ -153,6 +153,24 @@ describe("MobileHostDrawer", () => {
 
     expect(remoteHostStore.getState().activeHostId).toBe("host-2");
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("switches between paired machines on one relay without losing their tokens", () => {
+    const relayOrigin = "https://relay.example";
+    for (const machineId of ["a", "b"]) remoteHostStore.upsertHost({
+      machineId, relayOrigin, displayName: `Machine ${machineId}`, deviceToken: `token-${machineId}`,
+      lastSeenAt: null, directHints: [],
+    });
+    render(<MobileHostDrawer open onOpenChange={vi.fn()} />);
+    for (const machineId of ["a", "b", "a"]) {
+      const key = remoteHostKey(relayOrigin, machineId);
+      fireEvent.click(screen.getByTestId(`mobile-host-option-${key}`));
+      expect(remoteHostStore.getState().activeHostId).toBe(key);
+      expect(screen.getByTestId(`mobile-host-option-${key}`)).toHaveAttribute("aria-selected", "true");
+    }
+    for (const machineId of ["a", "b"]) {
+      expect(remoteHostStore.getState().hosts[remoteHostKey(relayOrigin, machineId)].deviceToken).toBe(`token-${machineId}`);
+    }
   });
 
   it("selects local (null) via remoteHostStore.setActiveHost when the local option is tapped", () => {

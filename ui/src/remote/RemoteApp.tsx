@@ -24,6 +24,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { RemoteTerminal } from "./RemoteTerminal";
+import { hostTransportUrl, remoteApiUrl as apiUrl, remoteSocketUrl } from "./remoteClient";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
 /// How long a selection may stay unconfirmed before the picker is released for
@@ -269,20 +270,6 @@ function relayEndpoint(url: string): CandidateEndpoint {
   return { type: "relay", url, priority: CANDIDATE_PRIORITY.relay };
 }
 
-function eventsSocketUrl(token: string, transportUrl: string): string {
-  const base = new URL(transportUrl);
-  const protocol = base.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${base.host}/api/v1/events?token=${encodeURIComponent(token)}`;
-}
-
-/**
- * Same-origin transport keeps request paths relative so nothing changes for the
- * relay case; only a verified direct upgrade produces absolute URLs.
- */
-function apiUrl(transportUrl: string, path: string): string {
-  return transportUrl === window.location.origin ? path : `${transportUrl}${path}`;
-}
-
 export const RemoteApp: React.FC = () => {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const host = selectActiveHost(state);
@@ -294,7 +281,8 @@ export const RemoteApp: React.FC = () => {
 
 const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrlHints: boolean }> = ({ hostId, relayUrl, readUrlHints }) => {
   const [token, setToken] = useState<string | null>(() => {
-    const scoped = getRemoteAuthToken(hostId);
+    const storedHost = remoteHostStore.getState().hosts[hostId];
+    const scoped = storedHost?.deviceToken ?? getRemoteAuthToken(hostId);
     if (scoped || !readUrlHints) return scoped;
     // Legacy credentials belong only to the original same-origin connection.
     const legacy = getRemoteAuthToken();
@@ -305,7 +293,10 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     return legacy;
   });
   // Capture fragment hints before successful pairing removes the fragment.
-  const [directHints] = useState(() => readDirectCandidateHints(hostId, readUrlHints));
+  const [directHints] = useState(() => {
+    const stored = remoteHostStore.getState().hosts[hostId]?.directHints;
+    return stored?.length ? stored : readDirectCandidateHints(hostId, readUrlHints);
+  });
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
@@ -316,6 +307,8 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = useMemo(() => selectActiveHost(remoteHostState), [remoteHostState]);
   const hostAgentSummary = useMemo(() => hostAgentTotals(remoteHostState), [remoteHostState]);
+  const transportBaseUrl = hostTransportUrl(activeHost, transport.url);
+  const pairingBaseUrl = hostTransportUrl(activeHost, relayUrl);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
   const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
   const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
@@ -329,6 +322,8 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
 
   const disconnect = useCallback(() => {
     clearRemoteAuthToken(hostId);
+    const host = remoteHostStore.getState().hosts[hostId];
+    if (host) remoteHostStore.upsertHost({ ...host, deviceToken: null, authStatus: "unpaired" });
     setToken(null);
     setModel(EMPTY_MODEL);
     setPending(null);
@@ -343,7 +338,11 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
   }, [hostId]);
 
   const handlePaired = useCallback((newToken: string) => {
-    setRemoteAuthToken(newToken, hostId);
+    const host = remoteHostStore.getState().hosts[hostId];
+    if (host) {
+      remoteHostStore.upsertHost({ ...host, deviceToken: newToken, lastSeenAt: Date.now(), authStatus: "paired" });
+      clearRemoteAuthToken(hostId);
+    } else setRemoteAuthToken(newToken, hostId);
     setToken(newToken);
   }, [hostId]);
 
@@ -359,9 +358,11 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
   const loadWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
     if (!token) return null;
     try {
-      const response = await fetch(
-        apiUrl(transport.url, `/api/v1/workspace/state?token=${encodeURIComponent(token)}`),
-      );
+      const response = await (activeHost?.machineId
+        ? fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/state"), {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        : fetch(apiUrl(transportBaseUrl, `/api/v1/workspace/state?token=${encodeURIComponent(token)}`)));
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
           disconnect();
@@ -372,7 +373,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     } catch {
       return null;
     }
-  }, [disconnect, token, transport.url]);
+  }, [activeHost?.machineId, disconnect, token, transportBaseUrl]);
 
   const refreshWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
     const refreshVersion = workspaceRefreshVersionRef.current;
@@ -389,7 +390,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     const code = new URLSearchParams(hash.slice(1)).get("pair");
     if (!code || !/^\d{6}$/.test(code)) return;
     let cancelled = false;
-    fetch(apiUrl(relayUrl, "/api/v1/pair/exchange"), {
+    fetch(apiUrl(pairingBaseUrl, "/api/v1/pair/exchange"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -405,7 +406,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
       })
       .catch((error) => console.warn("QR pairing failed", error));
     return () => { cancelled = true; };
-  }, [handlePaired, readUrlHints, relayUrl]);
+  }, [handlePaired, readUrlHints, pairingBaseUrl]);
 
   useEffect(() => {
     if (token) void refreshWorkspace();
@@ -504,6 +505,8 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     let retry: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
     let disposed = false;
+    let connecting = false;
+    const abort = new AbortController();
     const onMessage = (event: MessageEvent) => {
       const change = parseActiveSelectionEvent(event.data);
       if (!change) return;
@@ -522,16 +525,26 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
       selectionEventReceivedRef.current = true;
       if (selectionRequestAcceptedRef.current) void confirmSelection(pendingSelection);
     };
-    const connect = () => {
-      if (disposed) return;
+    const connect = async () => {
+      if (disposed || connecting) return;
+      connecting = true;
       retry = null;
       let current: WebSocket;
       try {
-        current = new WebSocket(eventsSocketUrl(token, transport.url));
+        const url = await remoteSocketUrl(transportBaseUrl, "/api/v1/events", token, abort.signal);
+        if (disposed) return;
+        current = new WebSocket(url);
       } catch (error) {
+        if (disposed) return;
         if (transport.url !== relayUrl) rollbackTransport();
-        else console.warn("Event socket connection failed", error);
+        else {
+          console.warn("Event socket connection failed", error);
+          retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt));
+          attempt = Math.min(attempt + 1, 4);
+        }
         return;
+      } finally {
+        connecting = false;
       }
       current.onerror = () => {
         if (!disposed && socket === current && transport.url !== relayUrl) rollbackTransport();
@@ -573,12 +586,13 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     document.addEventListener("visibilitychange", recover);
     return () => {
       disposed = true;
+      abort.abort();
       if (retry !== null) clearTimeout(retry);
       socket?.close();
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
     };
-  }, [clearPendingSelection, confirmSelection, refreshWorkspace, token, transport.url, relayUrl, rollbackTransport]);
+  }, [clearPendingSelection, confirmSelection, refreshWorkspace, token, transport.url, transportBaseUrl, relayUrl, rollbackTransport]);
 
   // A desktop that never republishes a matching selection (stale listener,
   // closed window) must not strand the picker: every chip is disabled while a
@@ -607,10 +621,14 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
 
     try {
       const response = await fetch(
-        apiUrl(transport.url, `/api/v1/workspace/select?token=${encodeURIComponent(token)}`),
+        apiUrl(transportBaseUrl, activeHost?.machineId
+          ? "/api/v1/workspace/select"
+          : `/api/v1/workspace/select?token=${encodeURIComponent(token)}`),
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: activeHost?.machineId
+            ? { "Content-Type": "application/json", Authorization: `Bearer ${token}` }
+            : { "Content-Type": "application/json" },
           body: JSON.stringify({
             workspaceId: option.workspaceId,
             ...(option.worktreeSlug ? { worktreeSlug: option.worktreeSlug } : {}),
@@ -627,7 +645,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     } catch {
       clearPendingSelection();
     }
-  }, [armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, token, transport.url]);
+  }, [activeHost?.machineId, armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, token, transportBaseUrl]);
 
   const tabs = model.context.terminalTabs;
   const activeIndex = tabs && model.context.activeTabId
@@ -663,7 +681,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     }
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
 
-  if (!token) return <PairingPage onPaired={handlePaired} transportUrl={relayUrl} />;
+  if (!token) return <PairingPage onPaired={handlePaired} transportUrl={pairingBaseUrl} />;
 
   const activeTerminal = model.context.activeTerminal;
   const effectiveSessionId = optimisticSessionId ?? activeTerminal?.sessionId ?? null;
