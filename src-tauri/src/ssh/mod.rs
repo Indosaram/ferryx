@@ -6,6 +6,7 @@ pub mod exec;
 #[path = "../ferryx_scope/ssh/mod.rs"]
 pub mod helper_runtime;
 pub mod helper_setup;
+pub mod helper_assets;
 pub mod operations;
 pub mod projects;
 pub mod runtime;

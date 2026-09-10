@@ -45,7 +45,8 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "resources": {
-      "../ui/dist": "ui/dist"
+      "../ui/dist": "ui/dist",
+      "resources/helpers": "helpers"
     },
     "targets": [
       "dmg",

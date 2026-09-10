@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "helperVersion": "2026.908.1",
+  "protocolVersion": 1,
+  "artifacts": [
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "filename": "ferryx-remote-helper.exe",
+      "sha256": "a16798950a2a6b54125c93ff6d5c27635c87b6b6fc9cd05fc77e63c5864f427b",
+      "byteLength": 2149064
+    }
+  ]
+}
