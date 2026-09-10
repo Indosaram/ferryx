@@ -380,3 +380,61 @@ Direct-path WebSocket query credentials (needs direct-gateway ticket issuance),
 cross-process ownership transactions and fsync durability, and the constant
 `relay` audience. The F10 harness remains in-process; the multi-machine case is
 covered by `relay_pairing_generation_regression.rs` rather than by F10.
+
+## Addendum 8: Gen4 findings closed (`5cf2726`)
+
+The Gen4 verdict credited the generation repairs and withheld approval on three
+defects in the daemon-pairing integration. All three were confirmed at source
+before changing anything, then fixed.
+
+- **B1** a View pairing issued a Control bearer. `register_pairing_capability`
+  hard-coded `DevicePermission::Control` and `generate_pairing` took no
+  permission, so the daemon's relay branch dropped the requested perm and
+  `exchange_pairing_code` copied Control onto the issued device.
+- **B2** an explicit daemon refusal started a competing relay owner, because
+  `.ok()` made "the daemon refused" indistinguishable from "no daemon".
+- **B3** stopping the relay left a dead coordinator selected for pairing.
+
+### Verified against the auditor's own probes
+
+`cargo test --test zero_config_gen4_audit -- --ignored --test-threads=1` now
+reports `0 passed; 3 failed` - the intended post-fix outcome for a
+defect-presence harness. Unlike the Gen3 round these fail by DIRECT ASSERTION
+rather than by timeout:
+
+- `observes_daemon_view_pairing_mints_control_...` -> `left: String("view"),
+  right: "control"`
+- `observes_stopped_relay_coordinator_breaks_local_daemon_pairing` -> `assertion
+  failed: ...relay_pairing.read().is_some()`
+- `observes_cli_daemon_error_starts_competing_relay_owner` -> no second owner
+
+### Verification at `5cf2726` (all exit 0)
+
+- `cargo test --lib remote::` 174 passed, 0 failed
+- `cargo test --test relay_pairing_generation_regression -- --test-threads=1`
+  2 passed, 0 failed
+- `bun run test src/remote/` 134 passed across 11 files
+- `bun run test src/remote/zeroConfigSecurityProbe.test.tsx` 6 passed
+- `bun run build` exit 0
+
+RED proof for the new permanent test: reinstating the hard-coded Control fails
+with `left: Control, right: View`.
+
+### Runtime verification of the CLI path
+
+Exercised against the real daemon on this machine, not only compiled:
+daemon running -> the PIN comes from the daemon's relay-registered coordinator;
+no daemon socket -> standalone fallback with no daemon spawned. That second case
+is what exposed a defect in `050e8a6`, where `DaemonClient` silently STARTED a
+daemon and then reported that a running daemon had served the pairing.
+
+### Deployment note
+
+On-host `relay_server.rs` hashes
+`5213297d80db16c67dc205c69a5d38a9efa40ee94b0000811b75a9b28fbd6a9e`, identical to
+`git show HEAD:...`; installed binary sha256
+`3ab49cb57d84b101d7082f39cb66cc0dce6fdfd8257ba4065e89fddd8295e964`, service
+active. The binary hash is UNCHANGED from the previous deployment, which is
+correct rather than stale: `ferryx-relay` is `src/bin/relay.rs` and links only
+`relay_server` (plus `auth`), while `5cf2726` changed daemon/gateway-side pairing
+code the relay binary does not include.
