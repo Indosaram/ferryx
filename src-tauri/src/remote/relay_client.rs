@@ -7,7 +7,7 @@
 //! notifies it of an incoming session (a remote client wants to attach),
 //! it opens a second WebSocket to `/tunnel/data/:session_id` and proxies
 //! frames between that socket and the local loopback gateway that Ferryx
-//! already serves on `127.0.0.1:43821`.
+//! serves at the address supplied by the gateway runtime.
 //!
 //! The control connection is expected to stay up for the lifetime of the
 //! daemon process; if it drops (relay restart, network blip, ...) the
@@ -66,19 +66,21 @@ impl RelayClient {
     /// `machine_token` for authentication. Data channels are proxied to
     /// the local gateway on [`LOCAL_GATEWAY_ADDR`].
     pub fn new(relay_url: impl Into<String>, machine_token: impl Into<String>) -> Self {
+        Self::with_gateway(relay_url, machine_token, LOCAL_GATEWAY_ADDR)
+    }
+
+    /// Creates a client proxying to the gateway's actual bound address,
+    /// including when the gateway requests an OS-assigned port.
+    pub fn with_gateway(
+        relay_url: impl Into<String>,
+        machine_token: impl Into<String>,
+        gateway_addr: impl Into<String>,
+    ) -> Self {
         Self {
             relay_url: relay_url.into(),
             machine_token: machine_token.into(),
-            gateway_addr: LOCAL_GATEWAY_ADDR.to_string(),
+            gateway_addr: gateway_addr.into(),
         }
-    }
-
-    /// Overrides the local gateway address data channels are proxied to.
-    /// Primarily useful for tests.
-    #[cfg(test)]
-    pub fn with_gateway_addr(mut self, addr: impl Into<String>) -> Self {
-        self.gateway_addr = addr.into();
-        self
     }
 
     fn control_url(&self) -> String {
@@ -136,14 +138,25 @@ impl RelayClient {
         let (socket, _response) = tokio_tungstenite::connect_async(request).await?;
         tracing::info!("relay control channel connected");
         let (mut write, mut read) = socket.split();
+        // Dropping the control future also aborts its data channels.
+        let mut sessions = tokio::task::JoinSet::new();
 
         loop {
-            match read.next().await {
+            let message = tokio::select! {
+                message = read.next() => message,
+                result = sessions.join_next(), if !sessions.is_empty() => {
+                    if let Some(Err(err)) = result {
+                        tracing::warn!("relay data channel task failed: {err}");
+                    }
+                    continue;
+                }
+            };
+            match message {
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<SessionRequest>(&text) {
                         Ok(SessionRequest { session_id }) => {
                             let client = self.clone();
-                            tokio::spawn(async move {
+                            sessions.spawn(async move {
                                 if let Err(err) = client.handle_session(&session_id).await {
                                     tracing::warn!(
                                         "relay data channel for session {session_id} failed: {err}"
@@ -271,9 +284,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn with_gateway_preserves_address_and_credentials() {
+        let client = RelayClient::with_gateway("http://localhost:8787/", "machine", "127.0.0.1:54321");
+        assert_eq!(client.gateway_addr, "127.0.0.1:54321");
+        assert_eq!(client.machine_token, "machine");
+        assert_eq!(client.control_url(), "ws://localhost:8787/tunnel/control");
+        assert_eq!(client.data_url("session"), "ws://localhost:8787/tunnel/data/session");
+        assert_eq!(RelayClient::new("http://localhost", "tok").gateway_addr, LOCAL_GATEWAY_ADDR);
+    }
+
     #[tokio::test]
     async fn proxies_frames_between_data_channel_and_local_gateway() {
-        use crate::remote::relay_server::{relay_router, spawn_session_reaper, RelayState};
         use tokio::net::TcpListener;
 
         // Fake local gateway: echoes back whatever it receives, prefixed.
@@ -281,25 +303,32 @@ mod tests {
         let gateway_addr = gateway_listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut sock, _) = gateway_listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let n = sock.read(&mut buf).await.unwrap();
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf).await.unwrap();
             let mut reply = b"echo:".to_vec();
-            reply.extend_from_slice(&buf[..n]);
+            reply.extend_from_slice(&buf);
             sock.write_all(&reply).await.unwrap();
         });
 
-        // Relay server with one valid machine token.
-        let state = RelayState::new(vec!["tok".to_string()]);
-        spawn_session_reaper(state.clone());
-        let router = relay_router(state.clone());
+        // A relay fixture sends the exact session notification after upgrade,
+        // then exposes the data socket through a signal, not a timing delay.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
+        let (data_tx, data_rx) = tokio::sync::oneshot::channel();
+        let relay_task = tokio::spawn(async move {
+            let (control, _) = listener.accept().await.unwrap();
+            let mut control = tokio_tungstenite::accept_async(control).await.unwrap();
+            control.send(Message::Text(r#"{"session_id":"sess-1"}"#.into())).await.unwrap();
+            let (data, _) = listener.accept().await.unwrap();
+            let data = tokio_tungstenite::accept_async(data).await.unwrap();
+            data_tx.send(data).unwrap();
+            while let Some(message) = control.next().await {
+                if message.is_err() { break; }
+            }
         });
 
         let relay_url = format!("http://{relay_addr}");
-        let client = RelayClient::new(&relay_url, "tok").with_gateway_addr(gateway_addr.to_string());
+        let client = RelayClient::with_gateway(&relay_url, "tok", gateway_addr.to_string());
 
         // Drive the daemon's control channel (and any sessions it spawns)
         // in the background.
@@ -307,21 +336,8 @@ mod tests {
             let _ = client.run_control_session().await;
         });
 
-        // Give the control channel a moment to connect and register
-        // itself before the relay is asked to notify it.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let session_id = "sess-1";
-        assert!(
-            state.notify_incoming_session("tok", session_id),
-            "control channel should be registered by now"
-        );
-
-        // Attach as the remote client half; once the daemon's data
-        // channel pairs with this, the relay proxies bytes between them,
-        // and the daemon in turn proxies to/from the fake gateway.
-        let client_url = format!("{}/tunnel/client/{session_id}", to_ws_base(&relay_url));
-        let (mut client_ws, _) = tokio_tungstenite::connect_async(client_url).await.unwrap();
+        let mut client_ws = tokio::time::timeout(Duration::from_secs(5), data_rx)
+            .await.expect("data connection timed out").unwrap();
 
         client_ws
             .send(Message::Binary(b"hello".to_vec().into()))
@@ -340,5 +356,7 @@ mod tests {
         }
 
         client_task.abort();
+        assert!(client_task.await.unwrap_err().is_cancelled());
+        relay_task.abort();
     }
 }

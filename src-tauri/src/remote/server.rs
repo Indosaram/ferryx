@@ -1748,6 +1748,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
 
 pub struct RemoteServerHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    relay_task: Option<tokio::task::JoinHandle<()>>,
     // Keeps every spawned listener task alive for the handle's lifetime; each
     // task independently unwinds `is_running`/`bound_address` on shutdown, so
     // handles are not required for correctness, only to avoid detached-task
@@ -1757,6 +1758,9 @@ pub struct RemoteServerHandle {
 
 impl RemoteServerHandle {
     pub fn stop(self) {
+        if let Some(task) = self.relay_task {
+            task.abort();
+        }
         let _ = self.shutdown_tx.send(());
         for tx in self._extra_shutdown_txs {
             let _ = tx.send(());
@@ -1833,6 +1837,19 @@ pub async fn start_remote_server_with_resolver(
         return Err("Remote gateway is OFF".into());
     }
 
+    let relay_url = config.relay_url.as_deref().map(str::trim).filter(|url| !url.is_empty());
+    if config.mode == RemoteNetworkMode::Relay && relay_url.is_none() {
+        return Err("Relay mode requires a non-empty relay URL".into());
+    }
+    // Provision the same token in the relay's machine-token allowlist.
+    // Never create a random local token that the relay cannot authenticate.
+    let relay_token = relay_url.map(|_| {
+        std::env::var("FERRYX_MACHINE_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| "Relay requires a provisioned FERRYX_MACHINE_TOKEN".to_string())
+    }).transpose()?;
+
     // Baseline listener: always loopback, never the wildcard address.
     let loopback_addr: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, config.port).into();
     let router = create_remote_router(Arc::clone(&state));
@@ -1880,9 +1897,19 @@ pub async fn start_remote_server_with_resolver(
         }
     }
 
+    let relay_task = relay_url.zip(relay_token).map(|(url, token)| {
+        let client = crate::remote::relay_client::RelayClient::with_gateway(
+            url,
+            token,
+            primary_local_addr.to_string(),
+        );
+        tokio::spawn(async move { client.run().await })
+    });
+
     Ok((
         RemoteServerHandle {
             shutdown_tx,
+            relay_task,
             _extra_shutdown_txs: extra_shutdown_txs,
         },
         primary_local_addr,

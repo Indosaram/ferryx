@@ -18,7 +18,13 @@
 //! Machine Token - checked on the control channel. Data and client
 //! channels are bound to a `session_id` that is only ever handed out over
 //! the (already authenticated) control channel, so they do not need to
-//! re-present the Machine Token.
+//! re-present the Machine Token. An authenticated control socket can send
+//! `{"type":"AllocateSession"}` to receive a fresh UUID in an
+//! `IncomingSessionNotice`. Trusted in-process callers can also issue via
+//! `notify_incoming_session`. Unknown IDs are rejected before upgrade;
+//! each issued ID accepts exactly one data half and one client half.
+//! Pending and active sessions share a 100-entry budget. Pairing expires
+//! after 30 seconds; sends time out after 30 seconds and sessions after one hour.
 
 use axum::{
     extract::{
@@ -34,6 +40,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -42,6 +49,10 @@ use tokio::time::timeout;
 /// How long a session may sit waiting for its data or client half before
 /// the relay gives up and evicts it from the registry.
 const SESSION_PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PENDING_SESSIONS: usize = 100;
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
+const SESSION_TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
+const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
 /// Interval on which the background reaper sweeps the session registry for
 /// entries that have exceeded [`SESSION_PAIRING_TIMEOUT`] without pairing.
@@ -61,13 +72,41 @@ enum HalfKind {
     Client,
 }
 
-/// A half that arrived at the registry before its counterpart, waiting to
-/// be paired. `notify` is fired with the *counterpart's* socket once one
-/// arrives, so the waiting task can resume and start proxying.
+/// An issued session, retained through reservation and active transfer.
+/// `notify` hands the second socket to the first connection's task.
 struct WaitingHalf {
-    kind: HalfKind,
+    generation: u64,
     created_at: Instant,
-    notify: oneshot::Sender<WebSocket>,
+    kind: Option<HalfKind>,
+    notify: Option<oneshot::Sender<WebSocket>>,
+    active: bool,
+}
+
+struct ControlChannel {
+    generation: u64,
+    tx: mpsc::Sender<IncomingSessionNotice>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ControlRequest {
+    AllocateSession,
+}
+
+/// Also cleans up failed upgrades and cancelled connection tasks.
+struct SessionGuard {
+    armed: bool,
+    state: RelayState,
+    session_id: String,
+    generation: u64,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.remove_pending(&self.session_id, self.generation);
+        }
+    }
 }
 
 /// Shared relay state: the set of authorized Machine Tokens, the live
@@ -80,24 +119,17 @@ pub struct RelayState {
 
 struct RelayInner {
     machine_tokens: Vec<String>,
-    control_channels: Mutex<HashMap<String, mpsc::UnboundedSender<IncomingSessionNotice>>>,
+    control_channels: Mutex<HashMap<String, ControlChannel>>,
+    next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
 }
 
 /// Outcome of offering a socket to the pairing registry.
 enum PairingOutcome {
-    /// A counterpart of the opposite kind was already waiting; it has been
-    /// handed this call's socket and will drive the proxy itself. This
-    /// call is done.
-    HandedOff,
-    /// No differently-kinded counterpart was waiting (or it was gone).
-    /// This call's socket is now the registered waiting half; the caller
-    /// keeps driving it and awaits `rx` for the counterpart's socket once
-    /// one arrives.
-    Waiting {
-        own_socket: WebSocket,
-        rx: oneshot::Receiver<WebSocket>,
-    },
+    /// The opposite half is reserved; send it the socket after upgrade.
+    HandOff(oneshot::Sender<WebSocket>),
+    /// The first half is reserved and awaits the counterpart after upgrade.
+    Waiting { rx: oneshot::Receiver<WebSocket> },
 }
 
 impl RelayState {
@@ -105,6 +137,7 @@ impl RelayState {
         Self {
             inner: Arc::new(RelayInner {
                 machine_tokens,
+                next_generation: AtomicU64::new(1),
                 control_channels: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
             }),
@@ -127,81 +160,109 @@ impl RelayState {
     fn register_control_channel(
         &self,
         machine_token: String,
-    ) -> mpsc::UnboundedReceiver<IncomingSessionNotice> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    ) -> (u64, mpsc::Receiver<IncomingSessionNotice>) {
+        let (tx, rx) = mpsc::channel(MAX_PENDING_SESSIONS);
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
         self.inner
             .control_channels
             .lock()
-            .insert(machine_token, tx);
-        rx
+            .insert(machine_token, ControlChannel { generation, tx });
+        (generation, rx)
     }
 
-    fn unregister_control_channel(&self, machine_token: &str) {
-        self.inner.control_channels.lock().remove(machine_token);
+    fn unregister_control_channel(&self, machine_token: &str, generation: u64) {
+        let mut channels = self.inner.control_channels.lock();
+        if channels
+            .get(machine_token)
+            .is_some_and(|channel| channel.generation == generation)
+        {
+            channels.remove(machine_token);
+        }
     }
 
-    /// Notifies the connected daemon holding `machine_token`'s control
-    /// channel that a new session has been requested. Returns `true` if a
-    /// control channel accepted the notification.
-    #[allow(dead_code)]
+    /// Trusted in-process issuance API. The caller must supply an opaque,
+    /// unpredictable ID and a configured token with a live control channel.
+    /// Registry insertion and notification are atomic with respect to admission.
     pub fn notify_incoming_session(&self, machine_token: &str, session_id: &str) -> bool {
-        let channels = self.inner.control_channels.lock();
-        match channels.get(machine_token) {
-            Some(tx) => tx
-                .send(IncomingSessionNotice {
-                    session_id: session_id.to_string(),
-                })
-                .is_ok(),
-            None => false,
-        }
+        self.issue_session(machine_token, session_id, None)
     }
 
-    /// Offers `socket` as the given `kind` of half for `session_id`.
-    ///
-    /// If a differently-kinded half is already registered and waiting,
-    /// this removes it from the registry, hands it `socket` directly (it
-    /// will resume and proxy), and returns [`PairingOutcome::HandedOff`].
-    ///
-    /// Otherwise this call's own socket becomes the new waiting half. The
-    /// caller must keep driving `socket` itself and wait on the returned
-    /// receiver for the eventual counterpart.
-    fn offer_half(&self, session_id: &str, kind: HalfKind, socket: WebSocket) -> PairingOutcome {
-        let mut sessions = self.inner.pending_sessions.lock();
-
-        let mut socket = socket;
-        if let Some(existing) = sessions.get(session_id) {
-            if existing.kind != kind {
-                let waiting = sessions.remove(session_id).expect("just matched above");
-                match waiting.notify.send(socket) {
-                    Ok(()) => return PairingOutcome::HandedOff,
-                    Err(returned_socket) => {
-                        // The waiting task's receiver was already dropped
-                        // (e.g. it timed out right as we tried to hand
-                        // off); recover our socket and fall through to
-                        // register as the new waiting half instead.
-                        socket = returned_socket;
-                    }
-                }
-            }
+    fn issue_session(
+        &self,
+        machine_token: &str,
+        session_id: &str,
+        generation: Option<u64>,
+    ) -> bool {
+        if !self.validate_machine_token(machine_token) {
+            return false;
         }
-
-        let (tx, rx) = oneshot::channel();
+        let channels = self.inner.control_channels.lock();
+        let Some(channel) = channels.get(machine_token) else {
+            return false;
+        };
+        if generation.is_some_and(|id| id != channel.generation) {
+            return false;
+        }
+        let mut sessions = self.inner.pending_sessions.lock();
+        if sessions.len() >= MAX_PENDING_SESSIONS || sessions.contains_key(session_id) {
+            return false;
+        }
+        if channel
+            .tx
+            .try_send(IncomingSessionNotice {
+                session_id: session_id.into(),
+            })
+            .is_err()
+        {
+            return false;
+        }
         sessions.insert(
-            session_id.to_string(),
+            session_id.into(),
             WaitingHalf {
-                kind,
+                generation: self.inner.next_generation.fetch_add(1, Ordering::Relaxed),
                 created_at: Instant::now(),
-                notify: tx,
+                kind: None,
+                notify: None,
+                active: false,
             },
         );
-        PairingOutcome::Waiting {
-            own_socket: socket,
-            rx,
-        }
+        true
     }
 
-    fn remove_pending(&self, session_id: &str) {
-        self.inner.pending_sessions.lock().remove(session_id);
+    /// Reserve before upgrade so concurrent duplicates receive HTTP 409.
+    fn reserve_half(
+        &self,
+        session_id: &str,
+        kind: HalfKind,
+    ) -> Result<(u64, PairingOutcome), StatusCode> {
+        let mut sessions = self.inner.pending_sessions.lock();
+        let waiting = sessions.get_mut(session_id).ok_or(StatusCode::NOT_FOUND)?;
+        if waiting.active || waiting.kind == Some(kind) {
+            return Err(StatusCode::CONFLICT);
+        }
+        if waiting.created_at.elapsed() >= SESSION_PAIRING_TIMEOUT {
+            return Err(StatusCode::GONE);
+        }
+        let outcome = if let Some(tx) = waiting.notify.take() {
+            waiting.active = true;
+            PairingOutcome::HandOff(tx)
+        } else {
+            let (tx, rx) = oneshot::channel();
+            waiting.kind = Some(kind);
+            waiting.notify = Some(tx);
+            PairingOutcome::Waiting { rx }
+        };
+        Ok((waiting.generation, outcome))
+    }
+
+    fn remove_pending(&self, session_id: &str, generation: u64) {
+        let mut sessions = self.inner.pending_sessions.lock();
+        if sessions
+            .get(session_id)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            sessions.remove(session_id);
+        }
     }
 
     /// Sweeps the pending-session registry, dropping any entry that has
@@ -210,7 +271,9 @@ impl RelayState {
     /// `rx.await` to resolve to an error so it can close its socket.
     fn sweep_expired_sessions(&self) {
         let mut sessions = self.inner.pending_sessions.lock();
-        sessions.retain(|_, waiting| waiting.created_at.elapsed() < SESSION_PAIRING_TIMEOUT);
+        sessions.retain(|_, waiting| {
+            waiting.active || waiting.created_at.elapsed() < SESSION_PAIRING_TIMEOUT
+        });
     }
 }
 
@@ -268,34 +331,49 @@ async fn control_handler(
         return Err((StatusCode::UNAUTHORIZED, "Invalid Machine Token".into()));
     }
 
-    Ok(ws.on_upgrade(move |socket| handle_control_socket(socket, state, token)))
+    Ok(ws
+        .max_message_size(MAX_MESSAGE_SIZE)
+        .max_frame_size(MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| handle_control_socket(socket, state, token)))
 }
 
 async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine_token: String) {
-    let mut notices = state.register_control_channel(machine_token.clone());
+    let (generation, mut notices) = state.register_control_channel(machine_token.clone());
     loop {
         tokio::select! {
             notice = notices.recv() => {
                 let Some(notice) = notice else { break };
                 let Ok(payload) = serde_json::to_string(&notice) else { continue };
-                if socket.send(Message::Text(payload.into())).await.is_err() {
+                if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(payload.into()))).await, Ok(Ok(()))) {
+                    tracing::warn!("relay control send failed or timed out");
                     break;
                 }
             }
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {
-                        // Control channel only carries relay-to-daemon
-                        // notifications; any inbound frame (e.g. a
-                        // keepalive ping payload) is simply ignored.
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ControlRequest>(&text) {
+                            Ok(ControlRequest::AllocateSession) => {
+                                let id = uuid::Uuid::new_v4().to_string();
+                                if !state.issue_session(&machine_token, &id, Some(generation)) {
+                                    tracing::warn!("relay session allocation rejected");
+                                    break;
+                                }
+                            }
+                            Err(error) => tracing::warn!(%error, "invalid relay control request"),
+                        }
                     }
-                    Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "relay control receive failed");
+                        break;
+                    }
                 }
             }
         }
     }
-    state.unregister_control_channel(&machine_token);
+    state.unregister_control_channel(&machine_token, generation);
 }
 
 /// `GET /tunnel/data/:session_id` - the desktop daemon's data channel for a
@@ -304,8 +382,8 @@ async fn data_handler(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
     State(state): State<RelayState>,
-) -> Response {
-    ws.on_upgrade(move |socket| handle_half_socket(socket, state, session_id, HalfKind::Data))
+) -> Result<Response, StatusCode> {
+    upgrade_half(ws, state, session_id, HalfKind::Data)
 }
 
 /// `GET /tunnel/client/:session_id` - the remote client's channel for a
@@ -314,8 +392,27 @@ async fn client_handler(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
     State(state): State<RelayState>,
-) -> Response {
-    ws.on_upgrade(move |socket| handle_half_socket(socket, state, session_id, HalfKind::Client))
+) -> Result<Response, StatusCode> {
+    upgrade_half(ws, state, session_id, HalfKind::Client)
+}
+
+fn upgrade_half(
+    ws: WebSocketUpgrade,
+    state: RelayState,
+    session_id: String,
+    kind: HalfKind,
+) -> Result<Response, StatusCode> {
+    let (generation, outcome) = state.reserve_half(&session_id, kind)?;
+    let guard = SessionGuard {
+        armed: true,
+        state,
+        session_id,
+        generation,
+    };
+    Ok(ws
+        .max_message_size(MAX_MESSAGE_SIZE)
+        .max_frame_size(MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| handle_half_socket(socket, guard, outcome)))
 }
 
 /// Registers `socket` as one half of `session_id`'s pairing. If the
@@ -325,68 +422,101 @@ async fn client_handler(
 /// up, then proxies frames bidirectionally between the two sockets until
 /// either side disconnects.
 async fn handle_half_socket(
-    socket: WebSocket,
-    state: RelayState,
-    session_id: String,
-    kind: HalfKind,
+    mut socket: WebSocket,
+    mut guard: SessionGuard,
+    outcome: PairingOutcome,
 ) {
-    match state.offer_half(&session_id, kind, socket) {
-        PairingOutcome::HandedOff => {
-            // The counterpart that was already waiting received our
-            // socket over its own oneshot and will drive the proxy;
-            // nothing left to do here.
-        }
-        PairingOutcome::Waiting { own_socket, rx } => {
-            match timeout(SESSION_PAIRING_TIMEOUT, rx).await {
-                Ok(Ok(peer_socket)) => {
-                    proxy_sockets(own_socket, peer_socket).await;
-                }
-                Ok(Err(_)) | Err(_) => {
-                    // Either the registry entry was reaped (sender
-                    // dropped) or we hit our own bound waiting for a
-                    // counterpart that never arrived. Either way, make
-                    // sure the (now stale) registry entry is gone and
-                    // close our socket.
-                    state.remove_pending(&session_id);
-                    let _ = own_socket;
-                }
+    match outcome {
+        PairingOutcome::HandOff(tx) => {
+            if tx.send(socket).is_ok() {
+                // The waiting task owns cleanup after a successful transfer.
+                guard.armed = false;
+            } else {
+                tracing::warn!("relay counterpart disconnected before handoff");
             }
+        }
+        PairingOutcome::Waiting { mut rx } => {
+            let transfer = async {
+                let mut buffered = Vec::new();
+                let mut bytes = 0;
+                let pairing = async {
+                    loop {
+                        tokio::select! {
+                            peer = &mut rx => return peer.map_err(anyhow::Error::from),
+                            incoming = socket.recv() => {
+                                match incoming {
+                                    Some(Ok(Message::Close(_))) | None => anyhow::bail!("pending peer disconnected"),
+                                    Some(Err(error)) => return Err(error.into()),
+                                    Some(Ok(message)) => {
+                                        bytes += match &message {
+                                            Message::Text(text) => text.len(),
+                                            Message::Binary(data) | Message::Ping(data) | Message::Pong(data) => data.len(),
+                                            Message::Close(_) => 0,
+                                        };
+                                        if bytes > MAX_MESSAGE_SIZE || buffered.len() >= 100 {
+                                            anyhow::bail!("pending frame buffer limit exceeded");
+                                        }
+                                        buffered.push(message);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                let mut peer = timeout(SESSION_PAIRING_TIMEOUT, pairing).await??;
+                for message in buffered {
+                    timeout(TRANSFER_TIMEOUT, peer.send(message)).await??;
+                }
+                proxy_sockets(socket, peer).await
+            };
+            match timeout(SESSION_TRANSFER_TIMEOUT, transfer).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "relay session failed"),
+                Err(error) => tracing::warn!(%error, "relay session lifetime exceeded"),
+            }
+            drop(guard);
         }
     }
 }
 
 /// Proxies WebSocket frames bidirectionally between `a` and `b` until
 /// either side closes or errors.
-async fn proxy_sockets(a: WebSocket, b: WebSocket) {
+async fn proxy_sockets(a: WebSocket, b: WebSocket) -> anyhow::Result<()> {
     let (mut a_tx, mut a_rx) = a.split();
     let (mut b_tx, mut b_rx) = b.split();
 
     let a_to_b = async {
-        while let Some(Ok(msg)) = a_rx.next().await {
+        while let Some(msg) = a_rx.next().await {
+            let msg = msg?;
             let is_close = matches!(msg, Message::Close(_));
-            if b_tx.send(msg).await.is_err() || is_close {
+            timeout(TRANSFER_TIMEOUT, b_tx.send(msg)).await??;
+            if is_close {
                 break;
             }
         }
-        let _ = b_tx.close().await;
+        Ok::<(), anyhow::Error>(())
     };
     let b_to_a = async {
-        while let Some(Ok(msg)) = b_rx.next().await {
+        while let Some(msg) = b_rx.next().await {
+            let msg = msg?;
             let is_close = matches!(msg, Message::Close(_));
-            if a_tx.send(msg).await.is_err() || is_close {
+            timeout(TRANSFER_TIMEOUT, a_tx.send(msg)).await??;
+            if is_close {
                 break;
             }
         }
-        let _ = a_tx.close().await;
+        Ok::<(), anyhow::Error>(())
     };
 
-    tokio::join!(a_to_b, b_to_a);
+    tokio::select! {
+        result = a_to_b => result,
+        result = b_to_a => result,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::{SinkExt as _, StreamExt as _};
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message as TMessage;
 
@@ -421,7 +551,23 @@ mod tests {
     #[tokio::test]
     async fn test_relay_reverse_tunnel_multiplex() {
         let (base_url, _server) = spawn_test_relay().await;
-        let session_id = "integration-test-session";
+        let (mut control, _) = tokio_tungstenite::connect_async(format!(
+            "{base_url}/tunnel/control?token=test-machine-token"
+        ))
+        .await
+        .unwrap();
+        control
+            .send(TMessage::Text(r#"{"type":"AllocateSession"}"#.into()))
+            .await
+            .unwrap();
+        let notice = timeout(Duration::from_secs(5), control.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let notice: IncomingSessionNotice =
+            serde_json::from_str(notice.to_text().unwrap()).unwrap();
+        let session_id = notice.session_id;
 
         let data_url = format!("{base_url}/tunnel/data/{session_id}");
         let client_url = format!("{base_url}/tunnel/client/{session_id}");
@@ -440,6 +586,14 @@ mod tests {
         let (mut client_socket, _) = tokio_tungstenite::connect_async(&client_url)
             .await
             .expect("client channel should connect");
+
+        for url in [&data_url, &client_url] {
+            let error = tokio_tungstenite::connect_async(url).await.unwrap_err();
+            assert!(
+                matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == StatusCode::CONFLICT)
+            );
+        }
 
         // client -> data
         client_socket
@@ -492,5 +646,57 @@ mod tests {
 
         let _ = client_socket.close(None).await;
         let _ = data_socket.close(None).await;
+        _server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_unissued_session_rejected() {
+        let (base, server) = spawn_test_relay().await;
+        for half in ["data", "client"] {
+            let error = tokio_tungstenite::connect_async(format!("{base}/tunnel/{half}/unissued"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == StatusCode::NOT_FOUND)
+            );
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn test_relay_generation_safe_cleanup_and_limits() {
+        let state = RelayState::new(vec!["tok".into()]);
+        assert!(!state.notify_incoming_session("tok", "missing-control"));
+        let (old, _old_rx) = state.register_control_channel("tok".into());
+        let (new, mut rx) = state.register_control_channel("tok".into());
+        state.unregister_control_channel("tok", old);
+        assert!(!state.issue_session("tok", "stale", Some(old)));
+        assert!(state.notify_incoming_session("tok", "session"));
+        rx.try_recv().unwrap();
+        let (generation, waiting) = state.reserve_half("session", HalfKind::Data).unwrap();
+        assert!(matches!(
+            state.reserve_half("session", HalfKind::Data),
+            Err(StatusCode::CONFLICT)
+        ));
+        state.remove_pending("session", generation);
+        drop(waiting);
+        assert!(state.notify_incoming_session("tok", "session"));
+        rx.try_recv().unwrap();
+        state.remove_pending("session", generation);
+        let (_, waiting) = state.reserve_half("session", HalfKind::Client).unwrap();
+        let (_, handoff) = state.reserve_half("session", HalfKind::Data).unwrap();
+        assert!(matches!(
+            state.reserve_half("session", HalfKind::Client),
+            Err(StatusCode::CONFLICT)
+        ));
+        for n in 1..MAX_PENDING_SESSIONS {
+            assert!(state.notify_incoming_session("tok", &format!("session-{n}")));
+            rx.try_recv().unwrap();
+        }
+        assert!(!state.notify_incoming_session("tok", "overflow"));
+        state.unregister_control_channel("tok", new);
+        assert!(!state.notify_incoming_session("tok", "no-control"));
+        drop((waiting, handoff));
     }
 }
