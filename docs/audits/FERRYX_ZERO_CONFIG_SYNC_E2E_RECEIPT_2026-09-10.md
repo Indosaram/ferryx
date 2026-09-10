@@ -237,3 +237,27 @@ browser", so the echo is genuinely observed rather than assumed.
 This is an in-process Rust harness: the browser side is the relay's HTTP/WS client
 surface, not a real browser engine, and it does not cover two machines, revocation
 mid-stream, expiry, owner replacement, or restart recovery. Those remain open.
+
+## Addendum 4: deployment of the F02/F03/F08 round
+
+- Commit deployed: `30555f2` (branch `remote-connectivity`).
+- Provenance: `git show HEAD:src-tauri/src/remote/relay_server.rs | shasum -a 256`
+  and `sha256sum` of the file on Omaki both report
+  `f9998406acdb9dab0d773300265dac43d9e1b5a58740e8474edaafd8d6a3668b`, so the host
+  built exactly this source. Deployment remains rsynced source plus an on-host
+  `cargo build --release --bin ferryx-relay` (2m50s, exit 0), not a git checkout.
+- Installed binary sha256: `dc8d181a117e2d4b1344b48b663e3d807bbe28589544d89b3af1f47dd18fe07f`.
+- Service: `ferryx-relay.service` restarted and `active`; the process holds the
+  listener on `0.0.0.0:8787` and logs `ferryx-relay listening on 0.0.0.0:8787`
+  with no errors after restart.
+
+### Routing note (not a regression)
+
+`GET https://relay.checka.cc/api/v1/health` returns 404, and so does
+`/host/<unknown>/api/v1/health`. That is correct: the relay serves no root health
+route, and an unknown machine is refused without disclosing existence. Earlier
+addenda that describe a 200 health response were probing a host-scoped path for a
+machine with a live control channel; no such daemon is connected here, so no
+end-to-end ticket flow was re-exercised against production in this round. The
+F02/F03/F08 behavior is covered by the in-process suite, not by this deployment
+check, which establishes only that the hardened build is the one now serving.
