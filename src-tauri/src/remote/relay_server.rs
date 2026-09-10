@@ -667,6 +667,16 @@ impl RelayState {
         if tracker.locked_until.is_some_and(|until| now < until) {
             return Err(StatusCode::UNAUTHORIZED);
         }
+        // Snapshot live control generations first. register_pairing takes
+        // control_channels before pairings, so acquiring them in that same order here
+        // keeps the two paths deadlock-free.
+        let live_generations: HashMap<String, u64> = self
+            .inner
+            .control_channels
+            .lock()
+            .iter()
+            .map(|(machine, channel)| (machine.clone(), channel.generation))
+            .collect();
         let mut pairings = self.inner.pairings.lock();
         let pairing = pairings.values_mut().find(|p| {
             if let Some(token) = &payload.pairing_token {
@@ -683,9 +693,21 @@ impl RelayState {
             }
         });
         if let Some(p) = pairing {
+            // The credentials handed back are attributed to the registering machine, so
+            // that machine must still be the live control identity for the generation it
+            // registered under. Otherwise a code registered by an earlier (or departed)
+            // control channel could still mint credentials for that identity.
+            let control_identity_is_live = live_generations
+                .get(&p.registration.machine_id)
+                .is_some_and(|current| {
+                    p.registration
+                        .generation
+                        .is_none_or(|generation| generation == *current)
+                });
             if p.state == PairingState::Ready
                 && p.registration.expires_at > current_time_secs()
                 && machine.is_none_or(|m| m == p.registration.machine_id)
+                && control_identity_is_live
             {
                 p.state = PairingState::Claimed;
                 // A caller can register its own known PINs. A match must not
@@ -2335,6 +2357,78 @@ mod tests {
             ),
             Err(StatusCode::UNAUTHORIZED)
         );
+    }
+
+    #[test]
+    fn test_relay_pairing_claim_requires_the_live_control_identity() {
+        // The exchange hands back credentials attributed to the registering machine.
+        // That attribution is only sound while the registering machine is still the
+        // live control identity for the generation it registered under.
+        let state = test_state(vec![]);
+        let machine = "exchange-machine";
+        let (tx, _rx) = mpsc::channel(1);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 3, tx });
+
+        let registration = RegisterPairingPin {
+            generation: Some(3),
+            machine_id: machine.into(),
+            pin: "525354".into(),
+            pairing_token: "exchange-pairing-token".into(),
+            expires_at: current_time_secs() + 120,
+        };
+        state.register_pairing(machine, 3, registration).unwrap();
+
+        let request = PublicPairExchangeRequest {
+            pin: Some("525354".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "test-device".into(),
+        };
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // The registering control channel is replaced before the code is exchanged.
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        state.inner.control_channels.lock().insert(
+            machine.to_owned(),
+            ControlChannel {
+                generation: 4,
+                tx: new_tx,
+            },
+        );
+        assert_eq!(
+            state.claim_pairing(ip, &request, None).err(),
+            Some(StatusCode::NOT_FOUND),
+            "a pairing registered by a superseded control identity must not be claimable"
+        );
+
+        // And with no control channel at all, the identity cannot be vouched for.
+        state.inner.control_channels.lock().remove(machine);
+        assert_eq!(
+            state
+                .claim_pairing("127.0.0.2".parse().unwrap(), &request, None)
+                .err(),
+            Some(StatusCode::NOT_FOUND),
+            "a pairing for a departed control identity must not be claimable"
+        );
+
+        // Restoring the exact registering generation makes it claimable again, so the
+        // guard is about identity liveness rather than blanket refusal.
+        let (restored_tx, _restored_rx) = mpsc::channel(1);
+        state.inner.control_channels.lock().insert(
+            machine.to_owned(),
+            ControlChannel {
+                generation: 3,
+                tx: restored_tx,
+            },
+        );
+        let (claimed_machine, _, _) = state
+            .claim_pairing("127.0.0.3".parse().unwrap(), &request, None)
+            .expect("live control identity must be able to complete the exchange");
+        assert_eq!(claimed_machine, machine);
     }
 
     #[test]
