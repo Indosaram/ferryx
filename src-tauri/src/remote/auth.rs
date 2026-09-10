@@ -19,15 +19,48 @@ pub struct MachineIdentity {
     pub private_key: String,
 }
 
+/// The one directory holding this machine's remote identity.
+///
+/// The GUI/daemon gateway and the `ferryx pair` CLI must resolve the SAME file, or
+/// the machine presents two different Ed25519 keypairs depending on which entry
+/// point ran first, and the relay sees them as competing owners of one machine ID.
+/// This previously returned `FERRYX_DATA_DIR` itself while every other resolver
+/// (main.rs `remote_state_dir`/`remote_auth_manager`, state.rs
+/// `resolve_remote_data_dir`) appended `remote`, so the identity split into
+/// `<data>/identity.json` and `<data>/remote/identity.json`. It also skipped the
+/// Windows `LOCALAPPDATA` location those resolvers use.
 pub(crate) fn canonical_identity_dir() -> Result<PathBuf, String> {
-    if let Some(base) = std::env::var_os("FERRYX_DATA_DIR") {
-        return Ok(PathBuf::from(base));
+    canonical_remote_dir().ok_or_else(|| "Cannot resolve machine identity directory".to_string())
+}
+
+/// Shared `<data>/remote` resolution used by every remote-state path.
+pub(crate) fn canonical_remote_dir() -> Option<PathBuf> {
+    resolve_canonical_remote_dir(|variable| std::env::var_os(variable))
+}
+
+/// Environment-injectable form of [`canonical_remote_dir`] so the resolution can be
+/// asserted without mutating process-wide environment state from tests.
+pub(crate) fn resolve_canonical_remote_dir<F>(lookup: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    if let Some(base) = lookup("FERRYX_DATA_DIR") {
+        return Some(PathBuf::from(base).join("remote"));
     }
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .map(|base| base.join(".ferryx/remote"))
-        .ok_or_else(|| "Cannot resolve machine identity directory".to_string())
+    #[cfg(windows)]
+    {
+        lookup("LOCALAPPDATA")
+            .map(|base| PathBuf::from(base).join("Ferryx").join("remote"))
+            .or_else(|| {
+                lookup("USERPROFILE").map(|base| PathBuf::from(base).join(".ferryx").join("remote"))
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        lookup("HOME")
+            .or_else(|| lookup("USERPROFILE"))
+            .map(|base| PathBuf::from(base).join(".ferryx").join("remote"))
+    }
 }
 
 pub(crate) fn canonical_auth_path() -> Option<PathBuf> {
@@ -703,6 +736,49 @@ mod security_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_identity_dir_matches_the_shared_remote_state_dir() {
+        // The GUI/daemon gateway and the `ferryx pair` CLI must load the SAME identity
+        // file. canonical_identity_dir previously returned FERRYX_DATA_DIR itself while
+        // every other resolver appended "remote", so one machine ended up with two
+        // Ed25519 keypairs depending on which entry point created one first.
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            move |variable: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == variable)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            }
+        };
+
+        // This mirrors main.rs remote_state_dir() and state.rs resolve_remote_data_dir():
+        // FERRYX_DATA_DIR is joined with "remote".
+        assert_eq!(
+            resolve_canonical_remote_dir(lookup(&[("FERRYX_DATA_DIR", "/data/ferryx")])).unwrap(),
+            PathBuf::from("/data/ferryx").join("remote"),
+            "identity must live under the same <data>/remote the CLI and gateway use"
+        );
+
+        // And the per-user fallback resolves rather than returning None, so the CLI does
+        // not silently create a second identity when FERRYX_DATA_DIR is unset.
+        #[cfg(not(windows))]
+        assert_eq!(
+            resolve_canonical_remote_dir(lookup(&[("HOME", "/home/user")])).unwrap(),
+            PathBuf::from("/home/user").join(".ferryx").join("remote")
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            resolve_canonical_remote_dir(lookup(&[("LOCALAPPDATA", r"C:\Users\u\AppData\Local")]))
+                .unwrap(),
+            PathBuf::from(r"C:\Users\u\AppData\Local")
+                .join("Ferryx")
+                .join("remote"),
+            "the Windows data location used by the other resolvers must be honored"
+        );
+
+        assert!(resolve_canonical_remote_dir(lookup(&[("UNRELATED", "/x")])).is_none());
+    }
 
     #[test]
     fn test_machine_identity_persistence() {
