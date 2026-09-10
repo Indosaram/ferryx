@@ -215,13 +215,27 @@ impl RelayState {
         machine_tokens: Vec<String>,
         key_store_path: Option<std::path::PathBuf>,
     ) -> std::io::Result<Self> {
-        let keys = match key_store_path.as_ref().map(std::fs::read).transpose() {
-            Ok(Some(bytes)) => serde_json::from_slice(&bytes)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-            Ok(None) => HashMap::new(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(error) => return Err(error),
-        };
+        let keys: HashMap<String, String> =
+            match key_store_path.as_ref().map(std::fs::read).transpose() {
+                Ok(Some(bytes)) => serde_json::from_slice(&bytes)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+                Ok(None) => HashMap::new(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+                Err(error) => return Err(error),
+            };
+        // A persisted record is an authorization decision, so reject a store that cannot
+        // be trusted rather than loading entries that would admit or lock out a machine.
+        // Keys are base64-encoded Ed25519 public keys (32 bytes -> 44 chars with padding).
+        if let Some((machine, _)) = keys.iter().find(|(machine, key)| {
+            machine.is_empty()
+                || key.is_empty()
+                || !crate::remote::auth::is_valid_public_key(key)
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid machine ownership record for {machine}"),
+            ));
+        }
         Ok(Self {
             paired_tokens: Arc::new(Mutex::new(HashMap::new())),
             inner: Arc::new(RelayInner {
@@ -317,10 +331,46 @@ impl RelayState {
             return Err("Enrollment token required for private relay".into());
         }
         let mut enrolled = keys.clone();
-        enrolled.insert(auth.machine_id.clone(), auth.public_key.clone());
         if let Some(path) = &self.inner.key_store_path {
+            // Another relay process may have enrolled machines since this one loaded the
+            // store. Writing our in-memory snapshot would silently drop their records, so
+            // re-read and merge under our lock before persisting.
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let on_disk: HashMap<String, String> = serde_json::from_slice(&bytes)
+                        .map_err(|error| format!("Corrupt machine ownership store: {error}"))?;
+                    for (machine, key) in on_disk {
+                        match enrolled.get(&machine) {
+                            // A conflicting on-disk owner must not be silently replaced.
+                            Some(existing) if existing != &key => {
+                                return Err(
+                                    "Machine ID already claimed by another public key".into()
+                                );
+                            }
+                            Some(_) => {}
+                            None => {
+                                enrolled.insert(machine, key);
+                            }
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("Failed to read machine ownership: {error}"));
+                }
+            }
+            // Re-check after merging: the claim may have been taken by another process.
+            if enrolled
+                .get(&auth.machine_id)
+                .is_some_and(|key| key != &auth.public_key)
+            {
+                return Err("Machine ID already claimed by another public key".into());
+            }
+            enrolled.insert(auth.machine_id.clone(), auth.public_key.clone());
             write_private_json(path, &enrolled)
                 .map_err(|error| format!("Failed to persist machine ownership: {error}"))?;
+        } else {
+            enrolled.insert(auth.machine_id.clone(), auth.public_key.clone());
         }
         *keys = enrolled;
         Ok(())
@@ -539,10 +589,22 @@ impl RelayState {
         }
         let mut pairings = self.inner.pairings.lock();
         pairings.retain(|_, p| p.registration.expires_at > current_time_secs());
-        if pairings.contains_key(&registration.pin)
-            || pairings
-                .values()
-                .any(|p| p.registration.pairing_token == registration.pairing_token)
+        // A daemon that retries after a lost ACK re-sends the identical registration.
+        // Treat that as already-satisfied instead of an error, without consuming another
+        // slot against MAX_ACTIVE_PAIRING_PINS_PER_MACHINE and without refreshing the
+        // lease (which would let a caller keep one short code alive indefinitely).
+        if let Some(existing) = pairings.get(&registration.pin) {
+            let same_request = existing.registration.machine_id == registration.machine_id
+                && existing.registration.pairing_token == registration.pairing_token;
+            return if same_request {
+                Ok(())
+            } else {
+                Err("Pairing code already registered")
+            };
+        }
+        if pairings
+            .values()
+            .any(|p| p.registration.pairing_token == registration.pairing_token)
         {
             return Err("Pairing code already registered");
         }
@@ -2250,6 +2312,111 @@ mod tests {
                 "/api/v1/events"
             ),
             Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn test_relay_key_store_merges_concurrent_enrollments_and_rejects_corrupt_records() {
+        // Two relay processes share one ownership file. Each loaded the store before the
+        // other enrolled, so a blind write of an in-memory snapshot would drop the peer's
+        // record. Enrollments must merge instead.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine_keys.json");
+
+        let first = RelayState::new_with_key_store(vec![], &path).unwrap();
+        let second = RelayState::new_with_key_store(vec![], &path).unwrap();
+
+        let alpha = identity(41, "alpha-machine");
+        let beta = identity(42, "beta-machine");
+        let auth = |id: &crate::remote::auth::MachineIdentity, machine: &str| ControlAuth {
+            machine_id: machine.to_owned(),
+            public_key: id.public_key.clone(),
+            display_name: machine.to_owned(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+
+        first.bind_machine_key(&auth(&alpha, "alpha-machine")).unwrap();
+        second.bind_machine_key(&auth(&beta, "beta-machine")).unwrap();
+
+        let persisted: HashMap<String, String> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            persisted.contains_key("alpha-machine"),
+            "a second relay must not drop the first relay's enrollment"
+        );
+        assert!(persisted.contains_key("beta-machine"));
+
+        // A record that cannot authenticate anything is an unusable authorization
+        // decision, so loading it must fail loudly rather than silently.
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, br#"{"ghost-machine":"not-a-real-key"}"#).unwrap();
+        assert!(
+            RelayState::new_with_key_store(vec![], &corrupt).is_err(),
+            "an invalid persisted public key must be rejected on load"
+        );
+    }
+
+    #[test]
+    fn test_relay_register_pairing_is_idempotent_for_identical_retries() {
+        // A lost ACK makes the daemon re-send the SAME registration. That retry must
+        // report success instead of "already registered", must not duplicate the entry,
+        // and must not let another machine claim the same code.
+        let state = test_state(vec![]);
+        let machine = "retry-machine";
+        let (tx, _rx) = mpsc::channel(1);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 1, tx });
+
+        let registration = RegisterPairingPin {
+            generation: Some(1),
+            machine_id: machine.into(),
+            pin: "246813".into(),
+            pairing_token: "retry-pairing-secret".into(),
+            expires_at: current_time_secs() + 120,
+        };
+
+        assert!(state
+            .register_pairing(machine, 1, registration.clone())
+            .is_ok());
+        // The identical retry is satisfied, not rejected.
+        assert!(
+            state
+                .register_pairing(machine, 1, registration.clone())
+                .is_ok(),
+            "an identical re-registration must be idempotent"
+        );
+        // Exactly one entry exists for that PIN.
+        assert_eq!(
+            state
+                .inner
+                .pairings
+                .lock()
+                .values()
+                .filter(|p| p.registration.pin == "246813")
+                .count(),
+            1
+        );
+
+        // A DIFFERENT machine presenting the same PIN is still refused.
+        let (other_tx, _other_rx) = mpsc::channel(1);
+        state.inner.control_channels.lock().insert(
+            "other-machine".to_owned(),
+            ControlChannel {
+                generation: 1,
+                tx: other_tx,
+            },
+        );
+        let mut hijack = registration.clone();
+        hijack.machine_id = "other-machine".into();
+        hijack.pairing_token = "other-pairing-secret".into();
+        assert!(
+            state.register_pairing("other-machine", 1, hijack).is_err(),
+            "a different machine must not claim an active pairing code"
         );
     }
 

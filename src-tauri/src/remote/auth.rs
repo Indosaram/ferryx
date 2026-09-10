@@ -23,7 +23,9 @@ pub(crate) fn canonical_identity_dir() -> Result<PathBuf, String> {
     if let Some(base) = std::env::var_os("FERRYX_DATA_DIR") {
         return Ok(PathBuf::from(base));
     }
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
         .map(|base| base.join(".ferryx/remote"))
         .ok_or_else(|| "Cannot resolve machine identity directory".to_string())
 }
@@ -31,7 +33,11 @@ pub(crate) fn canonical_identity_dir() -> Result<PathBuf, String> {
 pub(crate) fn canonical_auth_path() -> Option<PathBuf> {
     std::env::var_os("FERRYX_DATA_DIR")
         .map(|base| PathBuf::from(base).join("remote"))
-        .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|base| PathBuf::from(base).join(".ferryx/remote")))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|base| PathBuf::from(base).join(".ferryx/remote"))
+        })
         .map(|base| base.join("remote-auth.json"))
 }
 
@@ -80,7 +86,13 @@ pub fn sign_control_challenge(
     nonce: &str,
     timestamp: u64,
 ) -> Result<String, String> {
-    sign_message(identity, &format!("ferryx-control-v1:{}:{audience}:{nonce}:{timestamp}", identity.machine_id))
+    sign_message(
+        identity,
+        &format!(
+            "ferryx-control-v1:{}:{audience}:{nonce}:{timestamp}",
+            identity.machine_id
+        ),
+    )
 }
 
 pub fn verify_control_challenge(
@@ -91,7 +103,11 @@ pub fn verify_control_challenge(
     timestamp: u64,
     signature: &str,
 ) -> bool {
-    verify_message(public_key, &format!("ferryx-control-v1:{machine_id}:{audience}:{nonce}:{timestamp}"), signature)
+    verify_message(
+        public_key,
+        &format!("ferryx-control-v1:{machine_id}:{audience}:{nonce}:{timestamp}"),
+        signature,
+    )
 }
 
 fn sign_message(identity: &MachineIdentity, message: &str) -> Result<String, String> {
@@ -110,7 +126,21 @@ pub fn verify_machine_signature(
     timestamp: u64,
     signature_b64: &str,
 ) -> bool {
-    verify_message(public_key_b64, &format!("{nonce}:{timestamp}"), signature_b64)
+    verify_message(
+        public_key_b64,
+        &format!("{nonce}:{timestamp}"),
+        signature_b64,
+    )
+}
+
+/// True when `public_key_b64` is a usable base64 Ed25519 verifying key. Used to reject
+/// a persisted ownership record that could never authenticate anything.
+pub(crate) fn is_valid_public_key(public_key_b64: &str) -> bool {
+    STANDARD
+        .decode(public_key_b64)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .is_some_and(|bytes| VerifyingKey::from_bytes(&bytes).is_ok())
 }
 
 fn verify_message(public_key_b64: &str, message: &str, signature_b64: &str) -> bool {
@@ -129,8 +159,7 @@ fn verify_message(public_key_b64: &str, message: &str, signature_b64: &str) -> b
     let Ok(signature) = Signature::from_slice(&bytes) else {
         return false;
     };
-    key.verify_strict(message.as_bytes(), &signature)
-        .is_ok()
+    key.verify_strict(message.as_bytes(), &signature).is_ok()
 }
 
 const PAIRING_EXPIRY: Duration = Duration::from_secs(60);
@@ -334,12 +363,15 @@ impl AuthManager {
         let _transaction = self.begin_transaction();
         let mut window = self.pairing_window.write();
         window.refresh(Instant::now());
-        window.codes.insert(token.to_owned(), PairingCode {
-            _code: token.to_owned(),
-            created_at: Instant::now(),
-            default_permission: DevicePermission::Control,
-            approved_token: None,
-        });
+        window.codes.insert(
+            token.to_owned(),
+            PairingCode {
+                _code: token.to_owned(),
+                created_at: Instant::now(),
+                default_permission: DevicePermission::Control,
+                approved_token: None,
+            },
+        );
         drop(window);
         self.persist_best_effort();
     }
@@ -691,7 +723,9 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(base.join("identity.json"))
-                .unwrap().permissions().mode();
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         std::fs::write(base.join("identity.json"), b"invalid json").unwrap();
@@ -705,13 +739,45 @@ mod tests {
         let nonce = "challenge-nonce";
         let timestamp = 1_700_000_000;
         let signature = sign_challenge(&identity, nonce, timestamp).unwrap();
-        assert!(verify_machine_signature(&identity.public_key, nonce, timestamp, &signature));
-        assert!(!verify_machine_signature(&identity.public_key, "wrong-nonce", timestamp, &signature));
-        assert!(!verify_machine_signature(&identity.public_key, nonce, timestamp + 1, &signature));
-        assert!(!verify_machine_signature(&identity.public_key, nonce, timestamp, "invalid!"));
-        assert!(!verify_machine_signature(&identity.public_key, nonce, timestamp, &STANDARD.encode([0u8; 64])));
-        assert!(!verify_machine_signature("invalid!", nonce, timestamp, &signature));
-        assert!(!verify_machine_signature(&STANDARD.encode([0u8; 31]), nonce, timestamp, &signature));
+        assert!(verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp,
+            &signature
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            "wrong-nonce",
+            timestamp,
+            &signature
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp + 1,
+            &signature
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp,
+            "invalid!"
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp,
+            &STANDARD.encode([0u8; 64])
+        ));
+        assert!(!verify_machine_signature(
+            "invalid!", nonce, timestamp, &signature
+        ));
+        assert!(!verify_machine_signature(
+            &STANDARD.encode([0u8; 31]),
+            nonce,
+            timestamp,
+            &signature
+        ));
         let mut invalid = identity.clone();
         invalid.private_key = "invalid!".into();
         assert!(sign_challenge(&invalid, nonce, timestamp).is_err());
@@ -726,12 +792,18 @@ mod tests {
         let gateway = AuthManager::with_persistence(Some(path.clone()));
         let coordinator = AuthManager::with_persistence(Some(path));
         coordinator.register_pairing_capability("capability");
-        let (token, device) = gateway.exchange_pairing_code("capability", "browser").unwrap();
+        let (token, device) = gateway
+            .exchange_pairing_code("capability", "browser")
+            .unwrap();
         assert_eq!(gateway.validate_token(&token).unwrap().id, device.id);
-        assert!(gateway.exchange_pairing_code("capability", "replay").is_err());
+        assert!(gateway
+            .exchange_pairing_code("capability", "replay")
+            .is_err());
         coordinator.register_pairing_capability("cancelled");
         coordinator.cancel_pairing_capability("cancelled");
-        assert!(gateway.exchange_pairing_code("cancelled", "browser").is_err());
+        assert!(gateway
+            .exchange_pairing_code("cancelled", "browser")
+            .is_err());
     }
 
     #[test]
