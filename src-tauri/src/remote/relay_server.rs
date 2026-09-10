@@ -312,6 +312,7 @@ impl RelayState {
         let authorized = proxy_http(
             self,
             machine_id,
+            None,
             Method::GET,
             "/api/v1/devices",
             headers,
@@ -664,7 +665,7 @@ impl RelayState {
         ip: IpAddr,
         payload: &PublicPairExchangeRequest,
         machine: Option<&str>,
-    ) -> Result<(String, String, String), StatusCode> {
+    ) -> Result<(String, String, String, u64), StatusCode> {
         let now = Instant::now();
         let mut admission = self.inner.pairing_admission.lock();
         admission.retain(|_, t| {
@@ -723,10 +724,13 @@ impl RelayState {
                 p.state = PairingState::Claimed;
                 // A caller can register its own known PINs. A match must not
                 // replenish its guessing budget before daemon authentication.
+                // The validated control generation travels with the claim so dispatch
+                // can refuse a channel that was replaced after this check.
                 return Ok((
                     p.registration.machine_id.clone(),
                     p.registration.pin.clone(),
                     p.registration.pairing_token.clone(),
+                    p.control_generation,
                 ));
             }
         }
@@ -742,6 +746,7 @@ impl RelayState {
     async fn open_session_channel(
         &self,
         machine: &str,
+        expected_generation: Option<u64>,
     ) -> Result<(WebSocket, SessionGuard), StatusCode> {
         let session_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
@@ -755,6 +760,11 @@ impl RelayState {
         {
             let channels = self.inner.control_channels.lock();
             let channel = channels.get(machine).ok_or(StatusCode::NOT_FOUND)?;
+            // A claim authorized against one control generation must not be dispatched
+            // to a replacement channel that never held that authorization.
+            if expected_generation.is_some_and(|expected| expected != channel.generation) {
+                return Err(StatusCode::GONE);
+            }
             let mut sessions = self.inner.pending_sessions.lock();
             if sessions.len() >= MAX_PENDING_SESSIONS {
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -955,7 +965,7 @@ async fn browser_socket(
     device_token: String,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    let (data, guard) = state.open_session_channel(&machine).await?;
+    let (data, guard) = state.open_session_channel(&machine, None).await?;
     Ok(ws
         .max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
@@ -1114,6 +1124,7 @@ async fn host_http_handler(
     proxy_http(
         &state,
         &machine,
+        None,
         parts.method,
         &target,
         parts.headers,
@@ -1135,7 +1146,7 @@ async fn exchange_http(
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     let payload: PublicPairExchangeRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let (machine, pin, token) = state.claim_pairing(ip, &payload, machine)?;
+    let (machine, pin, token, control_generation) = state.claim_pairing(ip, &payload, machine)?;
     // The loopback gateway calls its pairing secret `code`.
     let body = serde_json::to_vec(&serde_json::json!({"code": token, "pairingToken": token, "deviceName": payload.device_name})).unwrap();
     let mut headers = HeaderMap::new();
@@ -1143,6 +1154,7 @@ async fn exchange_http(
     let response = proxy_http(
         &state,
         &machine,
+        Some(control_generation),
         Method::POST,
         "/api/v1/pair/exchange",
         headers,
@@ -1195,13 +1207,16 @@ fn hop_header(name: &str, headers: &HeaderMap) -> bool {
 async fn proxy_http(
     state: &RelayState,
     machine: &str,
+    expected_generation: Option<u64>,
     method: Method,
     path: &str,
     headers: HeaderMap,
     body: Vec<u8>,
 ) -> Result<Response, StatusCode> {
     let transfer = async {
-        let (mut socket, _guard) = state.open_session_channel(machine).await?;
+        let (mut socket, _guard) = state
+            .open_session_channel(machine, expected_generation)
+            .await?;
         let mut raw = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n", body.len()).into_bytes();
         for (name, value) in &headers {
             if name == "host" || name == "content-length" || hop_header(name.as_str(), &headers) {
@@ -2370,6 +2385,45 @@ mod tests {
         );
     }
 
+    /// `claim_pairing` validates against a control generation and then releases the
+    /// lock; dispatch happens afterwards and picks the then-current channel. If the
+    /// owner reconnects inside that window, the replacement must not be handed a claim
+    /// it never authorized, so dispatch re-checks the generation the claim carried.
+    #[tokio::test]
+    async fn test_relay_dispatch_rejects_a_replaced_control_channel() {
+        let state = test_state(vec![]);
+        let machine = "dispatch-window";
+        let (tx, _rx) = mpsc::channel(4);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 5, tx });
+
+        // A claim carrying a superseded generation must be refused outright.
+        assert_eq!(
+            state
+                .open_session_channel(machine, Some(4))
+                .await
+                .err()
+                .map(|status| status),
+            Some(StatusCode::GONE),
+            "dispatch must refuse a generation the current control channel never held"
+        );
+
+        // Positive control: with the matching generation the guard is passed, so the
+        // call proceeds to await the daemon's data half instead of returning an error.
+        assert!(
+            timeout(
+                Duration::from_millis(300),
+                state.open_session_channel(machine, Some(5))
+            )
+            .await
+            .is_err(),
+            "a matching generation must pass the guard and wait for the data half"
+        );
+    }
+
     #[test]
     fn test_relay_pairing_claim_uses_relay_generation_not_client_attempt_counter() {
         // relay_client.rs starts each coordinator's pairing-attempt counter at 0 and
@@ -2422,7 +2476,7 @@ mod tests {
             pairing_token: None,
             device_name: "second-device".into(),
         };
-        let (claimed, _, _) = state
+        let (claimed, _, _, _) = state
             .claim_pairing("127.0.0.1".parse().unwrap(), &request, None)
             .expect("an ordinary first pairing from a second machine must succeed");
         assert_eq!(claimed, "machine-two");
@@ -2531,7 +2585,7 @@ mod tests {
                 tx: restored_tx,
             },
         );
-        let (claimed_machine, _, _) = state
+        let (claimed_machine, _, _, _) = state
             .claim_pairing("127.0.0.3".parse().unwrap(), &request, None)
             .expect("live control identity must be able to complete the exchange");
         assert_eq!(claimed_machine, machine);

@@ -232,21 +232,58 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             Ok(())
         }
         PairCliCommand::GeneratePin => {
-            let directory = remote_state_dir().ok_or("Cannot persist machine identity: set FERRYX_DATA_DIR")?;
+            // The daemon owns the machine's single relay control connection and pairing
+            // coordinator. Ask it first: standing up a second RelayClient here would
+            // contend for the same machine identity on the relay, and a PIN minted
+            // outside the relay-registered coordinator is not redeemable remotely.
+            let daemon_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            let from_daemon = daemon_runtime.block_on(async {
+                let client = ferryx_lib::daemon::client::DaemonClient::new();
+                client
+                    .remote_create_pairing_code(Some(
+                        ferryx_lib::remote::auth::DevicePermission::Control,
+                    ))
+                    .await
+                    .ok()
+            });
+            if let Some(code) = from_daemon {
+                println!("{code}");
+                std::io::stdout().flush().map_err(|error| error.to_string())?;
+                eprintln!(
+                    "Pairing registered by the running daemon; it holds the relay control connection."
+                );
+                return Ok(());
+            }
+            eprintln!(
+                "No running daemon answered; pairing standalone from this process instead."
+            );
+            let directory =
+                remote_state_dir().ok_or("Cannot persist machine identity: set FERRYX_DATA_DIR")?;
             let config_path = directory.join("remote-config.json");
-            let config: ferryx_lib::remote::RemoteGatewayConfig = match std::fs::read(&config_path) {
+            let config: ferryx_lib::remote::RemoteGatewayConfig = match std::fs::read(&config_path)
+            {
                 Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
                 Err(error) => return Err(error.to_string()),
             };
-            let relay_url = std::env::var("FERRYX_RELAY_URL").ok().or(config.relay_url)
+            let relay_url = std::env::var("FERRYX_RELAY_URL")
+                .ok()
+                .or(config.relay_url)
                 .ok_or("Pairing requires a configured relay URL (FERRYX_RELAY_URL)")?;
             let identity = ferryx_lib::remote::auth::load_or_generate_machine_identity(&directory)?;
             let client = ferryx_lib::remote::relay_client::RelayClient::with_identity(
-                &relay_url, identity, format!("127.0.0.1:{}", config.port),
+                &relay_url,
+                identity,
+                format!("127.0.0.1:{}", config.port),
             );
             let coordinator = client.pairing_coordinator();
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
             runtime.block_on(async move {
                 let relay_task = tokio::spawn(async move { client.run().await });
                 let result = coordinator.generate_pairing(std::time::Duration::from_secs(60)).await;
