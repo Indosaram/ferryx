@@ -1841,14 +1841,33 @@ pub async fn start_remote_server_with_resolver(
     if config.mode == RemoteNetworkMode::Relay && relay_url.is_none() {
         return Err("Relay mode requires a non-empty relay URL".into());
     }
-    // Provision the same token in the relay's machine-token allowlist.
-    // Never create a random local token that the relay cannot authenticate.
-    let relay_token = relay_url.map(|_| {
-        std::env::var("FERRYX_MACHINE_TOKEN")
-            .ok()
-            .filter(|token| !token.trim().is_empty())
-            .ok_or_else(|| "Relay requires a provisioned FERRYX_MACHINE_TOKEN".to_string())
-    }).transpose()?;
+    let relay_token = std::env::var("FERRYX_MACHINE_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty());
+    if relay_url.is_some() && relay_token.is_none() {
+        let ferryx_data_dir = std::env::var_os("FERRYX_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                #[cfg(windows)]
+                {
+                    std::env::var_os("LOCALAPPDATA")
+                        .map(|base| std::path::PathBuf::from(base).join("Ferryx"))
+                        .or_else(|| std::env::var_os("USERPROFILE")
+                            .map(|base| std::path::PathBuf::from(base).join(".ferryx")))
+                }
+                #[cfg(not(windows))]
+                {
+                    std::env::var_os("HOME")
+                        .map(|base| std::path::PathBuf::from(base).join(".ferryx"))
+                }
+            })
+            .ok_or_else(|| "Cannot resolve a per-user directory for machine identity".to_string())?;
+        let identity = crate::remote::auth::load_or_generate_machine_identity(&ferryx_data_dir)?;
+        // Identity is not a bearer token. Keep the local daemon available without
+        // exposing the private seed or passing a public identifier as a credential.
+        tracing::warn!(machine_id = %identity.machine_id,
+            "machine identity ready; relay connection awaits challenge authentication support");
+    }
 
     // Baseline listener: always loopback, never the wildcard address.
     let loopback_addr: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, config.port).into();

@@ -1,3 +1,5 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -5,6 +7,87 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineIdentity {
+    pub machine_id: String,
+    pub display_name: String,
+    /// Standard base64 encoded 32-byte verifying key.
+    pub public_key: String,
+    /// Standard base64 encoded 32-byte signing key seed; never send to the relay.
+    pub private_key: String,
+}
+
+pub fn load_or_generate_machine_identity(base_dir: &Path) -> Result<MachineIdentity, String> {
+    let path = base_dir.join("identity.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            return serde_json::from_slice(&bytes)
+                .map_err(|error| format!("Failed to parse machine identity: {error}"));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to read machine identity: {error}")),
+    }
+
+    let key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let display_name = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Ferryx machine".to_string());
+    let identity = MachineIdentity {
+        machine_id: uuid::Uuid::new_v4().to_string(),
+        display_name,
+        public_key: STANDARD.encode(key.verifying_key().to_bytes()),
+        private_key: STANDARD.encode(key.to_bytes()),
+    };
+    write_private_json(&path, &identity)
+        .map_err(|error| format!("Failed to persist machine identity: {error}"))?;
+    Ok(identity)
+}
+
+pub fn sign_challenge(
+    identity: &MachineIdentity,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<String, String> {
+    let seed: [u8; 32] = STANDARD
+        .decode(&identity.private_key)
+        .map_err(|error| format!("Invalid machine private key encoding: {error}"))?
+        .try_into()
+        .map_err(|_| "Machine private key must contain 32 bytes".to_string())?;
+    let signature = SigningKey::from_bytes(&seed).sign(format!("{nonce}:{timestamp}").as_bytes());
+    Ok(STANDARD.encode(signature.to_bytes()))
+}
+
+pub fn verify_machine_signature(
+    public_key_b64: &str,
+    nonce: &str,
+    timestamp: u64,
+    signature_b64: &str,
+) -> bool {
+    let Ok(bytes) = STANDARD.decode(public_key_b64) else {
+        return false;
+    };
+    let Ok(bytes) = <[u8; 32]>::try_from(bytes) else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(&bytes) else {
+        return false;
+    };
+    let Ok(bytes) = STANDARD.decode(signature_b64) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&bytes) else {
+        return false;
+    };
+    key.verify_strict(format!("{nonce}:{timestamp}").as_bytes(), &signature)
+        .is_ok()
+}
 
 const PAIRING_EXPIRY: Duration = Duration::from_secs(60);
 const PAIRING_FAILURE_BUDGET: u8 = 5;
@@ -523,6 +606,53 @@ mod security_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_machine_identity_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("machine");
+        let identity = load_or_generate_machine_identity(&base).unwrap();
+        assert!(base.join("identity.json").is_file());
+        assert!(uuid::Uuid::parse_str(&identity.machine_id).is_ok());
+        assert!(!identity.display_name.is_empty());
+        assert_eq!(STANDARD.decode(&identity.public_key).unwrap().len(), 32);
+        assert_eq!(STANDARD.decode(&identity.private_key).unwrap().len(), 32);
+        let reloaded = load_or_generate_machine_identity(&base).unwrap();
+        assert_eq!(identity.machine_id, reloaded.machine_id);
+        assert_eq!(identity.display_name, reloaded.display_name);
+        assert_eq!(identity.public_key, reloaded.public_key);
+        assert_eq!(identity.private_key, reloaded.private_key);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(base.join("identity.json"))
+                .unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::write(base.join("identity.json"), b"invalid json").unwrap();
+        assert!(load_or_generate_machine_identity(&base).is_err());
+    }
+
+    #[test]
+    fn test_machine_identity_sign_and_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = load_or_generate_machine_identity(dir.path()).unwrap();
+        let nonce = "challenge-nonce";
+        let timestamp = 1_700_000_000;
+        let signature = sign_challenge(&identity, nonce, timestamp).unwrap();
+        assert!(verify_machine_signature(&identity.public_key, nonce, timestamp, &signature));
+        assert!(!verify_machine_signature(&identity.public_key, "wrong-nonce", timestamp, &signature));
+        assert!(!verify_machine_signature(&identity.public_key, nonce, timestamp + 1, &signature));
+        assert!(!verify_machine_signature(&identity.public_key, nonce, timestamp, "invalid!"));
+        assert!(!verify_machine_signature(&identity.public_key, nonce, timestamp, &STANDARD.encode([0u8; 64])));
+        assert!(!verify_machine_signature("invalid!", nonce, timestamp, &signature));
+        assert!(!verify_machine_signature(&STANDARD.encode([0u8; 31]), nonce, timestamp, &signature));
+        let mut invalid = identity.clone();
+        invalid.private_key = "invalid!".into();
+        assert!(sign_challenge(&invalid, nonce, timestamp).is_err());
+        invalid.private_key = STANDARD.encode([0u8; 31]);
+        assert!(sign_challenge(&invalid, nonce, timestamp).is_err());
+    }
 
     #[test]
     fn test_cli_pair_cross_process_persistence() {
