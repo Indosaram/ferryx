@@ -8,6 +8,7 @@ pub enum TransportType {
     Tailscale,
     Mdns,
     SshTunnel,
+    Relay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,3 @@ impl TargetRegistry {
 }
 
 pub mod tailscale;
-
-pub mod mdns;
-pub mod ssh_tunnel;

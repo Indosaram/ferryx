@@ -964,7 +964,6 @@ async fn ws_terminal_handler(
         .then(|| requested_grid_geometry(&query))
         .flatten();
 
-    let has_active_selection = state.active_selection.read().is_some();
     let is_declared_active = {
         let active = state.active_selection.read();
         active
@@ -974,18 +973,11 @@ async fn ws_terminal_handler(
             .unwrap_or(false)
     };
 
-    if has_active_selection && !is_declared_active {
-        let session_exists = state
-            .session_backend
-            .describe_session(&session_id)
-            .await
-            .is_ok();
-        if !session_exists {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Forbidden: session is not the active desktop session".into(),
-            ));
-        }
+    if !is_declared_active {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Forbidden: session is not the active desktop session".into(),
+        ));
     }
 
     let attachment = while_device_authorized(&mut revocation, async {
