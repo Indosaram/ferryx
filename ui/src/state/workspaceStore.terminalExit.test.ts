@@ -126,4 +126,30 @@ describe("workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer", (
     expect(next.sessions["term-activity"].lifecycle).toBe("exited");
     expect(next.activityBySessionId?.["term-activity"]?.state).toBe("done");
   });
+
+  it("is a no-op when bindingKey does not match the current session binding epoch", () => {
+    const session: TerminalSession = {
+      id: "term-1",
+      cwd: "/repo",
+      workspaceId: "ws-local",
+      worktree: { wsId: "ws-local", slug: "main" },
+      backendSessionId: "backend-1",
+      daemonEpoch: "2",
+      remoteGeneration: 0,
+      lifecycle: "working",
+    };
+
+    const state = createInitialState(session);
+    const next = workspaceReducer(state, {
+      type: "SESSION_BACKEND_UNAVAILABLE",
+      sessionId: "term-1",
+      backendSessionId: "backend-1",
+      bindingKey: "backend-1:1:0:",
+      reason: "daemon-attach-not-found",
+    });
+
+    expect(next).toBe(state);
+    expect(next.sessions["term-1"].lifecycle).toBe("working");
+    expect(next.sessions["term-1"].backendSessionId).toBe("backend-1");
+  });
 });

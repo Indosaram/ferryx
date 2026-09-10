@@ -187,6 +187,11 @@ pub(crate) fn parse_ready_output(bytes: &[u8]) -> Result<(), IpcError> {
 }
 
 pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation) -> IpcError {
+    let stage = err
+        .details
+        .as_ref()
+        .and_then(|d| d.get("stage"))
+        .and_then(|s| s.as_str());
     let exit_code = err
         .details
         .as_ref()
@@ -199,15 +204,39 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
         .and_then(|s| s.as_str())
         .unwrap_or("");
 
-    let is_missing = exit_code == Some(127)
-        || stderr.contains("FERRYX_ERR_HELPER_MISSING")
-        || err.message.contains("FERRYX_ERR_HELPER_MISSING");
+    // Preserve transport/connection errors (exit 255 or transport stage)
+    if exit_code == Some(255) || stage == Some("transport") {
+        return err;
+    }
 
-    let is_permissions = exit_code == Some(126)
-        || stderr.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE")
+    let has_missing_marker = stderr.contains("FERRYX_ERR_HELPER_MISSING")
+        || err.message.contains("FERRYX_ERR_HELPER_MISSING");
+    let has_not_executable_marker = stderr.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE")
         || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
 
+    // Reject contradictory markers or exit codes
+    if (has_missing_marker && has_not_executable_marker)
+        || (exit_code == Some(126) && has_missing_marker)
+        || (exit_code == Some(127) && has_not_executable_marker)
+    {
+        return err;
+    }
+
+    let is_missing = exit_code == Some(127) || (exit_code == Some(1) && has_missing_marker);
+    let is_permissions =
+        exit_code == Some(126) || (exit_code == Some(1) && has_not_executable_marker);
+
+    let cause = err.details.clone();
+
     if is_missing {
+        let mut details = serde_json::json!({
+            "stage": "helper_missing",
+            "executable": location.executable,
+            "root": location.root,
+        });
+        if let Some(c) = cause {
+            details["cause"] = c;
+        }
         IpcError::new(
             IpcErrorCode::CliExecutableNotFound,
             format!(
@@ -215,12 +244,16 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
                 location.executable
             ),
         )
-        .with_details(serde_json::json!({
-            "stage": "helper_missing",
+        .with_details(details)
+    } else if is_permissions {
+        let mut details = serde_json::json!({
+            "stage": "helper_permissions",
             "executable": location.executable,
             "root": location.root,
-        }))
-    } else if is_permissions {
+        });
+        if let Some(c) = cause {
+            details["cause"] = c;
+        }
         IpcError::new(
             IpcErrorCode::Unsupported,
             format!(
@@ -228,11 +261,7 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
                 location.executable
             ),
         )
-        .with_details(serde_json::json!({
-            "stage": "helper_permissions",
-            "executable": location.executable,
-            "root": location.root,
-        }))
+        .with_details(details)
     } else {
         err
     }

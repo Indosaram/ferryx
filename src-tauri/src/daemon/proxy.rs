@@ -1,3 +1,4 @@
+use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 use crate::daemon::manifest::{get_manifest_path, HandoverManifest};
 use crate::daemon::protocol::{
     DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
@@ -236,11 +237,13 @@ impl LegacyPeer {
         }
     }
 
-    pub async fn attach_and_stream<W>(
+    pub(crate) async fn attach_and_stream<W>(
         &self,
         session_id: &str,
         after_sequence: Option<u64>,
         client_writer: &mut W,
+        mut agent_states: AgentStateSubscription,
+        agent_state_hub: Arc<AgentStateHub>,
     ) -> Result<(), String>
     where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -304,27 +307,85 @@ impl LegacyPeer {
             .map_err(|e| e.to_string())?;
         client_writer.flush().await.map_err(|e| e.to_string())?;
 
-        // Pump remaining stream messages directly
-        line.clear();
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 {
-                break;
+        if let Some(snapshot) = agent_states.snapshot.as_ref() {
+            let message = DaemonStreamMessage::AgentState {
+                session_id: snapshot.session_id.as_str().into(),
+                state: snapshot.state.as_str().into(),
+                agent: snapshot.agent.as_deref().map(Into::into),
+                provider_session: snapshot.provider_session.clone(),
+                is_snapshot: true,
+            };
+            let frame = crate::daemon::protocol::encode_daemon_stream_frame(&message)
+                .map_err(|error| error.to_string())?;
+            client_writer
+                .write_all(frame.as_bytes())
+                .await
+                .map_err(|error| error.to_string())?;
+            client_writer
+                .flush()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+
+        let mut lines = reader.lines();
+        loop {
+            tokio::select! {
+                biased;
+                // Drain a report produced by the previous predecessor frame before reading the
+                // next frame (especially Exit), preserving fast working -> idle transitions.
+                report = agent_states.receiver.recv() => match report {
+                    Ok(report) if report.state.session_id == session_id => {
+                        let message = DaemonStreamMessage::AgentState {
+                            session_id: report.state.session_id.as_str().into(),
+                            state: report.state.state.as_str().into(),
+                            agent: report.state.agent.as_deref().map(Into::into),
+                            provider_session: report.state.provider_session,
+                            is_snapshot: report.is_snapshot,
+                        };
+                        let frame = crate::daemon::protocol::encode_daemon_stream_frame(&message)
+                            .map_err(|error| error.to_string())?;
+                        client_writer.write_all(frame.as_bytes()).await.map_err(|error| error.to_string())?;
+                        client_writer.flush().await.map_err(|error| error.to_string())?;
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if let Some(current) = agent_states.resynchronize(session_id) {
+                            let message = DaemonStreamMessage::AgentState {
+                                session_id: current.session_id.as_str().into(), state: current.state.as_str().into(),
+                                agent: current.agent.as_deref().map(Into::into), provider_session: current.provider_session,
+                                is_snapshot: true,
+                            };
+                            let frame = crate::daemon::protocol::encode_daemon_stream_frame(&message)
+                                .map_err(|error| error.to_string())?;
+                            client_writer.write_all(frame.as_bytes()).await.map_err(|error| error.to_string())?;
+                            client_writer.flush().await.map_err(|error| error.to_string())?;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                read = lines.next_line() => {
+                    let Some(mut line) = read.map_err(|error| error.to_string())? else { break; };
+                    line.push('\n');
+                    match serde_json::from_str::<DaemonStreamMessage<'_>>(line.trim()) {
+                        Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, is_snapshot }) => {
+                            agent_state_hub.publish_legacy(AgentState {
+                                session_id: session_id.into_owned(), state: state.into_owned(),
+                                agent: agent.map(|value| value.into_owned()), provider_session,
+                            }, is_snapshot);
+                        }
+                        Ok(DaemonStreamMessage::Exit { .. }) => {
+                            agent_state_hub.remove(session_id);
+                            client_writer.write_all(line.as_bytes()).await.map_err(|error| error.to_string())?;
+                            client_writer.flush().await.map_err(|error| error.to_string())?;
+                            break;
+                        }
+                        _ => {
+                            client_writer.write_all(line.as_bytes()).await.map_err(|error| error.to_string())?;
+                            client_writer.flush().await.map_err(|error| error.to_string())?;
+                        }
+                    }
+                }
             }
-            let is_exit =
-                if let Ok(msg) = serde_json::from_str::<DaemonStreamMessage<'_>>(line.trim()) {
-                    matches!(msg, DaemonStreamMessage::Exit { .. })
-                } else {
-                    false
-                };
-            if client_writer.write_all(line.as_bytes()).await.is_err()
-                || client_writer.flush().await.is_err()
-            {
-                break;
-            }
-            if is_exit {
-                break;
-            }
-            line.clear();
         }
 
         Ok(())

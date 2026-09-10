@@ -77,7 +77,7 @@ pub fn resolve_target_from_probe(
     let norm_arch = arch.trim().to_lowercase();
 
     match norm_platform.as_str() {
-        "posix" | "linux" => match norm_arch.as_str() {
+        "linux" => match norm_arch.as_str() {
             "x86_64" | "amd64" => Ok(HelperTarget::LinuxX86_64),
             "aarch64" | "arm64" => Ok(HelperTarget::LinuxAarch64),
             _ => Err(IpcError::new(
@@ -92,6 +92,11 @@ pub fn resolve_target_from_probe(
                 format!("Unsupported remote CPU architecture for Windows: '{arch}'"),
             )),
         },
+        "posix" => Err(IpcError::new(
+            IpcErrorCode::Unsupported,
+            "Ambiguous remote platform 'posix'; explicit operating system identification is required (e.g. Linux)"
+                .to_string(),
+        )),
         _ => Err(IpcError::new(
             IpcErrorCode::Unsupported,
             format!("Unsupported remote operating system platform: '{platform}'"),
@@ -130,6 +135,34 @@ pub fn resolve_helper_asset(
         )
     })?;
 
+    if manifest.schema_version != 1 {
+        return Err(IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!(
+                "Unsupported helper manifest schema version: {}",
+                manifest.schema_version
+            ),
+        )
+        .with_details(serde_json::json!({
+            "stage": "helper_asset_unsupported_schema",
+            "schemaVersion": manifest.schema_version,
+        })));
+    }
+
+    if manifest.protocol_version != 1 {
+        return Err(IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!(
+                "Unsupported helper manifest protocol version: {}",
+                manifest.protocol_version
+            ),
+        )
+        .with_details(serde_json::json!({
+            "stage": "helper_asset_unsupported_protocol",
+            "protocolVersion": manifest.protocol_version,
+        })));
+    }
+
     let entry = manifest.find_artifact(target).ok_or_else(|| {
         IpcError::new(
             IpcErrorCode::CliExecutableNotFound,
@@ -144,8 +177,30 @@ pub fn resolve_helper_asset(
         }))
     })?;
 
+    let entry_path = Path::new(&entry.filename);
+    if entry_path.components().count() != 1
+        || entry.filename.contains('/')
+        || entry.filename.contains('\\')
+        || entry.filename.contains("..")
+        || entry.filename != target.filename()
+    {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            format!(
+                "Invalid helper binary filename in manifest for target '{}': '{}'",
+                target.triple(),
+                entry.filename
+            ),
+        )
+        .with_details(serde_json::json!({
+            "stage": "helper_asset_invalid_filename",
+            "filename": entry.filename,
+            "target": target.triple(),
+        })));
+    }
+
     let binary_path = base_dir.join(target.triple()).join(&entry.filename);
-    if !binary_path.exists() {
+    if !binary_path.is_file() {
         return Err(IpcError::new(
             IpcErrorCode::CliExecutableNotFound,
             format!(
@@ -156,6 +211,31 @@ pub fn resolve_helper_asset(
         .with_details(serde_json::json!({
             "stage": "helper_asset_binary_missing",
             "path": binary_path.to_string_lossy(),
+            "target": target.triple(),
+        })));
+    }
+
+    let metadata = std::fs::metadata(&binary_path).map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::IoError,
+            format!("Failed to read metadata for helper binary: {e}"),
+        )
+    })?;
+
+    if metadata.len() != entry.byte_length {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            format!(
+                "Helper binary byte length mismatch for '{}': expected {}, got {}",
+                target.triple(),
+                entry.byte_length,
+                metadata.len()
+            ),
+        )
+        .with_details(serde_json::json!({
+            "stage": "helper_asset_length_mismatch",
+            "expected": entry.byte_length,
+            "actual": metadata.len(),
             "target": target.triple(),
         })));
     }
@@ -202,11 +282,11 @@ mod tests {
     #[test]
     fn resolve_target_normalizes_linux_x86_64() {
         assert_eq!(
-            resolve_target_from_probe("posix", "x86_64").unwrap(),
+            resolve_target_from_probe("linux", "x86_64").unwrap(),
             HelperTarget::LinuxX86_64
         );
         assert_eq!(
-            resolve_target_from_probe("posix", "amd64").unwrap(),
+            resolve_target_from_probe("Linux", "amd64").unwrap(),
             HelperTarget::LinuxX86_64
         );
     }
@@ -214,13 +294,31 @@ mod tests {
     #[test]
     fn resolve_target_normalizes_linux_aarch64() {
         assert_eq!(
-            resolve_target_from_probe("posix", "aarch64").unwrap(),
+            resolve_target_from_probe("linux", "aarch64").unwrap(),
             HelperTarget::LinuxAarch64
         );
         assert_eq!(
-            resolve_target_from_probe("posix", "arm64").unwrap(),
+            resolve_target_from_probe("Linux", "arm64").unwrap(),
             HelperTarget::LinuxAarch64
         );
+    }
+
+    #[test]
+    fn resolve_target_rejects_ambiguous_posix_and_unsupported_os() {
+        for (os, arch) in [
+            ("posix", "x86_64"),
+            ("posix", "arm64"),
+            ("posix", "mips"),
+            ("darwin", "arm64"),
+            ("Darwin", "x86_64"),
+            ("freebsd", "x86_64"),
+            ("OpenBSD", "amd64"),
+            ("solaris", "x86_64"),
+        ] {
+            let res = resolve_target_from_probe(os, arch);
+            assert!(res.is_err(), "expected error for os='{os}' arch='{arch}'");
+            assert_eq!(res.unwrap_err().code, IpcErrorCode::Unsupported);
+        }
     }
 
     #[test]
@@ -369,15 +467,85 @@ mod tests {
     }
 
     #[test]
-    fn resolve_helper_asset_reports_missing_manifest_or_target() {
+    fn resolve_helper_asset_rejects_incompatible_schema_or_protocol() {
         let temp = TempDir::new().unwrap();
         let base = temp.path();
 
-        let err = resolve_helper_asset(base, HelperTarget::LinuxAarch64).unwrap_err();
-        assert_eq!(err.code, IpcErrorCode::CliExecutableNotFound);
-        assert_eq!(
-            err.details.unwrap().get("stage").unwrap().as_str(),
-            Some("helper_asset_manifest_missing")
-        );
+        let json = r#"{
+            "schemaVersion": 999,
+            "helperVersion": "2026.908.1",
+            "protocolVersion": 1,
+            "artifacts": []
+        }"#;
+        fs::write(base.join("manifest.json"), json).unwrap();
+
+        let err = resolve_helper_asset(base, HelperTarget::LinuxX86_64).unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::Unsupported);
+        assert!(err.message.contains("schema"));
+    }
+
+    #[test]
+    fn resolve_helper_asset_rejects_byte_length_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let target = HelperTarget::WindowsX64;
+        let target_dir = base.join(target.triple());
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let binary_path = target_dir.join(target.filename());
+        let payload = b"abc";
+        fs::write(&binary_path, payload).unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let valid_sha = format!("{:x}", hasher.finalize());
+
+        let manifest = HelperAssetManifest {
+            schema_version: 1,
+            helper_version: "2026.908.1".into(),
+            protocol_version: 1,
+            artifacts: vec![HelperAssetEntry {
+                target,
+                filename: target.filename().into(),
+                sha256: valid_sha,
+                byte_length: 999999, // Mismatched byte length!
+            }],
+        };
+        fs::write(
+            base.join("manifest.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let err = resolve_helper_asset(base, target).unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+        assert!(err.message.contains("byte length mismatch"));
+    }
+
+    #[test]
+    fn resolve_helper_asset_rejects_directory_traversal_filename() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let target = HelperTarget::LinuxX86_64;
+
+        let manifest = HelperAssetManifest {
+            schema_version: 1,
+            helper_version: "2026.908.1".into(),
+            protocol_version: 1,
+            artifacts: vec![HelperAssetEntry {
+                target,
+                filename: "../outside-target".into(),
+                sha256: "0000".into(),
+                byte_length: 10,
+            }],
+        };
+        fs::write(
+            base.join("manifest.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let err = resolve_helper_asset(base, target).unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::InvalidPath);
     }
 }

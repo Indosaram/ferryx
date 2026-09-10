@@ -77,6 +77,8 @@ pub struct NativeTerminalAgentStatePayload {
     pub manifest_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_snapshot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -546,6 +548,7 @@ fn take_native_terminal_events(
                             rule_id: detection.rule_id,
                             manifest_id: detection.manifest_id,
                             provider_session: None,
+                            is_snapshot: false,
                         },
                     ));
                 }
@@ -1567,6 +1570,7 @@ impl NativeTerminalSurfaceHostState {
                         state,
                         agent,
                         provider_session,
+                        is_snapshot,
                         ..
                     } => {
                         let reported = match state.as_ref() {
@@ -1581,7 +1585,7 @@ impl NativeTerminalSurfaceHostState {
                                 match sessions_guard.get_mut(&session_id_owned) {
                                     Some(sess) => {
                                         sess.agent_reports_own_state = true;
-                                        if sess.last_agent_activity == Some(reported) {
+                                        if !is_snapshot && sess.last_agent_activity == Some(reported) {
                                             false
                                         } else {
                                             sess.last_agent_activity = Some(reported);
@@ -1605,6 +1609,7 @@ impl NativeTerminalSurfaceHostState {
                                                 .unwrap_or(AGENT_EXTENSION_MANIFEST_ID)
                                                 .to_string(),
                                             provider_session: provider_session.clone(),
+                                            is_snapshot,
                                         },
                                     ),
                                 );
@@ -2620,6 +2625,49 @@ mod tests {
         fn drop(&mut self) {
             self.state.teardown();
         }
+    }
+
+    #[tokio::test]
+    async fn agent_state_snapshot_reaches_desktop_even_when_native_state_is_unchanged() {
+        use tauri::Listener;
+        let harness = DirectRenderHarness::new(vec![]);
+        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let listener = harness
+            ._app
+            .listen(NATIVE_TERMINAL_AGENT_STATE_EVENT, move |event| {
+                sender.send(event.payload().to_string()).unwrap();
+            });
+
+        // Subscribe before driving the real native pump. Repeated snapshots must
+        // reach a newly mounted frontend even when the native state is unchanged.
+        for (state, is_snapshot) in [
+            ("idle", true),
+            ("idle", true),
+            ("working", false),
+            ("idle", false),
+        ] {
+            let message = serde_json::from_value(serde_json::json!({
+                "type": "agentState",
+                "sessionId": harness.request.session_id,
+                "state": state,
+                "agent": "omo",
+                "isSnapshot": is_snapshot,
+            }))
+            .unwrap();
+            harness._output.send(message).await.unwrap();
+            let payload = tokio::time::timeout(std::time::Duration::from_secs(3), received.recv())
+                .await
+                .expect("snapshot or live edge must reach the frontend")
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["sessionId"], harness.request.session_id);
+            assert_eq!(payload["state"], state);
+            assert_eq!(
+                payload["isSnapshot"].as_bool().unwrap_or(false),
+                is_snapshot
+            );
+        }
+        harness._app.unlisten(listener);
     }
 
     #[tokio::test]
@@ -3838,11 +3886,13 @@ mod tests {
         let session_id = "extension-owned-session";
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observed_for_sink = Arc::clone(&observed);
+        let (reported, mut reports) = tokio::sync::mpsc::unbounded_channel();
         state.set_event_sink(Arc::new(move |event| {
             if let NativeTerminalEvent::AgentState(payload) = event {
                 observed_for_sink
                     .lock()
                     .push((payload.state, payload.manifest_id));
+                reported.send(()).expect("report receiver alive");
             }
         }));
 
@@ -3869,19 +3919,19 @@ mod tests {
             state: "blocked".into(),
             agent: Some("omo".into()),
             provider_session: None,
+            is_snapshot: false,
         })
         .await
         .expect("send agent state report");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while observed.lock().is_empty() && std::time::Instant::now() < deadline {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), reports.recv())
+            .await.expect("extension report delivered").expect("event sink alive");
         assert_eq!(
             observed.lock().clone(),
             vec![("blocked".to_string(), "omo".to_string())]
         );
 
+        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
         tx.send(DaemonStreamMessage::Output {
             session_id: session_id.into(),
             sequence: 2,
@@ -3891,9 +3941,14 @@ mod tests {
         .await
         .expect("send screen output");
 
-        for _ in 0..200 {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                updates.changed().await.expect("native pump alive");
+                if state.sessions.lock()[session_id].last_sequence == Some(2) {
+                    break;
+                }
+            }
+        }).await.expect("screen output processed");
         assert_eq!(
             observed.lock().len(),
             1,

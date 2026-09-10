@@ -346,6 +346,55 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     expect(queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("re-attempts attach when same backendSessionId receives a new daemonEpoch", async () => {
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      let attachAttempts = 0;
+      tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "cmd_native_terminal_attach") {
+          attachAttempts += 1;
+          throw new Error("Session 'backend-1' not found");
+        }
+        return undefined;
+      });
+
+      const sessionEpoch1 = {
+        ...createSession("term-1"),
+        backendSessionId: "backend-1",
+        daemonEpoch: "1",
+      };
+
+      const { rerender } = render(
+        <NativeTerminalPane sessionId="term-1" session={sessionEpoch1} />,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(attachAttempts).toBe(1);
+
+      // Now same session and same backendSessionId receives a new daemonEpoch (e.g. "2")
+      const sessionEpoch2 = {
+        ...createSession("term-1"),
+        backendSessionId: "backend-1",
+        daemonEpoch: "2",
+      };
+
+      rerender(
+        <NativeTerminalPane sessionId="term-1" session={sessionEpoch2} />,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(attachAttempts).toBe(2);
+    } finally {
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("displays an accessible error banner when bounds IPC fails and does not show detach errors on unmount", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const session = createSession("term-session-1");

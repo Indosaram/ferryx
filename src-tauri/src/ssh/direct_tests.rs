@@ -333,3 +333,23 @@ fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
     assert!(remote_cmd.contains("bridge --stdio --root"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_probe_distinguishes_non_utf8_and_empty_stderr() {
+    // Non-UTF-8 stderr
+    let plan = ShellCommandPlan {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "printf '\\xff\\xfe\\xfd' >&2; exit 1".into()],
+    };
+    let err = bounded_output(&plan, Duration::from_secs(2)).await.unwrap_err();
+    assert!(err.message.contains("contained non-UTF-8 data"), "got: {}", err.message);
+
+    // Empty stderr
+    let plan_empty = ShellCommandPlan {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "exit 1".into()],
+    };
+    let err_empty = bounded_output(&plan_empty, Duration::from_secs(2)).await.unwrap_err();
+    assert!(err_empty.message.contains("was empty"), "got: {}", err_empty.message);
+}
+

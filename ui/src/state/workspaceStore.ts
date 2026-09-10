@@ -60,6 +60,7 @@ export type WorkspaceState = {
   layout: LayoutState;
   worktreeLayouts?: Record<string, LayoutState>;
   unreadTabIds: Record<string, boolean>;
+  bellUnreadTabIds?: Record<string, boolean>;
   unreadWorktreePaths: Record<string, boolean>;
   /** Optional for backwards compatibility with persisted/test states created before activity tracking. */
   activityBySessionId?: Record<string, TerminalActivity>;
@@ -188,6 +189,7 @@ export type WorkspaceAction =
       type: "SESSION_BACKEND_UNAVAILABLE";
       sessionId: string;
       backendSessionId: string;
+      bindingKey?: string | null;
       reason: string;
     }
   | { type: "SESSION_REMOTE_STATUS"; status: import("../lib/types").SshRecoveryStatus; daemonEpoch?: string | null }
@@ -209,6 +211,7 @@ export type WorkspaceAction =
       ruleId: string;
       manifestId?: string;
       providerSession?: AgentProviderSession | null;
+      isSnapshot?: boolean;
       observed?: boolean;
     }
   | { type: "MARK_TAB_UNREAD"; tabId: string; observed?: boolean }
@@ -446,6 +449,7 @@ export function useWorkspaceStore({
           ruleId: payload.ruleId,
           manifestId: payload.manifestId,
           providerSession: payload.providerSession,
+          isSnapshot: payload.isSnapshot,
         }));
         return;
       }
@@ -457,6 +461,7 @@ export function useWorkspaceStore({
         ruleId: payload.ruleId,
         manifestId: payload.manifestId,
         providerSession: payload.providerSession,
+        isSnapshot: payload.isSnapshot,
       });
       if (
         !payload.providerSession
@@ -1312,11 +1317,17 @@ export function useWorkspaceStore({
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
-    markBackendSessionUnavailable: (sessionId: string, backendSessionId: string, reason: string) => {
+    markBackendSessionUnavailable: (
+      sessionId: string,
+      backendSessionId: string,
+      reason: string,
+      bindingKey?: string | null,
+    ) => {
       dispatch({
         type: "SESSION_BACKEND_UNAVAILABLE",
         sessionId,
         backendSessionId,
+        bindingKey,
         reason,
       });
     },
@@ -1583,6 +1594,7 @@ function createInitialState(worktrees: Worktree[], workspaceId?: string): Worksp
     layout: createLayoutState(),
     worktreeLayouts: {},
     unreadTabIds: {},
+    bellUnreadTabIds: {},
     unreadWorktreePaths: {},
     activityBySessionId: {},
   };
@@ -1725,6 +1737,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return {
         ...state,
         unreadTabIds: { ...state.unreadTabIds, [action.tabId]: true },
+        bellUnreadTabIds: { ...state.bellUnreadTabIds, [action.tabId]: true },
         unreadWorktreePaths: worktreePath
           ? { ...state.unreadWorktreePaths, [worktreePath]: true }
           : state.unreadWorktreePaths,
@@ -1733,7 +1746,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "CLEAR_TAB_UNREAD": {
       const unreadTabIds = { ...state.unreadTabIds };
       delete unreadTabIds[action.tabId];
-      return clearWorktreeUnreadWhenRead({ ...state, unreadTabIds }, action.tabId);
+      const bellUnreadTabIds = { ...state.bellUnreadTabIds };
+      delete bellUnreadTabIds[action.tabId];
+      return clearWorktreeUnreadWhenRead({ ...state, unreadTabIds, bellUnreadTabIds }, action.tabId);
     }
     case "MARK_WORKTREE_UNREAD":
       return {
@@ -2084,6 +2099,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const session = state.sessions[action.sessionId];
       if (!session) return state;
       if (session.backendSessionId !== action.backendSessionId) return state;
+      if (action.bindingKey && session.backendSessionId) {
+        const currentBindingKey = `${session.backendSessionId}:${session.daemonEpoch ?? ""}:${session.remoteGeneration ?? 0}:${session.remoteConnectionState ?? ""}`;
+        if (action.bindingKey !== currentBindingKey) return state;
+      }
       if (isRemoteWorkspaceId(session.workspaceId)) {
         return {
           ...state,
@@ -2189,7 +2208,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       } else if (action.state === "blocked") {
         mappedState = "waiting";
       } else if (action.state === "idle") {
-        if (!previous || (previous.state !== "working" && previous.state !== "waiting")) {
+        if (!action.isSnapshot && (!previous || (previous.state !== "working" && previous.state !== "waiting"))) {
           return state;
         }
         mappedState = "done";
@@ -2220,8 +2239,25 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         agentType,
         source: "screen",
         agentSource,
+        ...(action.isSnapshot && mappedState !== "working"
+          ? { seen: true, notificationSuppressed: true }
+          : {}),
       };
-      const nextState = applySessionActivity(state, action.tabId, action.sessionId, activity, action.observed);
+      let nextState = applySessionActivity(state, action.tabId, action.sessionId, activity, action.observed);
+      const replacesUnseenAttention =
+        previous?.seen !== true && (previous?.state === "done" || previous?.state === "waiting");
+      if (action.isSnapshot && mappedState !== "working" && replacesUnseenAttention) {
+        const tabSessionIds = getTabSessionIds(nextState, action.tabId);
+        const hasOtherUnseenSessionInTab = [...tabSessionIds].some(
+          (sId) => sId !== action.sessionId && nextState.activityBySessionId?.[sId]?.seen !== true,
+        );
+        const hasBellUnread = Boolean(nextState.bellUnreadTabIds?.[action.tabId]);
+        if (!hasOtherUnseenSessionInTab && !hasBellUnread) {
+          const unreadTabIds = { ...nextState.unreadTabIds };
+          delete unreadTabIds[action.tabId];
+          nextState = clearWorktreeUnreadWhenRead({ ...nextState, unreadTabIds }, action.tabId);
+        }
+      }
       const session = nextState.sessions[action.sessionId];
       if (!session) return nextState;
 
@@ -2410,7 +2446,8 @@ function applySessionActivity(
     previous.agentType === activity.agentType &&
     previous.source === activity.source &&
     previous.agentSource === activity.agentSource &&
-    previous.seen === activity.seen
+    previous.seen === activity.seen &&
+    previous.notificationSuppressed === activity.notificationSuppressed
   ) {
     return state;
   }
@@ -2452,7 +2489,9 @@ function applySessionActivity(
     ...(isAttentionState
       ? {
           notificationSuppressed:
-            suppression || (isSameAttentionState && previous?.notificationSuppressed === true),
+            activity.notificationSuppressed === true ||
+            suppression ||
+            (isSameAttentionState && previous?.notificationSuppressed === true),
         }
       : {}),
   };
@@ -2474,7 +2513,7 @@ function applySessionActivity(
   const isNewAttentionTransition =
     isAttentionState && (!wasAttentionState || previous?.state !== activity.state);
 
-  if (isNewAttentionTransition && !suppression && (!observed || !isTabVisible(state, tabId))) {
+  if (isNewAttentionTransition && !stored.notificationSuppressed && (!observed || !isTabVisible(state, tabId))) {
     const worktreePath = sessionWorktreePath(state.sessions[sessionId]) || getTabWorktreePath(state, tabId);
     nextState = {
       ...nextState,

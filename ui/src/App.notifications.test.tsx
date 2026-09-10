@@ -74,6 +74,14 @@ const native = {
   isTauriRuntime: vi.fn(() => true),
   onNewTerminalTabMenu: vi.fn().mockResolvedValue(() => {}),
   onCloseTabMenu: vi.fn().mockResolvedValue(() => {}),
+  onSelectTabMenu: vi.fn().mockResolvedValue(() => {}),
+  onNextTabMenu: vi.fn().mockResolvedValue(() => {}),
+  onPrevTabMenu: vi.fn().mockResolvedValue(() => {}),
+  onSplitRightMenu: vi.fn().mockResolvedValue(() => {}),
+  onSplitDownMenu: vi.fn().mockResolvedValue(() => {}),
+  onCommandPaletteMenu: vi.fn().mockResolvedValue(() => {}),
+  onToggleSidebarMenu: vi.fn().mockResolvedValue(() => {}),
+  onOpenSettingsMenu: vi.fn().mockResolvedValue(() => {}),
   onSelectWorktreeMenu: vi.fn().mockResolvedValue(() => {}),
   onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
   onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
@@ -134,6 +142,14 @@ vi.mock("./lib/tauri", () => ({
   isTauriRuntime: native.isTauriRuntime,
   onNewTerminalTabMenu: native.onNewTerminalTabMenu,
   onCloseTabMenu: native.onCloseTabMenu,
+  onSelectTabMenu: native.onSelectTabMenu,
+  onNextTabMenu: native.onNextTabMenu,
+  onPrevTabMenu: native.onPrevTabMenu,
+  onSplitRightMenu: native.onSplitRightMenu,
+  onSplitDownMenu: native.onSplitDownMenu,
+  onCommandPaletteMenu: native.onCommandPaletteMenu,
+  onToggleSidebarMenu: native.onToggleSidebarMenu,
+  onOpenSettingsMenu: native.onOpenSettingsMenu,
   onSelectWorktreeMenu: native.onSelectWorktreeMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
   onTerminalOutput: native.onTerminalOutput,
@@ -318,6 +334,22 @@ describe("App notification coordinator wiring", () => {
     native.onNewTerminalTabMenu.mockResolvedValue(() => {});
     native.onCloseTabMenu.mockReset();
     native.onCloseTabMenu.mockResolvedValue(() => {});
+    native.onSelectTabMenu.mockReset();
+    native.onSelectTabMenu.mockResolvedValue(() => {});
+    native.onNextTabMenu.mockReset();
+    native.onNextTabMenu.mockResolvedValue(() => {});
+    native.onPrevTabMenu.mockReset();
+    native.onPrevTabMenu.mockResolvedValue(() => {});
+    native.onSplitRightMenu.mockReset();
+    native.onSplitRightMenu.mockResolvedValue(() => {});
+    native.onSplitDownMenu.mockReset();
+    native.onSplitDownMenu.mockResolvedValue(() => {});
+    native.onCommandPaletteMenu.mockReset();
+    native.onCommandPaletteMenu.mockResolvedValue(() => {});
+    native.onToggleSidebarMenu.mockReset();
+    native.onToggleSidebarMenu.mockResolvedValue(() => {});
+    native.onOpenSettingsMenu.mockReset();
+    native.onOpenSettingsMenu.mockResolvedValue(() => {});
     native.onSelectWorktreeMenu.mockReset();
     native.onSelectWorktreeMenu.mockResolvedValue(() => {});
     native.onTerminalLifecycle.mockReset();

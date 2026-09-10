@@ -208,7 +208,12 @@ type TerminalSplitViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
-  onBackendSessionUnavailable?: (sessionId: string, backendSessionId: string, reason: string) => void;
+  onBackendSessionUnavailable?: (
+    sessionId: string,
+    backendSessionId: string,
+    reason: string,
+    bindingKey?: string | null,
+  ) => void;
 };
 
 type DragFocusSnapshot = {
@@ -665,7 +670,12 @@ type TabGroupViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
-  onBackendSessionUnavailable?: (sessionId: string, backendSessionId: string, reason: string) => void;
+  onBackendSessionUnavailable?: (
+    sessionId: string,
+    backendSessionId: string,
+    reason: string,
+    bindingKey?: string | null,
+  ) => void;
   splitTerminalTab: (tabId: string, direction: PaneDirection) => void;
   browserPanesVisible: boolean;
   dropFeedbackLeafId: string | null;
@@ -851,7 +861,12 @@ type PaneRendererProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
-  onBackendSessionUnavailable?: (sessionId: string, backendSessionId: string, reason: string) => void;
+  onBackendSessionUnavailable?: (
+    sessionId: string,
+    backendSessionId: string,
+    reason: string,
+    bindingKey?: string | null,
+  ) => void;
   onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
   onReloadBrowserTab: (tabId: string, browserId?: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
@@ -939,7 +954,12 @@ type PaneLeafViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
-  onBackendSessionUnavailable?: (sessionId: string, backendSessionId: string, reason: string) => void;
+  onBackendSessionUnavailable?: (
+    sessionId: string,
+    backendSessionId: string,
+    reason: string,
+    bindingKey?: string | null,
+  ) => void;
   onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
   onReloadBrowserTab: (tabId: string, browserId?: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;

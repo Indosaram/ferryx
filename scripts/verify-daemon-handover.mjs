@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 const binary = path.resolve(process.argv[2] ?? "src-tauri/target/debug/ferryx");
 const initialBinary = path.resolve(process.argv[3] ?? binary);
 const noIntermediateSession = process.argv.includes("--no-intermediate-session");
+const verifyAgentState = process.argv.includes("--agent-state");
 const root = await mkdtemp("/tmp/fx-handover-");
 const runtime = path.join(root, "runtime");
 const canonical = path.join(runtime, "daemon.sock");
@@ -36,11 +37,19 @@ async function connect(socketPath) {
   const reader = createInterface({ input: socket });
   const queue = [];
   const pending = [];
+  const agentStates = [];
+  const agentWaiters = [];
   let closed = false;
   let output = "";
   const outputWaiters = new Set();
   reader.on("line", (line) => {
     const message = JSON.parse(line);
+    if (message.type === "agentState") {
+      const waiter = agentWaiters.shift();
+      if (waiter) waiter.resolve(message);
+      else agentStates.push(message);
+      return;
+    }
     if (message.type === "output") {
       output += Buffer.from(message.data, "base64").toString();
       for (const waiter of outputWaiters) {
@@ -58,6 +67,7 @@ async function connect(socketPath) {
   const fail = (error) => {
     closed = true;
     for (const waiter of pending.splice(0)) waiter.reject(error);
+    for (const waiter of agentWaiters.splice(0)) waiter.reject(error);
     for (const waiter of outputWaiters) waiter.reject(error);
     outputWaiters.clear();
   };
@@ -84,6 +94,13 @@ async function connect(socketPath) {
     call,
     handshake,
     close: () => socket.destroy(),
+    nextAgentState() {
+      return bounded(new Promise((resolve, reject) => {
+        if (agentStates.length) resolve(agentStates.shift());
+        else if (closed) reject(new Error(`Closed: ${socketPath}`));
+        else agentWaiters.push({ resolve, reject });
+      }), "agent state through canonical attach");
+    },
     waitForOutput(marker) {
       if (output.includes(marker)) return Promise.resolve(output);
       return bounded(new Promise((resolve, reject) => {
@@ -91,6 +108,51 @@ async function connect(socketPath) {
       }), `PTY output ${marker}`);
     },
   };
+}
+
+async function reportAgentStates(sessionId, states) {
+  const socket = net.createConnection(path.join(runtime, "agent-state.sock"));
+  connections.add(socket);
+  try {
+    await bounded(new Promise((resolve, reject) => {
+      socket.once("error", reject);
+      socket.once("connect", () => {
+        const payload = states.map((state) => JSON.stringify({
+          type: "agentState", sessionId, state, agent: "omo",
+        })).join("\n") + "\n";
+        socket.end(payload, resolve);
+      });
+    }), "isolated agent state report");
+  } finally {
+    connections.delete(socket);
+    socket.destroy();
+  }
+}
+
+async function verifyAgentDelivery(attached, sessionId) {
+  const working = attached.nextAgentState();
+  await reportAgentStates(sessionId, ["working"]);
+  let started = await working;
+  if (started.isSnapshot) started = await attached.nextAgentState();
+  assert.equal(started.sessionId, sessionId);
+  assert.equal(started.state, "working");
+  assert.notEqual(started.isSnapshot, true);
+
+  const transitions = Promise.all([attached.nextAgentState(), attached.nextAgentState()]);
+  await reportAgentStates(sessionId, ["blocked", "idle"]);
+  const [blocked, idle] = await transitions;
+  assert.equal(blocked.state, "blocked", "burst must preserve intermediate attention");
+  assert.equal(idle.state, "idle", "burst must preserve completion order");
+
+  const reattached = await connect(canonical);
+  assert.equal((await reattached.call({
+    type: "attach", sessionId, afterSequence: 0,
+  })).type, "attachOk");
+  const restored = await reattached.nextAgentState();
+  assert.equal(restored.sessionId, sessionId);
+  assert.equal(restored.state, "idle");
+  assert.equal(restored.isSnapshot, true, "reattach restores quietly instead of fabricating a live edge");
+  reattached.close();
 }
 
 function nextCanonical(previousEpoch) {
@@ -176,6 +238,9 @@ try {
         data: Buffer.from(`printf '%s%s\\n' 'BEFORE_' '${created.sessionId}'\n`).toString("base64"),
       })).type, "writeOk");
       await seeded;
+      if (verifyAgentState && initialBinary === binary) {
+        await verifyAgentDelivery(before, created.sessionId);
+      }
       before.close();
     }
 
@@ -215,9 +280,11 @@ try {
       assert.equal(described.type, "describeSessionOk");
       assert.equal(described.session.cols, 100);
       assert.equal(described.session.rows, 30);
+      if (verifyAgentState) await verifyAgentDelivery(attached, sessionId);
       attached.close();
     }
     console.log(`PASS generation ${generation + 1}: ${sessions.length} original PTYs; history, executed input, resize preserved`);
+    if (verifyAgentState) console.log(`PASS agent states generation ${generation + 1}: live ordered edges and quiet attach snapshots`);
   }
   control.close();
 } finally {

@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 vi.mock("../lib/tauri", () => ({
   DEFAULT_WORKSPACE_ID: "default",
+  isTauriRuntime: () => false,
   spawnTerminal: vi.fn(async () => "backend-default"),
   closeTerminal: vi.fn(async () => undefined),
   getTerminalCwd: vi.fn(async () => "/repo/main"),

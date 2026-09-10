@@ -283,6 +283,76 @@ fn ssh_helper_setup_ensure_started_windows_exit_1_with_sentinel_maps_to_unsuppor
     );
 }
 
+#[test]
+fn ssh_helper_setup_map_error_preserves_exit_255_transport_even_with_marker() {
+    let location = HelperLocation {
+        executable: "/home/u/.ferryx/bin/ferryx-remote-helper".into(),
+        root: "/home/u/.ferryx/helper/qa".into(),
+    };
+    let raw_err = IpcError::new(
+        IpcErrorCode::IoError,
+        "SSH connection error: host unreachable FERRYX_ERR_HELPER_MISSING",
+    )
+    .with_details(serde_json::json!({
+        "stage": "transport",
+        "exitCode": 255,
+        "stderr": "ssh: connect to host 1.2.3.4 port 22: Connection refused\nFERRYX_ERR_HELPER_MISSING",
+    }));
+    let mapped = map_ensure_started_error(raw_err.clone(), &location);
+    assert_eq!(mapped.code, IpcErrorCode::IoError);
+    assert_eq!(mapped.message, raw_err.message);
+}
+
+#[test]
+fn ssh_helper_setup_map_error_rejects_contradictory_markers() {
+    let location = HelperLocation {
+        executable: "/home/u/.ferryx/bin/ferryx-remote-helper".into(),
+        root: "/home/u/.ferryx/helper/qa".into(),
+    };
+    let raw_err = IpcError::new(IpcErrorCode::IoError, "exit 1 with both markers").with_details(
+        serde_json::json!({
+            "stage": "execution",
+            "exitCode": 1,
+            "stderr": "FERRYX_ERR_HELPER_MISSING\nFERRYX_ERR_HELPER_NOT_EXECUTABLE\n",
+        }),
+    );
+    let mapped = map_ensure_started_error(raw_err.clone(), &location);
+    assert_eq!(mapped.code, IpcErrorCode::IoError);
+
+    let raw_err2 = IpcError::new(IpcErrorCode::IoError, "exit 126 with missing marker").with_details(
+        serde_json::json!({
+            "stage": "execution",
+            "exitCode": 126,
+            "stderr": "FERRYX_ERR_HELPER_MISSING\n",
+        }),
+    );
+    let mapped2 = map_ensure_started_error(raw_err2.clone(), &location);
+    assert_eq!(mapped2.code, IpcErrorCode::IoError);
+}
+
+#[test]
+fn ssh_helper_setup_map_error_retains_diagnostic_cause() {
+    let location = HelperLocation {
+        executable: r"C:\Users\u\.ferryx\bin\ferryx-remote-helper.exe".into(),
+        root: r"C:\Users\u\.ferryx\helper\qa".into(),
+    };
+    let raw_err = IpcError::new(
+        IpcErrorCode::IoError,
+        "SSH command failed (exit 1)",
+    )
+    .with_details(serde_json::json!({
+        "stage": "execution",
+        "exitCode": 1,
+        "stderr": "FERRYX_ERR_HELPER_MISSING\r\n",
+    }));
+    let mapped = map_ensure_started_error(raw_err, &location);
+    assert_eq!(mapped.code, IpcErrorCode::CliExecutableNotFound);
+    let details = mapped.details.as_ref().expect("details");
+    let cause = details.get("cause").expect("cause must be preserved");
+    assert_eq!(cause.get("exitCode").and_then(serde_json::Value::as_i64), Some(1));
+    assert!(cause.get("stderr").and_then(serde_json::Value::as_str).unwrap().contains("FERRYX_ERR_HELPER_MISSING"));
+}
+
 #[cfg(unix)]
 #[test]
 fn ssh_helper_setup_process_start_rejects_symlink_root_without_writing_log() {

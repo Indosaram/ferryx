@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import { selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
+import { selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
 import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
@@ -95,6 +95,7 @@ export function ActivitySurfaceHarness() {
     state: "working" | "blocked" | "idle",
     ruleId: string,
     manifestId?: string,
+    isSnapshot = false,
   ) =>
     dispatch({
       type: "SESSION_SCREEN_ACTIVITY",
@@ -103,12 +104,28 @@ export function ActivitySurfaceHarness() {
       state,
       ruleId,
       manifestId,
+      isSnapshot,
     } as WorkspaceAction);
 
   const tabActivity = useMemo(() => selectTabActivitySummaries(state), [state]);
   const worktreeActivity = useMemo(() => selectWorktreeActivitySummaries(state), [state]);
 
   const scenarios: Array<{ id: string; label: string; run: () => void }> = [
+    {
+      id: "qa-snapshot-working",
+      label: "restore: working",
+      run: () => screen("session-bg", "tab-bg", "working", "", "omo", true),
+    },
+    {
+      id: "qa-snapshot-idle",
+      label: "restore: idle (quiet)",
+      run: () => screen("session-bg", "tab-bg", "idle", "", "omo", true),
+    },
+    {
+      id: "qa-snapshot-blocked",
+      label: "restore: blocked (quiet)",
+      run: () => screen("session-bg", "tab-bg", "blocked", "", "omo", true),
+    },
     {
       id: "qa-working-active",
       label: "active tab: working",
@@ -209,6 +226,7 @@ export function ActivitySurfaceHarness() {
       <pre data-testid="harness-state" className="mt-4 overflow-auto text-[10px] leading-tight text-muted-foreground">
         {JSON.stringify(
           {
+            badgeCount: selectGlobalUnreadBadgeCount(state),
             activityBySessionId: state.activityBySessionId,
             unreadTabIds: state.unreadTabIds,
             unreadWorktreePaths: state.unreadWorktreePaths,

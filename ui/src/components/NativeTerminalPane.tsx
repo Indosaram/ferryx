@@ -46,7 +46,7 @@ export interface NativeTerminalPaneProps {
   activity?: TerminalActivity;
   needsAttention?: boolean;
   active?: boolean;
-  onBackendSessionUnavailable?: (backendSessionId: string, reason: string) => void;
+  onBackendSessionUnavailable?: (backendSessionId: string, reason: string, bindingKey?: string | null) => void;
 }
 
 interface GeometryState {
@@ -543,13 +543,17 @@ export function NativeTerminalPane({
       quarantinedBindingRef.current = null;
     }
   }, [bindingKey]);
-  const attachmentOwnerRef = useRef<{ readonly sessionId: string; readonly live: boolean } | null>(null);
+  const attachmentOwnerRef = useRef<{
+    readonly sessionId: string;
+    readonly bindingKey: string | null;
+    readonly live: boolean;
+  } | null>(null);
   useLayoutEffect(() => {
     attachmentOwnerRef.current = surfaceVisible && surfaceSessionId
-      ? { sessionId: surfaceSessionId, live: targetSessionId !== null }
+      ? { sessionId: surfaceSessionId, bindingKey, live: targetSessionId !== null }
       : null;
     return () => { attachmentOwnerRef.current = null; };
-  }, [surfaceSessionId, surfaceVisible, targetSessionId]);
+  }, [bindingKey, surfaceSessionId, surfaceVisible, targetSessionId]);
   const surfaceOwnerRef = useRef<{ readonly sessionId: string } | null>(null);
   // Commit-scoped identity: A -> B -> A and hide/show must not revive old input.
   // Layout cleanup invalidates it before passive surface teardown or queued IPC.
@@ -1916,7 +1920,8 @@ export function NativeTerminalPane({
           if (
             attachmentOwnerRef.current !== currentOwner ||
             !attachmentOwnerRef.current?.live ||
-            attachmentOwnerRef.current.sessionId !== targetSessionId
+            attachmentOwnerRef.current.sessionId !== targetSessionId ||
+            attachmentOwnerRef.current.bindingKey !== bindingKey
           ) {
             return;
           }
@@ -1945,7 +1950,8 @@ export function NativeTerminalPane({
           if (
             attachmentOwnerRef.current !== currentOwner ||
             !attachmentOwnerRef.current?.live ||
-            attachmentOwnerRef.current.sessionId !== targetSessionId
+            attachmentOwnerRef.current.sessionId !== targetSessionId ||
+            attachmentOwnerRef.current.bindingKey !== bindingKey
           ) {
             return;
           }
@@ -1964,7 +1970,7 @@ export function NativeTerminalPane({
             });
             if (!notifiedMissing) {
               notifiedMissing = true;
-              onBackendSessionUnavailable?.(targetSessionId, classification.reason);
+              onBackendSessionUnavailable?.(targetSessionId, classification.reason, bindingKey);
             }
             return;
           }
@@ -2079,7 +2085,7 @@ export function NativeTerminalPane({
           reportNativeTerminalIpcFailure("cmd_native_terminal_detach", error);
         });
     };
-  }, [measureGeometry, performAttach, sessionId, paneIdentity, surfaceSessionId, surfaceVisible]);
+  }, [measureGeometry, performAttach, sessionId, paneIdentity, surfaceSessionId, surfaceVisible, bindingKey]);
 
   const thumb = nativeScrollbarThumb(scrollbar);
   const overlayVisible = Boolean(visible && isScrollbarRevealed && thumb.visible);

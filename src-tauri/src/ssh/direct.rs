@@ -336,9 +336,14 @@ async fn collect_output(
             } else {
                 use base64::{engine::general_purpose::STANDARD, Engine as _};
                 let text = std::str::from_utf8(&stderr).ok();
-                let diagnostic = match text.map(str::trim) {
-                    Some(s) if !s.is_empty() => s.to_string(),
-                    _ => "Remote stderr was empty; raw bytes are available in details".to_string(),
+                let diagnostic = if stderr.is_empty() {
+                    "Remote stderr was empty; raw bytes are available in details".to_string()
+                } else {
+                    match text.map(str::trim) {
+                        Some(s) if !s.is_empty() => s.to_string(),
+                        Some(_) => "Remote stderr was whitespace only; raw bytes are available in details".to_string(),
+                        None => "Remote stderr contained non-UTF-8 data; raw bytes are available in details".to_string(),
+                    }
                 };
                 Err(IpcError::new(
                     IpcErrorCode::IoError,

@@ -19,6 +19,7 @@ const nativeListeners = vi.hoisted(() => ({
 
 vi.mock("../lib/tauri", () => ({
   DEFAULT_WORKSPACE_ID: "default",
+  isTauriRuntime: vi.fn(() => true),
   spawnTerminal: vi.fn(async () => "backend-1"),
   closeTerminal: vi.fn(async () => undefined),
   getTerminalCwd: vi.fn(async () => "/repo/main"),
@@ -103,6 +104,124 @@ describe("workspace store native activity subscription", () => {
     });
     expect(Object.values(result.current.state.activityBySessionId ?? {})[0]?.seen).toBe(false);
     expect(result.current.unreadBadgeCount).toBe(1);
+  });
+
+  it("restores mounted agent snapshots quietly, then reports the next live completion once", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "mounted", initialWorktrees: [worktree], services: services() }));
+    await act(async () => { await result.current.openTab(worktree); });
+    await waitFor(() => expect(nativeListeners.agentState.size).toBeGreaterThan(0));
+
+    const received: Array<{ state: string; previousState?: string; suppressed?: boolean }> = [];
+    result.current.subscribeActivityNotification((event) => received.push({
+      state: event.state,
+      previousState: event.previousState,
+      suppressed: event.notificationSuppressed,
+    }));
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "prompt", manifestId: "omo", isSnapshot: true });
+    });
+    const localSessionId = Object.values(result.current.state.sessions)[0]!.id;
+    expect(result.current.state.activityBySessionId?.[localSessionId]).toMatchObject({
+      state: "done", agentType: "omo", seen: true, notificationSuppressed: true,
+    });
+    expect(result.current.unreadBadgeCount).toBe(0);
+    expect(result.current.state.unreadTabIds).toEqual({});
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "run", manifestId: "omo", isSnapshot: true });
+    });
+    expect(result.current.state.activityBySessionId?.[localSessionId]?.state).toBe("working");
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "prompt", manifestId: "omo", isSnapshot: true });
+      emitNativeAgentState({ sessionId: "backend-1", state: "blocked", ruleId: "approval", manifestId: "omo", isSnapshot: true });
+    });
+    expect(result.current.state.activityBySessionId?.[localSessionId]).toMatchObject({
+      state: "waiting", seen: true, notificationSuppressed: true,
+    });
+    expect(result.current.unreadBadgeCount).toBe(0);
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "run", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "prompt", manifestId: "omo" });
+    });
+    expect(result.current.state.activityBySessionId?.[localSessionId]).toMatchObject({
+      state: "done", seen: false, notificationSuppressed: false,
+    });
+    expect(result.current.unreadBadgeCount).toBe(1);
+    expect(received.filter((event) => event.state === "done" && event.suppressed !== true)).toHaveLength(1);
+  });
+
+  it("clears stale unread completion edges when a mounted idle snapshot is replayed", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "stale", initialWorktrees: [worktree], services: services() }));
+    await act(async () => { await result.current.openTab(worktree); });
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "run", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "prompt", manifestId: "omo" });
+    });
+    expect(result.current.unreadBadgeCount).toBe(1);
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "prompt", manifestId: "omo", isSnapshot: true });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "prompt", manifestId: "omo", isSnapshot: true });
+    });
+    expect(Object.values(result.current.state.activityBySessionId ?? {})[0]).toMatchObject({
+      state: "done", seen: true, notificationSuppressed: true,
+    });
+    expect(result.current.state.unreadTabIds).toEqual({});
+    expect(result.current.state.unreadWorktreePaths).toEqual({});
+    expect(result.current.unreadBadgeCount).toBe(0);
+  });
+
+  it("restores an initial blocked snapshot as already-seen attention", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "blocked", initialWorktrees: [worktree], services: services() }));
+    await act(async () => { await result.current.openTab(worktree); });
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "blocked", ruleId: "approval", manifestId: "omo", isSnapshot: true });
+    });
+
+    expect(Object.values(result.current.state.activityBySessionId ?? {})[0]).toMatchObject({
+      state: "waiting", agentType: "omo", seen: true, notificationSuppressed: true,
+    });
+    expect(result.current.state.unreadTabIds).toEqual({});
+    expect(result.current.unreadBadgeCount).toBe(0);
+  });
+
+  it("restores parked snapshots quietly and preserves the next live notification edge", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const svc = services();
+    const { result, rerender } = renderHook(({ workspaceId }) => useWorkspaceStore({ workspaceId, initialWorktrees: [worktree], services: svc }),
+      { initialProps: { workspaceId: "project-a" } });
+    await act(async () => { await result.current.openTab(worktree); });
+    const received: Array<{ workspaceId?: string; state: string; suppressed?: boolean }> = [];
+    result.current.subscribeActivityNotification((event) => received.push({
+      workspaceId: event.workspaceId, state: event.state, suppressed: event.notificationSuppressed,
+    }));
+    rerender({ workspaceId: "project-b" });
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "prompt", manifestId: "omo", isSnapshot: true });
+    });
+    expect(Object.values(getWorkspaceSnapshot("project-a")?.activityBySessionId ?? {})[0]).toMatchObject({
+      state: "done", agentType: "omo", seen: true, notificationSuppressed: true,
+    });
+    expect(result.current.unreadBadgeCount).toBe(0);
+
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "run", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "blocked", ruleId: "approval", manifestId: "omo" });
+    });
+    expect(Object.values(getWorkspaceSnapshot("project-a")?.activityBySessionId ?? {})[0]).toMatchObject({
+      state: "waiting", seen: false, notificationSuppressed: false,
+    });
+    expect(result.current.unreadBadgeCount).toBe(1);
+    expect(received.filter((event) => event.state === "waiting" && event.suppressed !== true)).toHaveLength(1);
   });
 
   it("routes parked project edges and bells immediately without replay on project switch", async () => {
@@ -243,5 +362,37 @@ describe("workspace store native activity subscription", () => {
     });
 
     expect(result.current.state.activityBySessionId?.[session1Id]?.seen).toBe(true);
+  });
+
+  it("preserves independent terminal bell unread when quiet snapshot arrives", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "bell-test", initialWorktrees: [worktree], services: services() }));
+    let tabId = "";
+    await act(async () => {
+      const opened = await result.current.openTab(worktree);
+      if (!opened) throw new Error("expected openTab to return tabId");
+      tabId = opened;
+    });
+
+    // Agent finishes
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "working", ruleId: "r1", manifestId: "omo" });
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "r2", manifestId: "omo" });
+    });
+    expect(result.current.unreadBadgeCount).toBe(1);
+
+    // Later terminal bell marks tab unread
+    act(() => {
+      result.current.markTabUnread(tabId);
+    });
+    expect(result.current.unreadBadgeCount).toBe(1);
+
+    // Replay quiet idle snapshot for backend-1
+    act(() => {
+      emitNativeAgentState({ sessionId: "backend-1", state: "idle", ruleId: "r2", manifestId: "omo", isSnapshot: true });
+    });
+    // Bell unread must be preserved!
+    expect(result.current.unreadBadgeCount).toBe(1);
+    expect(result.current.state.unreadTabIds[tabId]).toBe(true);
   });
 });

@@ -402,6 +402,8 @@ pub enum DaemonStreamMessage<'a> {
         agent: Option<Cow<'a, str>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_session: Option<AgentProviderSession>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_snapshot: bool,
     },
     #[serde(rename_all = "camelCase")]
     RemoteStatus {
@@ -519,6 +521,7 @@ mod tests {
                 id: "provider-1".to_string(),
                 transcript_path: None,
             }),
+            is_snapshot: false,
         };
 
         // When: serialized through the production framing contract.
@@ -529,6 +532,41 @@ mod tests {
             frame,
             "{\"type\":\"agentState\",\"sessionId\":\"pty-1\",\"state\":\"working\",\"agent\":\"omo\",\"providerSession\":{\"key\":\"session_id\",\"id\":\"provider-1\"}}\n"
         );
+    }
+
+    #[test]
+    fn agent_state_snapshot_flag_is_backward_compatible() {
+        let old_frame = r#"{"type":"agentState","sessionId":"pty-1","state":"idle"}"#;
+        let decoded = decode_daemon_stream_frame(old_frame).expect("decode old peer frame");
+        assert!(matches!(
+            decoded,
+            DaemonStreamMessage::AgentState {
+                is_snapshot: false,
+                ..
+            }
+        ));
+
+        let live = DaemonStreamMessage::AgentState {
+            session_id: Cow::Borrowed("pty-1"),
+            state: Cow::Borrowed("blocked"),
+            agent: None,
+            provider_session: None,
+            is_snapshot: false,
+        };
+        assert_eq!(
+            encode_daemon_stream_frame(&live).expect("encode live frame"),
+            "{\"type\":\"agentState\",\"sessionId\":\"pty-1\",\"state\":\"blocked\"}\n"
+        );
+    }
+
+    #[test]
+    fn agent_state_snapshot_flag_survives_wire_roundtrip() {
+        let frame = r#"{"type":"agentState","sessionId":"pty-1","state":"idle","isSnapshot":true}"#;
+        let decoded = decode_daemon_stream_frame(frame).expect("decode snapshot frame");
+        let encoded = encode_daemon_stream_frame(&decoded).expect("re-encode snapshot frame");
+        let value: serde_json::Value = serde_json::from_str(encoded.trim()).expect("snapshot json");
+
+        assert_eq!(value["isSnapshot"], true);
     }
 
     #[test]

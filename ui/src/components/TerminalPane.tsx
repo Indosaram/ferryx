@@ -23,7 +23,12 @@ type TerminalPaneProps = {
   onCloseSearch?: () => void;
   onReconnect?: (sessionId: string) => Promise<void> | void;
   onOpenNewShell?: (sessionId: string) => Promise<void> | void;
-  onBackendSessionUnavailable?: (sessionId: string, backendSessionId: string, reason: string) => void;
+  onBackendSessionUnavailable?: (
+    sessionId: string,
+    backendSessionId: string,
+    reason: string,
+    bindingKey?: string | null,
+  ) => void;
 };
 
 function friendlyAgentName(agentType: string | null | undefined): string {
@@ -167,8 +172,8 @@ export function TerminalPane({
         active={active}
         activity={activity}
         needsAttention={needsAttention}
-        onBackendSessionUnavailable={(backendSessionId, reason) => {
-          onBackendSessionUnavailable?.(session.id, backendSessionId, reason);
+        onBackendSessionUnavailable={(backendSessionId, reason, bindingKey) => {
+          onBackendSessionUnavailable?.(session.id, backendSessionId, reason, bindingKey);
         }}
       />
       {searchOpen ? (

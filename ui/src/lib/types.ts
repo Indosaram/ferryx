@@ -463,6 +463,7 @@ export type NativeTerminalAgentStatePayload = {
   ruleId: string;
   manifestId: string;
   providerSession?: AgentProviderSession | null;
+  isSnapshot?: boolean;
 };
 
 export type NativeTerminalBellPayload = {
