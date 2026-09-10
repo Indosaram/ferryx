@@ -14,8 +14,8 @@
 //!   present the relay proxies frames between them, bidirectionally, until
 //!   either side disconnects.
 //!
-//! Authentication is a single bearer credential - the desktop daemon's
-//! Machine Token - checked on the control channel. Data and client
+//! Control channels authenticate by Ed25519 challenge-response, or by a
+//! configured legacy Machine Token. Data and client
 //! channels are bound to a `session_id` that is only ever handed out over
 //! the (already authenticated) control channel, so they do not need to
 //! re-present the Machine Token. An authenticated control socket can send
@@ -26,10 +26,12 @@
 //! Pending and active sessions share a 100-entry budget. Pairing expires
 //! after 30 seconds; sends time out after 30 seconds and sessions after one hour.
 
+use crate::remote::auth::verify_machine_signature;
+use crate::remote::protocol::{ControlAuth, ControlAuthResponse, ControlChallenge};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath, State,
+        ConnectInfo, Path as AxumPath, State,
     },
     http::{HeaderMap, StatusCode},
     response::Response,
@@ -40,9 +42,10 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
@@ -120,8 +123,27 @@ pub struct RelayState {
 struct RelayInner {
     machine_tokens: Vec<String>,
     control_channels: Mutex<HashMap<String, ControlChannel>>,
+    machine_public_keys: Mutex<HashMap<String, String>>,
+    admission: Mutex<HashMap<IpAddr, AttemptTracker>>,
     next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
+}
+
+const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
+const CONTROL_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct AttemptTracker {
+    started: Instant,
+    attempts: u32,
+    failures: u32,
+    locked_until: Option<Instant>,
+}
+
+fn current_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before Unix epoch")
+        .as_secs()
 }
 
 /// Outcome of offering a socket to the pairing registry.
@@ -139,8 +161,51 @@ impl RelayState {
                 machine_tokens,
                 next_generation: AtomicU64::new(1),
                 control_channels: Mutex::new(HashMap::new()),
+                machine_public_keys: Mutex::new(HashMap::new()),
+                admission: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
             }),
+        }
+    }
+
+    fn admit(&self, ip: IpAddr, now: Instant) -> bool {
+        let mut admission = self.inner.admission.lock();
+        admission.retain(|_, tracker| {
+            now.duration_since(tracker.started) < ADMISSION_WINDOW
+                || tracker.locked_until.is_some_and(|until| now < until)
+        });
+        let tracker = admission.entry(ip).or_insert(AttemptTracker {
+            started: now,
+            attempts: 0,
+            failures: 0,
+            locked_until: None,
+        });
+        if tracker.locked_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        if now.duration_since(tracker.started) >= ADMISSION_WINDOW {
+            tracker.started = now;
+            tracker.attempts = 0;
+            tracker.failures = 0;
+            tracker.locked_until = None;
+        }
+        if tracker.attempts >= 30 {
+            return false;
+        }
+        tracker.attempts += 1;
+        true
+    }
+
+    fn record_auth(&self, ip: IpAddr, success: bool) {
+        if let Some(tracker) = self.inner.admission.lock().get_mut(&ip) {
+            if success {
+                tracker.failures = 0;
+            } else {
+                tracker.failures += 1;
+                if tracker.failures >= 5 {
+                    tracker.locked_until = Some(Instant::now() + ADMISSION_WINDOW);
+                }
+            }
         }
     }
 
@@ -159,14 +224,14 @@ impl RelayState {
 
     fn register_control_channel(
         &self,
-        machine_token: String,
+        machine_id: String,
     ) -> (u64, mpsc::Receiver<IncomingSessionNotice>) {
         let (tx, rx) = mpsc::channel(MAX_PENDING_SESSIONS);
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
         self.inner
             .control_channels
             .lock()
-            .insert(machine_token, ControlChannel { generation, tx });
+            .insert(machine_id, ControlChannel { generation, tx });
         (generation, rx)
     }
 
@@ -181,7 +246,7 @@ impl RelayState {
     }
 
     /// Trusted in-process issuance API. The caller must supply an opaque,
-    /// unpredictable ID and a configured token with a live control channel.
+    /// unpredictable ID and a machine identity with a live control channel.
     /// Registry insertion and notification are atomic with respect to admission.
     pub fn notify_incoming_session(&self, machine_token: &str, session_id: &str) -> bool {
         self.issue_session(machine_token, session_id, None)
@@ -193,9 +258,6 @@ impl RelayState {
         session_id: &str,
         generation: Option<u64>,
     ) -> bool {
-        if !self.validate_machine_token(machine_token) {
-            return false;
-        }
         let channels = self.inner.control_channels.lock();
         let Some(channel) = channels.get(machine_token) else {
             return false;
@@ -270,6 +332,11 @@ impl RelayState {
     /// entry drops its `notify` sender, which causes the waiting task's
     /// `rx.await` to resolve to an error so it can close its socket.
     fn sweep_expired_sessions(&self) {
+        let now = Instant::now();
+        self.inner.admission.lock().retain(|_, tracker| {
+            now.duration_since(tracker.started) < ADMISSION_WINDOW
+                || tracker.locked_until.is_some_and(|until| now < until)
+        });
         let mut sessions = self.inner.pending_sessions.lock();
         sessions.retain(|_, waiting| {
             waiting.active || waiting.created_at.elapsed() < SESSION_PAIRING_TIMEOUT
@@ -315,26 +382,133 @@ struct AuthQuery {
 
 /// `GET /tunnel/control` - the desktop daemon's long-lived control channel.
 ///
-/// The daemon authenticates with its Machine Token (via `Authorization:
-/// Bearer <token>` header or `?token=` query parameter). Once upgraded, the
-/// relay forwards [`IncomingSessionNotice`] messages to the daemon as JSON
-/// text frames for as long as the socket remains open.
+/// Without a legacy bearer token, the upgraded socket must prove ownership
+/// of its public key before it can allocate or receive sessions.
 async fn control_handler(
     ws: WebSocketUpgrade,
     axum::extract::Query(query): axum::extract::Query<AuthQuery>,
     headers: HeaderMap,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<RelayState>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_bearer_token(&headers, query.token.as_deref())
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Machine Token".into()))?;
-    if !state.validate_machine_token(&token) {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid Machine Token".into()));
+    let ip = peer_ip(peer);
+    if !state.admit(ip, Instant::now()) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Admission limit exceeded".into(),
+        ));
+    }
+    let token = extract_bearer_token(&headers, query.token.as_deref());
+    if let Some(token) = &token {
+        // Legacy identities remain token-keyed. Never allow a bearer to replace
+        // a previously bound Ed25519 identity, even if their strings coincide.
+        if !state.validate_machine_token(token)
+            || state.inner.machine_public_keys.lock().contains_key(token)
+        {
+            state.record_auth(ip, false);
+            return Err((StatusCode::UNAUTHORIZED, "Invalid Machine Token".into()));
+        }
     }
 
     Ok(ws
         .max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_control_socket(socket, state, token)))
+        .on_upgrade(move |socket| authenticate_control_socket(socket, state, token, ip)))
+}
+
+// Do not trust forwarding headers. Servers must supply ConnectInfo from the
+// accepted TCP socket; embeddings without it share one conservative bucket.
+fn peer_ip(peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>) -> IpAddr {
+    peer.map(|axum::Extension(ConnectInfo(addr))| addr.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
+
+async fn authenticate_control_socket(
+    mut socket: WebSocket,
+    state: RelayState,
+    token: Option<String>,
+    ip: IpAddr,
+) {
+    if let Some(token) = token {
+        state.record_auth(ip, true);
+        handle_control_socket(socket, state, token).await;
+        return;
+    }
+    let challenge = ControlChallenge {
+        nonce: uuid::Uuid::new_v4().to_string(),
+        timestamp: current_time_secs(),
+    };
+    let authenticate = async {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&challenge).unwrap().into(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let auth = match socket.recv().await {
+            Some(Ok(Message::Text(text))) => serde_json::from_str::<ControlAuth>(&text)
+                .map_err(|_| "Invalid ControlAuth frame".to_string())?,
+            _ => return Err("Expected ControlAuth text frame".to_string()),
+        };
+        if auth.machine_id.is_empty() || state.validate_machine_token(&auth.machine_id) {
+            return Err("Invalid or reserved machine ID".to_string());
+        }
+        if current_time_secs().abs_diff(auth.timestamp) > 60 {
+            return Err("Authentication timestamp expired".to_string());
+        }
+        if !verify_machine_signature(
+            &auth.public_key,
+            &challenge.nonce,
+            auth.timestamp,
+            &auth.signature,
+        ) {
+            return Err("Invalid machine signature".to_string());
+        }
+        // Check and bind under one lock: concurrent first registrations cannot
+        // both claim the same machine ID with different keys.
+        let mut keys = state.inner.machine_public_keys.lock();
+        if keys
+            .get(&auth.machine_id)
+            .is_some_and(|key| key != &auth.public_key)
+        {
+            return Err("Machine ID already claimed by another public key".to_string());
+        }
+        keys.insert(auth.machine_id.clone(), auth.public_key);
+        Ok(auth.machine_id)
+    };
+    let result = match timeout(CONTROL_AUTH_TIMEOUT, authenticate).await {
+        Ok(result) => result,
+        Err(_) => Err("Control authentication timed out".to_string()),
+    };
+    state.record_auth(ip, result.is_ok());
+    let response = ControlAuthResponse {
+        success: result.is_ok(),
+        error: result.as_ref().err().cloned(),
+    };
+    if !matches!(
+        timeout(
+            CONTROL_AUTH_TIMEOUT,
+            socket.send(Message::Text(
+                serde_json::to_string(&response).unwrap().into()
+            ))
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        tracing::warn!("relay authentication response send failed or timed out");
+        return;
+    }
+    match result {
+        Ok(machine_id) => handle_control_socket(socket, state, machine_id).await,
+        Err(_) => {
+            if !matches!(
+                timeout(CONTROL_AUTH_TIMEOUT, socket.close()).await,
+                Ok(Ok(()))
+            ) {
+                tracing::debug!("relay rejected control socket close failed or timed out");
+            }
+        }
+    }
 }
 
 async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine_token: String) {
@@ -381,8 +555,12 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
 async fn data_handler(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
+    if !state.admit(peer_ip(peer), Instant::now()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     upgrade_half(ws, state, session_id, HalfKind::Data)
 }
 
@@ -391,8 +569,12 @@ async fn data_handler(
 async fn client_handler(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
+    if !state.admit(peer_ip(peer), Instant::now()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     upgrade_half(ws, state, session_id, HalfKind::Client)
 }
 
@@ -533,12 +715,238 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
 
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .await
-                .expect("relay server exited unexpectedly");
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("relay server exited unexpectedly");
         });
 
         (format!("ws://{addr}"), handle)
+    }
+
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    fn identity(seed: u8, machine_id: &str) -> crate::remote::auth::MachineIdentity {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        crate::remote::auth::MachineIdentity {
+            machine_id: machine_id.into(),
+            display_name: machine_id.into(),
+            public_key: STANDARD.encode(key.verifying_key().to_bytes()),
+            private_key: STANDARD.encode(key.to_bytes()),
+        }
+    }
+
+    async fn receive_json<T: serde::de::DeserializeOwned>(socket: &mut TestSocket) -> T {
+        let frame = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+
+    async fn authenticate(
+        base: &str,
+        identity: &crate::remote::auth::MachineIdentity,
+        wrong_signature: bool,
+        stale: bool,
+    ) -> (TestSocket, ControlAuthResponse) {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap();
+        let challenge: ControlChallenge = receive_json(&mut socket).await;
+        let timestamp = if stale {
+            challenge.timestamp - 61
+        } else {
+            challenge.timestamp
+        };
+        let auth = ControlAuth {
+            machine_id: identity.machine_id.clone(),
+            display_name: identity.display_name.clone(),
+            public_key: identity.public_key.clone(),
+            timestamp,
+            signature: crate::remote::auth::sign_challenge(
+                identity,
+                if wrong_signature {
+                    "different-nonce"
+                } else {
+                    &challenge.nonce
+                },
+                timestamp,
+            )
+            .unwrap(),
+        };
+        socket
+            .send(TMessage::Text(serde_json::to_string(&auth).unwrap().into()))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        (socket, response)
+    }
+
+    async fn allocate(socket: &mut TestSocket) -> IncomingSessionNotice {
+        socket
+            .send(TMessage::Text(r#"{"type":"AllocateSession"}"#.into()))
+            .await
+            .unwrap();
+        receive_json(socket).await
+    }
+
+    #[tokio::test]
+    async fn test_relay_ed25519_control_handshake_success() {
+        let (base, server) = spawn_test_relay().await;
+        let (mut socket, response) =
+            authenticate(&base, &identity(1, "machine-a"), false, false).await;
+        assert!(response.success);
+        assert!(response.error.is_none());
+        let notice = allocate(&mut socket).await;
+        assert!(uuid::Uuid::parse_str(&notice.session_id).is_ok());
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id))
+                .await
+                .unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/{}", notice.session_id))
+                .await
+                .unwrap();
+        client
+            .send(TMessage::Text("authenticated tunnel".into()))
+            .await
+            .unwrap();
+        let frame = timeout(Duration::from_secs(5), data.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.to_text().unwrap(), "authenticated tunnel");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_ed25519_control_handshake_wrong_sig_rejected() {
+        let (base, server) = spawn_test_relay().await;
+        let (mut socket, response) =
+            authenticate(&base, &identity(1, "machine-a"), true, false).await;
+        assert!(!response.success);
+        assert!(response.error.is_some());
+        assert!(matches!(
+            timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap(),
+            Some(Ok(TMessage::Close(_))) | None
+        ));
+        // A failed proof must not claim the ID.
+        let (_, response) = authenticate(&base, &identity(2, "machine-a"), false, false).await;
+        assert!(response.success);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_ed25519_stale_timestamp_rejected() {
+        let (base, server) = spawn_test_relay().await;
+        let (_, response) = authenticate(&base, &identity(1, "machine-a"), false, true).await;
+        assert!(!response.success);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_machine_hijack_with_different_key_fails() {
+        let (base, server) = spawn_test_relay().await;
+        let owner = identity(1, "machine-a");
+        let (mut original, response) = authenticate(&base, &owner, false, false).await;
+        assert!(response.success);
+        let (_, response) = authenticate(&base, &identity(2, "machine-a"), false, false).await;
+        assert!(!response.success);
+        allocate(&mut original).await;
+        original.close(None).await.unwrap();
+        let (_, response) = authenticate(&base, &identity(2, "machine-a"), false, false).await;
+        assert!(!response.success);
+        let (mut replacement, response) = authenticate(&base, &owner, false, false).await;
+        assert!(response.success);
+        allocate(&mut replacement).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_multi_machine_concurrent_registration() {
+        let (base, server) = spawn_test_relay().await;
+        let a = identity(1, "machine-a");
+        let b = identity(2, "machine-b");
+        let ((mut first, a), (mut second, b)) = tokio::join!(
+            authenticate(&base, &a, false, false),
+            authenticate(&base, &b, false, false),
+        );
+        assert!(a.success && b.success);
+        let (a, b) = tokio::join!(allocate(&mut first), allocate(&mut second));
+        assert_ne!(a.session_id, b.session_id);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_admission_rate_limiting() {
+        let state = RelayState::new(vec![]);
+        let ip = "127.0.0.1".parse().unwrap();
+        let other_ip = "127.0.0.2".parse().unwrap();
+        let now = Instant::now();
+        for _ in 0..30 {
+            assert!(state.admit(ip, now));
+        }
+        assert!(!state.admit(ip, now));
+        assert!(state.admit(other_ip, now));
+        assert!(state.admit(ip, now + ADMISSION_WINDOW));
+
+        let (base, server) = spawn_test_relay().await;
+        // Success resets consecutive failures without resetting the attempt cap.
+        for _ in 0..4 {
+            let (_, response) = authenticate(&base, &identity(1, "a"), true, false).await;
+            assert!(!response.success);
+        }
+        let (_, response) = authenticate(&base, &identity(1, "a"), false, false).await;
+        assert!(response.success);
+        for _ in 0..5 {
+            let error =
+                tokio_tungstenite::connect_async(format!("{base}/tunnel/control?token=wrong"))
+                    .await
+                    .unwrap_err();
+            assert!(
+                matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == StatusCode::UNAUTHORIZED)
+            );
+        }
+        for path in ["control", "data/unknown", "client/unknown"] {
+            let error = tokio_tungstenite::connect_async(format!("{base}/tunnel/{path}"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == StatusCode::TOO_MANY_REQUESTS)
+            );
+        }
+        server.abort();
+
+        let (base, server) = spawn_test_relay().await;
+        for _ in 0..30 {
+            let error = tokio_tungstenite::connect_async(format!("{base}/tunnel/client/unknown"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == StatusCode::NOT_FOUND)
+            );
+        }
+        let error = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+            if response.status() == StatusCode::TOO_MANY_REQUESTS)
+        );
+        server.abort();
     }
 
     /// End-to-end integration test: starts a real relay server on an
