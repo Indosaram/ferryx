@@ -232,10 +232,40 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             Ok(())
         }
         PairCliCommand::GeneratePin => {
-            let pin = manager.create_pairing_code(ferryx_lib::remote::DevicePermission::Control);
-            println!("{pin}");
-            eprintln!("Pairing PIN saved; valid for 60 seconds.");
-            Ok(())
+            let directory = remote_state_dir().ok_or("Cannot persist machine identity: set FERRYX_DATA_DIR")?;
+            let config_path = directory.join("remote-config.json");
+            let config: ferryx_lib::remote::RemoteGatewayConfig = match std::fs::read(&config_path) {
+                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                Err(error) => return Err(error.to_string()),
+            };
+            let relay_url = std::env::var("FERRYX_RELAY_URL").ok().or(config.relay_url)
+                .ok_or("Pairing requires a configured relay URL (FERRYX_RELAY_URL)")?;
+            let identity = ferryx_lib::remote::auth::load_or_generate_machine_identity(&directory)?;
+            let client = ferryx_lib::remote::relay_client::RelayClient::with_identity(
+                &relay_url, identity, format!("127.0.0.1:{}", config.port),
+            );
+            let coordinator = client.pairing_coordinator();
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+            runtime.block_on(async move {
+                let relay_task = tokio::spawn(async move { client.run().await });
+                let result = coordinator.generate_pairing(std::time::Duration::from_secs(60)).await;
+                match result {
+                    Ok(session) => {
+                        println!("{}", session.pin);
+                        println!("{}#pair={}", relay_url.trim_end_matches('/'), session.pairing_token);
+                        std::io::stdout().flush().map_err(|error| error.to_string())?;
+                        eprintln!("Pairing registered; keep this command running until pairing completes or expires.");
+                        // This process owns the authenticated control connection; do not drop
+                        // it immediately after printing the relay-acknowledged credentials.
+                        let deadline = std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at);
+                        tokio::time::sleep(deadline.duration_since(std::time::SystemTime::now()).unwrap_or_default()).await;
+                        relay_task.abort();
+                        Ok(())
+                    }
+                    Err(error) => { relay_task.abort(); Err(error) }
+                }
+            })
         }
         PairCliCommand::Approve { pin } => match manager.approve_pairing_code_cli(&pin) {
             Ok(_device) => {

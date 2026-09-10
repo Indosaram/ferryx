@@ -14,7 +14,94 @@
 //! client reconnects automatically with exponential backoff.
 
 use futures_util::{SinkExt, StreamExt};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use parking_lot::RwLock;
+use rand::Rng;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use crate::remote::auth::{MachineIdentity, sign_challenge};
+use crate::remote::protocol::{ControlChallenge, ControlAuth, ControlAuthResponse, RegisterPairingPin, RegisterPairingPinAck, PairingState, PairingPinClaimed};
+
+type ControlSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub struct RegisterPairingPinRequest {
+    pub registration: RegisterPairingPin,
+    pub ack: oneshot::Sender<Result<RegisterPairingPinAck, String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairingSessionInfo {
+    pub pin: String,
+    pub pairing_token: String,
+    pub expires_at: u64,
+}
+
+#[derive(Clone)]
+pub struct PairingCoordinator {
+    state: Arc<RwLock<PairingState>>,
+    active_pin: Arc<RwLock<Option<String>>>,
+    active_token: Arc<RwLock<Option<String>>>,
+    register_tx: mpsc::Sender<RegisterPairingPinRequest>,
+    machine_id: String,
+}
+
+impl PairingCoordinator {
+    pub fn new(machine_id: impl Into<String>, register_tx: mpsc::Sender<RegisterPairingPinRequest>) -> Self {
+        Self { state: Arc::new(RwLock::new(PairingState::Created)), active_pin: Arc::new(RwLock::new(None)), active_token: Arc::new(RwLock::new(None)), register_tx, machine_id: machine_id.into() }
+    }
+
+    pub fn state(&self) -> PairingState { *self.state.read() }
+
+    pub fn transition(&self, target: PairingState) -> Result<(), String> {
+        let mut state = self.state.write();
+        if !state.can_transition_to(&target) {
+            return Err(format!("Invalid pairing transition: {state:?} -> {target:?}"));
+        }
+        *state = target;
+        if matches!(target, PairingState::Consumed | PairingState::Expired | PairingState::Cancelled) {
+            *self.active_pin.write() = None;
+            *self.active_token.write() = None;
+        }
+        Ok(())
+    }
+
+    /// `timeout` is the PIN lifetime; registration itself has a five-second deadline.
+    pub async fn generate_pairing(&self, timeout: Duration) -> Result<PairingSessionInfo, String> {
+        let expires_at = SystemTime::now().checked_add(timeout)
+            .ok_or("Invalid pairing lifetime")?.duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?.as_secs();
+        self.transition(PairingState::Registering)?;
+        let pin = format!("{:06}", rand::rngs::OsRng.gen_range(0..1_000_000u32));
+        let pairing_token = format!("{:032x}", rand::rngs::OsRng.gen::<u128>());
+        *self.active_pin.write() = Some(pin.clone());
+        *self.active_token.write() = Some(pairing_token.clone());
+        let registration = RegisterPairingPin { pin: pin.clone(), pairing_token: pairing_token.clone(), machine_id: self.machine_id.clone(), expires_at };
+        let (ack, rx) = oneshot::channel();
+        let result = tokio::time::timeout(REGISTER_ACK_TIMEOUT.min(timeout), async {
+            self.register_tx.send(RegisterPairingPinRequest { registration, ack }).await.map_err(|_| "Relay registration channel closed".to_string())?;
+            let ack = rx.await.map_err(|_| "Relay disconnected before registration ACK".to_string())??;
+            if ack.pin != pin || ack.machine_id != self.machine_id || ack.status != "ready" {
+                return Err(format!("Relay rejected pairing registration: {}", ack.status));
+            }
+            Ok(())
+        }).await;
+        match result {
+            Ok(Ok(())) => self.transition(PairingState::Ready)?,
+            Ok(Err(error)) => { self.transition(PairingState::Cancelled)?; return Err(error); }
+            Err(_) => { self.transition(PairingState::Expired)?; return Err("Timed out waiting for relay registration ACK".into()); }
+        }
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
+            tokio::time::sleep(deadline.duration_since(SystemTime::now()).unwrap_or_default()).await;
+            if let Err(error) = coordinator.transition(PairingState::Expired) {
+                tracing::debug!("Pairing expiry ignored: {error}");
+            }
+        });
+        Ok(PairingSessionInfo { pin, pairing_token, expires_at })
+    }
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -58,6 +145,9 @@ pub struct RelayClient {
     machine_token: String,
     /// Local loopback gateway address that data channels are proxied to.
     gateway_addr: String,
+    identity: Option<MachineIdentity>,
+    pairing: PairingCoordinator,
+    register_rx: Arc<Mutex<mpsc::Receiver<RegisterPairingPinRequest>>>,
 }
 
 impl RelayClient {
@@ -76,11 +166,47 @@ impl RelayClient {
         machine_token: impl Into<String>,
         gateway_addr: impl Into<String>,
     ) -> Self {
+        let machine_token = machine_token.into();
+        let (tx, rx) = mpsc::channel(1);
         Self {
             relay_url: relay_url.into(),
-            machine_token: machine_token.into(),
+            pairing: PairingCoordinator::new(machine_token.clone(), tx),
+            machine_token,
             gateway_addr: gateway_addr.into(),
+            identity: None,
+            register_rx: Arc::new(Mutex::new(rx)),
         }
+    }
+
+    pub fn with_identity(relay_url: impl Into<String>, identity: MachineIdentity, gateway_addr: impl Into<String>) -> Self {
+        let mut client = Self::with_gateway(relay_url, "", gateway_addr);
+        client.pairing.machine_id = identity.machine_id.clone();
+        client.identity = Some(identity);
+        client
+    }
+
+    pub fn pairing_coordinator(&self) -> PairingCoordinator { self.pairing.clone() }
+
+    pub async fn connect_control(&self) -> anyhow::Result<ControlSocket> {
+        let mut request = self.control_url().into_client_request()?;
+        if self.identity.is_none() {
+            request.headers_mut().insert(AUTHORIZATION, format!("Bearer {}", self.machine_token).parse()?);
+        }
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
+        if let Some(identity) = &self.identity {
+            tokio::time::timeout(REGISTER_ACK_TIMEOUT, async {
+                let challenge: ControlChallenge = read_control_json(&mut socket).await?;
+                let auth = ControlAuth {
+                    machine_id: identity.machine_id.clone(), display_name: identity.display_name.clone(), public_key: identity.public_key.clone(),
+                    signature: sign_challenge(identity, &challenge.nonce, challenge.timestamp).map_err(anyhow::Error::msg)?, timestamp: challenge.timestamp,
+                };
+                socket.send(Message::Text(serde_json::to_string(&auth)?.into())).await?;
+                let response: ControlAuthResponse = read_control_json(&mut socket).await?;
+                anyhow::ensure!(response.success, "Relay authentication rejected: {}", response.error.unwrap_or_default());
+                Ok::<_, anyhow::Error>(())
+            }).await??;
+        }
+        Ok(socket)
     }
 
     fn control_url(&self) -> String {
@@ -129,13 +255,9 @@ impl RelayClient {
     /// that opens a data channel and proxies it against the local gateway,
     /// so a slow or stuck session cannot block subsequent notifications.
     async fn run_control_session(&self) -> anyhow::Result<()> {
-        let mut request = self.control_url().into_client_request()?;
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            format!("Bearer {}", self.machine_token).parse()?,
-        );
-
-        let (socket, _response) = tokio_tungstenite::connect_async(request).await?;
+        let socket = self.connect_control().await?;
+        let mut registrations = self.register_rx.lock().await;
+        let mut pending: Option<RegisterPairingPinRequest> = None;
         tracing::info!("relay control channel connected");
         let (mut write, mut read) = socket.split();
         // Dropping the control future also aborts its data channels.
@@ -143,6 +265,14 @@ impl RelayClient {
 
         loop {
             let message = tokio::select! {
+                registration = registrations.recv(), if pending.is_none() => {
+                    if let Some(registration) = registration {
+                        if registration.ack.is_closed() { continue; }
+                        write.send(Message::Text(serde_json::to_string(&registration.registration)?.into())).await?;
+                        pending = Some(registration);
+                    }
+                    continue;
+                }
                 message = read.next() => message,
                 result = sessions.join_next(), if !sessions.is_empty() => {
                     if let Some(Err(err)) = result {
@@ -153,6 +283,23 @@ impl RelayClient {
             };
             match message {
                 Some(Ok(Message::Text(text))) => {
+                    if let Ok(ack) = serde_json::from_str::<RegisterPairingPinAck>(&text) {
+                        if pending.as_ref().is_some_and(|request| request.registration.pin == ack.pin && request.registration.machine_id == ack.machine_id) {
+                            if pending.take().unwrap().ack.send(Ok(ack)).is_err() {
+                                tracing::debug!("Registration ACK arrived after caller disconnected");
+                            }
+                        }
+                        continue;
+                    }
+                    if let Ok(claim) = serde_json::from_str::<PairingPinClaimed>(&text) {
+                        let matches = claim.machine_id == self.pairing.machine_id && self.pairing.active_pin.read().as_ref() == Some(&claim.pin);
+                        if matches {
+                            if let Err(error) = self.pairing.transition(PairingState::Claimed) {
+                                tracing::warn!("Invalid relay pairing claim: {error}");
+                            }
+                        }
+                        continue;
+                    }
                     match serde_json::from_str::<SessionRequest>(&text) {
                         Ok(SessionRequest { session_id }) => {
                             let client = self.clone();
@@ -191,6 +338,18 @@ impl RelayClient {
         let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)).await?;
         let gateway = TcpStream::connect(&self.gateway_addr).await?;
         proxy_ws_to_tcp(ws, gateway).await
+    }
+}
+
+async fn read_control_json<T: serde::de::DeserializeOwned>(socket: &mut ControlSocket) -> anyhow::Result<T> {
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => return Ok(serde_json::from_str(&text)?),
+            Some(Ok(Message::Ping(payload))) => socket.send(Message::Pong(payload)).await?,
+            Some(Ok(Message::Pong(_))) => continue,
+            Some(Err(error)) => return Err(error.into()),
+            _ => anyhow::bail!("Expected relay control text frame"),
+        }
     }
 }
 
@@ -263,6 +422,119 @@ async fn proxy_ws_to_tcp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_identity() -> MachineIdentity {
+        use base64::Engine;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        MachineIdentity {
+            machine_id: "test-machine".into(), display_name: "test".into(),
+            public_key: base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes()),
+            private_key: base64::engine::general_purpose::STANDARD.encode(key.to_bytes()),
+        }
+    }
+
+    async fn auth_fixture(success: bool) -> (RelayClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::with_identity(format!("http://{}", listener.local_addr().unwrap()), test_identity(), LOCAL_GATEWAY_ADDR);
+        let task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(tcp, |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                assert_eq!(request.uri().path(), "/tunnel/control");
+                assert!(request.headers().get(AUTHORIZATION).is_none());
+                Ok(response)
+            }).await.unwrap();
+            let challenge = ControlChallenge { nonce: "unique-challenge".into(), timestamp: 1234 };
+            socket.send(Message::Text(serde_json::to_string(&challenge).unwrap().into())).await.unwrap();
+            let frame = socket.next().await.unwrap().unwrap();
+            let auth: ControlAuth = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(auth.machine_id, "test-machine");
+            assert!(crate::remote::auth::verify_machine_signature(&auth.public_key, &challenge.nonce, auth.timestamp, &auth.signature));
+            let response = ControlAuthResponse { success, error: (!success).then(|| "denied".into()) };
+            socket.send(Message::Text(serde_json::to_string(&response).unwrap().into())).await.unwrap();
+        });
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn test_relay_client_ed25519_auth_success() {
+        let (client, server) = auth_fixture(true).await;
+        assert!(tokio::time::timeout(Duration::from_secs(5), client.connect_control()).await.unwrap().is_ok());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_relay_client_ed25519_auth_rejection() {
+        let (client, server) = auth_fixture(false).await;
+        let error = tokio::time::timeout(Duration::from_secs(5), client.connect_control()).await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("denied"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pairing_coordinator_lifecycle_and_ack() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "machine");
+        let coordinator = client.pairing_coordinator();
+        let (registered_tx, registered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let frame = socket.next().await.unwrap().unwrap();
+            let registration: RegisterPairingPin = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            registered_tx.send(registration.clone()).unwrap();
+            release_rx.await.unwrap();
+            let ack = RegisterPairingPinAck { pin: registration.pin, machine_id: registration.machine_id, status: "ready".into() };
+            socket.send(Message::Text(serde_json::to_string(&ack).unwrap().into())).await.unwrap();
+            while let Some(message) = socket.next().await { if message.is_err() { break; } }
+        });
+        let control = tokio::spawn(async move { client.run_control_session().await });
+        let generator = coordinator.clone();
+        let generation = tokio::spawn(async move { generator.generate_pairing(Duration::from_secs(60)).await });
+        let registration = tokio::time::timeout(Duration::from_secs(5), registered_rx).await.unwrap().unwrap();
+        assert_eq!(coordinator.state(), PairingState::Registering);
+        assert!(!generation.is_finished());
+        assert_eq!(registration.pin.len(), 6);
+        assert!(registration.pin.bytes().all(|b| b.is_ascii_digit()));
+        assert_eq!(registration.pairing_token.len(), 32);
+        assert!(u128::from_str_radix(&registration.pairing_token, 16).is_ok());
+        assert!(coordinator.transition(PairingState::Consumed).is_err());
+        release_tx.send(()).unwrap();
+        let session = tokio::time::timeout(Duration::from_secs(5), generation).await.unwrap().unwrap().unwrap();
+        assert_eq!(session.pin, registration.pin);
+        assert_eq!(session.pairing_token, registration.pairing_token);
+        assert_eq!(coordinator.state(), PairingState::Ready);
+        assert!(coordinator.generate_pairing(Duration::from_secs(60)).await.is_err());
+        coordinator.transition(PairingState::Claimed).unwrap();
+        coordinator.transition(PairingState::Consumed).unwrap();
+        assert!(coordinator.transition(PairingState::Expired).is_err());
+        assert!(coordinator.active_pin.read().is_none());
+        assert!(coordinator.active_token.read().is_none());
+        control.abort(); server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_pairing_coordinator_timeout_or_rejection() {
+        let (tx, mut rx) = mpsc::channel::<RegisterPairingPinRequest>(1);
+        let coordinator = PairingCoordinator::new("machine", tx);
+        let reject = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            request.ack.send(Ok(RegisterPairingPinAck { pin: request.registration.pin, machine_id: "machine".into(), status: "rejected".into() })).unwrap();
+        });
+        assert!(coordinator.generate_pairing(Duration::from_secs(60)).await.is_err());
+        assert_eq!(coordinator.state(), PairingState::Cancelled);
+        reject.await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<RegisterPairingPinRequest>(1);
+        let coordinator = PairingCoordinator::new("machine", tx);
+        // Time is the behavior under test: retain the ACK sender without responding.
+        let generator = coordinator.clone();
+        let generation = tokio::spawn(async move { generator.generate_pairing(Duration::from_millis(20)).await });
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), generation).await.unwrap().unwrap().is_err());
+        assert_eq!(coordinator.state(), PairingState::Expired);
+        drop(request);
+    }
 
     #[test]
     fn to_ws_base_rewrites_https_and_trims_trailing_slash() {
