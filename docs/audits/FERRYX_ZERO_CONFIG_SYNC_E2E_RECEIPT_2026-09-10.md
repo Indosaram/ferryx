@@ -160,3 +160,35 @@ Scope of impact: this is relay admission only. The gateway remains the authentic
 revocation-enforcing authority for the subsequent stream, so this reproduction does not
 demonstrate unauthorized terminal control. It does allow an unauthenticated caller to consume
 the shared ticket budget and induce backend work.
+
+## Addendum 2: F04 fix verified live on the hardened relay
+
+After deploying the remediation (worktree commit `c5fea8b`), the same probe that
+previously succeeded now fails closed.
+
+Deployed binary: `/home/indo/bin/ferryx-relay`, SHA-256
+`afd03af3a5b8a9dbac78a89644cc8a87d5b25b8b4ed6ba5791eedd5d1b4890d4`
+(`systemctl is-active` -> `active`). Supersedes the earlier `bb1b5520...52902d` build.
+
+### Negative case - gateway rejects the bearer
+
+- Machine `coldcache3-d6e4a4bd`: real Ed25519 control handshake, no pair exchange, bearer
+  `never-issued-anywhere-000`. The relay consulted the owning gateway over the reverse
+  tunnel; the gateway answered `401`.
+- **Result: HTTP 401** `{"error":"Device token not authorized for this machine"}`.
+- Before the fix this identical request returned **HTTP 200 with a valid ticket**.
+
+### Positive case - gateway confirms the bearer
+
+- Machine `warmpath-*`, bearer `gateway-approved-token-001`, target
+  `/api/v1/terminal/workspace:session-main`; gateway answered `200`.
+- **Result: HTTP 200** with an issued ticket, so admission is not simply denying everything.
+
+### Unknown machine
+
+- `POST /host/unknown-machine-xyz/api/v1/socket-ticket` -> **HTTP 404**, disclosing no
+  information about whether a machine or token exists.
+
+Residual limits unchanged: the control peer and gateway responder are still a synthetic
+probe, so this validates relay-side admission and its gateway-consultation path, not the real
+daemon's token store or an authenticated terminal attachment. F10 remains open.
