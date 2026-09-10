@@ -261,3 +261,21 @@ machine with a live control channel; no such daemon is connected here, so no
 end-to-end ticket flow was re-exercised against production in this round. The
 F02/F03/F08 behavior is covered by the in-process suite, not by this deployment
 check, which establishes only that the hardened build is the one now serving.
+
+## Addendum 5: F01 identity path change is migration-safe
+
+Unifying `canonical_identity_dir()` onto `<data>/remote` moves where the gateway
+looks for `identity.json`, which could in principle strand an existing keypair
+and silently re-enroll a machine under a new identity. Checked on the real
+machine:
+
+- `~/.ferryx/` contains only `locks/` and `remote/`.
+- `find ~/.ferryx -maxdepth 2 -name identity.json` returns exactly one path,
+  `~/.ferryx/remote/identity.json` (0600), which is the unified location.
+
+No identity exists at the pre-fix root, so no existing install loses its keypair.
+The reason is that the divergence only appeared when `FERRYX_DATA_DIR` was set:
+in the default case the old code's `HOME`-based branch already appended
+`.ferryx/remote`, matching the other resolvers. The split therefore affected
+`FERRYX_DATA_DIR` deployments (including test and packaged layouts) rather than
+the default desktop install.
