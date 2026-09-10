@@ -101,7 +101,12 @@ async fn main() {
     };
 
     tracing::info!("ferryx-relay listening on {addr}");
-    if let Err(err) = axum::serve(listener, router).await {
+    if let Err(err) = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    {
         eprintln!("ferryx-relay: server error: {err}");
         std::process::exit(1);
     }

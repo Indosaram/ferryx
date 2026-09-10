@@ -27,15 +27,19 @@
 //! after 30 seconds; sends time out after 30 seconds and sessions after one hour.
 
 use crate::remote::auth::verify_machine_signature;
-use crate::remote::protocol::{ControlAuth, ControlAuthResponse, ControlChallenge};
+use crate::remote::protocol::{
+    ControlAuth, ControlAuthResponse, ControlChallenge, PairingState, RegisterPairingPin,
+    RegisterPairingPinAck,
+};
 use axum::{
+    body::{to_bytes, Body},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Path as AxumPath, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode},
     response::Response,
-    routing::get,
+    routing::{any, get, post},
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -94,6 +98,20 @@ struct ControlChannel {
 #[serde(tag = "type")]
 enum ControlRequest {
     AllocateSession,
+    RegisterPairingPin(RegisterPairingPin),
+}
+
+struct RegisteredPairing {
+    registration: RegisterPairingPin,
+    state: PairingState,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairExchange {
+    pin: Option<String>,
+    pairing_token: Option<String>,
+    device_name: String,
 }
 
 /// Also cleans up failed upgrades and cancelled connection tasks.
@@ -125,6 +143,8 @@ struct RelayInner {
     control_channels: Mutex<HashMap<String, ControlChannel>>,
     machine_public_keys: Mutex<HashMap<String, String>>,
     admission: Mutex<HashMap<IpAddr, AttemptTracker>>,
+    pairing_admission: Mutex<HashMap<IpAddr, AttemptTracker>>,
+    pairings: Mutex<HashMap<String, RegisteredPairing>>,
     next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
 }
@@ -163,6 +183,8 @@ impl RelayState {
                 control_channels: Mutex::new(HashMap::new()),
                 machine_public_keys: Mutex::new(HashMap::new()),
                 admission: Mutex::new(HashMap::new()),
+                pairing_admission: Mutex::new(HashMap::new()),
+                pairings: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
             }),
         }
@@ -344,9 +366,393 @@ impl RelayState {
     }
 }
 
+impl RelayState {
+    fn register_pairing(
+        &self,
+        machine: &str,
+        generation: u64,
+        registration: RegisterPairingPin,
+    ) -> bool {
+        let channels = self.inner.control_channels.lock();
+        if !channels
+            .get(machine)
+            .is_some_and(|c| c.generation == generation)
+            || registration.machine_id != machine
+            || registration.pin.len() != 6
+            || !registration.pin.bytes().all(|b| b.is_ascii_digit())
+            || registration.pairing_token.is_empty()
+            || registration.expires_at <= current_time_secs()
+        {
+            return false;
+        }
+        let mut pairings = self.inner.pairings.lock();
+        pairings.retain(|_, p| p.registration.expires_at > current_time_secs());
+        if pairings.contains_key(&registration.pin)
+            || pairings
+                .values()
+                .any(|p| p.registration.pairing_token == registration.pairing_token)
+        {
+            return false;
+        }
+        pairings.insert(
+            registration.pin.clone(),
+            RegisteredPairing {
+                registration,
+                state: PairingState::Ready,
+            },
+        );
+        true
+    }
+
+    fn claim_pairing(
+        &self,
+        ip: IpAddr,
+        payload: &PairExchange,
+        machine: Option<&str>,
+    ) -> Result<(String, String, String), StatusCode> {
+        let now = Instant::now();
+        let mut admission = self.inner.pairing_admission.lock();
+        admission.retain(|_, t| {
+            now.duration_since(t.started) < ADMISSION_WINDOW
+                || t.locked_until.is_some_and(|until| now < until)
+        });
+        let tracker = admission.entry(ip).or_insert(AttemptTracker {
+            started: now,
+            attempts: 0,
+            failures: 0,
+            locked_until: None,
+        });
+        if tracker.locked_until.is_some_and(|until| now < until) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let mut pairings = self.inner.pairings.lock();
+        let pairing = pairings.values_mut().find(|p| {
+            if let Some(token) = &payload.pairing_token {
+                &p.registration.pairing_token == token
+            } else {
+                payload.pin.as_ref() == Some(&p.registration.pin)
+            }
+        });
+        if let Some(p) = pairing {
+            if p.state == PairingState::Ready
+                && p.registration.expires_at > current_time_secs()
+                && machine.is_none_or(|m| m == p.registration.machine_id)
+            {
+                p.state = PairingState::Claimed;
+                tracker.failures = 0;
+                return Ok((
+                    p.registration.machine_id.clone(),
+                    p.registration.pin.clone(),
+                    p.registration.pairing_token.clone(),
+                ));
+            }
+        }
+        tracker.failures += 1;
+        if tracker.failures >= 5 {
+            tracker.locked_until = Some(now + ADMISSION_WINDOW);
+        }
+        Err(StatusCode::NOT_FOUND)
+    }
+
+    /// Reserve the relay's HTTP half before notifying the daemon, so even an
+    /// immediate data connection hands its socket directly to this request.
+    async fn open_session_channel(
+        &self,
+        machine: &str,
+    ) -> Result<(WebSocket, SessionGuard), StatusCode> {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        let guard = SessionGuard {
+            armed: true,
+            state: self.clone(),
+            session_id: session_id.clone(),
+            generation,
+        };
+        {
+            let channels = self.inner.control_channels.lock();
+            let channel = channels.get(machine).ok_or(StatusCode::NOT_FOUND)?;
+            let mut sessions = self.inner.pending_sessions.lock();
+            if sessions.len() >= MAX_PENDING_SESSIONS {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            sessions.insert(
+                session_id.clone(),
+                WaitingHalf {
+                    generation,
+                    created_at: Instant::now(),
+                    kind: Some(HalfKind::Client),
+                    notify: Some(tx),
+                    active: false,
+                },
+            );
+            channel
+                .tx
+                .try_send(IncomingSessionNotice { session_id })
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        }
+        let socket = timeout(SESSION_PAIRING_TIMEOUT, rx)
+            .await
+            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        Ok((socket, guard))
+    }
+}
+
+async fn pair_exchange_handler(
+    State(state): State<RelayState>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    request: Request<Body>,
+) -> Result<Response, StatusCode> {
+    exchange_http(state, peer_ip(peer), None, request).await
+}
+
+async fn host_http_handler(
+    State(state): State<RelayState>,
+    AxumPath((machine, path)): AxumPath<(String, String)>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    request: Request<Body>,
+) -> Result<Response, StatusCode> {
+    if path == "pair/exchange" && request.method() == Method::POST {
+        return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
+    }
+    let uri_path = request
+        .uri()
+        .path()
+        .strip_prefix(&format!("/host/{machine}"))
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let target = match request.uri().query() {
+        Some(query) => format!("{uri_path}?{query}"),
+        None => uri_path.to_owned(),
+    };
+    let (parts, body) = request.into_parts();
+    let body = to_bytes(body, MAX_HTTP_SIZE)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    proxy_http(
+        &state,
+        &machine,
+        parts.method,
+        &target,
+        parts.headers,
+        body.to_vec(),
+    )
+    .await
+}
+
+const MAX_HTTP_SIZE: usize = 8 * 1024 * 1024;
+
+async fn exchange_http(
+    state: RelayState,
+    ip: IpAddr,
+    machine: Option<&str>,
+    request: Request<Body>,
+) -> Result<Response, StatusCode> {
+    let body = to_bytes(request.into_body(), MAX_MESSAGE_SIZE)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    let payload: PairExchange =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (machine, pin, token) = state.claim_pairing(ip, &payload, machine)?;
+    // The loopback gateway calls its pairing secret `code`.
+    let body = serde_json::to_vec(&serde_json::json!({"code": token, "pairingToken": token, "deviceName": payload.device_name})).unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    let response = proxy_http(
+        &state,
+        &machine,
+        Method::POST,
+        "/api/v1/pair/exchange",
+        headers,
+        body,
+    )
+    .await?;
+    if response.status().is_success() {
+        if let Some(p) = state.inner.pairings.lock().get_mut(&pin) {
+            if p.state == PairingState::Claimed && p.registration.pairing_token == token {
+                p.state = PairingState::Consumed;
+            }
+        }
+    }
+    Ok(response)
+}
+
+fn hop_header(name: &str, headers: &HeaderMap) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    ) || headers.get_all("connection").iter().any(|value| {
+        value
+            .to_str()
+            .is_ok_and(|v| v.split(',').any(|h| h.trim().eq_ignore_ascii_case(name)))
+    })
+}
+
+async fn proxy_http(
+    state: &RelayState,
+    machine: &str,
+    method: Method,
+    path: &str,
+    headers: HeaderMap,
+    body: Vec<u8>,
+) -> Result<Response, StatusCode> {
+    let transfer = async {
+        let (mut socket, _guard) = state.open_session_channel(machine).await?;
+        let mut raw = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n", body.len()).into_bytes();
+        for (name, value) in &headers {
+            if name == "host" || name == "content-length" || hop_header(name.as_str(), &headers) {
+                continue;
+            }
+            raw.extend_from_slice(name.as_str().as_bytes());
+            raw.extend_from_slice(b": ");
+            raw.extend_from_slice(value.as_bytes());
+            raw.extend_from_slice(b"\r\n");
+        }
+        raw.extend_from_slice(b"\r\n");
+        raw.extend(body);
+        for chunk in raw.chunks(MAX_MESSAGE_SIZE) {
+            socket
+                .send(Message::Binary(chunk.to_vec().into()))
+                .await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        }
+        let mut response = Vec::new();
+        loop {
+            let eof = match socket.recv().await {
+                Some(Ok(Message::Binary(bytes))) => {
+                    response.extend_from_slice(&bytes);
+                    false
+                }
+                Some(Ok(Message::Text(text))) => {
+                    response.extend_from_slice(text.as_bytes());
+                    false
+                }
+                Some(Ok(Message::Close(_))) | None => true,
+                Some(Ok(_)) => continue,
+                Some(Err(_)) => return Err(StatusCode::BAD_GATEWAY),
+            };
+            if response.len() > MAX_HTTP_SIZE {
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+            if let Some(parsed) = parse_http_response(&response, method == Method::HEAD, eof)? {
+                return Ok(parsed);
+            }
+            if eof {
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+        }
+    };
+    timeout(TRANSFER_TIMEOUT, transfer)
+        .await
+        .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+}
+
+/// Decode HTTP framing independently of WebSocket message boundaries.
+fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Response>, StatusCode> {
+    let bad = StatusCode::BAD_GATEWAY;
+    let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(&raw[..end]).map_err(|_| bad)?;
+    let mut lines = text.split("\r\n");
+    let mut status_line = lines.next().ok_or(bad)?.split_whitespace();
+    if !matches!(status_line.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
+        return Err(bad);
+    }
+    let status = StatusCode::from_u16(status_line.next().ok_or(bad)?.parse().map_err(|_| bad)?)
+        .map_err(|_| bad)?;
+    if status.is_informational() {
+        if status == StatusCode::SWITCHING_PROTOCOLS {
+            return Err(bad);
+        }
+        return parse_http_response(&raw[end + 4..], head, eof);
+    }
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or(bad)?;
+        headers.append(
+            name.parse::<axum::http::HeaderName>().map_err(|_| bad)?,
+            value.trim().parse().map_err(|_| bad)?,
+        );
+    }
+    let data = &raw[end + 4..];
+    let body = if head || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED {
+        Vec::new()
+    } else if let Some(encoding) = headers.get("transfer-encoding") {
+        if encoding != "chunked" {
+            return Err(bad);
+        }
+        let mut remaining = data;
+        let mut decoded = Vec::new();
+        loop {
+            let Some(end) = remaining.windows(2).position(|b| b == b"\r\n") else {
+                return Ok(None);
+            };
+            let size = std::str::from_utf8(&remaining[..end])
+                .map_err(|_| bad)?
+                .split(';')
+                .next()
+                .ok_or(bad)?;
+            let size = usize::from_str_radix(size, 16).map_err(|_| bad)?;
+            remaining = &remaining[end + 2..];
+            if size == 0 {
+                if !remaining.starts_with(b"\r\n")
+                    && !remaining.windows(4).any(|b| b == b"\r\n\r\n")
+                {
+                    return Ok(None);
+                }
+                break;
+            }
+            if size > MAX_HTTP_SIZE {
+                return Err(bad);
+            }
+            if remaining.len() < size + 2 {
+                return Ok(None);
+            }
+            if &remaining[size..size + 2] != b"\r\n" {
+                return Err(bad);
+            }
+            decoded.extend_from_slice(&remaining[..size]);
+            remaining = &remaining[size + 2..];
+        }
+        decoded
+    } else if let Some(length) = headers.get("content-length") {
+        let length: usize = length.to_str().map_err(|_| bad)?.parse().map_err(|_| bad)?;
+        if length > MAX_HTTP_SIZE {
+            return Err(bad);
+        }
+        if data.len() < length {
+            return Ok(None);
+        }
+        data[..length].to_vec()
+    } else {
+        if !eof {
+            return Ok(None);
+        }
+        data.to_vec()
+    };
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    for (name, value) in &headers {
+        if name != "content-length" && !hop_header(name.as_str(), &headers) {
+            response.headers_mut().append(name.clone(), value.clone());
+        }
+    }
+    Ok(Some(response))
+}
+
 /// Builds the Axum router exposing the three tunnel endpoints.
 pub fn relay_router(state: RelayState) -> Router {
     Router::new()
+        .route("/api/v1/pair/exchange", post(pair_exchange_handler))
+        .route("/host/{machine_id}/api/v1/{*path}", any(host_http_handler))
         .route("/tunnel/control", get(control_handler))
         .route("/tunnel/data/{session_id}", get(data_handler))
         .route("/tunnel/client/{session_id}", get(client_handler))
@@ -527,11 +933,24 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<ControlRequest>(&text) {
+                        match serde_json::from_str::<ControlRequest>(&text).or_else(|_| {
+                            serde_json::from_str::<RegisterPairingPin>(&text).map(ControlRequest::RegisterPairingPin)
+                        }) {
                             Ok(ControlRequest::AllocateSession) => {
                                 let id = uuid::Uuid::new_v4().to_string();
                                 if !state.issue_session(&machine_token, &id, Some(generation)) {
                                     tracing::warn!("relay session allocation rejected");
+                                    break;
+                                }
+                            }
+                            Ok(ControlRequest::RegisterPairingPin(registration)) => {
+                                let ack = RegisterPairingPinAck {
+                                    pin: registration.pin.clone(),
+                                    machine_id: machine_token.clone(),
+                                    status: if state.register_pairing(&machine_token, generation, registration) { "ready" } else { "rejected" }.into(),
+                                };
+                                if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(serde_json::to_string(&ack).unwrap().into()))).await, Ok(Ok(()))) {
+                                    tracing::warn!("relay pairing acknowledgment failed");
                                     break;
                                 }
                             }
@@ -724,6 +1143,163 @@ mod tests {
         });
 
         (format!("ws://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_relay_pair_exchange_success() {
+        let (base, server) = spawn_test_relay().await;
+        let (mut control, auth) =
+            authenticate(&base, &identity(9, "pair-machine"), false, false).await;
+        assert!(auth.success);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for (pin, token, route, credential) in [
+            (
+                "123456",
+                "secret-one",
+                "/api/v1/pair/exchange",
+                serde_json::json!({"pin":"123456"}),
+            ),
+            (
+                "234567",
+                "secret-two",
+                "/host/pair-machine/api/v1/pair/exchange",
+                serde_json::json!({"pairingToken":"secret-two"}),
+            ),
+        ] {
+            let registration = RegisterPairingPin {
+                pin: pin.into(),
+                pairing_token: token.into(),
+                machine_id: "pair-machine".into(),
+                expires_at: current_time_secs() + 60,
+            };
+            control
+                .send(TMessage::Text(
+                    serde_json::to_string(&registration).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let ack: RegisterPairingPinAck = receive_json(&mut control).await;
+            assert_eq!(ack.status, "ready");
+            let mut payload = credential;
+            payload["deviceName"] = "test-device".into();
+            let url = format!("{}{route}", base.replace("ws://", "http://"));
+            let request = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .body(payload.to_string())
+                .send();
+            let daemon = async {
+                let notice: IncomingSessionNotice = receive_json(&mut control).await;
+                let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                    "{base}/tunnel/data/{}",
+                    notice.session_id
+                ))
+                .await
+                .unwrap();
+                let frame = timeout(Duration::from_secs(5), data.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let raw = String::from_utf8(frame.into_data().to_vec()).unwrap();
+                assert!(raw.starts_with("POST /api/v1/pair/exchange HTTP/1.1\r\n"));
+                let body: serde_json::Value =
+                    serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["code"], token);
+                assert_eq!(body["deviceName"], "test-device");
+                let body = br#"{"token":"device-token"}"#;
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Daemon: yes\r\nContent-Length: {}\r\n\r\n", body.len());
+                data.send(TMessage::Binary(response.into_bytes().into()))
+                    .await
+                    .unwrap();
+                data.send(TMessage::Binary(body.to_vec().into()))
+                    .await
+                    .unwrap();
+                // Await relay completion rather than dropping a socket with unread frames.
+                let _ = timeout(Duration::from_secs(5), data.next()).await.unwrap();
+            };
+            let (response, ()) = tokio::join!(request, daemon);
+            let response = response.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-daemon"], "yes");
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(body["token"], "device-token");
+            let replay = client
+                .post(url)
+                .body(payload.to_string())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_pair_exchange_unknown_pin_returns_404() {
+        let (base, server) = spawn_test_relay().await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/api/v1/pair/exchange",
+                base.replace("ws://", "http://")
+            ))
+            .timeout(Duration::from_secs(5))
+            .body(r#"{"pin":"000000","deviceName":"test"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_relay_pair_exchange_lockout_after_failures() {
+        let (base, server) = spawn_test_relay().await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for attempt in 0..6 {
+            let response = client
+                .post(format!(
+                    "{}/api/v1/pair/exchange",
+                    base.replace("ws://", "http://")
+                ))
+                .header("x-forwarded-for", format!("192.0.2.{attempt}"))
+                .body(r#"{"pin":"000000","deviceName":"test"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if attempt < 5 {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::UNAUTHORIZED
+                }
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_http_response_framing() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: x-hop\r\nX-Hop: hidden\r\nX-End: kept\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+        assert!(parse_http_response(&raw[..raw.len() - 1], false, false)
+            .unwrap()
+            .is_none());
+        let response = parse_http_response(raw, false, false).unwrap().unwrap();
+        assert!(!response.headers().contains_key("x-hop"));
+        assert!(!response.headers().contains_key("transfer-encoding"));
+        assert_eq!(response.headers()["x-end"], "kept");
+        assert_eq!(
+            to_bytes(response.into_body(), 100).await.unwrap().as_ref(),
+            b"abc"
+        );
     }
 
     type TestSocket = tokio_tungstenite::WebSocketStream<
