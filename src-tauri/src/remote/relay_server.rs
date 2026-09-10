@@ -149,7 +149,7 @@ struct RelayInner {
     pairings: Mutex<HashMap<String, RegisteredPairing>>,
     next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
-    pending_socket_tickets: Mutex<HashMap<String, (String, String, u64)>>,
+    pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
 }
 
 const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
@@ -402,7 +402,8 @@ impl RelayState {
     /// `rx.await` to resolve to an error so it can close its socket.
     fn sweep_expired_sessions(&self) {
         let now = Instant::now();
-        self.inner.pending_socket_tickets.lock().retain(|_, (_, _, expiry)| *expiry > current_time_secs());
+        self.inner.pending_socket_tickets.lock().retain(|_, (_, _, _, expiry)| *expiry > current_time_secs());
+        self.inner.pairings.lock().retain(|_, p| p.registration.expires_at > current_time_secs());
         self.inner.admission.lock().retain(|_, tracker| {
             now.duration_since(tracker.started) < ADMISSION_WINDOW
                 || tracker.locked_until.is_some_and(|until| now < until)
@@ -420,7 +421,7 @@ impl RelayState {
         machine: &str,
         generation: u64,
         registration: RegisterPairingPin,
-    ) -> bool {
+    ) -> Result<(), &'static str> {
         let channels = self.inner.control_channels.lock();
         if !channels
             .get(machine)
@@ -431,7 +432,7 @@ impl RelayState {
             || registration.pairing_token.is_empty()
             || registration.expires_at <= current_time_secs()
         {
-            return false;
+            return Err("Invalid pairing registration");
         }
         let mut pairings = self.inner.pairings.lock();
         pairings.retain(|_, p| p.registration.expires_at > current_time_secs());
@@ -440,7 +441,12 @@ impl RelayState {
                 .values()
                 .any(|p| p.registration.pairing_token == registration.pairing_token)
         {
-            return false;
+            return Err("Pairing code already registered");
+        }
+        if pairings.values().filter(|p| p.registration.machine_id == machine).count()
+            >= MAX_ACTIVE_PAIRING_PINS_PER_MACHINE
+        {
+            return Err("Maximum active pairing codes exceeded");
         }
         pairings.insert(
             registration.pin.clone(),
@@ -449,7 +455,7 @@ impl RelayState {
                 state: PairingState::Ready,
             },
         );
-        true
+        Ok(())
     }
 
     fn claim_pairing(
@@ -492,7 +498,8 @@ impl RelayState {
                 && machine.is_none_or(|m| m == p.registration.machine_id)
             {
                 p.state = PairingState::Claimed;
-                tracker.failures = 0;
+                // A caller can register its own known PINs. A match must not
+                // replenish its guessing budget before daemon authentication.
                 return Ok((
                     p.registration.machine_id.clone(),
                     p.registration.pin.clone(),
@@ -553,12 +560,19 @@ impl RelayState {
 }
 
 const SOCKET_TICKET_TTL: u64 = 30;
+const MAX_ACTIVE_PAIRING_PINS_PER_MACHINE: usize = 5;
 
 async fn socket_ticket_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
+    headers: HeaderMap,
     Json(mut body): Json<serde_json::Value>,
 ) -> Result<Json<SocketTicketResponse>, StatusCode> {
+    let device_token = headers.get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b)))
+        .ok_or(StatusCode::UNAUTHORIZED)?.to_owned();
     // The public route supplies machineId; the shared wire type also supports
     // callers that include it explicitly, but must not permit a conflicting ID.
     let object = body.as_object_mut().ok_or(StatusCode::BAD_REQUEST)?;
@@ -573,13 +587,13 @@ async fn socket_ticket_handler(
     }
     let now = current_time_secs();
     let mut tickets = state.inner.pending_socket_tickets.lock();
-    tickets.retain(|_, (_, _, expiry)| *expiry > now);
+    tickets.retain(|_, (_, _, _, expiry)| *expiry > now);
     if tickets.len() >= MAX_PENDING_SESSIONS {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let ticket = uuid::Uuid::new_v4().to_string();
     let expires_at = now + SOCKET_TICKET_TTL;
-    tickets.insert(ticket.clone(), (machine, request.target, expires_at));
+    tickets.insert(ticket.clone(), (machine, request.target, device_token, expires_at));
     Ok(Json(SocketTicketResponse { ticket, expires_at }))
 }
 
@@ -595,17 +609,26 @@ struct SocketQuery {
     ticket: Option<String>,
 }
 
-fn consume_socket_ticket(state: &RelayState, query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>, machine: &str, target: &str) -> Result<(), StatusCode> {
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalSocketQuery {
+    pub ticket: String,
+    pub render: Option<String>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+}
+
+fn consume_socket_ticket(state: &RelayState, query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>, machine: &str, target: &str) -> Result<String, StatusCode> {
     // Unknown query keys (including token/access_token/authorization) are
     // forbidden, even when accompanied by a valid one-time ticket.
     let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
     let ticket = query.ticket.ok_or(StatusCode::UNAUTHORIZED)?;
-    let (issued_machine, issued_target, expiry) = state.inner.pending_socket_tickets.lock()
+    let (issued_machine, issued_target, device_token, expiry) = state.inner.pending_socket_tickets.lock()
         .remove(&ticket).ok_or(StatusCode::UNAUTHORIZED)?;
     if issued_machine != machine || issued_target != target || expiry <= current_time_secs() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(())
+    Ok(device_token)
 }
 
 async fn browser_events_handler(
@@ -614,30 +637,45 @@ async fn browser_events_handler(
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    browser_socket(state, machine, "/api/v1/events".into(), query, ws).await
+    let target = "/api/v1/events";
+    let device_token = consume_socket_ticket(&state, query, &machine, target)?;
+    browser_socket(state, machine, target.into(), device_token, ws).await
 }
 
 async fn browser_terminal_handler(
     State(state): State<RelayState>,
     AxumPath((machine, terminal)): AxumPath<(String, String)>,
-    query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    query: Result<Query<TerminalSocketQuery>, axum::extract::rejection::QueryRejection>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    browser_socket(state, machine, format!("/api/v1/terminal/{terminal}"), query, ws).await
+    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let target = format!("/api/v1/terminal/{terminal}");
+    let device_token = consume_socket_ticket(&state, Ok(Query(SocketQuery { ticket: Some(query.ticket) })), &machine, &target)?;
+    let mut uri = reqwest::Url::parse(&format!("ws://localhost{target}")).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if query.render.is_some() || query.cols.is_some() || query.rows.is_some() {
+        let mut params = uri.query_pairs_mut();
+        if let Some(render) = query.render { params.append_pair("render", &render); }
+        if let Some(cols) = query.cols { params.append_pair("cols", &cols.to_string()); }
+        if let Some(rows) = query.rows { params.append_pair("rows", &rows.to_string()); }
+    }
+    let target = match uri.query() {
+        Some(query) => format!("{}?{query}", uri.path()),
+        None => uri.path().to_owned(),
+    };
+    browser_socket(state, machine, target, device_token, ws).await
 }
 
 async fn browser_socket(
     state: RelayState,
     machine: String,
     target: String,
-    query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    device_token: String,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    consume_socket_ticket(&state, query, &machine, &target)?;
     let (data, guard) = state.open_session_channel(&machine).await?;
     Ok(ws.max_message_size(MAX_MESSAGE_SIZE).max_frame_size(MAX_MESSAGE_SIZE)
         .on_upgrade(move |browser| async move {
-            match timeout(SESSION_TRANSFER_TIMEOUT, bridge_browser_socket(browser, data, &target)).await {
+            match timeout(SESSION_TRANSFER_TIMEOUT, bridge_browser_socket(browser, data, &target, &device_token)).await {
                 Ok(Ok(())) => {},
                 Ok(Err(error)) => tracing::warn!(%error, "browser reverse WebSocket failed"),
                 Err(error) => tracing::warn!(%error, "browser reverse WebSocket lifetime exceeded"),
@@ -649,7 +687,7 @@ async fn browser_socket(
 /// The existing daemon unwraps tunnel Binary messages onto a TCP stream.
 /// Use a bounded duplex stream to run a real WebSocket client over that stream,
 /// including its HTTP upgrade, masking, fragmentation and control frames.
-async fn bridge_browser_socket(mut browser: WebSocket, mut data: WebSocket, target: &str) -> anyhow::Result<()> {
+async fn bridge_browser_socket(mut browser: WebSocket, mut data: WebSocket, target: &str, device_token: &str) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message as Wire;
     let (client_io, tunnel_io) = tokio::io::duplex(MAX_MESSAGE_SIZE);
@@ -677,7 +715,10 @@ async fn bridge_browser_socket(mut browser: WebSocket, mut data: WebSocket, targ
         }
     };
     let application = async {
-        let (mut daemon, _) = timeout(TRANSFER_TIMEOUT, tokio_tungstenite::client_async(format!("ws://localhost{target}"), client_io)).await??;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://localhost{target}").into_client_request()?;
+        request.headers_mut().insert("authorization", format!("Bearer {device_token}").parse()?);
+        let (mut daemon, _) = timeout(TRANSFER_TIMEOUT, tokio_tungstenite::client_async(request, client_io)).await??;
         loop {
             tokio::select! {
                 frame = browser.recv() => {
@@ -735,6 +776,12 @@ async fn host_http_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     request: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    if !(matches!(path.as_str(), "events" | "socket-ticket" | "pair/exchange")
+        || ["workspace/", "terminal/", "push/"].iter().any(|prefix| path.starts_with(prefix)))
+        || path.split('/').any(|part| matches!(part, "." | "..") || part.contains(['%', '\\']))
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
     if path == "pair/exchange" && request.method() == Method::POST {
         return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
     }
@@ -967,6 +1014,16 @@ fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Respo
             response.headers_mut().append(name.clone(), value.clone());
         }
     }
+    let headers = response.headers_mut();
+    headers.remove("set-cookie");
+    headers.remove("service-worker-allowed");
+    if headers.get_all("content-type").iter().any(|value| {
+        value.to_str().is_ok_and(|value| value.to_ascii_lowercase().contains("text/html"))
+    }) {
+        headers.insert("content-type", "text/plain".parse().unwrap());
+    }
+    headers.insert("content-security-policy", "default-src 'none'".parse().unwrap());
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     Ok(Some(response))
 }
 
@@ -1166,7 +1223,10 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
                                     generation: registration.generation,
                                     pin: registration.pin.clone(),
                                     machine_id: machine_token.clone(),
-                                    status: if state.register_pairing(&machine_token, generation, registration) { "ready" } else { "rejected" }.into(),
+                                    status: match state.register_pairing(&machine_token, generation, registration) {
+                                        Ok(()) => "ready",
+                                        Err(error) => error,
+                                    }.into(),
                                 };
                                 if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(serde_json::to_string(&ack).unwrap().into()))).await, Ok(Ok(()))) {
                                     tracing::warn!("relay pairing acknowledgment failed");
@@ -1372,7 +1432,9 @@ mod tests {
     }
 
     async fn issue_test_ticket(state: &RelayState, target: &str) -> SocketTicketResponse {
-        socket_ticket_handler(State(state.clone()), AxumPath("browser-machine".into()),
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer test-device-token".parse().unwrap());
+        socket_ticket_handler(State(state.clone()), AxumPath("browser-machine".into()), headers,
             Json(serde_json::json!({"target": target}))).await.unwrap().0
     }
 
@@ -1443,7 +1505,7 @@ mod tests {
     async fn test_security_fleet_pin_brute_force_lockout() {
         let state = test_state(vec![]);
         let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
-        assert!(state.register_pairing("machine_alpha", generation, security_registration("machine_alpha")));
+        assert!(state.register_pairing("machine_alpha", generation, security_registration("machine_alpha")).is_ok());
         for pin in ["000001", "000002", "000003", "000004", "000005"] {
             assert_eq!(security_claim(&state, pin).await, StatusCode::NOT_FOUND);
         }
@@ -1464,9 +1526,9 @@ mod tests {
         let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
         let mut expired = security_registration("machine_alpha");
         expired.expires_at = current_time_secs() - 10;
-        assert!(!state.register_pairing("machine_alpha", generation, expired));
+        assert!(state.register_pairing("machine_alpha", generation, expired).is_err());
         assert_eq!(security_claim(&state, "123456").await, StatusCode::NOT_FOUND);
-        assert!(state.register_pairing("machine_alpha", generation, security_registration("machine_alpha")));
+        assert!(state.register_pairing("machine_alpha", generation, security_registration("machine_alpha")).is_ok());
         // Exercise claim-time expiration as well as registration-time rejection, without waiting.
         state.inner.pairings.lock().get_mut("123456").unwrap().registration.expires_at = current_time_secs() - 10;
         assert_eq!(security_claim(&state, "123456").await, StatusCode::NOT_FOUND);
@@ -1542,6 +1604,7 @@ mod tests {
         assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Consumed);
         for target in ["/api/v1/events", "/api/v1/terminal/t1"] {
             let response = client.post(format!("{}/host/daemon_1/api/v1/socket-ticket", base.replace("ws://", "http://")))
+                .header("authorization", "Bearer test-device-token")
                 .header("content-type", "application/json").body(serde_json::json!({"target": target}).to_string()).send().await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let ticket: SocketTicketResponse = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
@@ -1562,7 +1625,7 @@ mod tests {
         assert_eq!(uuid::Uuid::parse_str(&ticket.ticket).unwrap().get_version_num(), 4);
         assert!(ticket.expires_at > current_time_secs());
         assert!(ticket.expires_at <= current_time_secs() + 30);
-        assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), "browser-machine", "/api/v1/events"), Ok(()));
+        assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), "browser-machine", "/api/v1/events"), Ok("test-device-token".into()));
         assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), "browser-machine", "/api/v1/events"), Err(StatusCode::UNAUTHORIZED));
         for (machine, target) in [("other", "/api/v1/events"), ("browser-machine", "/api/v1/terminal/t1")] {
             let ticket = issue_test_ticket(&state, "/api/v1/events").await;
@@ -1576,7 +1639,7 @@ mod tests {
         let state = test_state(vec![]);
         let (_generation, _control) = state.register_control_channel("browser-machine".into());
         let ticket = issue_test_ticket(&state, "/api/v1/events").await;
-        state.inner.pending_socket_tickets.lock().get_mut(&ticket.ticket).unwrap().2 = current_time_secs() - 1;
+        state.inner.pending_socket_tickets.lock().get_mut(&ticket.ticket).unwrap().3 = current_time_secs() - 1;
         assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), "browser-machine", "/api/v1/events"), Err(StatusCode::UNAUTHORIZED));
     }
 
@@ -1589,6 +1652,7 @@ mod tests {
         // An acknowledged control operation is the registration barrier.
         allocate(&mut control).await;
         let response = reqwest::Client::new().post(format!("{}/host/browser-machine/api/v1/socket-ticket", base.replace("ws://", "http://")))
+            .header("authorization", "Bearer test-device-token")
             .timeout(Duration::from_secs(5)).header("content-type", "application/json").body(r#"{"target":"/api/v1/terminal/t1"}"#).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let ticket: SocketTicketResponse = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
