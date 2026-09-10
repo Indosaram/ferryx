@@ -2434,9 +2434,14 @@ mod tests {
             Arc::new(crate::terminal::PtyManager::new()),
             Arc::new(crate::terminal::TerminalOutputHub::default()),
         ));
+        // Retain handles so the test can spawn a PTY on the SAME service and registry the
+        // gateway serves, which is what makes the later attachment genuinely end-to-end.
+        let terminal_handle = Arc::clone(&terminal);
+        let registry = crate::worktree::WorkspaceRegistry::new();
+        let registry_handle = registry.clone();
         let state = Arc::new(RemoteGatewayState::new_with_paths(
             terminal,
-            crate::worktree::WorkspaceRegistry::new(),
+            registry,
             None,
             None,
         ));
@@ -2510,6 +2515,147 @@ mod tests {
             .auth_manager
             .exchange_pairing_code(&session.pairing_token, "replay")
             .is_err());
+
+        // The auditor's F10 requirement: issuance alone is not end-to-end. Carry the
+        // paired device credential through an actual authenticated terminal attachment
+        // over the relay and prove real bytes flow from the real gateway's PTY.
+        let device_token = body["token"].as_str().unwrap().to_owned();
+        // Spawn a real PTY on the real gateway's terminal service, in a real worktree.
+        let workspace = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git init");
+        registry_handle
+            .register("e2e-workspace", workspace.path())
+            .expect("register workspace");
+        let manager = registry_handle.manager("e2e-workspace").expect("manager");
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.cwd(workspace.path());
+        let (session_id, _pty_rx) = terminal_handle
+            .spawn_in_worktree(command, 80, 24, &manager, workspace.path())
+            .expect("real gateway PTY session");
+
+        let ticket = http
+            .post(format!(
+                "{}/host/real-gateway/api/v1/socket-ticket",
+                base.replace("ws://", "http://")
+            ))
+            .bearer_auth(&device_token)
+            .header("content-type", "application/json")
+            .body(format!(
+                r#"{{"target":"/api/v1/terminal/{session_id}"}}"#
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let ticket: SocketTicketResponse =
+            serde_json::from_slice(&ticket.bytes().await.unwrap()).unwrap();
+
+        // The gateway attaches only the active desktop session. A valid ticket for a
+        // non-selected session therefore carries no terminal data: the relay completes the
+        // upgrade before it learns the upstream verdict, so the stream is torn down instead
+        // of serving output. Assert no payload is delivered rather than asserting on the
+        // handshake result, which is a relay-proxy implementation detail.
+        {
+            use futures_util::StreamExt;
+            if let Ok((mut refused, _)) = tokio_tungstenite::connect_async(format!(
+                "{base}/host/real-gateway/api/v1/terminal/{session_id}?ticket={}",
+                ticket.ticket
+            ))
+            .await
+            {
+                let delivered = timeout(Duration::from_secs(5), refused.next()).await;
+                let served_payload = matches!(
+                    delivered,
+                    Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(ref b)))) if !b.is_empty()
+                );
+                assert!(
+                    !served_payload,
+                    "a ticket must not stream terminal data for a session the desktop has not selected"
+                );
+            }
+        }
+
+        // Declare the desktop selection exactly as the real desktop does.
+        state.set_active_selection(crate::remote::RemoteActiveDesktopSelection {
+            workspace_id: None,
+            worktree_slug: None,
+            worktree_label: None,
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        });
+
+        // The first ticket was consumed by the refused attempt, so mint a fresh one.
+        let ticket = http
+            .post(format!(
+                "{}/host/real-gateway/api/v1/socket-ticket",
+                base.replace("ws://", "http://")
+            ))
+            .bearer_auth(&device_token)
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"target":"/api/v1/terminal/{session_id}"}}"#))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let ticket: SocketTicketResponse =
+            serde_json::from_slice(&ticket.bytes().await.unwrap()).unwrap();
+
+        // A single-use ticket authorizes the upgrade; the permanent token never
+        // appears in the WebSocket URL.
+        let (mut terminal_socket, _) = tokio_tungstenite::connect_async(format!(
+            "{base}/host/real-gateway/api/v1/terminal/{session_id}?ticket={}",
+            ticket.ticket
+        ))
+        .await
+        .expect("authenticated terminal attachment over relay");
+
+        // Drive the real PTY and await its echo instead of sleeping: the shell must
+        // return the marker we wrote through the relay-proxied socket.
+        use futures_util::{SinkExt, StreamExt};
+        terminal_socket
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                b"echo ferryx_e2e_marker\n".to_vec().into(),
+            ))
+            .await
+            .unwrap();
+
+        let echoed = timeout(Duration::from_secs(20), async {
+            let mut seen = String::new();
+            while let Some(Ok(message)) = terminal_socket.next().await {
+                match message {
+                    tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                        seen.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        seen.push_str(&text);
+                    }
+                    _ => {}
+                }
+                if seen.contains("ferryx_e2e_marker") {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("terminal output arrived before the deadline");
+        assert!(
+            echoed,
+            "real PTY output must traverse the relay to the paired browser"
+        );
+
+        // A single-use ticket must not authorize a second attachment.
+        assert!(tokio_tungstenite::connect_async(format!(
+            "{base}/host/real-gateway/api/v1/terminal/{session_id}?ticket={}",
+            ticket.ticket
+        ))
+        .await
+        .is_err());
+
         control.abort();
         gateway.abort();
         relay.abort();
