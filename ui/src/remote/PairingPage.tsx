@@ -2,9 +2,10 @@ import React, { useState } from "react";
 
 type PairingPageProps = {
   onPaired: (token: string) => void;
+  transportUrl?: string;
 };
 
-export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
+export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl = window.location.origin }) => {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -17,7 +18,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired }) => {
     setError(null);
 
     try {
-      const res = await fetch("/api/v1/pair/exchange", {
+      const res = await fetch(transportUrl === window.location.origin ? "/api/v1/pair/exchange" : `${transportUrl}/api/v1/pair/exchange`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

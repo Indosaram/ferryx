@@ -180,6 +180,17 @@ describe("RemoteAccessSection", () => {
     );
   });
 
+  it("preserves an existing bound-address port in fallback links and relay hints", () => {
+    const status = { ...enabledStatus, localIp: null, boundAddress: "100.64.0.5:43821" };
+    expect(buildPairingUrl(status, "", "111222")).toBe(
+      "http://100.64.0.5:43821/#pair=111222",
+    );
+    const url = new URL(buildPairingUrl(status, "https://relay.example.com", "111222"));
+    expect(new URLSearchParams(url.hash.slice(1)).get("hints")).toBe(
+      "http://100.64.0.5:43821",
+    );
+  });
+
   it("sends the typed relay URL when enabling remote access", async () => {
     getRemoteStatus.mockResolvedValue(disabledStatus);
 

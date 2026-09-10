@@ -1122,7 +1122,7 @@ describe("Remote UI Components", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
 
     // Authorization token must NOT be cleared from localStorage on non-401/403 failure
-    expect(localStorage.getItem("ferryx_remote_token")).toBe("paired-device-token");
+    expect(localStorage.getItem(`ferryx_remote_token_local:${window.location.origin}`)).toBe("paired-device-token");
     expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
   });
 

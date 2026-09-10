@@ -7,16 +7,25 @@ import type { RegisteredProject } from "./tauri";
 const TOKEN_KEY = "ferryx_remote_token";
 const LEGACY_TOKEN_KEY = "rorca_remote_token";
 
-export function getRemoteAuthToken(): string | null {
+export function getRemoteAuthToken(hostId?: string): string | null {
+  if (hostId !== undefined) return localStorage.getItem(`${TOKEN_KEY}_${hostId}`);
   return localStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(LEGACY_TOKEN_KEY);
 }
 
-export function setRemoteAuthToken(token: string) {
+export function setRemoteAuthToken(token: string, hostId?: string) {
+  if (hostId !== undefined) {
+    localStorage.setItem(`${TOKEN_KEY}_${hostId}`, token);
+    return;
+  }
   localStorage.setItem(TOKEN_KEY, token);
   localStorage.removeItem(LEGACY_TOKEN_KEY);
 }
 
-export function clearRemoteAuthToken() {
+export function clearRemoteAuthToken(hostId?: string) {
+  if (hostId !== undefined) {
+    localStorage.removeItem(`${TOKEN_KEY}_${hostId}`);
+    return;
+  }
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(LEGACY_TOKEN_KEY);
 }

@@ -28,7 +28,7 @@ afterEach(() => {
 it("reconnects events and refreshes missed focus without losing pairing", async () => {
   // Given a paired browser that has loaded one desktop selection.
   vi.useFakeTimers();
-  localStorage.setItem("ferryx_remote_token", "paired");
+  localStorage.setItem(`ferryx_remote_token_local:${window.location.origin}`, "paired");
   vi.stubGlobal("WebSocket", EventSocket);
   let sessionId: string | null = "before-outage";
   const fetcher = vi.fn(async () => new Response(JSON.stringify({
@@ -54,7 +54,7 @@ it("reconnects events and refreshes missed focus without losing pairing", async 
 
   // Then reconnect itself refreshes state, even without a selection event.
   expect(screen.queryByTestId("session")).toBeNull();
-  expect(localStorage.getItem("ferryx_remote_token")).toBe("paired");
+  expect(localStorage.getItem(`ferryx_remote_token_local:${window.location.origin}`)).toBe("paired");
   await act(async () => { recovered.onclose?.(); unmount(); });
   await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
   expect(EventSocket.instances).toHaveLength(2);

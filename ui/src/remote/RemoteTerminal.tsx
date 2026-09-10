@@ -18,6 +18,8 @@ type RemoteTerminalProps = {
   readonly sessionId: string;
   readonly token: string;
   readonly title?: string;
+  readonly transportUrl?: string;
+  readonly onTransportFailure?: () => void;
   readonly onBack?: () => void;
   readonly embedded?: boolean;
   readonly activeTabId?: string | null;
@@ -169,9 +171,10 @@ function controlByteForChar(ch: string): number | null {
   }
 }
 
-function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/v1/terminal/${sessionId}?token=${encodeURIComponent(token)}&render=grid&cols=${geometry.cols}&rows=${geometry.rows}`;
+function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry, transportUrl: string): string {
+  const base = new URL(transportUrl);
+  const protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${base.host}/api/v1/terminal/${sessionId}?token=${encodeURIComponent(token)}&render=grid&cols=${geometry.cols}&rows=${geometry.rows}`;
 }
 
 function geometriesEqual(left: GridGeometry | null, right: GridGeometry): boolean {
@@ -268,6 +271,8 @@ export function RemoteTerminal({
   sessionId,
   token,
   title,
+  transportUrl = window.location.origin,
+  onTransportFailure,
   onBack,
   embedded = false,
   activeTabId,
@@ -399,9 +404,19 @@ export function RemoteTerminal({
     const dial = () => {
       clearReconnectTimer();
       if (disposed) return;
-      const socket = new WebSocket(
-        terminalSocketUrl(socketRequest.sessionId, socketRequest.token, socketRequest.geometry),
-      );
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(
+          terminalSocketUrl(socketRequest.sessionId, socketRequest.token, socketRequest.geometry, transportUrl),
+        );
+      } catch (error) {
+        if (onTransportFailure) onTransportFailure();
+        else console.warn("Terminal socket connection failed", error);
+        return;
+      }
+      socket.onerror = () => {
+        if (!disposed && socketRef.current === socket) onTransportFailure?.();
+      };
       socket.binaryType = "arraybuffer";
       socketRef.current = socket;
       activeSocketRequestRef.current = socketRequest;
@@ -415,6 +430,10 @@ export function RemoteTerminal({
       socket.onclose = () => {
         if (disposed || socketRef.current !== socket || reconnectTimer !== null) return;
         setConnected(false);
+        if (onTransportFailure) {
+          onTransportFailure();
+          return;
+        }
         onSocketLifecycle?.(socketRequest.sessionId, "closed");
 
         const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt));
@@ -446,7 +465,7 @@ export function RemoteTerminal({
       }
       currentSocket?.close();
     };
-  }, [onSocketLifecycle, socketRequest]);
+  }, [onSocketLifecycle, socketRequest, transportUrl, onTransportFailure]);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;

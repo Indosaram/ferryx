@@ -38,7 +38,28 @@ export interface ProbeResult {
 
 export const DEFAULT_PROBE_TIMEOUT_MS = 1500;
 
-const HEALTH_PATH = "/health";
+const HEALTH_PATH = "/api/v1/health";
+
+/** Only literal private/overlay addresses and loopback may receive direct credentials. */
+export function normalizeDirectCandidateOrigin(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+      || url.pathname !== "/" || url.search || url.hash) return null;
+    const host = url.hostname;
+    if (host === "localhost" || host === "[::1]") return url.origin;
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return null;
+    const [a, b] = host.split(".").map(Number);
+    if (a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)) {
+      return url.origin;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function healthUrl(url: string): string {
   return `${url.replace(/\/+$/, "")}${HEALTH_PATH}`;
@@ -75,6 +96,8 @@ export async function probeCandidate(
   timeoutMs: number = DEFAULT_PROBE_TIMEOUT_MS,
 ): Promise<ProbeResult> {
   const startedAt = now();
+  const origin = normalizeDirectCandidateOrigin(candidate.url);
+  if (!origin) return { candidate, ok: false, durationMs: 0, reason: "blocked" };
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -83,11 +106,12 @@ export async function probeCandidate(
   }, timeoutMs);
 
   try {
-    const response = await fetch(healthUrl(candidate.url), {
+    const response = await fetch(healthUrl(origin), {
       method: "GET",
       signal: controller.signal,
       cache: "no-store",
       credentials: "omit",
+      redirect: "error",
       mode: "cors",
     });
     if (!response?.ok) {

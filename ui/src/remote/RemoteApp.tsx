@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExtern
 import { Toaster } from "../components/ui/sonner";
 import {
   selectBestDirectCandidate,
+  normalizeDirectCandidateOrigin,
   type CandidateEndpoint,
   type CandidateEndpointType,
 } from "../lib/directPathUpgrade";
@@ -213,19 +214,8 @@ const CONNECTION_BADGE_LABEL: Record<CandidateEndpointType, string> = {
   tailscale: "Tailscale (Direct)",
 };
 
-function normalizeEndpointUrl(value: unknown): string | null {
-  if (typeof value !== "string" || !value.trim()) return null;
-  try {
-    const url = new URL(value.trim(), window.location.origin);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
-}
-
 function directCandidate(type: "lan" | "tailscale", value: unknown): CandidateEndpoint | null {
-  const url = normalizeEndpointUrl(value);
+  const url = normalizeDirectCandidateOrigin(value);
   return url ? { type, url, priority: CANDIDATE_PRIORITY[type] } : null;
 }
 
@@ -234,16 +224,24 @@ function directCandidate(type: "lan" | "tailscale", value: unknown): CandidateEn
  * link carries the desktop's addresses) and falls back to the last hints this device
  * stored. Any hint found in the URL is persisted so later loads keep the fast path.
  */
-function readDirectCandidateHints(): CandidateEndpoint[] {
-  const params = new URLSearchParams(window.location.search);
+function readDirectCandidateHints(hostId: string, readUrl: boolean): CandidateEndpoint[] {
+  const storageKey = `${DIRECT_HINT_STORAGE_KEY}_${hostId}`;
+  const params = new URLSearchParams(readUrl ? window.location.search : "");
+  const fragment = new URLSearchParams(readUrl ? window.location.hash.slice(1) : "");
   const fromUrl = [
+    ...(fragment.get("hints") ?? params.get("hints") ?? "").split(",").map((value) => {
+      const origin = normalizeDirectCandidateOrigin(value);
+      const type = origin && /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(new URL(origin).hostname)
+        ? "tailscale" : "lan";
+      return directCandidate(type, value);
+    }),
     directCandidate("lan", params.get("lan")),
     directCandidate("tailscale", params.get("ts") ?? params.get("tailscale")),
   ].filter((candidate): candidate is CandidateEndpoint => candidate !== null);
 
   if (fromUrl.length > 0) {
     try {
-      localStorage.setItem(DIRECT_HINT_STORAGE_KEY, JSON.stringify(fromUrl));
+      localStorage.setItem(storageKey, JSON.stringify(fromUrl));
     } catch {
       // Private-mode storage denial must not block the upgrade for this session.
     }
@@ -252,7 +250,7 @@ function readDirectCandidateHints(): CandidateEndpoint[] {
 
   let stored: unknown;
   try {
-    stored = JSON.parse(localStorage.getItem(DIRECT_HINT_STORAGE_KEY) ?? "null");
+    stored = JSON.parse(localStorage.getItem(storageKey) ?? "null");
   } catch {
     return [];
   }
@@ -267,8 +265,8 @@ function readDirectCandidateHints(): CandidateEndpoint[] {
     .filter((candidate): candidate is CandidateEndpoint => candidate !== null);
 }
 
-function relayEndpoint(): CandidateEndpoint {
-  return { type: "relay", url: window.location.origin, priority: CANDIDATE_PRIORITY.relay };
+function relayEndpoint(url: string): CandidateEndpoint {
+  return { type: "relay", url, priority: CANDIDATE_PRIORITY.relay };
 }
 
 function eventsSocketUrl(token: string, transportUrl: string): string {
@@ -286,14 +284,35 @@ function apiUrl(transportUrl: string, path: string): string {
 }
 
 export const RemoteApp: React.FC = () => {
-  const [token, setToken] = useState<string | null>(getRemoteAuthToken);
+  const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const host = selectActiveHost(state);
+  const hostId = state.activeHostId ?? `local:${window.location.origin}`;
+  const address = host?.address ?? window.location.origin;
+  const relayUrl = new URL(address.includes("://") ? address : `http://${address}`).origin;
+  return <RemoteHostConnection key={`${hostId}:${relayUrl}`} hostId={hostId} relayUrl={relayUrl} readUrlHints={state.activeHostId === null} />;
+};
+
+const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrlHints: boolean }> = ({ hostId, relayUrl, readUrlHints }) => {
+  const [token, setToken] = useState<string | null>(() => {
+    const scoped = getRemoteAuthToken(hostId);
+    if (scoped || !readUrlHints) return scoped;
+    // Legacy credentials belong only to the original same-origin connection.
+    const legacy = getRemoteAuthToken();
+    if (legacy) {
+      setRemoteAuthToken(legacy, hostId);
+      clearRemoteAuthToken();
+    }
+    return legacy;
+  });
+  // Capture fragment hints before successful pairing removes the fragment.
+  const [directHints] = useState(() => readDirectCandidateHints(hostId, readUrlHints));
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
-  const [transport, setTransport] = useState<CandidateEndpoint>(relayEndpoint);
+  const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = useMemo(() => selectActiveHost(remoteHostState), [remoteHostState]);
   const hostAgentSummary = useMemo(() => hostAgentTotals(remoteHostState), [remoteHostState]);
@@ -309,7 +328,7 @@ export const RemoteApp: React.FC = () => {
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const disconnect = useCallback(() => {
-    clearRemoteAuthToken();
+    clearRemoteAuthToken(hostId);
     setToken(null);
     setModel(EMPTY_MODEL);
     setPending(null);
@@ -321,11 +340,20 @@ export const RemoteApp: React.FC = () => {
     selectionEventReceivedRef.current = false;
     confirmationInFlightRef.current = false;
     workspaceRefreshVersionRef.current += 1;
-  }, []);
+  }, [hostId]);
 
   const handlePaired = useCallback((newToken: string) => {
-    setRemoteAuthToken(newToken);
+    setRemoteAuthToken(newToken, hostId);
     setToken(newToken);
+  }, [hostId]);
+
+  const rollbackTransport = useCallback(() => {
+    setTransport((current) => current.url === relayUrl ? current : relayEndpoint(relayUrl));
+  }, [relayUrl]);
+
+  useEffect(() => () => {
+    workspaceRefreshVersionRef.current += 1;
+    if (confirmationTimeoutRef.current !== null) clearTimeout(confirmationTimeoutRef.current);
   }, []);
 
   const loadWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
@@ -356,10 +384,12 @@ export const RemoteApp: React.FC = () => {
 
   useEffect(() => {
     const hash = window.location.hash;
-    if (!hash.startsWith("#pair=")) return;
+    if (!readUrlHints || !hash.startsWith("#pair=")) return;
 
-    const code = hash.slice("#pair=".length);
-    fetch("/api/v1/pair/exchange", {
+    const code = new URLSearchParams(hash.slice(1)).get("pair");
+    if (!code || !/^\d{6}$/.test(code)) return;
+    let cancelled = false;
+    fetch(apiUrl(relayUrl, "/api/v1/pair/exchange"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -369,12 +399,13 @@ export const RemoteApp: React.FC = () => {
     })
       .then((response) => response.json())
       .then((data) => {
-        if (typeof data.token !== "string") return;
+        if (cancelled || typeof data.token !== "string") return;
         handlePaired(data.token);
         window.location.hash = "";
       })
-      .catch(() => undefined);
-  }, [handlePaired]);
+      .catch((error) => console.warn("QR pairing failed", error));
+    return () => { cancelled = true; };
+  }, [handlePaired, readUrlHints, relayUrl]);
 
   useEffect(() => {
     if (token) void refreshWorkspace();
@@ -385,7 +416,7 @@ export const RemoteApp: React.FC = () => {
   // when the desktop published no direct endpoint hints.
   useEffect(() => {
     if (!token || typeof fetch !== "function") return;
-    const candidates = readDirectCandidateHints();
+    const candidates = directHints;
     if (candidates.length === 0) return;
     let cancelled = false;
     void selectBestDirectCandidate(candidates).then((best) => {
@@ -395,7 +426,7 @@ export const RemoteApp: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [directHints, token]);
 
   useEffect(() => {
     if (!token) {
@@ -494,7 +525,17 @@ export const RemoteApp: React.FC = () => {
     const connect = () => {
       if (disposed) return;
       retry = null;
-      const current = new WebSocket(eventsSocketUrl(token, transport.url));
+      let current: WebSocket;
+      try {
+        current = new WebSocket(eventsSocketUrl(token, transport.url));
+      } catch (error) {
+        if (transport.url !== relayUrl) rollbackTransport();
+        else console.warn("Event socket connection failed", error);
+        return;
+      }
+      current.onerror = () => {
+        if (!disposed && socket === current && transport.url !== relayUrl) rollbackTransport();
+      };
       socket = current;
       current.onmessage = (event) => {
         if (!disposed && socket === current) onMessage(event);
@@ -510,6 +551,10 @@ export const RemoteApp: React.FC = () => {
       current.onclose = () => {
         if (disposed || socket !== current) return;
         socket = null;
+        if (transport.url !== relayUrl) {
+          rollbackTransport();
+          return;
+        }
         retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt));
         attempt = Math.min(attempt + 1, 4);
       };
@@ -533,7 +578,7 @@ export const RemoteApp: React.FC = () => {
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
     };
-  }, [clearPendingSelection, confirmSelection, refreshWorkspace, token, transport.url]);
+  }, [clearPendingSelection, confirmSelection, refreshWorkspace, token, transport.url, relayUrl, rollbackTransport]);
 
   // A desktop that never republishes a matching selection (stale listener,
   // closed window) must not strand the picker: every chip is disabled while a
@@ -618,7 +663,7 @@ export const RemoteApp: React.FC = () => {
     }
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
 
-  if (!token) return <PairingPage onPaired={handlePaired} />;
+  if (!token) return <PairingPage onPaired={handlePaired} transportUrl={relayUrl} />;
 
   const activeTerminal = model.context.activeTerminal;
   const effectiveSessionId = optimisticSessionId ?? activeTerminal?.sessionId ?? null;
@@ -779,6 +824,8 @@ export const RemoteApp: React.FC = () => {
             key={`${effectiveSessionId}:${terminalRetryGeneration}`}
             sessionId={effectiveSessionId}
             token={token}
+            transportUrl={transport.url}
+            onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
             activeTabId={model.context.activeTabId}
             onBack={() => undefined}
             embedded

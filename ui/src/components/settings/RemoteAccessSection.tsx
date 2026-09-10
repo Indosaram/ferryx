@@ -36,7 +36,7 @@ function directCandidates(status: RemoteGatewayStatus | null): string[] {
   const hosts = [status?.localIp, status?.boundAddress].filter(
     (host): host is string => Boolean(host) && host !== "0.0.0.0" && host !== "::",
   );
-  return Array.from(new Set(hosts)).map((host) => `http://${host}:${port}`);
+  return Array.from(new Set(hosts)).map((host) => `http://${host.includes(":") ? host : `${host}:${port}`}`);
 }
 
 /**
@@ -56,7 +56,7 @@ export function buildPairingUrl(
   }
   const port = status?.port ?? DEFAULT_PORT;
   const host = status?.localIp ?? status?.boundAddress ?? "localhost";
-  return `http://${host}:${port}/#pair=${code}`;
+  return `http://${host.includes(":") ? host : `${host}:${port}`}/#pair=${code}`;
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {

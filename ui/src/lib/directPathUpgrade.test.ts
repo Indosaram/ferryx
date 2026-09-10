@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PROBE_TIMEOUT_MS,
   probeCandidate,
+  normalizeDirectCandidateOrigin,
   selectBestDirectCandidate,
   type CandidateEndpoint,
 } from "./directPathUpgrade";
@@ -130,6 +131,37 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+describe("candidate origin validation", () => {
+  it.each([
+    "http://10.0.0.1:8787", "https://172.16.0.1", "http://172.31.255.255",
+    "http://192.168.1.1", "http://127.0.0.2", "http://localhost:8787",
+    "http://[::1]:8787", "https://100.64.0.1", "https://100.127.255.255",
+  ])("accepts private or loopback origin %s", (url) => {
+    expect(normalizeDirectCandidateOrigin(url)).toBe(new URL(url).origin);
+  });
+
+  it.each([
+    "https://evil.example", "https://8.8.8.8", "http://172.15.0.1",
+    "http://172.32.0.1", "http://100.63.255.255", "http://100.128.0.1",
+    "http://192.168.1.1.evil.example", "http://192.168.1.1@evil.example",
+    "http://user:pass@192.168.1.1", "ftp://192.168.1.1", "/relative",
+    "http://192.168.1.1/path", "http://192.168.1.1?redirect=evil",
+    "http://192.168.1.1#fragment", "http://[2001:4860:4860::8888]",
+  ])("rejects unsafe origin without probing %s", async (url) => {
+    expect(normalizeDirectCandidateOrigin(url)).toBeNull();
+    expect(await probeCandidate({ ...LAN, url })).toMatchObject({ ok: false, reason: "blocked" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never selects an untrusted origin even with the highest priority", async () => {
+    fetchMock.mockResolvedValue(okResponse());
+    expect(await selectBestDirectCandidate([
+      { ...LAN, url: "https://evil.example", priority: 999 }, TAILSCALE, LAN,
+    ])).toBe(LAN);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("probeCandidate", () => {
   it("reports a reachable candidate and hits the health endpoint with an abort signal", async () => {
     fetchMock.mockResolvedValue(okResponse());
@@ -141,7 +173,9 @@ describe("probeCandidate", () => {
     expect(result.reason).toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://192.168.1.20:8787/health");
+    expect(url).toBe("http://192.168.1.20:8787/api/v1/health");
+    expect(init.redirect).toBe("error");
+    expect(init.credentials).toBe("omit");
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -150,7 +184,7 @@ describe("probeCandidate", () => {
 
     await probeCandidate({ ...LAN, url: "http://192.168.1.20:8787/" });
 
-    expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.1.20:8787/health");
+    expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.1.20:8787/api/v1/health");
   });
 
   it.each([

@@ -1,3 +1,5 @@
+import { getRemoteAuthToken } from "./remoteClient";
+
 /**
  * Registers the current page for Web Push notifications (used to alert the
  * user when an agent transitions into a waiting/blocked state) and forwards
@@ -25,9 +27,15 @@ export async function registerPushSubscription(
   }
 
   try {
-    const registration = await navigator.serviceWorker.ready.catch(
-      () => navigator.serviceWorker.register("/service-worker.js"),
-    );
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const registration = await Promise.race([
+      navigator.serviceWorker.ready.catch(
+        () => navigator.serviceWorker.register("/service-worker.js"),
+      ),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), 3000);
+      }),
+    ]).finally(() => clearTimeout(timeout));
 
     if (!registration || !registration.pushManager) {
       return false;
@@ -49,10 +57,14 @@ export async function registerPushSubscription(
       return false;
     }
 
+    const token = getRemoteAuthToken();
     const base = apiBaseUrl.replace(/\/$/, "");
     const res = await fetch(`${base}/api/push/subscribe`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({
         endpoint: json.endpoint,
         keys: {
@@ -62,6 +74,24 @@ export async function registerPushSubscription(
       }),
     });
 
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function unsubscribePush(apiBaseUrl: string, endpoint: string): Promise<boolean> {
+  try {
+    const token = getRemoteAuthToken();
+    const base = apiBaseUrl.replace(/\/$/, "");
+    const res = await fetch(`${base}/api/push/unsubscribe`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ endpoint }),
+    });
     return res.ok;
   } catch {
     return false;
