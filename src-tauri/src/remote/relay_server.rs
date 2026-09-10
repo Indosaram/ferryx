@@ -108,6 +108,14 @@ enum ControlRequest {
 
 struct RegisteredPairing {
     registration: RegisterPairingPin,
+    /// The relay's own authenticated control generation at registration time.
+    ///
+    /// `registration.generation` is the CLIENT's pairing-attempt counter
+    /// (relay_client.rs starts it at 0 per coordinator and bumps it per attempt).
+    /// The relay allocates control generations from a relay-wide counter that
+    /// session allocation also advances, so the two numbers are unrelated and must
+    /// never be compared. Only this relay-stamped value may gate a claim.
+    control_generation: u64,
     state: PairingState,
 }
 
@@ -614,8 +622,12 @@ impl RelayState {
         // slot against MAX_ACTIVE_PAIRING_PINS_PER_MACHINE and without refreshing the
         // lease (which would let a caller keep one short code alive indefinitely).
         if let Some(existing) = pairings.get(&registration.pin) {
+            // Idempotency must not resurrect a record owned by a superseded control
+            // generation: the retry has to come from the same owner AND the same live
+            // control generation, not merely reuse the machine id and token.
             let same_request = existing.registration.machine_id == registration.machine_id
-                && existing.registration.pairing_token == registration.pairing_token;
+                && existing.registration.pairing_token == registration.pairing_token
+                && existing.control_generation == generation;
             return if same_request {
                 Ok(())
             } else {
@@ -640,6 +652,7 @@ impl RelayState {
             registration.pin.clone(),
             RegisteredPairing {
                 registration,
+                control_generation: generation,
                 state: PairingState::Ready,
             },
         );
@@ -697,13 +710,11 @@ impl RelayState {
             // that machine must still be the live control identity for the generation it
             // registered under. Otherwise a code registered by an earlier (or departed)
             // control channel could still mint credentials for that identity.
+            // Compare the relay's own stamped generation - never the client-supplied
+            // attempt counter, and with no optional-field bypass.
             let control_identity_is_live = live_generations
                 .get(&p.registration.machine_id)
-                .is_some_and(|current| {
-                    p.registration
-                        .generation
-                        .is_none_or(|generation| generation == *current)
-                });
+                .is_some_and(|current| *current == p.control_generation);
             if p.state == PairingState::Ready
                 && p.registration.expires_at > current_time_secs()
                 && machine.is_none_or(|m| m == p.registration.machine_id)
@@ -2356,6 +2367,101 @@ mod tests {
                 "/api/v1/events"
             ),
             Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn test_relay_pairing_claim_uses_relay_generation_not_client_attempt_counter() {
+        // relay_client.rs starts each coordinator's pairing-attempt counter at 0 and
+        // bumps it per attempt, so every machine's FIRST pairing sends attempt 1. The
+        // relay allocates control generations from a relay-wide counter that session
+        // allocation also advances. Comparing those two numbers made an ordinary second
+        // machine's first pairing fail, so the claim must use the relay-stamped value.
+        let state = test_state(vec![]);
+
+        // A first machine occupies the relay, advancing the relay-wide counter.
+        let (first_tx, _first_rx) = mpsc::channel(1);
+        let first_generation = 1;
+        state.inner.control_channels.lock().insert(
+            "machine-one".to_owned(),
+            ControlChannel {
+                generation: first_generation,
+                tx: first_tx,
+            },
+        );
+
+        // A second machine connects later, so its control generation is NOT 1.
+        let second_generation = 9;
+        let (second_tx, _second_rx) = mpsc::channel(1);
+        state.inner.control_channels.lock().insert(
+            "machine-two".to_owned(),
+            ControlChannel {
+                generation: second_generation,
+                tx: second_tx,
+            },
+        );
+
+        // Its very first pairing attempt is client attempt 1.
+        state
+            .register_pairing(
+                "machine-two",
+                second_generation,
+                RegisterPairingPin {
+                    generation: Some(1),
+                    machine_id: "machine-two".into(),
+                    pin: "778899".into(),
+                    pairing_token: "machine-two-first-pairing".into(),
+                    expires_at: current_time_secs() + 120,
+                },
+            )
+            .unwrap();
+
+        let request = PublicPairExchangeRequest {
+            pin: Some("778899".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "second-device".into(),
+        };
+        let (claimed, _, _) = state
+            .claim_pairing("127.0.0.1".parse().unwrap(), &request, None)
+            .expect("an ordinary first pairing from a second machine must succeed");
+        assert_eq!(claimed, "machine-two");
+
+        // An omitted client attempt number must not become a bypass either: the claim
+        // is gated on the relay's own generation, so replacing the owner still revokes.
+        state
+            .register_pairing(
+                "machine-one",
+                first_generation,
+                RegisterPairingPin {
+                    generation: None,
+                    machine_id: "machine-one".into(),
+                    pin: "112233".into(),
+                    pairing_token: "machine-one-null-generation".into(),
+                    expires_at: current_time_secs() + 120,
+                },
+            )
+            .unwrap();
+        let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+        state.inner.control_channels.lock().insert(
+            "machine-one".to_owned(),
+            ControlChannel {
+                generation: first_generation + 100,
+                tx: replacement_tx,
+            },
+        );
+        let stale_request = PublicPairExchangeRequest {
+            pin: Some("112233".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "stale-device".into(),
+        };
+        assert_eq!(
+            state
+                .claim_pairing("127.0.0.4".parse().unwrap(), &stale_request, None)
+                .err(),
+            Some(StatusCode::NOT_FOUND),
+            "an omitted client generation must not bypass the relay generation check"
         );
     }
 

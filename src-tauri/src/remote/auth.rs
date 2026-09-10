@@ -63,15 +63,13 @@ where
     }
 }
 
+/// The pairing auth store, resolved through the same directory as the identity.
+///
+/// This previously duplicated the resolution and omitted the Windows LOCALAPPDATA
+/// location the gateway and CLI use, so on Windows PairingCoordinator's auth store
+/// (`relay_client.rs`) diverged from the state directory everything else reads.
 pub(crate) fn canonical_auth_path() -> Option<PathBuf> {
-    std::env::var_os("FERRYX_DATA_DIR")
-        .map(|base| PathBuf::from(base).join("remote"))
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|base| PathBuf::from(base).join(".ferryx/remote"))
-        })
-        .map(|base| base.join("remote-auth.json"))
+    canonical_remote_dir().map(|base| base.join("remote-auth.json"))
 }
 
 pub fn load_or_generate_machine_identity(base_dir: &Path) -> Result<MachineIdentity, String> {
@@ -778,6 +776,57 @@ mod tests {
         );
 
         assert!(resolve_canonical_remote_dir(lookup(&[("UNRELATED", "/x")])).is_none());
+    }
+
+    #[test]
+    fn test_auth_store_resolves_under_the_same_dir_as_the_identity() {
+        // PairingCoordinator's auth store and the gateway/CLI state directory must be
+        // the same place. canonical_auth_path used to duplicate the resolution and skip
+        // the Windows LOCALAPPDATA location, splitting them on Windows.
+        // Asserted against a literal expected path, not against the resolver itself,
+        // so this cannot pass tautologically.
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            move |variable: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == variable)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            }
+        };
+        let auth_path_for = |pairs: &'static [(&'static str, &'static str)]| {
+            resolve_canonical_remote_dir(lookup(pairs)).map(|base| base.join("remote-auth.json"))
+        };
+
+        assert_eq!(
+            auth_path_for(&[("FERRYX_DATA_DIR", "/data/ferryx")]).unwrap(),
+            PathBuf::from("/data/ferryx")
+                .join("remote")
+                .join("remote-auth.json")
+        );
+
+        // The Windows location the gateway and CLI use must be honored here too; the
+        // old canonical_auth_path only consulted HOME/USERPROFILE.
+        #[cfg(windows)]
+        assert_eq!(
+            auth_path_for(&[
+                ("LOCALAPPDATA", r"C:\Users\u\AppData\Local"),
+                ("USERPROFILE", r"C:\Users\u")
+            ])
+            .unwrap(),
+            PathBuf::from(r"C:\Users\u\AppData\Local")
+                .join("Ferryx")
+                .join("remote")
+                .join("remote-auth.json"),
+            "on Windows the auth store must follow LOCALAPPDATA, not USERPROFILE"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            auth_path_for(&[("HOME", "/home/user")]).unwrap(),
+            PathBuf::from("/home/user")
+                .join(".ferryx")
+                .join("remote")
+                .join("remote-auth.json")
+        );
     }
 
     #[test]
