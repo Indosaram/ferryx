@@ -794,7 +794,7 @@ async fn host_http_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     request: Request<Body>,
 ) -> Result<Response, StatusCode> {
-    if !(matches!(path.as_str(), "events" | "socket-ticket" | "pair/exchange")
+    if !(matches!(path.as_str(), "health" | "events" | "socket-ticket" | "pair/exchange")
         || ["workspace/", "terminal/", "push/"].iter().any(|prefix| path.starts_with(prefix))
         || path.strip_prefix("session/").is_some_and(|id| {
             !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':'))
