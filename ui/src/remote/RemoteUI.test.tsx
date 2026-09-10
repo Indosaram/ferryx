@@ -299,10 +299,10 @@ describe("Remote UI Components", () => {
     expect(screen.queryByRole("dialog", { name: /Workspace context/i })).toBeNull();
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "/api/v1/workspace/select?token=test-token",
+      "/api/v1/workspace/select",
       expect.objectContaining({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
         body: JSON.stringify({
           workspaceId: "api-service",
           worktreeSlug: "feature/remote-safe",
@@ -806,10 +806,10 @@ describe("Remote UI Components", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "/api/v1/workspace/select?token=test-token",
+      "/api/v1/workspace/select",
       expect.objectContaining({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
         body: JSON.stringify({
           workspaceId: "ferryx-ui",
           worktreeSlug: "main",
@@ -850,7 +850,7 @@ describe("Remote UI Components", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
-      "/api/v1/workspace/select?token=test-token",
+      "/api/v1/workspace/select",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -892,7 +892,7 @@ describe("Remote UI Components", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       6,
-      "/api/v1/workspace/select?token=test-token",
+      "/api/v1/workspace/select",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -1283,7 +1283,7 @@ describe("Remote UI Components", () => {
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/v1/workspace/select?token=test-token",
+        "/api/v1/workspace/select",
         expect.objectContaining({
           method: "POST",
           // The pane's own worktree travels with the request; the mirrored context is not assumed.
@@ -1772,9 +1772,13 @@ describe("Remote UI Components", () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(3);
     });
+    // The confirmation refresh is authenticated, so it carries a bearer header.
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining("/api/v1/workspace/state"),
+      expect.objectContaining({
+        headers: { Authorization: "Bearer test-token" },
+      }),
     );
   });
 

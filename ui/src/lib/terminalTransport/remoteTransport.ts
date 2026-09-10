@@ -12,7 +12,10 @@ export class WebSocketTerminalTransport implements TerminalTransport {
   }
 
   async listSessions() {
-    const res = await fetch(`${this.baseUrl}/api/v1/sessions?token=${encodeURIComponent(this.token)}`);
+    // Credentials belong in the Authorization header, never the query string.
+    const res = await fetch(`${this.baseUrl}/api/v1/sessions`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
     if (!res.ok) throw new Error(`Failed to list sessions: ${res.statusText}`);
     const data = await res.json();
     return data.map((s: { sessionId: string }) => ({ sessionId: s.sessionId }));

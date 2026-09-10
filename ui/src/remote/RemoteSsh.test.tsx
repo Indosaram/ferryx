@@ -40,7 +40,11 @@ it("sends the backend session identity when selecting an SSH session", async () 
   fireEvent.click(screen.getByRole("button", { name: "Change workspace context" }));
   const option = screen.getByRole("button", { name: /Terminal 2/ });
   await act(async () => { fireEvent.click(option); });
-  const call = fetcher.mock.calls.find((args) => args.length > 1);
+  // Match the selection POST specifically: authenticated GETs now also carry an
+  // init argument (the Authorization header), so "has an init" is no longer unique.
+  const call = fetcher.mock.calls.find(
+    (args) => String(args[0]).includes("/api/v1/workspace/select"),
+  );
   expect(JSON.parse(String(call?.[1]?.body))).toEqual({ workspaceId: "ssh:build", sessionId: "ssh-two" });
   expect(screen.getByTestId("session").textContent).toBe("ssh-two");
 });

@@ -134,3 +134,34 @@ it("never discloses credentials to an unverified direct candidate and stays on r
   expect(fetch.mock.calls.filter(([url]) => url.startsWith(direct) && url !== probeUrl)).toHaveLength(0);
   expect(Socket.instances.every(({ url }) => !url.includes("192.168.1.99"))).toBe(true);
 });
+
+// F09b: a permanent device token must never appear in any request URL. URLs are
+// recorded in browser history, proxy/server access logs and Referer headers, so a
+// credential placed there outlives the request and escapes the client's control.
+it("never places the device token in an HTTP or WebSocket request URL", async () => {
+  const fetch = fetcher();
+  paired();
+  await mount(fetch);
+
+  const tokens = ["audit-device-a", "audit-device"];
+  const httpUrls = fetch.mock.calls.map(([url]) => String(url));
+  expect(httpUrls.length).toBeGreaterThan(0);
+  for (const url of httpUrls) {
+    for (const secret of tokens) {
+      expect(url).not.toContain(secret);
+    }
+    expect(url).not.toMatch(/[?&](token|access_token)=/);
+  }
+
+  // Authenticated calls must carry the credential in the Authorization header instead.
+  const authenticated = fetch.mock.calls.filter(([, init]) =>
+    new Headers((init as RequestInit | undefined)?.headers).has("Authorization"));
+  expect(authenticated.length).toBeGreaterThan(0);
+
+  for (const socket of Socket.instances) {
+    for (const secret of tokens) {
+      expect(socket.url).not.toContain(secret);
+    }
+    expect(socket.url).not.toMatch(/[?&](token|access_token)=/);
+  }
+});

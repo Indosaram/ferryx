@@ -201,7 +201,7 @@ describe("RemoteAttention Affordance", () => {
         expect.stringContaining("/api/v1/workspace/select"),
         expect.objectContaining({
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
           body: JSON.stringify({
             workspaceId: "ferryx-ui",
             worktreeSlug: "main",

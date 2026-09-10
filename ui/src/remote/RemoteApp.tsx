@@ -382,11 +382,11 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
   const loadWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
     if (!token) return null;
     try {
-      const response = await (activeHost?.machineId
-        ? fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/state"), {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        : fetch(apiUrl(transportBaseUrl, `/api/v1/workspace/state?token=${encodeURIComponent(token)}`)));
+      // The credential always travels in the Authorization header: a token in the
+      // query string leaks into history, access logs and Referer headers.
+      const response = await fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/state"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
           disconnect();
@@ -660,14 +660,10 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
 
     try {
       const response = await fetch(
-        apiUrl(transportBaseUrl, activeHost?.machineId
-          ? "/api/v1/workspace/select"
-          : `/api/v1/workspace/select?token=${encodeURIComponent(token)}`),
+        apiUrl(transportBaseUrl, "/api/v1/workspace/select"),
         {
           method: "POST",
-          headers: activeHost?.machineId
-            ? { "Content-Type": "application/json", Authorization: `Bearer ${token}` }
-            : { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify({
             workspaceId: option.workspaceId,
             ...(option.worktreeSlug ? { worktreeSlug: option.worktreeSlug } : {}),
