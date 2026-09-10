@@ -83,6 +83,11 @@ enum HalfKind {
 /// `notify` hands the second socket to the first connection's task.
 struct WaitingHalf {
     generation: u64,
+    /// Machine that owns this session, and the control generation it was allocated
+    /// under. A half offered after the owner reconnects under a new generation must
+    /// not attach to a session authorized by the previous one.
+    owner: String,
+    control_generation: u64,
     created_at: Instant,
     kind: Option<HalfKind>,
     notify: Option<oneshot::Sender<WebSocket>>,
@@ -490,6 +495,8 @@ impl RelayState {
             session_id.into(),
             WaitingHalf {
                 generation: self.inner.next_generation.fetch_add(1, Ordering::Relaxed),
+                owner: machine_token.to_owned(),
+                control_generation: channel.generation,
                 created_at: Instant::now(),
                 kind: None,
                 notify: None,
@@ -505,12 +512,25 @@ impl RelayState {
         session_id: &str,
         kind: HalfKind,
     ) -> Result<(u64, PairingOutcome), StatusCode> {
+        // Lock order matches allocate_session (control_channels before
+        // pending_sessions) so the two paths cannot deadlock against each other.
+        let channels = self.inner.control_channels.lock();
         let mut sessions = self.inner.pending_sessions.lock();
         let waiting = sessions.get_mut(session_id).ok_or(StatusCode::NOT_FOUND)?;
         if waiting.active || waiting.kind == Some(kind) {
             return Err(StatusCode::CONFLICT);
         }
         if waiting.created_at.elapsed() >= SESSION_PAIRING_TIMEOUT {
+            return Err(StatusCode::GONE);
+        }
+        // The authorization that created this session belongs to one control
+        // generation. If the owner has since reconnected (new generation) or gone
+        // away, the session is no longer backed by a live authorization.
+        if channels
+            .get(&waiting.owner)
+            .map(|channel| channel.generation)
+            != Some(waiting.control_generation)
+        {
             return Err(StatusCode::GONE);
         }
         let outcome = if let Some(tx) = waiting.notify.take() {
@@ -710,6 +730,8 @@ impl RelayState {
                 session_id.clone(),
                 WaitingHalf {
                     generation,
+                    owner: machine.to_owned(),
+                    control_generation: channel.generation,
                     created_at: Instant::now(),
                     kind: Some(HalfKind::Client),
                     notify: Some(tx),
@@ -2312,6 +2334,50 @@ mod tests {
                 "/api/v1/events"
             ),
             Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn test_relay_stream_half_is_bound_to_the_allocating_control_generation() {
+        // A session is authorized by one control channel. If the owner reconnects
+        // (new generation), a half offered against the old authorization must be
+        // refused rather than proxied into the new session.
+        let state = test_state(vec![]);
+        let machine = "generation-machine";
+        let (tx, _rx) = mpsc::channel(4);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 7, tx });
+
+        assert!(state.issue_session(machine, "session-gen-7", Some(7)));
+        // Same generation still attaches.
+        assert!(state.reserve_half("session-gen-7", HalfKind::Data).is_ok());
+
+        assert!(state.issue_session(machine, "session-stale", Some(7)));
+        // The daemon reconnects: same machine, new control generation.
+        let (new_tx, _new_rx) = mpsc::channel(4);
+        state.inner.control_channels.lock().insert(
+            machine.to_owned(),
+            ControlChannel {
+                generation: 8,
+                tx: new_tx,
+            },
+        );
+        assert_eq!(
+            state.reserve_half("session-stale", HalfKind::Data).err(),
+            Some(StatusCode::GONE),
+            "a half from a superseded control generation must not attach"
+        );
+
+        // The owner disconnecting entirely also invalidates its pending sessions.
+        assert!(state.issue_session(machine, "session-orphan", Some(8)));
+        state.inner.control_channels.lock().remove(machine);
+        assert_eq!(
+            state.reserve_half("session-orphan", HalfKind::Data).err(),
+            Some(StatusCode::GONE),
+            "a half for a departed owner must not attach"
         );
     }
 
