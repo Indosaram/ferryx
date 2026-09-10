@@ -71,7 +71,11 @@ impl RemoteFailure {
             BridgeError::SshSetup(error) => {
                 let details = error.details.as_ref();
                 let stage = details.and_then(|d| d.get("stage")).and_then(|v| v.as_str());
-                if error.code != crate::ipc::IpcErrorCode::IoError {
+                if stage == Some("helper_missing")
+                    || error.code == crate::ipc::IpcErrorCode::CliExecutableNotFound
+                {
+                    RemoteFailureKind::Missing
+                } else if error.code != crate::ipc::IpcErrorCode::IoError {
                     RemoteFailureKind::Protocol
                 } else if stage == Some("transport") {
                     RemoteFailureKind::Transport

@@ -192,9 +192,23 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
         .as_ref()
         .and_then(|d| d.get("exitCode"))
         .and_then(|c| c.as_i64());
+    let stderr = err
+        .details
+        .as_ref()
+        .and_then(|d| d.get("stderr"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
 
-    match exit_code {
-        Some(127) => IpcError::new(
+    let is_missing = exit_code == Some(127)
+        || stderr.contains("FERRYX_ERR_HELPER_MISSING")
+        || err.message.contains("FERRYX_ERR_HELPER_MISSING");
+
+    let is_permissions = exit_code == Some(126)
+        || stderr.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE")
+        || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
+
+    if is_missing {
+        IpcError::new(
             IpcErrorCode::CliExecutableNotFound,
             format!(
                 "Remote helper binary is not installed at '{}'. Run install to set up the helper.",
@@ -205,8 +219,9 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
             "stage": "helper_missing",
             "executable": location.executable,
             "root": location.root,
-        })),
-        Some(126) => IpcError::new(
+        }))
+    } else if is_permissions {
+        IpcError::new(
             IpcErrorCode::Unsupported,
             format!(
                 "Remote helper binary at '{}' is not executable. Please verify permissions.",
@@ -217,8 +232,9 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
             "stage": "helper_permissions",
             "executable": location.executable,
             "root": location.root,
-        })),
-        _ => err,
+        }))
+    } else {
+        err
     }
 }
 
@@ -233,8 +249,8 @@ pub async fn ensure_started(
     let script = match env.platform {
         RemotePlatform::Posix => format!(
             "exe={}; root={}; host_id={}; \
-             if [ ! -f \"$exe\" ]; then exit 127; fi; \
-             if [ ! -x \"$exe\" ]; then exit 126; fi; \
+             if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
+             if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
              exec \"$exe\" start --root \"$root\" --host-id \"$host_id\"",
             direct::quote_posix(&location.executable),
             direct::quote_posix(&location.root),
@@ -242,7 +258,7 @@ pub async fn ensure_started(
         ),
         RemotePlatform::Windows => format!(
             "$exe = {}; $root = {}; $hostId = {}; \
-             if (-not [System.IO.File]::Exists($exe)) {{ exit 127; }}; \
+             if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
              & $exe start --root $root --host-id $hostId",
             runtime::powershell_data(&location.executable),
             runtime::powershell_data(&location.root),

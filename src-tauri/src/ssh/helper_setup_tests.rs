@@ -233,6 +233,56 @@ fn ssh_helper_setup_ensure_started_exit_code_126_maps_to_unsupported_permissions
     );
 }
 
+#[test]
+fn ssh_helper_setup_ensure_started_windows_exit_1_with_sentinel_maps_to_missing_helper() {
+    let location = HelperLocation {
+        executable: r"C:\Users\u\.ferryx\bin\ferryx-remote-helper.exe".into(),
+        root: r"C:\Users\u\.ferryx\helper\qa".into(),
+    };
+    // Windows OpenSSH normalizes non-zero exit codes to 1, but captures stderr sentinel
+    let raw_err = IpcError::new(
+        IpcErrorCode::IoError,
+        "SSH command failed (exit 1): FERRYX_ERR_HELPER_MISSING",
+    )
+    .with_details(serde_json::json!({
+        "stage": "execution",
+        "exitCode": 1,
+        "stderr": "FERRYX_ERR_HELPER_MISSING\r\n",
+    }));
+    let mapped = map_ensure_started_error(raw_err, &location);
+    assert_eq!(mapped.code, IpcErrorCode::CliExecutableNotFound);
+    let details = mapped.details.as_ref().expect("details");
+    assert_eq!(
+        details.get("stage").and_then(serde_json::Value::as_str),
+        Some("helper_missing")
+    );
+    assert!(mapped.message.contains("not installed"));
+}
+
+#[test]
+fn ssh_helper_setup_ensure_started_windows_exit_1_with_sentinel_maps_to_unsupported_permissions() {
+    let location = HelperLocation {
+        executable: r"C:\Users\u\.ferryx\bin\ferryx-remote-helper.exe".into(),
+        root: r"C:\Users\u\.ferryx\helper\qa".into(),
+    };
+    let raw_err = IpcError::new(
+        IpcErrorCode::IoError,
+        "SSH command failed (exit 1): FERRYX_ERR_HELPER_NOT_EXECUTABLE",
+    )
+    .with_details(serde_json::json!({
+        "stage": "execution",
+        "exitCode": 1,
+        "stderr": "FERRYX_ERR_HELPER_NOT_EXECUTABLE\r\n",
+    }));
+    let mapped = map_ensure_started_error(raw_err, &location);
+    assert_eq!(mapped.code, IpcErrorCode::Unsupported);
+    let details = mapped.details.as_ref().expect("details");
+    assert_eq!(
+        details.get("stage").and_then(serde_json::Value::as_str),
+        Some("helper_permissions")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn ssh_helper_setup_process_start_rejects_symlink_root_without_writing_log() {

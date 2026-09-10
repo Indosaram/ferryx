@@ -225,6 +225,7 @@ async fn ssh_reconnect_safety_setup_classifies_structured_transport_and_authenti
         (IpcErrorCode::IoError, serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Connection refused"}), RemoteFailureKind::Transport),
         (IpcErrorCode::InvalidArgument, serde_json::json!({"stage": "transport"}), RemoteFailureKind::Protocol),
         (IpcErrorCode::IoError, serde_json::json!({"stage": "startup"}), RemoteFailureKind::Protocol),
+        (IpcErrorCode::CliExecutableNotFound, serde_json::json!({"stage": "helper_missing"}), RemoteFailureKind::Missing),
     ];
     for (code, details, expected) in cases {
         let error = IpcError::new(code, "authentication connection refused").with_details(details);

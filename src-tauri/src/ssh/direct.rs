@@ -336,11 +336,17 @@ async fn collect_output(
             } else {
                 use base64::{engine::general_purpose::STANDARD, Engine as _};
                 let text = std::str::from_utf8(&stderr).ok();
+                let diagnostic = match text.map(str::trim) {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => "Remote stderr was empty; raw bytes are available in details".to_string(),
+                };
                 Err(IpcError::new(
                     IpcErrorCode::IoError,
-                    format!("SSH command failed (exit {}): {}",
+                    format!(
+                        "SSH command failed (exit {}): {}",
                         status.code().map_or_else(|| "signal".into(), |code| code.to_string()),
-                        text.map(str::trim).unwrap_or("Remote diagnostic is not UTF-8; raw bytes are available in details")),
+                        diagnostic
+                    ),
                 ).with_details(serde_json::json!({
                     "stage": "execution",
                     "exitCode": status.code(),
