@@ -172,7 +172,7 @@ function controlByteForChar(ch: string): number | null {
   }
 }
 
-function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry, transportUrl: string): string | Promise<string> {
+function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry, transportUrl: string, signal: AbortSignal): string | Promise<string> {
   const base = new URL(transportUrl);
   const target = `/api/v1/terminal/${sessionId}`;
   const withGeometry = (socketUrl: string): string => {
@@ -183,7 +183,8 @@ function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeome
     return url.toString();
   };
   if (base.pathname.startsWith("/host/")) {
-    return remoteSocketUrl(transportUrl, target, token).then(withGeometry);
+    // Keep the host prefix for ticket issuance and append grid options without replacing the ticket.
+    return remoteSocketUrl(transportUrl, target, token, signal).then(withGeometry);
   }
   const url = new URL(`${transportUrl.replace(/\/$/, "")}${target}`);
   url.protocol = base.protocol === "https:" ? "wss:" : "ws:";
@@ -407,6 +408,7 @@ export function RemoteTerminal({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffAttempt = 0;
     let disposed = false;
+    const abort = new AbortController();
 
     const clearReconnectTimer = () => {
       if (reconnectTimer !== null) {
@@ -420,7 +422,7 @@ export function RemoteTerminal({
       if (disposed) return;
       let socket: WebSocket;
       try {
-        const pendingUrl = terminalSocketUrl(socketRequest.sessionId, socketRequest.token, socketRequest.geometry, transportUrl);
+        const pendingUrl = terminalSocketUrl(socketRequest.sessionId, socketRequest.token, socketRequest.geometry, transportUrl, abort.signal);
         const url = typeof pendingUrl === "string" ? pendingUrl : await pendingUrl;
         if (disposed) return;
         socket = new WebSocket(url);
@@ -473,6 +475,7 @@ export function RemoteTerminal({
 
     return () => {
       disposed = true;
+      abort.abort();
       clearReconnectTimer();
       const currentSocket = socketRef.current;
       if (socketRef.current === currentSocket) {

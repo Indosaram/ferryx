@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 
 type PairingPageProps = {
-  onPaired: (token: string) => void;
+  onPaired: (token: string, metadata?: { machineId?: unknown; displayName?: unknown }) => void;
   transportUrl?: string;
 };
 
@@ -32,7 +32,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       }
 
       const data = await res.json();
-      onPaired(data.token);
+      onPaired(data.token, { machineId: data.machineId, displayName: data.displayName });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to pair device");
     } finally {

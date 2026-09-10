@@ -2,7 +2,7 @@ import { ChevronDown, Laptop } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import {
-  selectBestDirectCandidate,
+  DEFAULT_PROBE_TIMEOUT_MS,
   normalizeDirectCandidateOrigin,
   type CandidateEndpoint,
   type CandidateEndpointType,
@@ -12,7 +12,7 @@ import {
   getRemoteAuthToken,
   setRemoteAuthToken,
 } from "../lib/remoteClient";
-import { remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
+import { remoteHostKey, remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 import { hostAgentTotals, MobileHostDrawer } from "./MobileHostDrawer";
 import { PairingPage } from "./PairingPage";
 import {
@@ -272,15 +272,23 @@ function relayEndpoint(url: string): CandidateEndpoint {
 
 export const RemoteApp: React.FC = () => {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const host = selectActiveHost(state);
-  const hostId = state.activeHostId ?? `local:${window.location.origin}`;
+  const [pairingHash, setPairingHash] = useState(window.location.hash);
+  useEffect(() => {
+    const onHashChange = () => setPairingHash(window.location.hash);
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  const pairingRequested = /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(pairingHash);
+  const host = pairingRequested ? null : selectActiveHost(state);
+  const hostId = (pairingRequested ? null : state.activeHostId) ?? `local:${window.location.origin}`;
   const address = host?.address ?? window.location.origin;
   const relayUrl = new URL(address.includes("://") ? address : `http://${address}`).origin;
-  return <RemoteHostConnection key={`${hostId}:${relayUrl}`} hostId={hostId} relayUrl={relayUrl} readUrlHints={state.activeHostId === null} />;
+  return <RemoteHostConnection key={`${hostId}:${relayUrl}:${pairingRequested ? pairingHash : ""}`} hostId={hostId} relayUrl={relayUrl} readUrlHints={pairingRequested || state.activeHostId === null} />;
 };
 
 const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrlHints: boolean }> = ({ hostId, relayUrl, readUrlHints }) => {
   const [token, setToken] = useState<string | null>(() => {
+    if (readUrlHints && /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(window.location.hash)) return null;
     const storedHost = remoteHostStore.getState().hosts[hostId];
     const scoped = storedHost?.deviceToken ?? getRemoteAuthToken(hostId);
     if (scoped || !readUrlHints) return scoped;
@@ -305,7 +313,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const activeHost = useMemo(() => selectActiveHost(remoteHostState), [remoteHostState]);
+  const activeHost = remoteHostState.hosts[hostId] ?? null;
   const hostAgentSummary = useMemo(() => hostAgentTotals(remoteHostState), [remoteHostState]);
   const transportBaseUrl = hostTransportUrl(activeHost, transport.url);
   const pairingBaseUrl = hostTransportUrl(activeHost, relayUrl);
@@ -337,14 +345,29 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     workspaceRefreshVersionRef.current += 1;
   }, [hostId]);
 
-  const handlePaired = useCallback((newToken: string) => {
+  const handlePaired = useCallback((newToken: string, metadata?: { machineId?: unknown; displayName?: unknown }) => {
+    const machineId = optionalString(metadata?.machineId);
+    const displayName = optionalString(metadata?.displayName);
+    if (machineId && displayName) {
+      remoteHostStore.upsertHost({
+        machineId,
+        displayName,
+        relayOrigin: relayUrl,
+        deviceToken: newToken,
+        lastSeenAt: Date.now(),
+        directHints,
+      });
+      remoteHostStore.setActiveHost(remoteHostKey(relayUrl, machineId));
+      clearRemoteAuthToken(hostId);
+      return;
+    }
     const host = remoteHostStore.getState().hosts[hostId];
     if (host) {
       remoteHostStore.upsertHost({ ...host, deviceToken: newToken, lastSeenAt: Date.now(), authStatus: "paired" });
       clearRemoteAuthToken(hostId);
     } else setRemoteAuthToken(newToken, hostId);
     setToken(newToken);
-  }, [hostId]);
+  }, [directHints, hostId, relayUrl]);
 
   const rollbackTransport = useCallback(() => {
     setTransport((current) => current.url === relayUrl ? current : relayEndpoint(relayUrl));
@@ -388,7 +411,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     if (!readUrlHints || !hash.startsWith("#pair=")) return;
 
     const code = new URLSearchParams(hash.slice(1)).get("pair");
-    if (!code || !/^\d{6}$/.test(code)) return;
+    if (!code || !/^([0-9a-fA-F]{32}|[0-9]{6})$/i.test(code)) return;
     let cancelled = false;
     fetch(apiUrl(pairingBaseUrl, "/api/v1/pair/exchange"), {
       method: "POST",
@@ -398,10 +421,13 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
         deviceName: navigator.userAgent.includes("Mobile") ? "Mobile Device" : "Browser Device",
       }),
     })
-      .then((response) => response.json())
+      .then((response) => {
+        if (!response.ok) throw new Error(`Pairing failed (${response.status})`);
+        return response.json();
+      })
       .then((data) => {
         if (cancelled || typeof data.token !== "string") return;
-        handlePaired(data.token);
+        handlePaired(data.token, data);
         window.location.hash = "";
       })
       .catch((error) => console.warn("QR pairing failed", error));
@@ -416,18 +442,43 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
   // probe costs nothing but a stay on the relay. Runs once per token, and not at all
   // when the desktop published no direct endpoint hints.
   useEffect(() => {
+    const expectedMachineId = activeHost?.machineId;
     if (!token || typeof fetch !== "function") return;
-    const candidates = directHints;
+    const candidates = directHints.filter((candidate) =>
+      normalizeDirectCandidateOrigin(candidate.url) !== null);
     if (candidates.length === 0) return;
-    let cancelled = false;
-    void selectBestDirectCandidate(candidates).then((best) => {
-      if (cancelled || !best) return;
-      setTransport((current) => (current.url === best.url ? current : best));
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEFAULT_PROBE_TIMEOUT_MS);
+    void Promise.all(candidates.map(async (candidate) => {
+      try {
+        // Probe without credentials or redirects; known hosts must match their identity.
+        const response = await fetch(`${candidate.url}/api/v1/health`, {
+          signal: controller.signal,
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+          mode: "cors",
+        });
+        if (!response.ok) return null;
+        // Legacy local pairing has no machine identity to compare.
+        if (!expectedMachineId) return candidate;
+        const identity = record(await response.json());
+        return identity?.machineId === expectedMachineId ? candidate : null;
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn("Direct host identity probe failed", error);
+        return null;
+      }
+    })).then((results) => {
+      if (controller.signal.aborted) return;
+      const best = results.filter((candidate): candidate is CandidateEndpoint => candidate !== null)
+        .sort((a, b) => b.priority - a.priority)[0];
+      if (best) setTransport((current) => current.url === best.url ? current : best);
+    }).finally(() => clearTimeout(timeout));
     return () => {
-      cancelled = true;
+      controller.abort();
+      clearTimeout(timeout);
     };
-  }, [directHints, token]);
+  }, [activeHost?.machineId, directHints, token]);
 
   useEffect(() => {
     if (!token) {
@@ -842,7 +893,7 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
             key={`${effectiveSessionId}:${terminalRetryGeneration}`}
             sessionId={effectiveSessionId}
             token={token}
-            transportUrl={transport.url}
+            transportUrl={transportBaseUrl}
             onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
             activeTabId={model.context.activeTabId}
             onBack={() => undefined}
