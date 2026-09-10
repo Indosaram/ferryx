@@ -195,8 +195,9 @@ function modelConfirmsSelection(option: RemoteContextOption, model: RemoteWorksp
  * The page is always served over the relay, so the relay endpoint is the only one
  * guaranteed to work and is what the first render connects through. LAN / Tailscale
  * endpoints are *hints* published by the desktop (query string on the pairing link,
- * or a previously stored hint) and are only trusted once a probe confirms them, at
- * which point the active transport URL flips to the direct endpoint.
+ * or a previously stored hint). The gateway health response proves reachability but
+ * not possession of the paired machine identity, so these hints remain untrusted and
+ * the active transport stays on the relay.
  *
  * Probing costs a request per candidate, so it only runs when at least one hint
  * exists: a relay-only client never issues a probe.
@@ -438,11 +439,10 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     if (token) void refreshWorkspace();
   }, [refreshWorkspace, token]);
 
-  // Background upgrade: the relay session above is already live, so a failed or slow
-  // probe costs nothing but a stay on the relay. Runs once per token, and not at all
-  // when the desktop published no direct endpoint hints.
+  // Candidate discovery is deliberately credential-free. The current health contract
+  // only proves reachability, not paired-machine identity, so a successful probe must
+  // not release the device token or upgrade away from the relay.
   useEffect(() => {
-    const expectedMachineId = activeHost?.machineId;
     if (!token || typeof fetch !== "function") return;
     const candidates = directHints.filter((candidate) =>
       normalizeDirectCandidateOrigin(candidate.url) !== null);
@@ -451,35 +451,22 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     const timeout = setTimeout(() => controller.abort(), DEFAULT_PROBE_TIMEOUT_MS);
     void Promise.all(candidates.map(async (candidate) => {
       try {
-        // Authenticate with the device token, omit cookies and reject redirects; known hosts must match their identity.
-        const response = await fetch(`${candidate.url}/api/v1/health`, {
+        await fetch(`${candidate.url}/api/v1/health`, {
           signal: controller.signal,
           cache: "no-store",
           credentials: "omit",
-          headers: { Authorization: `Bearer ${token}` },
           redirect: "error",
           mode: "cors",
         });
-        if (!response.ok) return null;
-        // Legacy local pairing has no machine identity to compare.
-        if (!expectedMachineId) return candidate;
-        const identity = record(await response.json());
-        return identity?.machineId === expectedMachineId ? candidate : null;
       } catch (error) {
-        if (!controller.signal.aborted) console.warn("Direct host identity probe failed", error);
-        return null;
+        if (!controller.signal.aborted) console.warn("Direct host reachability probe failed", error);
       }
-    })).then((results) => {
-      if (controller.signal.aborted) return;
-      const best = results.filter((candidate): candidate is CandidateEndpoint => candidate !== null)
-        .sort((a, b) => b.priority - a.priority)[0];
-      if (best) setTransport((current) => current.url === best.url ? current : best);
-    }).finally(() => clearTimeout(timeout));
+    })).finally(() => clearTimeout(timeout));
     return () => {
       controller.abort();
       clearTimeout(timeout);
     };
-  }, [activeHost?.machineId, directHints, token]);
+  }, [directHints, token]);
 
   useEffect(() => {
     if (!token) {

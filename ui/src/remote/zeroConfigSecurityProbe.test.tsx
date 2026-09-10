@@ -18,18 +18,15 @@ class Socket {
   constructor(readonly url: string) { Socket.instances.push(this); }
 }
 
-function fetcher(machineId = "audit-a") {
-  return vi.fn(async (url: string, init?: RequestInit) => {
+function fetcher() {
+  return vi.fn(async (url: string, _init?: RequestInit) => {
     if (url.includes("socket-ticket")) return Response.json({ ticket: "audit-ticket" });
     if (url.includes("pair/exchange")) return Response.json({
       token: "audit-device", device: { id: "audit-device-id", name: "Browser Device", permission: "control" },
       machineId: "audit-new", displayName: "New",
     });
     if (url.endsWith("/api/v1/health")) {
-      if (new Headers(init?.headers).get("Authorization") !== "Bearer audit-device-a") {
-        return new Response(null, { status: 401 });
-      }
-      return Response.json({ machineId });
+      return Response.json({ status: "ok", version: "0.1.0" });
     }
     return Response.json({
       activeContext: { workspaceId: "audit-workspace", sessionId: "audit-terminal", terminalTabs: [] },
@@ -121,21 +118,19 @@ it("retains the machine prefix, ticket and grid geometry in the real terminal so
   }));
 });
 
-it.each(["audit-a", "impostor"])("authenticates the direct probe and validates machineId %s before upgrading transport", async (machineId) => {
+it("never discloses credentials to an unverified direct candidate and stays on relay", async () => {
   const direct = "https://192.168.1.99:8787";
   paired([{ type: "lan", url: direct, priority: 30 }]);
-  const fetch = fetcher(machineId);
+  const fetch = fetcher();
   await mount(fetch);
-  expect(fetch).toHaveBeenCalledWith(`${direct}/api/v1/health`, expect.objectContaining({
+  const probe = fetch.mock.calls.find(([url]) => url === `${direct}/api/v1/health`);
+  expect(probe).toBeDefined();
+  const [probeUrl, probeInit] = probe!;
+  expect(new URL(probeUrl).search).toBe("");
+  expect(new Headers(probeInit?.headers).has("Authorization")).toBe(false);
+  expect(probeInit).toMatchObject({
     credentials: "omit", redirect: "error", cache: "no-store", mode: "cors",
-    headers: { Authorization: "Bearer audit-device-a" },
-  }));
-  const directCalls = fetch.mock.calls.filter(([url]) => url.startsWith(direct) && !url.endsWith("/health"));
-  if (machineId === "audit-a") {
-    expect(directCalls).toContainEqual([`${direct}/api/v1/workspace/state`, { headers: { Authorization: "Bearer audit-device-a" } }]);
-    expect(Socket.instances.some(({ url }) => url.includes("192.168.1.99:8787/api/v1/events?token=audit-device-a"))).toBe(true);
-  } else {
-    expect(directCalls).toHaveLength(0);
-    expect(Socket.instances.every(({ url }) => !url.includes("192.168.1.99"))).toBe(true);
-  }
+  });
+  expect(fetch.mock.calls.filter(([url]) => url.startsWith(direct) && url !== probeUrl)).toHaveLength(0);
+  expect(Socket.instances.every(({ url }) => !url.includes("192.168.1.99"))).toBe(true);
 });

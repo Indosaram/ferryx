@@ -111,14 +111,14 @@ it("migrates a single-host inventory and its scoped token without borrowing an o
   expect(store.getState().hosts[key].deviceToken).toBe("a-token");
 });
 
-it("parses fragment PIN and hints separately and rolls a failed terminal back to relay", async () => {
+it("parses fragment PIN and hints separately and keeps transport on the relay", async () => {
   window.history.replaceState(null, "", "/#pair=123456&hints=" + encodeURIComponent("http://192.168.1.20:8787,https://evil.example"));
-  const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+  // The real gateway health route is unauthenticated and returns only { status, version }.
+  // It therefore cannot prove the responder owns the paired machine identity.
+  const fetcher = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url.includes("pair/exchange")) return new Response(JSON.stringify({ token: "paired" }));
     if (url.endsWith("/api/v1/health")) {
-      return new Response("ok", {
-        status: new Headers(init?.headers).get("Authorization") === "Bearer paired" ? 200 : 401,
-      });
+      return new Response(JSON.stringify({ status: "ok", version: "0.1.0" }), { status: 200 });
     }
     return workspace();
   });
@@ -130,8 +130,21 @@ it("parses fragment PIN and hints separately and rolls a failed terminal back to
   const init = (pairing as unknown as [string, RequestInit])[1];
   expect(JSON.parse(init.body as string).code).toBe("123456");
   expect(fetcher.mock.calls.some(([url]) => url.includes("evil.example"))).toBe(false);
-  expect(screen.getByTestId("terminal-transport").textContent).toBe("http://192.168.1.20:8787");
   expect(localStorage.getItem(`ferryx_remote_direct_candidates_local:${window.location.origin}`)).not.toContain("evil.example");
+
+  // A reachable-but-unverified LAN hint must NOT capture the terminal transport: a
+  // health 200 proves reachability only, so the credential-bearing transport stays
+  // on the relay origin.
+  expect(screen.getByTestId("terminal-transport").textContent).toBe(window.location.origin);
+
+  // The probe itself must never carry the device credential to an unverified endpoint.
+  const healthCalls = fetcher.mock.calls.filter(([url]) => String(url).endsWith("/api/v1/health"));
+  expect(healthCalls.length).toBeGreaterThan(0);
+  for (const [url, requestInit] of healthCalls as unknown as [string, RequestInit][]) {
+    expect(new Headers(requestInit?.headers).get("Authorization")).toBeNull();
+    expect(String(url)).not.toContain("paired");
+  }
+
   await act(async () => { screen.getByTestId("terminal-transport").click(); });
   expect(screen.getByTestId("terminal-transport").textContent).toBe(window.location.origin);
   expect(EventSocket.instances.at(-1)?.url).toContain(window.location.host);
