@@ -985,26 +985,26 @@ impl NativeTerminalSurfaceHostState {
             }
         };
 
-        let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
-            let prior_scrollbar = session.terminal.scrollbar().ok();
-            let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
+        let prior_scrollbar = session.terminal.scrollbar().ok();
+        let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
+            let max_offset = sb.total.saturating_sub(sb.len);
+            max_offset == 0
+                || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
+        });
+        let prior_scroll_ratio = if is_at_bottom {
+            None
+        } else {
+            prior_scrollbar.and_then(|sb| {
                 let max_offset = sb.total.saturating_sub(sb.len);
-                max_offset == 0
-                    || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
-            });
-            let prior_scroll_ratio = if is_at_bottom {
-                None
-            } else {
-                prior_scrollbar.and_then(|sb| {
-                    let max_offset = sb.total.saturating_sub(sb.len);
-                    if max_offset > 0 {
-                        Some(sb.offset as f64 / max_offset as f64)
-                    } else {
-                        None
-                    }
-                })
-            };
+                if max_offset > 0 {
+                    Some(sb.offset as f64 / max_offset as f64)
+                } else {
+                    None
+                }
+            })
+        };
 
+        let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
             session.terminal.resize(
                 layout.cols,
                 layout.rows,
@@ -1029,6 +1029,11 @@ impl NativeTerminalSurfaceHostState {
             }
             true
         } else {
+            if is_at_bottom {
+                let _ = session
+                    .terminal
+                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+            }
             false
         };
         session.layout = Some(layout);
@@ -1133,26 +1138,26 @@ impl NativeTerminalSurfaceHostState {
                 }
             };
             if let Some((bounds, metrics, layout)) = layout {
-                if session.terminal.dimensions()? != (layout.cols, layout.rows) {
-                    let prior_scrollbar = session.terminal.scrollbar().ok();
-                    let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
+                let prior_scrollbar = session.terminal.scrollbar().ok();
+                let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
+                    let max_offset = sb.total.saturating_sub(sb.len);
+                    max_offset == 0
+                        || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
+                });
+                let prior_scroll_ratio = if is_at_bottom {
+                    None
+                } else {
+                    prior_scrollbar.and_then(|sb| {
                         let max_offset = sb.total.saturating_sub(sb.len);
-                        max_offset == 0
-                            || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
-                    });
-                    let prior_scroll_ratio = if is_at_bottom {
-                        None
-                    } else {
-                        prior_scrollbar.and_then(|sb| {
-                            let max_offset = sb.total.saturating_sub(sb.len);
-                            if max_offset > 0 {
-                                Some(sb.offset as f64 / max_offset as f64)
-                            } else {
-                                None
-                            }
-                        })
-                    };
+                        if max_offset > 0 {
+                            Some(sb.offset as f64 / max_offset as f64)
+                        } else {
+                            None
+                        }
+                    })
+                };
 
+                if session.terminal.dimensions()? != (layout.cols, layout.rows) {
                     session.terminal.resize(
                         layout.cols,
                         layout.rows,
@@ -1176,6 +1181,10 @@ impl NativeTerminalSurfaceHostState {
                             .terminal
                             .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                     }
+                } else if is_at_bottom {
+                    let _ = session
+                        .terminal
+                        .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 }
                 session.layout = Some(layout);
                 session.logical_bounds = Some(bounds);

@@ -100,7 +100,7 @@ pub fn capture_render_snapshot(
             0
         },
         wide_tail,
-        visible,
+        visible: visible && viewport_has_value,
         blinking,
         visual_style: CursorVisualStyle::try_from(raw_cursor.visual_style)?,
     };

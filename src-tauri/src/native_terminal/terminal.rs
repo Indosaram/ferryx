@@ -676,6 +676,27 @@ mod tests {
     }
 
     #[test]
+    fn off_viewport_cursor_suppresses_visibility() {
+        let mut terminal = NativeTerminal::new(80, 5).expect("create terminal");
+        for i in 0..20 {
+            terminal.feed_str(&format!("line {}\r\n", i)).expect("feed lines");
+        }
+        let snapshot_bottom = terminal.render_snapshot().expect("snapshot bottom");
+        assert!(snapshot_bottom.cursor.visible, "cursor at bottom should be visible");
+
+        terminal
+            .scroll_viewport(crate::native_terminal::ScrollViewport::Top)
+            .expect("scroll top");
+        let snapshot_top = terminal.render_snapshot().expect("snapshot top");
+        assert!(
+            !snapshot_top.cursor.visible,
+            "cursor outside visible viewport must have visible=false"
+        );
+        assert_eq!(snapshot_top.cursor.x, 0);
+        assert_eq!(snapshot_top.cursor.y, 0);
+    }
+
+    #[test]
     fn native_terminal_ffi_probe_osc_2_reports_title_change_and_value() {
         let mut terminal = NativeTerminal::new(80, 24).expect("create live native terminal");
         assert!(
