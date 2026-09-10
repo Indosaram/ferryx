@@ -156,7 +156,10 @@ const PAIR_USAGE: &str = "expected `ferryx pair <list|generate|--generate-pin|ap
 /// Parses a pair subcommand (`list`, `generate`, `--generate-pin`, `approve <pin>`)
 /// starting at `args[subcommand_index]`. Shared by both `ferryx pair <...>` and
 /// `ferryx remote pair <...>`.
-fn parse_pair_subcommand(args: &[String], subcommand_index: usize) -> Result<PairCliCommand, String> {
+fn parse_pair_subcommand(
+    args: &[String],
+    subcommand_index: usize,
+) -> Result<PairCliCommand, String> {
     match args.get(subcommand_index).map(String::as_str) {
         Some("list") => Ok(PairCliCommand::List),
         Some("--generate-pin") | Some("generate") => Ok(PairCliCommand::GeneratePin),
@@ -186,7 +189,7 @@ where
     parse_pair_subcommand(&args, 2)
 }
 
-fn remote_auth_manager() -> ferryx_lib::remote::AuthManager {
+fn remote_auth_manager() -> Result<ferryx_lib::remote::AuthManager, String> {
     let data_dir = std::env::var_os("FERRYX_DATA_DIR")
         .map(std::path::PathBuf::from)
         .map(|dir| dir.join("remote"))
@@ -196,30 +199,28 @@ fn remote_auth_manager() -> ferryx_lib::remote::AuthManager {
                 std::env::var_os("LOCALAPPDATA")
                     .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
                     .or_else(|| {
-                        std::env::var_os("USERPROFILE").map(|dir| {
-                            std::path::PathBuf::from(dir)
-                                .join(".ferryx")
-                                .join("remote")
-                        })
+                        std::env::var_os("USERPROFILE")
+                            .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
                     })
             }
             #[cfg(not(windows))]
             {
-                std::env::var_os("HOME").map(|dir| {
-                    std::path::PathBuf::from(dir)
-                        .join(".ferryx")
-                        .join("remote")
-                })
+                std::env::var_os("HOME")
+                    .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
             }
         });
-    let auth_path = data_dir.map(|dir| dir.join("remote-auth.json"));
-    ferryx_lib::remote::AuthManager::with_persistence(auth_path)
+    let auth_path = data_dir
+        .ok_or_else(|| "Cannot persist pairing state: set FERRYX_DATA_DIR".to_string())?
+        .join("remote-auth.json");
+    Ok(ferryx_lib::remote::AuthManager::with_persistence(Some(
+        auth_path,
+    )))
 }
 
 pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
+    let manager = remote_auth_manager()?;
     match command {
         PairCliCommand::List => {
-            let manager = remote_auth_manager();
             let devices = manager.list_devices();
             if devices.is_empty() {
                 println!("No paired devices");
@@ -231,21 +232,18 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             Ok(())
         }
         PairCliCommand::GeneratePin => {
-            let manager = remote_auth_manager();
             let pin = manager.create_pairing_code(ferryx_lib::remote::DevicePermission::Control);
             println!("{pin}");
+            eprintln!("Pairing PIN saved; valid for 60 seconds.");
             Ok(())
         }
-        PairCliCommand::Approve { pin } => {
-            let manager = remote_auth_manager();
-            match manager.approve_pairing_code_cli(&pin) {
-                Ok(_device) => {
-                    println!("Pairing approved for {pin}");
-                    Ok(())
-                }
-                Err(error) => Err(format!("Failed to approve pairing: {error}")),
+        PairCliCommand::Approve { pin } => match manager.approve_pairing_code_cli(&pin) {
+            Ok(_device) => {
+                println!("Pairing approved for {pin}; ready for remote client exchange");
+                Ok(())
             }
-        }
+            Err(error) => Err(format!("Failed to approve pairing: {error}")),
+        },
     }
 }
 
@@ -296,20 +294,14 @@ fn remote_state_dir() -> Option<std::path::PathBuf> {
                 std::env::var_os("LOCALAPPDATA")
                     .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
                     .or_else(|| {
-                        std::env::var_os("USERPROFILE").map(|dir| {
-                            std::path::PathBuf::from(dir)
-                                .join(".ferryx")
-                                .join("remote")
-                        })
+                        std::env::var_os("USERPROFILE")
+                            .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
                     })
             }
             #[cfg(not(windows))]
             {
-                std::env::var_os("HOME").map(|dir| {
-                    std::path::PathBuf::from(dir)
-                        .join(".ferryx")
-                        .join("remote")
-                })
+                std::env::var_os("HOME")
+                    .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
             }
         })
 }
@@ -366,7 +358,10 @@ pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
                     serde_json::to_string(&output).map_err(|error| error.to_string())?
                 );
             } else {
-                println!("status={} port={} mode={}", output.status, output.port, output.mode);
+                println!(
+                    "status={} port={} mode={}",
+                    output.status, output.port, output.mode
+                );
             }
             Ok(())
         }

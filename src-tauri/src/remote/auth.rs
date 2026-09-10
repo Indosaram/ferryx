@@ -1,4 +1,4 @@
-use parking_lot::RwLock;
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,10 +32,42 @@ pub struct DeviceInfo {
     pub revoked: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct PairingCode {
     _code: String,
+    #[serde(with = "persisted_instant")]
     created_at: Instant,
     default_permission: DevicePermission,
+    #[serde(default)]
+    approved_token: Option<String>,
+}
+
+// Preserve monotonic expiry in-process while storing portable wall-clock timestamps.
+mod persisted_instant {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        instant: &Instant,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let created = std::time::SystemTime::now()
+            .checked_sub(instant.elapsed())
+            .unwrap_or(std::time::UNIX_EPOCH)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        created.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Instant, D::Error> {
+        let created = Duration::deserialize(deserializer)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let age = now.checked_sub(created).unwrap_or(PAIRING_EXPIRY);
+        Ok(Instant::now() - age.min(PAIRING_EXPIRY))
+    }
 }
 
 #[derive(Default)]
@@ -64,11 +96,14 @@ impl PairingWindow {
 struct PersistedAuthState {
     devices: HashMap<String, DeviceInfo>,
     tokens: HashMap<String, String>,
+    #[serde(default)]
+    pairing_codes: HashMap<String, PairingCode>,
 }
 
 #[derive(Clone)]
 pub struct AuthManager {
     pairing_window: Arc<RwLock<PairingWindow>>,
+    transaction: Arc<Mutex<()>>,
     devices: Arc<RwLock<HashMap<String, DeviceInfo>>>,
     /// Device Bearer Tokens: long-lived credentials issued to paired remote
     /// control clients. Maps token -> owning device id.
@@ -101,7 +136,11 @@ impl AuthManager {
             .unwrap_or_default();
         prune_revoked_devices(&mut persisted);
         Self {
-            pairing_window: Arc::new(RwLock::new(PairingWindow::default())),
+            pairing_window: Arc::new(RwLock::new(PairingWindow {
+                codes: persisted.pairing_codes,
+                ..PairingWindow::default()
+            })),
+            transaction: Arc::new(Mutex::new(())),
             devices: Arc::new(RwLock::new(persisted.devices)),
             tokens: Arc::new(RwLock::new(persisted.tokens)),
             machine_tokens: Arc::new(RwLock::new(std::collections::HashSet::new())),
@@ -143,6 +182,7 @@ impl AuthManager {
     }
 
     pub fn create_pairing_code(&self, default_permission: DevicePermission) -> String {
+        let _transaction = self.begin_transaction();
         let pin: u32 = rand::thread_rng().gen_range(100_000..=999_999);
         let code = format!("{pin:06}");
 
@@ -154,8 +194,11 @@ impl AuthManager {
                 _code: code.clone(),
                 created_at: Instant::now(),
                 default_permission,
+                approved_token: None,
             },
         );
+        drop(window);
+        self.persist_best_effort();
         code
     }
 
@@ -164,6 +207,7 @@ impl AuthManager {
         code: &str,
         device_name: &str,
     ) -> Result<(String, DeviceInfo), AuthError> {
+        let _transaction = self.begin_transaction();
         let pairing = {
             // Lookup, failure accounting and single-use consumption share one
             // lock. No concurrent request can spend the same budget slot/code.
@@ -182,6 +226,15 @@ impl AuthManager {
             }
             pairing
         };
+
+        if let Some(token) = pairing.approved_token {
+            let device_id = self.tokens.read().get(&token).cloned();
+            let info = device_id.and_then(|id| self.devices.read().get(&id).cloned());
+            self.persist_best_effort();
+            return info
+                .map(|info| (token, info))
+                .ok_or(AuthError::Unauthorized);
+        }
 
         let device_id = uuid::Uuid::new_v4().to_string();
         let token: String = rand::thread_rng()
@@ -207,15 +260,15 @@ impl AuthManager {
     }
 
     /// Approves a pairing PIN from a headless/CLI context (e.g. `ferryx pair approve <pin>`).
-    /// Validates the 6-digit numeric code against active pairing codes and registers an
-    /// approved CLI device, mirroring [`Self::exchange_pairing_code`] but without issuing a
-    /// bearer token, since CLI approval only needs to confirm the device was registered.
+    /// Persists an approved device and its bearer token with the PIN so a remote
+    /// client can retrieve that same token in a single-use exchange.
     pub fn approve_pairing_code_cli(&self, code: &str) -> Result<DeviceInfo, AuthError> {
         if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
             return Err(AuthError::InvalidPairingCode);
         }
 
-        let pairing = {
+        let _transaction = self.begin_transaction();
+        let mut pairing = {
             let mut window = self.pairing_window.write();
             window.refresh(Instant::now());
             if window.failures >= PAIRING_FAILURE_BUDGET {
@@ -231,6 +284,16 @@ impl AuthManager {
             }
             pairing
         };
+
+        if let Some(token) = &pairing.approved_token {
+            let device_id = self.tokens.read().get(token).cloned();
+            let info = device_id.and_then(|id| self.devices.read().get(&id).cloned());
+            self.pairing_window
+                .write()
+                .codes
+                .insert(code.to_string(), pairing);
+            return info.ok_or(AuthError::Unauthorized);
+        }
 
         let device_id = uuid::Uuid::new_v4().to_string();
         let token: String = rand::thread_rng()
@@ -250,12 +313,18 @@ impl AuthManager {
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
-        self.tokens.write().insert(token, device_id);
+        self.tokens.write().insert(token.clone(), device_id);
+        pairing.approved_token = Some(token);
+        self.pairing_window
+            .write()
+            .codes
+            .insert(code.to_string(), pairing);
         self.persist_best_effort();
         Ok(info)
     }
 
     pub fn validate_token(&self, token: &str) -> Result<DeviceInfo, AuthError> {
+        let _transaction = self.begin_transaction();
         let device_id = {
             let tokens = self.tokens.read();
             tokens.get(token).cloned()
@@ -303,6 +372,7 @@ impl AuthManager {
     /// from [`Self::list_devices`] immediately instead of lingering as a
     /// revoked entry.
     pub fn revoke_device(&self, device_id: &str) -> bool {
+        let _transaction = self.begin_transaction();
         let changed = {
             let mut devices = self.devices.write();
             if devices.remove(device_id).is_some() {
@@ -340,6 +410,33 @@ impl AuthManager {
         }
     }
 
+    // A separate lock file survives atomic replacement of the JSON inode.
+    // Serialize reload/mutation/save across both clones and independent processes.
+    fn begin_transaction(&self) -> (MutexGuard<'_, ()>, Option<std::fs::File>) {
+        let guard = self.transaction.lock();
+        let file = self.persistence_path.as_deref().map(|path| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create remote auth directory");
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path.with_extension("lock"))
+                .expect("open remote auth lock");
+            file.lock().expect("lock remote auth state");
+            if let Some(mut state) = load_persisted_auth(path) {
+                prune_revoked_devices(&mut state);
+                self.pairing_window.write().codes = state.pairing_codes;
+                *self.devices.write() = state.devices;
+                *self.tokens.write() = state.tokens;
+            }
+            file
+        });
+        (guard, file)
+    }
+
     fn persist_best_effort(&self) {
         let Some(path) = self.persistence_path.as_deref() else {
             return;
@@ -348,6 +445,7 @@ impl AuthManager {
         let snapshot = PersistedAuthState {
             devices: self.devices.read().clone(),
             tokens: self.tokens.read().clone(),
+            pairing_codes: self.pairing_window.read().codes.clone(),
         };
         if let Err(error) = write_private_json(path, &snapshot) {
             tracing::warn!("failed to persist remote auth state: {error}");
@@ -370,7 +468,9 @@ fn load_persisted_auth(path: &Path) -> Option<PersistedAuthState> {
 /// Drops devices that older builds tombstoned with `revoked: true`, together
 /// with their tokens, so a revoked device never resurfaces in the device list.
 fn prune_revoked_devices(state: &mut PersistedAuthState) {
-    let PersistedAuthState { devices, tokens } = state;
+    let PersistedAuthState {
+        devices, tokens, ..
+    } = state;
     devices.retain(|_, device| !device.revoked);
     tokens.retain(|_, device_id| devices.contains_key(device_id));
 }
@@ -423,6 +523,47 @@ mod security_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cli_pair_cross_process_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-auth.json");
+        let gateway = AuthManager::with_persistence(Some(path.clone()));
+        let generator = AuthManager::with_persistence(Some(path.clone()));
+        let code = generator.create_pairing_code(DevicePermission::View);
+        drop(generator);
+        let approver = AuthManager::with_persistence(Some(path.clone()));
+        let approved = approver.approve_pairing_code_cli(&code).unwrap();
+        let issued_token = load_persisted_auth(&path).unwrap().pairing_codes[&code]
+            .approved_token
+            .clone()
+            .unwrap();
+        assert_eq!(
+            approver.approve_pairing_code_cli(&code).unwrap().id,
+            approved.id
+        );
+        drop(approver);
+        let (token, device) = gateway.exchange_pairing_code(&code, "Phone").unwrap();
+        assert_eq!(token, issued_token);
+        assert_eq!(device.id, approved.id);
+        assert_eq!(device.permission, DevicePermission::View);
+        assert_eq!(gateway.validate_token(&token).unwrap().id, approved.id);
+        let reopened = AuthManager::with_persistence(Some(path.clone()));
+        assert!(matches!(
+            reopened.exchange_pairing_code(&code, "Replay"),
+            Err(AuthError::InvalidPairingCode)
+        ));
+        assert_eq!(reopened.validate_token(&token).unwrap().id, approved.id);
+        let expired = gateway.create_pairing_code(DevicePermission::Control);
+        let mut state = load_persisted_auth(&path).unwrap();
+        state.pairing_codes.get_mut(&expired).unwrap().created_at = Instant::now() - PAIRING_EXPIRY;
+        write_private_json(&path, &state).unwrap();
+        assert!(matches!(
+            reopened.approve_pairing_code_cli(&expired),
+            Err(AuthError::ExpiredPairingCode)
+        ));
+        assert!(gateway.exchange_pairing_code(&expired, "Expired").is_err());
+    }
 
     #[test]
     fn test_cli_pair_approve() {

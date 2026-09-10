@@ -143,21 +143,84 @@ fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, Strin
     Ok(addrs)
 }
 
-#[cfg(not(unix))]
-fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
-    Err("interface enumeration is not supported on this platform".into())
+/// Ask the routing table for its source address. UDP connect does not send
+/// packets, so this needs a route, not a response from the destination.
+fn routed_ipv4_address(destination: &str) -> Result<std::net::Ipv4Addr, String> {
+    let probe = || -> std::io::Result<std::net::SocketAddr> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        socket.connect(destination)?;
+        socket.local_addr()
+    };
+    match probe().map_err(|error| format!("route probe to {destination} failed: {error}"))? {
+        std::net::SocketAddr::V4(addr)
+            if !addr.ip().is_unspecified() && !addr.ip().is_loopback() =>
+        {
+            Ok(*addr.ip())
+        }
+        _ => Err(format!("route probe to {destination} found no external IPv4 address")),
+    }
 }
 
-/// Default [`InterfaceResolver`] backed by the operating system's network
-/// interface list.
+#[cfg(any(not(unix), test))]
+fn portable_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    let mut addresses = Vec::new();
+    let mut errors = Vec::new();
+    for destination in ["8.8.8.8:80", "100.100.100.100:80"] {
+        match routed_ipv4_address(destination) {
+            Ok(address) if !addresses.contains(&address) => addresses.push(address),
+            Ok(_) => {}
+            Err(error) => errors.push(error),
+        }
+    }
+    if addresses.is_empty() {
+        Err(errors.join("; "))
+    } else {
+        for error in errors {
+            tracing::debug!(%error, "optional interface route probe unavailable");
+        }
+        Ok(addresses)
+    }
+}
+
+#[cfg(not(unix))]
+fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    portable_ipv4_interface_addresses()
+}
+
+fn select_local_network_address(
+    addresses: impl IntoIterator<Item = std::net::Ipv4Addr>,
+    routed: Option<std::net::Ipv4Addr>,
+) -> Option<std::net::Ipv4Addr> {
+    addresses
+        .into_iter()
+        .chain(routed)
+        .filter(|addr| {
+            !addr.is_unspecified()
+                && !addr.is_loopback()
+                && !addr.is_link_local()
+                && !addr.is_multicast()
+                && !addr.is_broadcast()
+                && !is_tailscale_cgnat_address(addr)
+        })
+        .min_by_key(|addr| (Some(*addr) != routed, !addr.is_private()))
+}
+
+/// Default [`InterfaceResolver`] backed by routing probes and, on Unix, the
+/// operating system's active interface list.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemInterfaceResolver;
 
 impl InterfaceResolver for SystemInterfaceResolver {
     fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
-        enumerate_ipv4_interface_addresses()?
-            .into_iter()
-            .find(|addr| !is_tailscale_cgnat_address(addr))
+        match routed_ipv4_address("8.8.8.8:80") {
+            Ok(routed) => {
+                if let Some(address) = select_local_network_address([], Some(routed)) {
+                    return Ok(address);
+                }
+            }
+            Err(error) => tracing::debug!(%error, "using interface list for LAN resolution"),
+        }
+        select_local_network_address(enumerate_ipv4_interface_addresses()?, None)
             .ok_or_else(|| "no active local network IPv4 interface found".into())
     }
 
@@ -647,6 +710,51 @@ mod tests {
         assert_eq!(
             reopened_config.relay_url,
             Some("https://relay.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_interface_resolver_portable() {
+        // This smoke test requires an active IPv4 network, but no remote server
+        // or Internet response. Exercise the Windows probe path on Unix too.
+        let addresses = portable_ipv4_interface_addresses().expect("active IPv4 route");
+        assert!(!addresses.is_empty());
+        let address = SystemInterfaceResolver
+            .local_network_address()
+            .expect("active local network IPv4 interface");
+        assert!(!address.is_unspecified());
+        assert!(!address.is_loopback());
+        assert!(!is_tailscale_cgnat_address(&address));
+        std::net::UdpSocket::bind((address, 0)).expect("resolved address is locally bindable");
+    }
+
+    #[test]
+    fn test_interface_resolver_multihoming() {
+        use std::net::Ipv4Addr;
+
+        let bridge = Ipv4Addr::new(172, 17, 0, 1);
+        let lan = Ipv4Addr::new(192, 168, 1, 42);
+        let public = Ipv4Addr::new(203, 0, 113, 5);
+        let tailscale = Ipv4Addr::new(100, 88, 12, 4);
+        assert_eq!(
+            select_local_network_address([bridge, lan, public], Some(lan)),
+            Some(lan)
+        );
+        assert_eq!(
+            select_local_network_address([bridge, public], Some(public)),
+            Some(public)
+        );
+        assert_eq!(select_local_network_address([public, lan], None), Some(lan));
+        assert_eq!(
+            select_local_network_address([tailscale, lan], Some(tailscale)),
+            Some(lan)
+        );
+        assert_eq!(
+            select_local_network_address(
+                [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST, tailscale],
+                None
+            ),
+            None
         );
     }
 
