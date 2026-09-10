@@ -1301,6 +1301,10 @@ mod tests {
     /// keeps the server task alive for the duration of the test.
     async fn spawn_test_relay() -> (String, tokio::task::JoinHandle<()>) {
         let state = RelayState::new(vec!["test-machine-token".to_string()]);
+        spawn_test_relay_with_state(state).await
+    }
+
+    async fn spawn_test_relay_with_state(state: RelayState) -> (String, tokio::task::JoinHandle<()>) {
         let router = relay_router(state);
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -1327,6 +1331,179 @@ mod tests {
 
     fn ticket_query(ticket: &str) -> Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection> {
         Ok(Query(SocketQuery { ticket: Some(ticket.into()) }))
+    }
+
+    async fn register_security_pin(socket: &mut TestSocket, machine: &str) {
+        let registration = security_registration(machine);
+        socket.send(TMessage::Text(serde_json::to_string(&registration).unwrap().into())).await.unwrap();
+        let ack: RegisterPairingPinAck = receive_json(socket).await;
+        assert_eq!(ack.machine_id, machine);
+        assert_eq!(ack.pin, registration.pin);
+        assert_eq!(ack.status, "ready");
+    }
+
+    fn security_registration(machine: &str) -> RegisterPairingPin {
+        RegisterPairingPin {
+            machine_id: machine.into(),
+            pin: "123456".into(),
+            pairing_token: "security-pairing-secret".into(),
+            expires_at: current_time_secs() + 3600,
+        }
+    }
+
+    async fn security_claim(state: &RelayState, pin: &str) -> StatusCode {
+        let request = Request::builder().method(Method::POST)
+            .uri("/api/v1/pair/exchange")
+            .body(Body::from(serde_json::json!({"pin": pin, "deviceName": "security-client"}).to_string())).unwrap();
+        // Supply the accepted peer address, not an untrusted forwarding header.
+        let peer = Some(axum::Extension(ConnectInfo("192.0.2.1:12345".parse().unwrap())));
+        match timeout(Duration::from_secs(5), pair_exchange_handler(State(state.clone()), peer, request)).await.unwrap() {
+            Ok(response) => response.status(),
+            Err(status) => status,
+        }
+    }
+
+    async fn assert_socket_rejected(base: &str, path: &str, status: StatusCode) {
+        let error = timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(format!("{base}{path}")))
+            .await.unwrap().unwrap_err();
+        assert!(matches!(error, tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == status));
+    }
+
+    #[tokio::test]
+    async fn test_security_machine_id_hijack_rejection() {
+        let state = RelayState::new(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let owner = identity(31, "machine_alpha");
+        let (mut original, auth) = authenticate(&base, &owner, false, false).await;
+        assert!(auth.success);
+        register_security_pin(&mut original, "machine_alpha").await;
+        let generation = state.inner.control_channels.lock()["machine_alpha"].generation;
+        let (mut attacker, rejection) = authenticate(&base, &identity(32, "machine_alpha"), false, false).await;
+        assert!(!rejection.success);
+        // Authentication happens after HTTP 101, so rejection is a protocol error, not HTTP 401.
+        assert!(rejection.error.unwrap().contains("Machine ID already claimed"));
+        assert!(matches!(timeout(Duration::from_secs(5), attacker.next()).await.unwrap(), Some(Ok(TMessage::Close(_)))));
+        assert_eq!(state.inner.machine_public_keys.lock()["machine_alpha"], owner.public_key);
+        assert_eq!(state.inner.control_channels.lock()["machine_alpha"].generation, generation);
+        assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Ready);
+        let notice = allocate(&mut original).await;
+        assert!(state.inner.pending_sessions.lock().contains_key(&notice.session_id));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_security_fleet_pin_brute_force_lockout() {
+        let state = RelayState::new(vec![]);
+        let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
+        assert!(state.register_pairing("machine_alpha", generation, security_registration("machine_alpha")));
+        for pin in ["000001", "000002", "000003", "000004", "000005"] {
+            assert_eq!(security_claim(&state, pin).await, StatusCode::NOT_FOUND);
+        }
+        // The current pairing API represents lockout with 401 (control admission uses 429).
+        assert_eq!(security_claim(&state, "123456").await, StatusCode::UNAUTHORIZED);
+        let admission = state.inner.pairing_admission.lock();
+        let tracker = &admission[&"192.0.2.1".parse::<IpAddr>().unwrap()];
+        assert_eq!(tracker.failures, 5);
+        assert!(tracker.locked_until.is_some());
+        assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Ready);
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        assert!(matches!(notices.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn test_security_expired_pin_claim_rejected() {
+        let state = RelayState::new(vec![]);
+        let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
+        let mut expired = security_registration("machine_alpha");
+        expired.expires_at = current_time_secs() - 10;
+        assert!(!state.register_pairing("machine_alpha", generation, expired));
+        assert_eq!(security_claim(&state, "123456").await, StatusCode::NOT_FOUND);
+        assert!(state.register_pairing("machine_alpha", generation, security_registration("machine_alpha")));
+        // Exercise claim-time expiration as well as registration-time rejection, without waiting.
+        state.inner.pairings.lock().get_mut("123456").unwrap().registration.expires_at = current_time_secs() - 10;
+        assert_eq!(security_claim(&state, "123456").await, StatusCode::NOT_FOUND);
+        assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Ready);
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        assert!(matches!(notices.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn test_security_role_swap_prevention() {
+        let state = RelayState::new(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(33, "machine_alpha"), false, false).await;
+        assert!(auth.success);
+        register_security_pin(&mut daemon, "machine_alpha").await;
+        for path in ["/host/machine_alpha/api/v1/events", "/host/machine_alpha/api/v1/terminal/t1"] {
+            assert_socket_rejected(&base, path, StatusCode::UNAUTHORIZED).await;
+        }
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control")).await.unwrap();
+        let _: ControlChallenge = receive_json(&mut client).await;
+        // Trigger explicit rejection, rather than waiting for authentication timeout.
+        client.send(TMessage::Text(r#"{"machineId":"public-client","publicKey":"","timestamp":0}"#.into())).await.unwrap();
+        let rejection: ControlAuthResponse = receive_json(&mut client).await;
+        assert!(!rejection.success);
+        assert!(rejection.error.is_some());
+        assert!(matches!(timeout(Duration::from_secs(5), client.next()).await.unwrap(), Some(Ok(TMessage::Close(_)))));
+        assert_socket_rejected(&base, "/tunnel/data/unissued-session", StatusCode::NOT_FOUND).await;
+        assert_eq!(state.inner.control_channels.lock().len(), 1);
+        assert!(!state.inner.machine_public_keys.lock().contains_key("public-client"));
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_security_concurrent_two_daemon_isolation() {
+        let state = RelayState::new(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let first = identity(34, "daemon_1");
+        let second = identity(35, "daemon_2");
+        let ((mut daemon_1, a), (mut daemon_2, b)) = tokio::join!(
+            authenticate(&base, &first, false, false),
+            authenticate(&base, &second, false, false),
+        );
+        assert!(a.success && b.success);
+        register_security_pin(&mut daemon_1, "daemon_1").await;
+        allocate(&mut daemon_2).await; // Registration barrier on the second real socket.
+        // Observe dispatch at the actual mpsc boundary. Retain the original sender so
+        // daemon_2 remains connected; no elapsed-time absence assertion is needed.
+        let (capture, mut unexpected) = mpsc::channel(MAX_PENDING_SESSIONS);
+        let original_sender = {
+            let mut channels = state.inner.control_channels.lock();
+            std::mem::replace(&mut channels.get_mut("daemon_2").unwrap().tx, capture)
+        };
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let request = client.post(format!("{}/api/v1/pair/exchange", base.replace("ws://", "http://")))
+            .body(r#"{"pin":"123456","deviceName":"isolated-client"}"#).send();
+        let daemon = async {
+            let notice: IncomingSessionNotice = receive_json(&mut daemon_1).await;
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            let frame = timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap();
+            let raw = String::from_utf8(frame.into_data().to_vec()).unwrap();
+            assert!(raw.starts_with("POST /api/v1/pair/exchange HTTP/1.1\r\n"));
+            let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["code"], "security-pairing-secret");
+            assert_eq!(body["deviceName"], "isolated-client");
+            data.send(TMessage::Binary(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\ndaemon_1".to_vec().into())).await.unwrap();
+            let _ = timeout(Duration::from_secs(5), data.next()).await.unwrap();
+        };
+        let (response, ()) = timeout(Duration::from_secs(5), async { tokio::join!(request, daemon) }).await.unwrap();
+        let response = response.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "daemon_1");
+        assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Consumed);
+        for target in ["/api/v1/events", "/api/v1/terminal/t1"] {
+            let response = client.post(format!("{}/host/daemon_1/api/v1/socket-ticket", base.replace("ws://", "http://")))
+                .header("content-type", "application/json").body(serde_json::json!({"target": target}).to_string()).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let ticket: SocketTicketResponse = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            assert_socket_rejected(&base, &format!("/host/daemon_2{target}?ticket={}", ticket.ticket), StatusCode::UNAUTHORIZED).await;
+        }
+        // HTTP completion establishes that all synchronous dispatch decisions finished.
+        assert!(matches!(unexpected.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        state.inner.control_channels.lock().get_mut("daemon_2").unwrap().tx = original_sender;
+        allocate(&mut daemon_2).await; // The unaffected daemon remains usable.
+        server.abort();
     }
 
     #[tokio::test]
