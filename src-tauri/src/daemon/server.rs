@@ -199,6 +199,35 @@ pub fn resolve_binary_identity() -> (Option<String>, Option<u64>) {
     resolve_binary_identity_with(std::env::current_exe, get_file_mtime_ms)
 }
 
+/// Resolve the executable a daemon upgrade or handover should launch.
+///
+/// A daemon that survived an in-place application replacement keeps executing from an
+/// unlinked inode, so `current_exe()` can name a path that no longer exists. Launching that
+/// path fails, and it fails *after* the canonical listener has already been handed over,
+/// which would leave no daemon serving either socket. Only ever resolve to a file that
+/// exists right now; the caller must treat `None` as "upgrade unavailable".
+pub fn resolve_upgrade_target_exe_with<FExe>(
+    explicit: Option<&str>,
+    get_exe: FExe,
+) -> Option<PathBuf>
+where
+    FExe: Fn() -> std::io::Result<PathBuf>,
+{
+    if let Some(path) = explicit.map(PathBuf::from) {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    match get_exe() {
+        Ok(exe) if exe.is_file() => Some(exe),
+        _ => None,
+    }
+}
+
+pub fn resolve_upgrade_target_exe(explicit: Option<&str>) -> Option<PathBuf> {
+    resolve_upgrade_target_exe_with(explicit, std::env::current_exe)
+}
+
 #[cfg(unix)]
 pub fn clear_cloexec(fd: std::os::unix::io::RawFd) -> Result<(), std::io::Error> {
     // SAFETY: Foreign Function Interface to fcntl.
@@ -2019,8 +2048,12 @@ impl DaemonServer {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null());
             if let Err(e) = cmd.spawn() {
-                tracing::error!("Failed to spawn new daemon for handover: {e}");
-                return;
+                // The canonical listener is already gone by this point. Abandoning the loop
+                // here would strand every live session with no reachable socket, so keep
+                // serving the legacy peer instead of returning.
+                tracing::error!(
+                    "Failed to spawn new daemon for handover: {e}; continuing to serve legacy socket"
+                );
             }
 
             loop {
@@ -2042,12 +2075,18 @@ impl DaemonServer {
         self: &Arc<Self>,
         new_binary_path: Option<String>,
     ) -> DaemonResponse {
-        let target_exe = new_binary_path
-            .as_deref()
-            .map(PathBuf::from)
-            .filter(|p| p.is_file())
-            .or_else(|| std::env::current_exe().ok())
-            .unwrap_or_else(|| PathBuf::from("ferryx"));
+        let Some(target_exe) = resolve_upgrade_target_exe(new_binary_path.as_deref()) else {
+            tracing::error!(
+                "Daemon upgrade aborted: no launchable executable on disk (requested {:?}, current_exe {:?})",
+                new_binary_path,
+                std::env::current_exe().ok()
+            );
+            return DaemonResponse::Error {
+                message: "Daemon upgrade unavailable: the running daemon's executable no longer \
+                          exists on disk and no valid newBinaryPath was supplied"
+                    .into(),
+            };
+        };
 
         // If no explicit new binary path was provided by the GUI, check if upgrade is needed
         if new_binary_path.is_none() {
@@ -2985,6 +3024,40 @@ mod tests {
     use super::*;
     use crate::terminal::output_hub::OutputChunk;
     use tempfile::tempdir;
+
+    #[test]
+    fn resolve_upgrade_target_exe_only_resolves_paths_that_exist() {
+        let live = std::env::current_exe().expect("test binary path");
+        let deleted = PathBuf::from("/nonexistent/Ferryx.app.bak-deleted/Contents/MacOS/ferryx");
+
+        let explicit_wins = {
+            let live = live.clone();
+            resolve_upgrade_target_exe_with(live.to_str(), || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "current_exe unavailable",
+                ))
+            })
+        };
+        assert_eq!(explicit_wins.as_deref(), Some(live.as_path()));
+
+        let falls_back = {
+            let live = live.clone();
+            resolve_upgrade_target_exe_with(deleted.to_str(), move || Ok(live.clone()))
+        };
+        assert_eq!(falls_back.as_deref(), Some(live.as_path()));
+
+        // An orphaned daemon: current_exe names an unlinked image and the caller supplied
+        // nothing usable. Resolving here would exec a path that cannot be launched.
+        let orphaned = {
+            let deleted = deleted.clone();
+            resolve_upgrade_target_exe_with(None, move || Ok(deleted.clone()))
+        };
+        assert!(
+            orphaned.is_none(),
+            "must not resolve to an executable that no longer exists"
+        );
+    }
 
     struct AbortTask(tokio::task::JoinHandle<()>);
 
