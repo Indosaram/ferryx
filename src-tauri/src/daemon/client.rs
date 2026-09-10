@@ -295,6 +295,28 @@ pub fn should_request_upgrade(
     }
 }
 
+pub(crate) fn parse_attach_error_response(message: String, session_id: &str) -> IpcError {
+    let prefix = "Session '";
+    let suffix = "' not found";
+    let is_session_not_found = message
+        .strip_prefix(prefix)
+        .and_then(|m| m.strip_suffix(suffix))
+        .is_some_and(|id| id == session_id);
+
+    if is_session_not_found {
+        IpcError::new(
+            IpcErrorCode::SessionNotFound,
+            message,
+        ).with_details(serde_json::json!({
+            "source": "daemon_attach",
+            "kind": "session_not_found",
+            "sessionId": session_id,
+        }))
+    } else {
+        IpcError::new(IpcErrorCode::InternalError, message)
+    }
+}
+
 #[derive(Clone)]
 pub struct DaemonClient {
     socket_path: PathBuf,
@@ -1134,7 +1156,7 @@ impl DaemonClient {
                 })
             }
             DaemonResponse::Error { message } => {
-                Err(IpcError::new(IpcErrorCode::InternalError, message))
+                Err(parse_attach_error_response(message, session_id))
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -2327,6 +2349,42 @@ mod tests {
             Some("daemonSocketTrustValidation")
         );
         assert!(error.message.contains("owned by UID"));
+    }
+
+    #[test]
+    fn test_attach_session_not_found_exact_match() {
+        let err = parse_attach_error_response("Session 'test-id' not found".to_string(), "test-id");
+        assert_eq!(err.code, IpcErrorCode::SessionNotFound);
+        assert_eq!(err.message, "Session 'test-id' not found");
+        let details = err.details.expect("expected details");
+        assert_eq!(details.get("source").and_then(|v| v.as_str()), Some("daemon_attach"));
+        assert_eq!(details.get("kind").and_then(|v| v.as_str()), Some("session_not_found"));
+        assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
+    }
+
+    #[test]
+    fn test_attach_session_not_found_wrong_id() {
+        let err = parse_attach_error_response("Session 'other-id' not found".to_string(), "test-id");
+        assert_eq!(err.code, IpcErrorCode::InternalError);
+        assert_eq!(err.message, "Session 'other-id' not found");
+        assert!(err.details.is_none());
+    }
+
+    #[test]
+    fn test_attach_arbitrary_error_not_session_not_found() {
+        let err = parse_attach_error_response("Internal server error".to_string(), "test-id");
+        assert_eq!(err.code, IpcErrorCode::InternalError);
+        assert_eq!(err.message, "Internal server error");
+        assert!(err.details.is_none());
+    }
+
+    #[test]
+    fn test_attach_malformed_overlapping_not_found_message_does_not_panic() {
+        // "Session ' not found" has length 19; prefix is 9, suffix is 10.
+        // In the old code, slicing [9..19-10] was [9..9] or would panic on shorter overlapping messages.
+        let err = parse_attach_error_response("Session ' not found".to_string(), "test-id");
+        assert_eq!(err.code, IpcErrorCode::InternalError);
+        assert!(err.details.is_none());
     }
 
     #[test]

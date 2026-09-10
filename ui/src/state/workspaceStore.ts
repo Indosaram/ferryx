@@ -184,6 +184,12 @@ export type WorkspaceAction =
   | { type: "SET_TAB_GROUP_RATIO"; path: string; ratio: number }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
   | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle }
+  | {
+      type: "SESSION_BACKEND_UNAVAILABLE";
+      sessionId: string;
+      backendSessionId: string;
+      reason: string;
+    }
   | { type: "SESSION_REMOTE_STATUS"; status: import("../lib/types").SshRecoveryStatus; daemonEpoch?: string | null }
   | {
       type: "SET_RECONNECT_LIFECYCLE";
@@ -1306,6 +1312,14 @@ export function useWorkspaceStore({
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
+    markBackendSessionUnavailable: (sessionId: string, backendSessionId: string, reason: string) => {
+      dispatch({
+        type: "SESSION_BACKEND_UNAVAILABLE",
+        sessionId,
+        backendSessionId,
+        reason,
+      });
+    },
     updateSessionTitleActivity,
     subscribeTerminalBell,
     subscribeActivityNotification,
@@ -2062,6 +2076,45 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           const tabId = findTabIdForSession(nextState, sessionId);
           if (!tabId) continue;
           nextState = applySessionActivity(nextState, tabId, sessionId, { ...current, state: "done" });
+        }
+      }
+      return nextState;
+    }
+    case "SESSION_BACKEND_UNAVAILABLE": {
+      const session = state.sessions[action.sessionId];
+      if (!session) return state;
+      if (session.backendSessionId !== action.backendSessionId) return state;
+      if (isRemoteWorkspaceId(session.workspaceId)) {
+        return {
+          ...state,
+          sessions: {
+            ...state.sessions,
+            [action.sessionId]: {
+              ...session,
+              remoteConnectionState: "reconnecting",
+              remoteGeneration: null,
+            },
+          },
+        };
+      }
+      const updatedSession: TerminalSession = {
+        ...session,
+        lifecycle: "exited",
+        backendSessionId: null,
+        reconnectLifecycle: "idle",
+      };
+      let nextState: WorkspaceState = {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [action.sessionId]: updatedSession,
+        },
+      };
+      const current = nextState.activityBySessionId?.[action.sessionId];
+      if (current && current.state !== "done") {
+        const tabId = findTabIdForSession(nextState, action.sessionId);
+        if (tabId) {
+          nextState = applySessionActivity(nextState, tabId, action.sessionId, { ...current, state: "done" });
         }
       }
       return nextState;

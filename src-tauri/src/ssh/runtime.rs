@@ -156,11 +156,14 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let marker = format!("FERRYX_ENV_V1_{nonce}");
-    for executor in [
+    let executors = [
         RemoteExecutor::Powershell,
         RemoteExecutor::Pwsh,
         RemoteExecutor::Sh,
-    ] {
+    ];
+    let mut last_error: Option<IpcError> = None;
+
+    for (index, &executor) in executors.iter().enumerate() {
         let script = match executor {
             RemoteExecutor::Sh => format!(
                 "os=$(uname -s) || exit; case \"$os\" in Linux|Darwin|FreeBSD|OpenBSD|NetBSD) ;; *) exit 2;; esac; \
@@ -175,14 +178,27 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
         };
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            if let Some(err) = last_error {
+                return Err(err);
+            }
             return Err(error(
                 IpcErrorCode::IoError,
                 "environment",
                 "SSH environment detection timed out",
             ));
         }
+
+        // Divide remaining deadline among executors (e.g. up to 4s per probe)
+        // so that a hanging/non-responsive executor does not starve subsequent executors.
+        let probes_left = (executors.len() - index) as u32;
+        let step_timeout = if probes_left > 1 {
+            remaining.min(Duration::from_secs(4))
+        } else {
+            remaining
+        };
+
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        match direct::bounded_output(&plan, remaining).await {
+        match direct::bounded_output(&plan, step_timeout).await {
             Ok(output) => {
                 let fields = parse_fields(&output, &marker, 5)?;
                 let platform = match (executor, fields[0]) {
@@ -221,21 +237,36 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
                 });
             }
             Err(mut err) => {
-                if err
+                let exit_code = err
                     .details
                     .as_ref()
                     .and_then(|v| v.get("exitCode"))
-                    .and_then(|v| v.as_i64())
-                    .is_none_or(|code| code == 255)
-                {
+                    .and_then(|v| v.as_i64());
+
+                // Exit code 255 indicates a fatal SSH transport failure (e.g. connection refused,
+                // host key verification failure, authentication failure). In that case, subsequent
+                // executor probes will also fail identically, so fail immediately.
+                if exit_code == Some(255) {
                     if let Some(details) = err.details.as_mut() {
                         details["stage"] = "environment".into();
                         details["executor"] = executor.program().into();
                     }
                     return Err(err);
                 }
+
+                // For non-255 errors (e.g. exit code 127 command not found, exit code 2 not supported,
+                // or individual step timeout), record error and fall through to next executor.
+                if let Some(details) = err.details.as_mut() {
+                    details["stage"] = "environment".into();
+                    details["executor"] = executor.program().into();
+                }
+                last_error = Some(err);
             }
         }
+    }
+
+    if let Some(err) = last_error {
+        return Err(err);
     }
     Err(error(
         IpcErrorCode::Unsupported,
@@ -295,5 +326,28 @@ mod tests {
         ] {
             assert!(parse_fields(bytes, "frame", 2).is_err());
         }
+    }
+
+    #[test]
+    fn fatal_transport_error_exit_code_255_is_identified() {
+        let err = error(IpcErrorCode::IoError, "transport", "Connection refused")
+            .with_details(serde_json::json!({ "exitCode": 255 }));
+        let exit_code = err
+            .details
+            .as_ref()
+            .and_then(|v| v.get("exitCode"))
+            .and_then(|v| v.as_i64());
+        assert_eq!(exit_code, Some(255));
+    }
+
+    #[test]
+    fn non_fatal_timeout_has_no_exit_code_and_does_not_match_255() {
+        let err = error(IpcErrorCode::IoError, "transport", "SSH operation timed out");
+        let exit_code = err
+            .details
+            .as_ref()
+            .and_then(|v| v.get("exitCode"))
+            .and_then(|v| v.as_i64());
+        assert_ne!(exit_code, Some(255));
     }
 }

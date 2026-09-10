@@ -26,6 +26,7 @@ import {
   setNativeTerminalAttentionFrame,
 } from "../lib/tauri";
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
+import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
 import { isRemoteWorkspaceId, pasteClipboardImageToRemote } from "../lib/remoteProject";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
@@ -45,6 +46,7 @@ export interface NativeTerminalPaneProps {
   activity?: TerminalActivity;
   needsAttention?: boolean;
   active?: boolean;
+  onBackendSessionUnavailable?: (backendSessionId: string, reason: string) => void;
 }
 
 interface GeometryState {
@@ -471,6 +473,7 @@ export function NativeTerminalPane({
   style,
   needsAttention = false,
   active,
+  onBackendSessionUnavailable,
 }: NativeTerminalPaneProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -531,6 +534,15 @@ export function NativeTerminalPane({
   } | null>(null);
   const retainedPresentation = presentation?.paneIdentity === paneIdentity ? presentation : null;
   const surfaceSessionId = targetSessionId ?? (isExited && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
+  const bindingKey = targetSessionId
+    ? `${targetSessionId}:${session?.daemonEpoch ?? ""}:${session?.remoteGeneration ?? 0}:${session?.remoteConnectionState ?? ""}`
+    : null;
+  const quarantinedBindingRef = useRef<{ readonly sessionId: string; readonly bindingKey: string } | null>(null);
+  useEffect(() => {
+    if (quarantinedBindingRef.current && quarantinedBindingRef.current.bindingKey !== bindingKey) {
+      quarantinedBindingRef.current = null;
+    }
+  }, [bindingKey]);
   const attachmentOwnerRef = useRef<{ readonly sessionId: string; readonly live: boolean } | null>(null);
   useLayoutEffect(() => {
     attachmentOwnerRef.current = surfaceVisible && surfaceSessionId
@@ -755,6 +767,7 @@ export function NativeTerminalPane({
   const performAttach = useCallback((targetId: string, force = false): Promise<void> => {
     const owner = attachmentOwnerRef.current;
     if (!owner?.live || owner.sessionId !== targetId) return Promise.resolve();
+    if (quarantinedBindingRef.current?.sessionId === targetId) return Promise.resolve();
     const initialGeometry = measureGeometry();
     if (initialGeometry) {
       scaleFactorRef.current = initialGeometry.scaleFactor;
@@ -770,6 +783,7 @@ export function NativeTerminalPane({
     const attachOp = force ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
       if (attachmentOwnerRef.current !== owner) return;
+      if (quarantinedBindingRef.current?.sessionId === targetId) return;
       await invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
         ...(initialGeometry
@@ -827,6 +841,13 @@ export function NativeTerminalPane({
       return;
     }
 
+    if (quarantinedBindingRef.current?.sessionId === targetSessionId) {
+      switchDebug("terminal.surface.input.dropped.quarantined", {
+        backendSessionId: targetSessionId,
+      });
+      return;
+    }
+
     const currentSessionId = targetSessionId;
     const owner = surfaceOwnerRef.current;
     const isCurrentOwner = () => owner !== null && owner.sessionId === currentSessionId && surfaceOwnerRef.current === owner;
@@ -834,6 +855,7 @@ export function NativeTerminalPane({
 
     const executeInput = async (isRetry = false): Promise<void> => {
       if (!isCurrentOwner()) return;
+      if (quarantinedBindingRef.current?.sessionId === currentSessionId) return;
       try {
         const receipt = await invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
           sessionId: currentSessionId,
@@ -871,10 +893,20 @@ export function NativeTerminalPane({
           try {
             await recovery;
             if (!isCurrentOwner()) return;
+            if (quarantinedBindingRef.current?.sessionId === currentSessionId) return;
             restoreFocusIfLost();
             await executeInput(true);
           } catch (recoveryError: unknown) {
             if (!isCurrentOwner()) return;
+            const classification = classifyNativeTerminalAttachError(recoveryError, currentSessionId);
+            if (classification.status === "confirmed-missing") {
+              if (bindingKey) {
+                quarantinedBindingRef.current = { sessionId: currentSessionId, bindingKey };
+              }
+              setError(null);
+              onBackendSessionUnavailable?.(currentSessionId, classification.reason);
+              return;
+            }
             switchDebug("terminal.surface.input.recover.failed", {
               backendSessionId: currentSessionId,
               error: String(recoveryError),
@@ -1855,60 +1887,123 @@ export function NativeTerminalPane({
     // flash an alarming error, so hold it until the failure has survived those fast retries
     // (~750ms) or every retry is exhausted.
     const bannerRetryThreshold = 2;
+    let inFlightAttempt: Promise<void> | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let notifiedMissing = false;
 
-    const attemptAttach = async (retryCount = 0, force = false): Promise<void> => {
-      if (!attachmentOwnerRef.current?.live) return;
-      try {
-        await performAttach(targetSessionId, force || retryCount > 0);
-        if (!isSubscribed) return;
-        isAttached = true;
-        switchDebug("terminal.surface.attach.complete", {
-          localSessionId: sessionId,
-          backendSessionId: targetSessionId,
-          subscribed: isSubscribed,
-          retryCount,
-        });
-        refreshScrollbar();
-        reportBounds();
-        if (surfaceOwnerRef.current?.sessionId === targetSessionId) {
-          if (isBackendRebind) {
-            inputRef.current?.focus();
-          } else {
-            restoreFocusIfLost();
-          }
-        }
-      } catch (error: unknown) {
-        if (!isSubscribed) return;
-        isAttached = false;
-        switchDebug("terminal.surface.attach.error", {
-          localSessionId: sessionId,
-          backendSessionId: targetSessionId,
-          error: String(error),
-          retryCount,
-        });
-        reportNativeTerminalIpcFailure("cmd_native_terminal_attach", error);
-        const willRetry = retryCount < maxRetries;
-        if (!willRetry || retryCount >= bannerRetryThreshold) {
-          setError("Failed to attach native terminal");
-        }
-        if (willRetry) {
-          const delay = Math.min(4000, 250 * Math.pow(2, retryCount));
-          retryTimer = setTimeout(() => {
-            if (isSubscribed) {
-              void attemptAttach(retryCount + 1);
-            }
-          }, delay);
-        }
-      }
-    };
-
-    retryAttachRef.current = () => {
-      if (!isSubscribed) return;
+    const cancelRetry = () => {
       if (retryTimer) {
         clearTimeout(retryTimer);
         retryTimer = null;
       }
+    };
+
+    const attemptAttach = async (retryCount = 0, force = false): Promise<void> => {
+      const currentOwner = attachmentOwnerRef.current;
+      if (!currentOwner?.live || currentOwner.sessionId !== targetSessionId) return;
+      if (quarantinedBindingRef.current?.sessionId === targetSessionId) return;
+
+      if (inFlightAttempt) {
+        if (!force) return inFlightAttempt;
+        cancelRetry();
+      }
+
+      let attemptPromise: Promise<void> | null = null;
+      attemptPromise = (async () => {
+        try {
+          await performAttach(targetSessionId, force || retryCount > 0);
+          if (!isSubscribed) return;
+          if (
+            attachmentOwnerRef.current !== currentOwner ||
+            !attachmentOwnerRef.current?.live ||
+            attachmentOwnerRef.current.sessionId !== targetSessionId
+          ) {
+            return;
+          }
+          if (quarantinedBindingRef.current?.sessionId === targetSessionId) return;
+
+          isAttached = true;
+          cancelRetry();
+          switchDebug("terminal.surface.attach.complete", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+            subscribed: isSubscribed,
+            retryCount,
+          });
+          refreshScrollbar();
+          reportBounds();
+          if (surfaceOwnerRef.current?.sessionId === targetSessionId) {
+            if (isBackendRebind) {
+              inputRef.current?.focus();
+            } else {
+              restoreFocusIfLost();
+            }
+          }
+        } catch (error: unknown) {
+          if (!isSubscribed) return;
+          isAttached = false;
+          if (
+            attachmentOwnerRef.current !== currentOwner ||
+            !attachmentOwnerRef.current?.live ||
+            attachmentOwnerRef.current.sessionId !== targetSessionId
+          ) {
+            return;
+          }
+
+          const classification = classifyNativeTerminalAttachError(error, targetSessionId);
+          if (classification.status === "confirmed-missing") {
+            if (bindingKey) {
+              quarantinedBindingRef.current = { sessionId: targetSessionId, bindingKey };
+            }
+            cancelRetry();
+            setError(null);
+            switchDebug("terminal.surface.attach.confirmed_missing", {
+              localSessionId: sessionId,
+              backendSessionId: targetSessionId,
+              reason: classification.reason,
+            });
+            if (!notifiedMissing) {
+              notifiedMissing = true;
+              onBackendSessionUnavailable?.(targetSessionId, classification.reason);
+            }
+            return;
+          }
+
+          switchDebug("terminal.surface.attach.error", {
+            localSessionId: sessionId,
+            backendSessionId: targetSessionId,
+            error: String(error),
+            retryCount,
+          });
+          reportNativeTerminalIpcFailure("cmd_native_terminal_attach", error);
+          const willRetry = retryCount < maxRetries;
+          if (!willRetry || retryCount >= bannerRetryThreshold) {
+            setError("Failed to attach native terminal");
+          }
+          if (willRetry) {
+            cancelRetry();
+            const delay = Math.min(4000, 250 * Math.pow(2, retryCount));
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              if (isSubscribed) {
+                void attemptAttach(retryCount + 1);
+              }
+            }, delay);
+          }
+        } finally {
+          if (inFlightAttempt === attemptPromise) {
+            inFlightAttempt = null;
+          }
+        }
+      })();
+
+      inFlightAttempt = attemptPromise;
+      return attemptPromise;
+    };
+
+    retryAttachRef.current = () => {
+      if (!isSubscribed) return;
+      cancelRetry();
       lastGeometry = null;
       void attemptAttach(0, true);
     };
@@ -1918,11 +2013,9 @@ export function NativeTerminalPane({
         if (isAttached) {
           reportBounds();
         } else {
-          if (retryTimer) {
-            clearTimeout(retryTimer);
-            retryTimer = null;
+          if (!inFlightAttempt && !retryTimer) {
+            void attemptAttach(0);
           }
-          void attemptAttach(0);
         }
       });
       observer.observe(element);

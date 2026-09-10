@@ -23,6 +23,7 @@ type TerminalPaneProps = {
   onCloseSearch?: () => void;
   onReconnect?: (sessionId: string) => Promise<void> | void;
   onOpenNewShell?: (sessionId: string) => Promise<void> | void;
+  onBackendSessionUnavailable?: (sessionId: string, backendSessionId: string, reason: string) => void;
 };
 
 function friendlyAgentName(agentType: string | null | undefined): string {
@@ -75,6 +76,7 @@ export function TerminalPane({
   onCloseSearch,
   onReconnect,
   onOpenNewShell,
+  onBackendSessionUnavailable,
 }: TerminalPaneProps) {
   const [pendingLocal, setPendingLocal] = useState(false);
   const [replacementError, setReplacementError] = useState<string | null>(null);
@@ -165,6 +167,9 @@ export function TerminalPane({
         active={active}
         activity={activity}
         needsAttention={needsAttention}
+        onBackendSessionUnavailable={(backendSessionId, reason) => {
+          onBackendSessionUnavailable?.(session.id, backendSessionId, reason);
+        }}
       />
       {searchOpen ? (
         <TerminalSearchOverlay

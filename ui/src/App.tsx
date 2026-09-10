@@ -587,6 +587,7 @@ function WorkspaceApp({
     restoreWorkspace,
     ensureSessionBackends,
     dispatchWorkspaceAction,
+    markBackendSessionUnavailable,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
   useBrowserSessionHydration(state, activeProject.workspaceId);
 
@@ -2371,6 +2372,7 @@ function WorkspaceApp({
               reportRuntimeError(error);
               throw error;
             })}
+            onBackendSessionUnavailable={markBackendSessionUnavailable}
             leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
           />
         ) : (
