@@ -29,18 +29,18 @@
 use crate::remote::auth::verify_machine_signature;
 use crate::remote::protocol::{
     ControlAuth, ControlAuthResponse, ControlChallenge, PairingState, RegisterPairingPin,
-    RegisterPairingPinAck,
+    RegisterPairingPinAck, SocketTicketRequest, SocketTicketResponse,
 };
 use axum::{
     body::{to_bytes, Body},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Path as AxumPath, State,
+        ConnectInfo, Path as AxumPath, Query, State,
     },
     http::{HeaderMap, Method, Request, StatusCode},
     response::Response,
     routing::{any, get, post},
-    Router,
+    Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
@@ -147,6 +147,7 @@ struct RelayInner {
     pairings: Mutex<HashMap<String, RegisteredPairing>>,
     next_generation: AtomicU64,
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
+    pending_socket_tickets: Mutex<HashMap<String, (String, String, u64)>>,
 }
 
 const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
@@ -186,6 +187,7 @@ impl RelayState {
                 pairing_admission: Mutex::new(HashMap::new()),
                 pairings: Mutex::new(HashMap::new()),
                 pending_sessions: Mutex::new(HashMap::new()),
+                pending_socket_tickets: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -355,6 +357,7 @@ impl RelayState {
     /// `rx.await` to resolve to an error so it can close its socket.
     fn sweep_expired_sessions(&self) {
         let now = Instant::now();
+        self.inner.pending_socket_tickets.lock().retain(|_, (_, _, expiry)| *expiry > current_time_secs());
         self.inner.admission.lock().retain(|_, tracker| {
             now.duration_since(tracker.started) < ADMISSION_WINDOW
                 || tracker.locked_until.is_some_and(|until| now < until)
@@ -496,6 +499,175 @@ impl RelayState {
             .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
         Ok((socket, guard))
+    }
+}
+
+const SOCKET_TICKET_TTL: u64 = 30;
+
+async fn socket_ticket_handler(
+    State(state): State<RelayState>,
+    AxumPath(machine): AxumPath<String>,
+    Json(mut body): Json<serde_json::Value>,
+) -> Result<Json<SocketTicketResponse>, StatusCode> {
+    // The public route supplies machineId; the shared wire type also supports
+    // callers that include it explicitly, but must not permit a conflicting ID.
+    let object = body.as_object_mut().ok_or(StatusCode::BAD_REQUEST)?;
+    object.entry("machineId").or_insert_with(|| machine.clone().into());
+    let request: SocketTicketRequest = serde_json::from_value(body)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.machine_id != machine || !valid_socket_target(&request.target) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !state.inner.control_channels.lock().get(&machine).is_some_and(|c| !c.tx.is_closed()) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let now = current_time_secs();
+    let mut tickets = state.inner.pending_socket_tickets.lock();
+    tickets.retain(|_, (_, _, expiry)| *expiry > now);
+    if tickets.len() >= MAX_PENDING_SESSIONS {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let ticket = uuid::Uuid::new_v4().to_string();
+    let expires_at = now + SOCKET_TICKET_TTL;
+    tickets.insert(ticket.clone(), (machine, request.target, expires_at));
+    Ok(Json(SocketTicketResponse { ticket, expires_at }))
+}
+
+fn valid_socket_target(target: &str) -> bool {
+    target == "/api/v1/events" || target.strip_prefix("/api/v1/terminal/").is_some_and(|id| {
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SocketQuery {
+    ticket: Option<String>,
+}
+
+fn consume_socket_ticket(state: &RelayState, query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>, machine: &str, target: &str) -> Result<(), StatusCode> {
+    // Unknown query keys (including token/access_token/authorization) are
+    // forbidden, even when accompanied by a valid one-time ticket.
+    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let ticket = query.ticket.ok_or(StatusCode::UNAUTHORIZED)?;
+    let (issued_machine, issued_target, expiry) = state.inner.pending_socket_tickets.lock()
+        .remove(&ticket).ok_or(StatusCode::UNAUTHORIZED)?;
+    if issued_machine != machine || issued_target != target || expiry <= current_time_secs() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
+async fn browser_events_handler(
+    State(state): State<RelayState>,
+    AxumPath(machine): AxumPath<String>,
+    query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    browser_socket(state, machine, "/api/v1/events".into(), query, ws).await
+}
+
+async fn browser_terminal_handler(
+    State(state): State<RelayState>,
+    AxumPath((machine, terminal)): AxumPath<(String, String)>,
+    query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    browser_socket(state, machine, format!("/api/v1/terminal/{terminal}"), query, ws).await
+}
+
+async fn browser_socket(
+    state: RelayState,
+    machine: String,
+    target: String,
+    query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    consume_socket_ticket(&state, query, &machine, &target)?;
+    let (data, guard) = state.open_session_channel(&machine).await?;
+    Ok(ws.max_message_size(MAX_MESSAGE_SIZE).max_frame_size(MAX_MESSAGE_SIZE)
+        .on_upgrade(move |browser| async move {
+            match timeout(SESSION_TRANSFER_TIMEOUT, bridge_browser_socket(browser, data, &target)).await {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) => tracing::warn!(%error, "browser reverse WebSocket failed"),
+                Err(error) => tracing::warn!(%error, "browser reverse WebSocket lifetime exceeded"),
+            }
+            drop(guard);
+        }))
+}
+
+/// The existing daemon unwraps tunnel Binary messages onto a TCP stream.
+/// Use a bounded duplex stream to run a real WebSocket client over that stream,
+/// including its HTTP upgrade, masking, fragmentation and control frames.
+async fn bridge_browser_socket(mut browser: WebSocket, mut data: WebSocket, target: &str) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message as Wire;
+    let (client_io, tunnel_io) = tokio::io::duplex(MAX_MESSAGE_SIZE);
+    let (mut reader, mut writer) = tokio::io::split(tunnel_io);
+    let tunnel = async {
+        let mut buffer = vec![0; MAX_MESSAGE_SIZE];
+        loop {
+            tokio::select! {
+                count = reader.read(&mut buffer) => {
+                    let count = count?;
+                    if count == 0 {
+                        timeout(TRANSFER_TIMEOUT, data.send(Message::Close(None))).await??;
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                    timeout(TRANSFER_TIMEOUT, data.send(Message::Binary(buffer[..count].to_vec().into()))).await??;
+                }
+                frame = data.recv() => match frame {
+                    Some(Ok(Message::Binary(bytes))) => timeout(TRANSFER_TIMEOUT, writer.write_all(&bytes)).await??,
+                    Some(Ok(Message::Text(text))) => timeout(TRANSFER_TIMEOUT, writer.write_all(text.as_bytes())).await??,
+                    Some(Ok(Message::Close(_))) | None => return Ok(()),
+                    Some(Err(error)) => return Err(error.into()),
+                    Some(Ok(_)) => {},
+                }
+            }
+        }
+    };
+    let application = async {
+        let (mut daemon, _) = timeout(TRANSFER_TIMEOUT, tokio_tungstenite::client_async(format!("ws://localhost{target}"), client_io)).await??;
+        loop {
+            tokio::select! {
+                frame = browser.recv() => {
+                    let Some(frame) = frame else { return Ok::<(), anyhow::Error>(()); };
+                    let frame = match frame? {
+                        Message::Text(text) => Wire::Text(text.to_string().into()),
+                        Message::Binary(bytes) => Wire::Binary(bytes),
+                        Message::Ping(bytes) => Wire::Ping(bytes),
+                        Message::Pong(bytes) => Wire::Pong(bytes),
+                        Message::Close(frame) => Wire::Close(frame.map(|f| tokio_tungstenite::tungstenite::protocol::CloseFrame { code: f.code.into(), reason: f.reason.to_string().into() })),
+                    };
+                    let close = frame.is_close();
+                    timeout(TRANSFER_TIMEOUT, daemon.send(frame)).await??;
+                    if close { return Ok(()); }
+                }
+                frame = daemon.next() => {
+                    let Some(frame) = frame else { return Ok(()); };
+                    let frame = match frame? {
+                        Wire::Text(text) => Message::Text(text.to_string().into()),
+                        Wire::Binary(bytes) => Message::Binary(bytes),
+                        Wire::Ping(bytes) => Message::Ping(bytes),
+                        Wire::Pong(bytes) => Message::Pong(bytes),
+                        Wire::Close(frame) => Message::Close(frame.map(|f| axum::extract::ws::CloseFrame { code: f.code.into(), reason: f.reason.to_string().into() })),
+                        Wire::Frame(_) => continue,
+                    };
+                    let close = matches!(frame, Message::Close(_));
+                    timeout(TRANSFER_TIMEOUT, browser.send(frame)).await??;
+                    if close { return Ok(()); }
+                }
+            }
+        }
+    };
+    tokio::pin!(tunnel);
+    tokio::select! {
+        result = &mut tunnel => result,
+        result = application => {
+            result?;
+            // Flush the inner close frame before releasing the reverse channel.
+            timeout(TRANSFER_TIMEOUT, &mut tunnel).await?
+        },
     }
 }
 
@@ -752,6 +924,9 @@ fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Respo
 pub fn relay_router(state: RelayState) -> Router {
     Router::new()
         .route("/api/v1/pair/exchange", post(pair_exchange_handler))
+        .route("/host/{machine_id}/api/v1/socket-ticket", post(socket_ticket_handler))
+        .route("/host/{machine_id}/api/v1/events", get(browser_events_handler))
+        .route("/host/{machine_id}/api/v1/terminal/{terminal_id}", get(browser_terminal_handler))
         .route("/host/{machine_id}/api/v1/{*path}", any(host_http_handler))
         .route("/tunnel/control", get(control_handler))
         .route("/tunnel/data/{session_id}", get(data_handler))
@@ -1143,6 +1318,117 @@ mod tests {
         });
 
         (format!("ws://{addr}"), handle)
+    }
+
+    async fn issue_test_ticket(state: &RelayState, target: &str) -> SocketTicketResponse {
+        socket_ticket_handler(State(state.clone()), AxumPath("browser-machine".into()),
+            Json(serde_json::json!({"target": target}))).await.unwrap().0
+    }
+
+    fn ticket_query(ticket: &str) -> Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection> {
+        Ok(Query(SocketQuery { ticket: Some(ticket.into()) }))
+    }
+
+    #[tokio::test]
+    async fn test_relay_socket_ticket_issuance_and_single_use() {
+        let state = RelayState::new(vec![]);
+        let (_generation, _control) = state.register_control_channel("browser-machine".into());
+        let ticket = issue_test_ticket(&state, "/api/v1/events").await;
+        assert_eq!(uuid::Uuid::parse_str(&ticket.ticket).unwrap().get_version_num(), 4);
+        assert!(ticket.expires_at > current_time_secs());
+        assert!(ticket.expires_at <= current_time_secs() + 30);
+        assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), "browser-machine", "/api/v1/events"), Ok(()));
+        assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), "browser-machine", "/api/v1/events"), Err(StatusCode::UNAUTHORIZED));
+        for (machine, target) in [("other", "/api/v1/events"), ("browser-machine", "/api/v1/terminal/t1")] {
+            let ticket = issue_test_ticket(&state, "/api/v1/events").await;
+            assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), machine, target), Err(StatusCode::UNAUTHORIZED));
+            assert!(!state.inner.pending_socket_tickets.lock().contains_key(&ticket.ticket));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_relay_socket_ticket_expired_rejected() {
+        let state = RelayState::new(vec![]);
+        let (_generation, _control) = state.register_control_channel("browser-machine".into());
+        let ticket = issue_test_ticket(&state, "/api/v1/events").await;
+        state.inner.pending_socket_tickets.lock().get_mut(&ticket.ticket).unwrap().2 = current_time_secs() - 1;
+        assert_eq!(consume_socket_ticket(&state, ticket_query(&ticket.ticket), "browser-machine", "/api/v1/events"), Err(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn test_relay_browser_ws_terminal_bridge_success() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (base, server) = spawn_test_relay().await;
+        let (mut control, auth) = authenticate(&base, &identity(12, "browser-machine"), false, false).await;
+        assert!(auth.success);
+        // An acknowledged control operation is the registration barrier.
+        allocate(&mut control).await;
+        let response = reqwest::Client::new().post(format!("{}/host/browser-machine/api/v1/socket-ticket", base.replace("ws://", "http://")))
+            .timeout(Duration::from_secs(5)).header("content-type", "application/json").body(r#"{"target":"/api/v1/terminal/t1"}"#).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ticket: SocketTicketResponse = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        for query in [String::new(), "?token=permanent".into(), format!("?ticket={}&access_token=permanent", ticket.ticket)] {
+            let error = tokio_tungstenite::connect_async(format!("{base}/host/browser-machine/api/v1/terminal/t1{query}")).await.unwrap_err();
+            assert!(matches!(error, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == StatusCode::UNAUTHORIZED));
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let gateway = async {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_hdr_async(tcp, |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                assert_eq!(request.uri().path(), "/api/v1/terminal/t1");
+                assert!(request.uri().query().is_none());
+                Ok(response)
+            }).await.unwrap();
+            for expected in [TMessage::Text("input".into()), TMessage::Binary(vec![0, 1, 255].into()), TMessage::Ping(vec![7].into())] {
+                assert_eq!(ws.next().await.unwrap().unwrap(), expected);
+                ws.send(match expected { TMessage::Ping(bytes) => TMessage::Pong(bytes), other => other }).await.unwrap();
+            }
+            // Consume any forwarded pong before the close frame.
+            loop {
+                match ws.next().await.unwrap().unwrap() {
+                    TMessage::Close(_) => break,
+                    TMessage::Pong(_) => {},
+                    other => panic!("unexpected frame: {other:?}"),
+                }
+            }
+        };
+        let daemon = async {
+            let notice: IncomingSessionNotice = receive_json(&mut control).await;
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+            let (mut read, mut write) = tcp.into_split();
+            let mut buffer = [0; 8192];
+            loop {
+                tokio::select! {
+                    frame = data.next() => match frame {
+                        Some(Ok(TMessage::Binary(bytes))) => write.write_all(&bytes).await.unwrap(),
+                        Some(Ok(TMessage::Close(_))) | None => break,
+                        Some(Ok(_)) => {},
+                        Some(Err(error)) => panic!("data channel failed: {error}"),
+                    },
+                    count = read.read(&mut buffer) => {
+                        let count = count.unwrap();
+                        if count == 0 { break; }
+                        data.send(TMessage::Binary(buffer[..count].to_vec().into())).await.unwrap();
+                    }
+                }
+            }
+        };
+        let browser = async {
+            let url = format!("{base}/host/browser-machine/api/v1/terminal/t1?ticket={}", ticket.ticket);
+            let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let error = tokio_tungstenite::connect_async(&url).await.unwrap_err();
+            assert!(matches!(error, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == StatusCode::UNAUTHORIZED));
+            for frame in [TMessage::Text("input".into()), TMessage::Binary(vec![0, 1, 255].into()), TMessage::Ping(vec![7].into())] {
+                ws.send(frame.clone()).await.unwrap();
+                let expected = match frame { TMessage::Ping(bytes) => TMessage::Pong(bytes), other => other };
+                assert_eq!(ws.next().await.unwrap().unwrap(), expected);
+            }
+            ws.close(None).await.unwrap();
+        };
+        timeout(Duration::from_secs(5), async { tokio::join!(browser, daemon, gateway); }).await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
