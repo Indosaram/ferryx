@@ -3874,8 +3874,10 @@ mod tests {
         // No tabId: tab availability is validated against the desktop's last
         // published selection, which is empty in a fresh daemon.
         let body = serde_json::json!({ "workspaceId": "ws" }).to_string();
+        // The bearer travels in the Authorization header. A device token in the URL
+        // is refused, because it would persist in access logs and browser history.
         let request = format!(
-            "POST /api/v1/workspace/select?token={token} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST /api/v1/workspace/select HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         let mut http = tokio::net::TcpStream::connect(addr).await.expect("connect");
