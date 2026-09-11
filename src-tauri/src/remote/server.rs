@@ -165,6 +165,8 @@ struct HealthResponse {
 struct PairExchangeRequest {
     code: String,
     device_name: String,
+    #[serde(default)]
+    installation_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -348,7 +350,11 @@ async fn pair_exchange(
         })?;
     let (token, device) = state
         .auth_manager
-        .exchange_pairing_code(&payload.code, &payload.device_name)
+        .exchange_pairing_code_with_installation(
+            &payload.code,
+            &payload.device_name,
+            payload.installation_id.as_deref(),
+        )
         .map_err(|e| match e {
             AuthError::InvalidPairingCode => {
                 (StatusCode::BAD_REQUEST, "Invalid pairing code").into_response()

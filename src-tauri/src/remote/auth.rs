@@ -196,6 +196,7 @@ fn verify_message(public_key_b64: &str, message: &str, signature_b64: &str) -> b
 const PAIRING_EXPIRY: Duration = Duration::from_secs(60);
 const PAIRING_FAILURE_BUDGET: u8 = 5;
 const LAST_SEEN_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+pub const DEVICE_IDLE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,6 +218,8 @@ pub struct DeviceInfo {
     /// instead of removing them, can be pruned on load.
     #[serde(default)]
     pub revoked: bool,
+    #[serde(default)]
+    pub installation_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -321,7 +324,7 @@ impl AuthManager {
             .as_deref()
             .and_then(load_persisted_auth)
             .unwrap_or_default();
-        prune_revoked_devices(&mut persisted);
+        prune_revoked_and_idle_devices(&mut persisted, unix_now());
         Self {
             pairing_window: Arc::new(RwLock::new(PairingWindow {
                 codes: persisted.pairing_codes,
@@ -431,6 +434,15 @@ impl AuthManager {
         code: &str,
         device_name: &str,
     ) -> Result<(String, DeviceInfo), AuthError> {
+        self.exchange_pairing_code_with_installation(code, device_name, None)
+    }
+
+    pub fn exchange_pairing_code_with_installation(
+        &self,
+        code: &str,
+        device_name: &str,
+        installation_id: Option<&str>,
+    ) -> Result<(String, DeviceInfo), AuthError> {
         let _transaction = self.begin_transaction();
         let pairing = {
             // Lookup, failure accounting and single-use consumption share one
@@ -451,30 +463,102 @@ impl AuthManager {
             pairing
         };
 
+        let trimmed_name = device_name.trim();
+        let effective_name = if trimmed_name.is_empty() {
+            "Remote Device".to_string()
+        } else {
+            trimmed_name.to_string()
+        };
+
+        let effective_installation_id = installation_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let now = unix_now();
+
         if let Some(token) = pairing.approved_token {
-            let device_id = self.tokens.read().get(&token).cloned();
-            let info = device_id.and_then(|id| self.devices.read().get(&id).cloned());
+            let existing_device = effective_installation_id.as_deref().and_then(|inst_id| {
+                self.devices
+                    .read()
+                    .values()
+                    .find(|d| d.installation_id.as_deref() == Some(inst_id))
+                    .cloned()
+            });
+
+            let info = if let Some(existing) = existing_device {
+                if let Some(cli_dev_id) = self.tokens.read().get(&token).cloned() {
+                    if cli_dev_id != existing.id {
+                        self.devices.write().remove(&cli_dev_id);
+                    }
+                }
+                self.tokens.write().retain(|_, owner| owner != &existing.id);
+                self.tokens.write().insert(token.clone(), existing.id.clone());
+
+                let updated = DeviceInfo {
+                    id: existing.id.clone(),
+                    name: effective_name,
+                    permission: pairing.default_permission,
+                    created_at: existing.created_at,
+                    last_seen_at: now,
+                    revoked: false,
+                    installation_id: effective_installation_id,
+                };
+                self.devices.write().insert(existing.id.clone(), updated.clone());
+                updated
+            } else {
+                let dev_id = self.tokens.read().get(&token).cloned();
+                if let Some(dev_id) = dev_id {
+                    let mut devices = self.devices.write();
+                    if let Some(dev) = devices.get_mut(&dev_id) {
+                        dev.name = effective_name;
+                        dev.installation_id = effective_installation_id;
+                        dev.last_seen_at = now;
+                        dev.clone()
+                    } else {
+                        drop(devices);
+                        return Err(AuthError::Unauthorized);
+                    }
+                } else {
+                    return Err(AuthError::Unauthorized);
+                }
+            };
+
             self.persist_best_effort();
-            return info
-                .map(|info| (token, info))
-                .ok_or(AuthError::Unauthorized);
+            return Ok((token, info));
         }
 
-        let device_id = uuid::Uuid::new_v4().to_string();
+        let existing_device = effective_installation_id.as_deref().and_then(|inst_id| {
+            self.devices
+                .read()
+                .values()
+                .find(|d| d.installation_id.as_deref() == Some(inst_id))
+                .cloned()
+        });
+
         let token: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(64)
             .map(char::from)
             .collect();
 
-        let now = unix_now();
+        let (device_id, created_at) = match &existing_device {
+            Some(existing) => (existing.id.clone(), existing.created_at),
+            None => (uuid::Uuid::new_v4().to_string(), now),
+        };
+
+        if existing_device.is_some() {
+            self.tokens.write().retain(|_, owner| owner != &device_id);
+        }
+
         let info = DeviceInfo {
             id: device_id.clone(),
-            name: device_name.to_string(),
+            name: effective_name,
             permission: pairing.default_permission,
-            created_at: now,
+            created_at,
             last_seen_at: now,
             revoked: false,
+            installation_id: effective_installation_id,
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
@@ -534,6 +618,7 @@ impl AuthManager {
             created_at: now,
             last_seen_at: now,
             revoked: false,
+            installation_id: None,
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
@@ -555,10 +640,14 @@ impl AuthManager {
         }
         .ok_or(AuthError::Unauthorized)?;
 
+        let now = unix_now();
         let result = {
             let mut devices = self.devices.write();
             let device = devices.get_mut(&device_id).ok_or(AuthError::Unauthorized)?;
-            device.last_seen_at = unix_now();
+            if now.saturating_sub(device.last_seen_at) > DEVICE_IDLE_EXPIRY_SECS {
+                return Err(AuthError::Unauthorized);
+            }
+            device.last_seen_at = now;
             device.clone()
         };
 
@@ -660,7 +749,7 @@ impl AuthManager {
                 .expect("open remote auth lock");
             file.lock().expect("lock remote auth state");
             if let Some(mut state) = load_persisted_auth(path) {
-                prune_revoked_devices(&mut state);
+                prune_revoked_and_idle_devices(&mut state, unix_now());
                 self.pairing_window.write().codes = state.pairing_codes;
                 *self.devices.write() = state.devices;
                 *self.tokens.write() = state.tokens;
@@ -698,13 +787,15 @@ fn load_persisted_auth(path: &Path) -> Option<PersistedAuthState> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Drops devices that older builds tombstoned with `revoked: true`, together
-/// with their tokens, so a revoked device never resurfaces in the device list.
-fn prune_revoked_devices(state: &mut PersistedAuthState) {
+/// Drops devices that older builds tombstoned with `revoked: true` or devices
+/// that have been idle longer than `DEVICE_IDLE_EXPIRY_SECS`, together with their tokens.
+fn prune_revoked_and_idle_devices(state: &mut PersistedAuthState, now: u64) {
     let PersistedAuthState {
         devices, tokens, ..
     } = state;
-    devices.retain(|_, device| !device.revoked);
+    devices.retain(|_, device| {
+        !device.revoked && now.saturating_sub(device.last_seen_at) <= DEVICE_IDLE_EXPIRY_SECS
+    });
     tokens.retain(|_, device_id| devices.contains_key(device_id));
 }
 
@@ -1171,6 +1262,218 @@ mod tests {
             "revoking a machine token must not affect device bearer tokens"
         );
     }
+
+    #[test]
+    fn test_repairing_with_same_installation_id_replaces_and_invalidates_old_token() {
+        let manager = AuthManager::new();
+        let code1 = manager.create_pairing_code(DevicePermission::Control);
+        let (token1, device1) = manager
+            .exchange_pairing_code_with_installation(&code1, "Phone 1", Some("install-unique-1"))
+            .expect("first pairing succeeds");
+
+        assert_eq!(manager.list_devices().len(), 1);
+        assert!(manager.validate_token(&token1).is_ok());
+
+        let code2 = manager.create_pairing_code(DevicePermission::Control);
+        let (token2, device2) = manager
+            .exchange_pairing_code_with_installation(&code2, "Phone 2", Some("install-unique-1"))
+            .expect("second pairing succeeds");
+
+        assert_eq!(
+            manager.list_devices().len(),
+            1,
+            "re-pairing with the same installationId must leave exactly ONE device record"
+        );
+        assert_eq!(device2.id, device1.id, "device id must be preserved");
+        assert_eq!(device2.name, "Phone 2", "device name must be updated");
+        assert_ne!(token2, token1, "new token must be issued");
+        assert!(
+            matches!(manager.validate_token(&token1), Err(AuthError::Unauthorized)),
+            "previous token must be invalidated"
+        );
+        assert!(
+            manager.validate_token(&token2).is_ok(),
+            "new token must validate"
+        );
+    }
+
+    #[test]
+    fn test_repairing_view_pin_preserves_view_permission_on_replacement() {
+        let manager = AuthManager::new();
+        let code1 = manager.create_pairing_code(DevicePermission::Control);
+        let (_token1, device1) = manager
+            .exchange_pairing_code_with_installation(&code1, "Control Device", Some("install-perm-1"))
+            .expect("first pairing succeeds");
+        assert_eq!(device1.permission, DevicePermission::Control);
+
+        let code2 = manager.create_pairing_code(DevicePermission::View);
+        let (token2, device2) = manager
+            .exchange_pairing_code_with_installation(&code2, "View Device", Some("install-perm-1"))
+            .expect("second pairing succeeds");
+
+        assert_eq!(
+            device2.permission,
+            DevicePermission::View,
+            "re-pairing with view PIN must not produce a control device"
+        );
+        assert_eq!(manager.list_devices().len(), 1);
+        assert_eq!(
+            manager.list_devices()[0].permission,
+            DevicePermission::View,
+            "stored device must have view permission"
+        );
+        let validated = manager.validate_token(&token2).expect("valid token");
+        assert_eq!(validated.permission, DevicePermission::View);
+    }
+
+    #[test]
+    fn test_device_idle_expiry() {
+        // 1. In-memory: validate_token itself must enforce idle window
+        let mem_manager = AuthManager::new();
+        let code1 = mem_manager.create_pairing_code(DevicePermission::Control);
+        let (idle_token, idle_device) = mem_manager
+            .exchange_pairing_code(&code1, "Idle Device")
+            .expect("pair idle");
+
+        let code2 = mem_manager.create_pairing_code(DevicePermission::Control);
+        let (active_token, active_device) = mem_manager
+            .exchange_pairing_code(&code2, "Active Device")
+            .expect("pair active");
+
+        let now = unix_now();
+        {
+            let mut devices = mem_manager.devices.write();
+            if let Some(dev) = devices.get_mut(&idle_device.id) {
+                dev.last_seen_at = now - (DEVICE_IDLE_EXPIRY_SECS + 100);
+            }
+            // Active device was created a long time ago, but seen recently (now)
+            if let Some(dev) = devices.get_mut(&active_device.id) {
+                dev.created_at = now - (DEVICE_IDLE_EXPIRY_SECS + 5000);
+                dev.last_seen_at = now;
+            }
+        }
+
+        assert!(
+            matches!(mem_manager.validate_token(&idle_token), Err(AuthError::Unauthorized)),
+            "device idle past window must fail validate_token"
+        );
+
+        assert!(
+            mem_manager.validate_token(&active_token).is_ok(),
+            "recently seen device must succeed validate_token"
+        );
+
+        // 2. Persisted: idle devices must be pruned when the store loads
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("remote-auth.json");
+        let persisted_state = serde_json::json!({
+            "devices": {
+                "idle-dev": {
+                    "id": "idle-dev",
+                    "name": "Idle Stored",
+                    "permission": "control",
+                    "createdAt": now - (DEVICE_IDLE_EXPIRY_SECS + 500),
+                    "lastSeenAt": now - (DEVICE_IDLE_EXPIRY_SECS + 200),
+                    "revoked": false
+                },
+                "active-dev": {
+                    "id": "active-dev",
+                    "name": "Active Stored",
+                    "permission": "control",
+                    "createdAt": now - (DEVICE_IDLE_EXPIRY_SECS + 5000),
+                    "lastSeenAt": now,
+                    "revoked": false
+                }
+            },
+            "tokens": {
+                "idle-tok": "idle-dev",
+                "active-tok": "active-dev"
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&persisted_state).unwrap()).unwrap();
+
+        let disk_manager = AuthManager::with_persistence(Some(path));
+        assert!(
+            disk_manager.list_devices().iter().all(|d| d.id != "idle-dev"),
+            "idle device must be pruned on load"
+        );
+        assert!(
+            disk_manager.list_devices().iter().any(|d| d.id == "active-dev"),
+            "active device must survive store load"
+        );
+        assert!(
+            matches!(disk_manager.validate_token("idle-tok"), Err(AuthError::Unauthorized)),
+            "pruned idle device token must fail validate_token"
+        );
+        assert!(
+            disk_manager.validate_token("active-tok").is_ok(),
+            "active device token must succeed"
+        );
+    }
+
+    #[test]
+    fn test_pairing_exchange_with_blank_name_stores_fallback() {
+        let manager = AuthManager::new();
+        let code1 = manager.create_pairing_code(DevicePermission::Control);
+        let (_token1, device1) = manager
+            .exchange_pairing_code(&code1, "   ")
+            .expect("pairing succeeds");
+
+        assert!(
+            !device1.name.trim().is_empty(),
+            "blank name must store a non-empty fallback, got {:?}",
+            device1.name
+        );
+        assert_eq!(
+            manager.list_devices()[0].name,
+            device1.name,
+            "stored name must match fallback"
+        );
+
+        let code2 = manager.create_pairing_code(DevicePermission::Control);
+        let (_token2, device2) = manager
+            .exchange_pairing_code(&code2, "")
+            .expect("pairing succeeds");
+
+        assert!(
+            !device2.name.trim().is_empty(),
+            "empty name must store a non-empty fallback, got {:?}",
+            device2.name
+        );
+    }
+
+    #[test]
+    fn test_store_without_installation_id_backward_compat() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("remote-auth.json");
+        let now = unix_now();
+        let legacy_json = serde_json::json!({
+            "devices": {
+                "legacy-dev": {
+                    "id": "legacy-dev",
+                    "name": "Legacy Device",
+                    "permission": "control",
+                    "createdAt": now,
+                    "lastSeenAt": now,
+                    "revoked": false
+                }
+            },
+            "tokens": {
+                "legacy-token": "legacy-dev"
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&legacy_json).unwrap()).unwrap();
+
+        let manager = AuthManager::with_persistence(Some(path));
+        let devices = manager.list_devices();
+        assert_eq!(devices.len(), 1, "legacy store must load device");
+        assert_eq!(devices[0].id, "legacy-dev");
+        assert_eq!(devices[0].installation_id, None, "installation_id must be None");
+        assert!(
+            manager.validate_token("legacy-token").is_ok(),
+            "token for legacy device must validate"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1402,7 +1705,7 @@ mod persistence_tests {
                     "name": "Current Phone",
                     "permission": "control",
                     "createdAt": 3,
-                    "lastSeenAt": 4,
+                    "lastSeenAt": unix_now(),
                     "revoked": false
                 }
             },
