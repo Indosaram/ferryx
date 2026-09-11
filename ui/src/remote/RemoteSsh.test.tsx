@@ -29,18 +29,35 @@ it("lists each SSH session separately without treating background sessions as fo
     .toEqual(["ssh-one", "ssh-two"]);
 });
 
+function ticketed(inner: typeof fetch): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return new Response(JSON.stringify({ ticket: "ui-test-ticket", expiresAt: 9999999999 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
+
 it("sends the backend session identity when selecting an SSH session", async () => {
   localStorage.setItem("ferryx_remote_token", "paired");
   vi.stubGlobal("WebSocket", class {
     close() {}
   });
   const fetcher = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) => new Response(JSON.stringify(inventory)));
-  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("fetch", ticketed(fetcher));
   await act(async () => { render(<RemoteApp />); });
   fireEvent.click(screen.getByRole("button", { name: "Change workspace context" }));
   const option = screen.getByRole("button", { name: /Terminal 2/ });
   await act(async () => { fireEvent.click(option); });
-  const call = fetcher.mock.calls.find((args) => args.length > 1);
+  // Match the selection POST specifically: authenticated GETs now also carry an
+  // init argument (the Authorization header), so "has an init" is no longer unique.
+  const call = fetcher.mock.calls.find(
+    (args) => String(args[0]).includes("/api/v1/workspace/select"),
+  );
   expect(JSON.parse(String(call?.[1]?.body))).toEqual({ workspaceId: "ssh:build", sessionId: "ssh-two" });
   expect(screen.getByTestId("session").textContent).toBe("ssh-two");
 });

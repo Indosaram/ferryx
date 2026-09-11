@@ -25,10 +25,23 @@ afterEach(() => {
   EventSocket.instances = [];
 });
 
+function ticketed(inner: typeof fetch): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return new Response(JSON.stringify({ ticket: "ui-test-ticket", expiresAt: 9999999999 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
+
 it("reconnects events and refreshes missed focus without losing pairing", async () => {
   // Given a paired browser that has loaded one desktop selection.
   vi.useFakeTimers();
-  localStorage.setItem("ferryx_remote_token", "paired");
+  localStorage.setItem(`ferryx_remote_token_local:${window.location.origin}`, "paired");
   vi.stubGlobal("WebSocket", EventSocket);
   let sessionId: string | null = "before-outage";
   const fetcher = vi.fn(async () => new Response(JSON.stringify({
@@ -36,7 +49,7 @@ it("reconnects events and refreshes missed focus without losing pairing", async 
     projects: [],
     sessions: [],
   })));
-  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("fetch", ticketed(fetcher));
   let unmount = () => {};
   await act(async () => { unmount = render(<RemoteApp />).unmount; });
   expect(screen.getByTestId("session").textContent).toBe("before-outage");
@@ -54,7 +67,7 @@ it("reconnects events and refreshes missed focus without losing pairing", async 
 
   // Then reconnect itself refreshes state, even without a selection event.
   expect(screen.queryByTestId("session")).toBeNull();
-  expect(localStorage.getItem("ferryx_remote_token")).toBe("paired");
+  expect(localStorage.getItem(`ferryx_remote_token_local:${window.location.origin}`)).toBe("paired");
   await act(async () => { recovered.onclose?.(); unmount(); });
   await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
   expect(EventSocket.instances).toHaveLength(2);

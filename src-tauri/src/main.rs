@@ -144,11 +144,316 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairCliCommand {
+    List,
+    GeneratePin,
+    Approve { pin: String },
+}
+
+const PAIR_USAGE: &str = "expected `ferryx pair <list|generate|--generate-pin|approve <pin>>`";
+
+/// Parses a pair subcommand (`list`, `generate`, `--generate-pin`, `approve <pin>`)
+/// starting at `args[subcommand_index]`. Shared by both `ferryx pair <...>` and
+/// `ferryx remote pair <...>`.
+fn parse_pair_subcommand(
+    args: &[String],
+    subcommand_index: usize,
+) -> Result<PairCliCommand, String> {
+    match args.get(subcommand_index).map(String::as_str) {
+        Some("list") => Ok(PairCliCommand::List),
+        Some("--generate-pin") | Some("generate") => Ok(PairCliCommand::GeneratePin),
+        Some("approve") => {
+            let pin = args
+                .get(subcommand_index + 1)
+                .cloned()
+                .ok_or_else(|| "missing <pin> for `ferryx pair approve`".to_string())?;
+            Ok(PairCliCommand::Approve { pin })
+        }
+        _ => Err(PAIR_USAGE.into()),
+    }
+}
+
+pub fn parse_pair_cli<I, T>(args: I) -> Result<PairCliCommand, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "pair") {
+        return Err(PAIR_USAGE.into());
+    }
+    parse_pair_subcommand(&args, 2)
+}
+
+fn remote_auth_manager() -> Result<ferryx_lib::remote::AuthManager, String> {
+    let data_dir = std::env::var_os("FERRYX_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join("remote"))
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE")
+                            .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME")
+                    .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
+            }
+        });
+    let auth_path = data_dir
+        .ok_or_else(|| "Cannot persist pairing state: set FERRYX_DATA_DIR".to_string())?
+        .join("remote-auth.json");
+    Ok(ferryx_lib::remote::AuthManager::with_persistence(Some(
+        auth_path,
+    )))
+}
+
+pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
+    let manager = remote_auth_manager()?;
+    match command {
+        PairCliCommand::List => {
+            let devices = manager.list_devices();
+            if devices.is_empty() {
+                println!("No paired devices");
+            } else {
+                for device in devices {
+                    println!("{}\t{}\t{:?}", device.id, device.name, device.permission);
+                }
+            }
+            Ok(())
+        }
+        PairCliCommand::GeneratePin => {
+            // The daemon owns the machine's single relay control connection and pairing
+            // coordinator. Ask it first: standing up a second RelayClient here would
+            // contend for the same machine identity on the relay, and a PIN minted
+            // outside the relay-registered coordinator is not redeemable remotely.
+            let daemon_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            // Only defer to a daemon that is ALREADY running. DaemonClient will happily
+            // start one on demand, but silently spawning a daemon is not this command's
+            // job, and it would also make the message below untrue.
+            let daemon_socket = ferryx_lib::daemon::server::get_socket_path();
+            if daemon_socket.exists() {
+                // A daemon is present, so it owns this machine's relay identity. Its
+                // answer is authoritative: an explicit refusal must surface as an error
+                // rather than silently starting a competing relay owner, which would
+                // replace the daemon's control generation and invalidate its live PIN.
+                let answer = daemon_runtime.block_on(async {
+                    let client = ferryx_lib::daemon::client::DaemonClient::new();
+                    client
+                        .remote_create_pairing_code(Some(
+                            ferryx_lib::remote::auth::DevicePermission::Control,
+                        ))
+                        .await
+                });
+                match answer {
+                    Ok(code) => {
+                        println!("{code}");
+                        std::io::stdout().flush().map_err(|error| error.to_string())?;
+                        eprintln!(
+                            "Pairing registered by the running daemon; it holds the relay control connection."
+                        );
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "The running daemon refused this pairing request: {}. \
+                             It owns this machine's relay identity, so pairing standalone \
+                             would replace its control connection and invalidate any PIN it \
+                             already issued.",
+                            error.message
+                        ));
+                    }
+                }
+            }
+            eprintln!(
+                "No running daemon answered; pairing standalone from this process instead."
+            );
+            let directory =
+                remote_state_dir().ok_or("Cannot persist machine identity: set FERRYX_DATA_DIR")?;
+            let config_path = directory.join("remote-config.json");
+            let config: ferryx_lib::remote::RemoteGatewayConfig = match std::fs::read(&config_path)
+            {
+                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                Err(error) => return Err(error.to_string()),
+            };
+            let relay_url = std::env::var("FERRYX_RELAY_URL")
+                .ok()
+                .or(config.relay_url)
+                .ok_or("Pairing requires a configured relay URL (FERRYX_RELAY_URL)")?;
+            let identity = ferryx_lib::remote::auth::load_or_generate_machine_identity(&directory)?;
+            let client = ferryx_lib::remote::relay_client::RelayClient::with_identity(
+                &relay_url,
+                identity,
+                format!("127.0.0.1:{}", config.port),
+            );
+            let coordinator = client.pairing_coordinator();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime.block_on(async move {
+                let relay_task = tokio::spawn(async move { client.run().await });
+                let result = coordinator.generate_pairing(std::time::Duration::from_secs(60)).await;
+                match result {
+                    Ok(session) => {
+                        println!("{}", session.pin);
+                        println!("{}#pair={}", relay_url.trim_end_matches('/'), session.pairing_token);
+                        std::io::stdout().flush().map_err(|error| error.to_string())?;
+                        eprintln!("Pairing registered; keep this command running until pairing completes or expires.");
+                        // This process owns the authenticated control connection; do not drop
+                        // it immediately after printing the relay-acknowledged credentials.
+                        let deadline = std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at);
+                        tokio::time::sleep(deadline.duration_since(std::time::SystemTime::now()).unwrap_or_default()).await;
+                        relay_task.abort();
+                        Ok(())
+                    }
+                    Err(error) => { relay_task.abort(); Err(error) }
+                }
+            })
+        }
+        PairCliCommand::Approve { pin } => match manager.approve_pairing_code_cli(&pin) {
+            Ok(_device) => {
+                println!("Pairing approved for {pin}; ready for remote client exchange");
+                Ok(())
+            }
+            Err(error) => Err(format!("Failed to approve pairing: {error}")),
+        },
+    }
+}
+
 fn print_browser_cli_error(code: &str, message: impl AsRef<str>) {
     eprintln!(
         "{}",
         serde_json::json!({ "type": "error", "code": code, "message": message.as_ref() })
     );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteCliCommand {
+    Status { json: bool },
+    Pair(PairCliCommand),
+}
+
+pub fn parse_remote_cli<I, T>(args: I) -> Result<RemoteCliCommand, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "remote") {
+        return Err("expected `ferryx remote <status|pair>`".into());
+    }
+    match args.get(2).map(String::as_str) {
+        Some("status") => {
+            let json = args.iter().skip(3).any(|arg| arg == "--json");
+            Ok(RemoteCliCommand::Status { json })
+        }
+        Some("pair") => parse_pair_subcommand(&args, 3).map(RemoteCliCommand::Pair),
+        _ => Err("expected `ferryx remote <status|pair>`".into()),
+    }
+}
+
+/// Resolves the base directory Ferryx stores remote gateway state under,
+/// mirroring the resolution used by [`remote_auth_manager`].
+fn remote_state_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("FERRYX_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join("remote"))
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE")
+                            .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME")
+                    .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
+            }
+        })
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RemoteStatusOutput {
+    status: &'static str,
+    port: u16,
+    mode: String,
+}
+
+/// Reads the persisted remote gateway config (`remote-config.json`) if one
+/// exists, otherwise falls back to the default config, and reports the
+/// configured port and mode. This does not require the daemon to be running.
+fn remote_status_output() -> RemoteStatusOutput {
+    let persisted = remote_state_dir()
+        .map(|dir| dir.join("remote-config.json"))
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+
+    let default_config = ferryx_lib::remote::RemoteGatewayConfig::default();
+    let mode = persisted
+        .as_ref()
+        .and_then(|value| value.get("mode"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            serde_json::to_value(default_config.mode)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "off".to_string())
+        });
+    let port = persisted
+        .as_ref()
+        .and_then(|value| value.get("port"))
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(default_config.port);
+
+    RemoteStatusOutput {
+        status: "ok",
+        port,
+        mode,
+    }
+}
+
+pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
+    match command {
+        RemoteCliCommand::Status { json } => {
+            let output = remote_status_output();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&output).map_err(|error| error.to_string())?
+                );
+            } else {
+                println!(
+                    "status={} port={} mode={}",
+                    output.status, output.port, output.mode
+                );
+            }
+            Ok(())
+        }
+        RemoteCliCommand::Pair(pair_command) => run_pair_cli(pair_command),
+    }
 }
 
 pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
@@ -254,6 +559,24 @@ fn main() {
             Err(error) => {
                 print_browser_cli_error("BROWSER_CLI_INVALID_OR_UNAVAILABLE", error);
                 std::process::exit(2);
+            }
+        }
+    }
+    if args.get(1).is_some_and(|arg| arg == "pair") {
+        match parse_pair_cli(&args).and_then(|command| run_pair_cli(command)) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.get(1).is_some_and(|arg| arg == "remote") {
+        match parse_remote_cli(&args).and_then(run_remote_cli) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
             }
         }
     }

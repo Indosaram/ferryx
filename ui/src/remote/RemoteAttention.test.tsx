@@ -57,6 +57,16 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as unknown as Response;
 }
 
+function ticketed(inner: typeof fetch): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
+
 class EventWebSocket {
   static latest: EventWebSocket | null = null;
   readonly url: string;
@@ -130,7 +140,7 @@ describe("RemoteAttention Affordance", () => {
       },
     };
 
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithWaiting)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithWaiting))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -184,7 +194,7 @@ describe("RemoteAttention Affordance", () => {
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(targetSwitchedState));
 
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -201,7 +211,7 @@ describe("RemoteAttention Affordance", () => {
         expect.stringContaining("/api/v1/workspace/select"),
         expect.objectContaining({
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
           body: JSON.stringify({
             workspaceId: "ferryx-ui",
             worktreeSlug: "main",
@@ -251,7 +261,7 @@ describe("RemoteAttention Affordance", () => {
       },
     };
 
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateNoWaiting)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateNoWaiting))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -275,7 +285,7 @@ describe("RemoteAttention Affordance", () => {
       },
     };
 
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateActiveWaiting)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateActiveWaiting))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -307,7 +317,7 @@ describe("RemoteAttention Affordance", () => {
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(stateMultipleWaiting));
 
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -368,7 +378,7 @@ describe("RemoteAttention Affordance", () => {
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(stateDifferentWorktree));
 
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -417,7 +427,7 @@ describe("RemoteAttention Affordance", () => {
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(stateWithThreeTabs));
 
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -464,7 +474,7 @@ describe("RemoteAttention Affordance", () => {
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(stateOnTabTwo));
 
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -507,7 +517,7 @@ describe("RemoteAttention Affordance", () => {
       .fn<typeof fetch>()
       .mockResolvedValue(jsonResponse(stateOnFirstTab));
 
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     const { unmount } = render(<RemoteApp />);
@@ -542,7 +552,7 @@ describe("RemoteAttention Affordance", () => {
       .fn<typeof fetch>()
       .mockResolvedValue(jsonResponse(stateOnLastTab));
 
-    vi.stubGlobal("fetch", fetchMockLast);
+    vi.stubGlobal("fetch", ticketed(fetchMockLast));
 
     render(<RemoteApp />);
 

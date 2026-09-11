@@ -763,7 +763,7 @@ export async function discoverAgentProviderSession(sessionId: string, agentType:
   });
 }
 
-export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale";
+export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale" | "relay";
 
 export type RemoteGatewayStatus = {
   enabled: boolean;
@@ -771,6 +771,7 @@ export type RemoteGatewayStatus = {
   port: number;
   boundAddress: string | null;
   localIp: string | null;
+  relayUrl: string | null;
 };
 
 export type DeviceInfo = {
@@ -795,6 +796,7 @@ export async function getRemoteStatus(): Promise<RemoteGatewayStatus> {
       port: 43821,
       boundAddress: null,
       localIp: null,
+      relayUrl: null,
     };
   }
   return invokeCommand<RemoteGatewayStatus>("cmd_remote_status");
@@ -804,6 +806,7 @@ export async function enableRemoteGateway(request: {
   mode: RemoteNetworkMode;
   port?: number;
   allowControl?: boolean;
+  relayUrl?: string;
 }): Promise<RemoteGatewayStatus> {
   return invokeCommand<RemoteGatewayStatus>("cmd_remote_enable", { request });
 }

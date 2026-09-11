@@ -28,6 +28,7 @@ pub enum RemoteNetworkMode {
     Off,
     LocalNetwork,
     Tailscale,
+    Relay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -44,6 +45,8 @@ pub struct RemoteGatewayConfig {
     pub mode: RemoteNetworkMode,
     pub port: u16,
     pub allow_control: bool,
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 impl Default for RemoteGatewayConfig {
@@ -52,6 +55,7 @@ impl Default for RemoteGatewayConfig {
             mode: RemoteNetworkMode::Off,
             port: REMOTE_GATEWAY_PORT,
             allow_control: true,
+            relay_url: None,
         }
     }
 }
@@ -67,7 +71,166 @@ impl RemoteGatewayConfig {
             port: self.port,
             allow_control: self.allow_control,
             restart_policy: self.restart_policy(),
+            relay_url: self.relay_url.clone(),
         }
+    }
+}
+
+/// Resolves the network interface address a `RemoteNetworkMode` should bind
+/// to, beyond the always-on loopback listener.
+///
+/// Implementations must never return a wildcard (`0.0.0.0`) or loopback
+/// address for [`RemoteNetworkMode::LocalNetwork`] or
+/// [`RemoteNetworkMode::Tailscale`]: those modes exist specifically to expose
+/// the gateway on a *specific* external interface, not on every interface.
+pub trait InterfaceResolver: Send + Sync {
+    /// Returns the primary non-loopback IPv4 address of this machine on the
+    /// local network (e.g. a `192.168.x.x` or `10.x.x.x` address).
+    fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String>;
+
+    /// Returns the Tailscale CGNAT IPv4 address (`100.64.0.0/10`) of this
+    /// machine, or an error if no Tailscale interface is active.
+    fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String>;
+
+    /// Resolves the extra bind address (if any) required for `mode`, on top
+    /// of the baseline loopback listener. Returns `Ok(None)` for modes that
+    /// only need loopback (`Off`).
+    fn resolve(&self, mode: RemoteNetworkMode) -> Result<Option<std::net::Ipv4Addr>, String> {
+        match mode {
+            RemoteNetworkMode::Off => Ok(None),
+            RemoteNetworkMode::LocalNetwork => self.local_network_address().map(Some),
+            RemoteNetworkMode::Tailscale => self.tailscale_address().map(Some),
+            RemoteNetworkMode::Relay => Ok(None),
+        }
+    }
+}
+
+/// Returns `true` for addresses in the Tailscale/CGNAT range `100.64.0.0/10`
+/// (i.e. `100.64.0.0` through `100.127.255.255`).
+pub fn is_tailscale_cgnat_address(addr: &std::net::Ipv4Addr) -> bool {
+    let octets = addr.octets();
+    octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
+}
+
+/// Enumerates active, non-loopback IPv4 interface addresses on this machine.
+#[cfg(unix)]
+fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    use std::net::Ipv4Addr;
+
+    let mut addrs = Vec::new();
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return Err("failed to enumerate network interfaces".into());
+        }
+        let mut cursor = head;
+        while !cursor.is_null() {
+            let iface = &*cursor;
+            if !iface.ifa_addr.is_null() && (*iface.ifa_addr).sa_family as i32 == libc::AF_INET {
+                let flags = iface.ifa_flags as i32;
+                let up = flags & libc::IFF_UP != 0;
+                let loopback = flags & libc::IFF_LOOPBACK != 0;
+                if up && !loopback {
+                    let sockaddr_in = iface.ifa_addr as *const libc::sockaddr_in;
+                    let raw = (*sockaddr_in).sin_addr.s_addr;
+                    addrs.push(Ipv4Addr::from(u32::from_be(raw)));
+                }
+            }
+            cursor = iface.ifa_next;
+        }
+        libc::freeifaddrs(head);
+    }
+    Ok(addrs)
+}
+
+/// Ask the routing table for its source address. UDP connect does not send
+/// packets, so this needs a route, not a response from the destination.
+fn routed_ipv4_address(destination: &str) -> Result<std::net::Ipv4Addr, String> {
+    let probe = || -> std::io::Result<std::net::SocketAddr> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        socket.connect(destination)?;
+        socket.local_addr()
+    };
+    match probe().map_err(|error| format!("route probe to {destination} failed: {error}"))? {
+        std::net::SocketAddr::V4(addr)
+            if !addr.ip().is_unspecified() && !addr.ip().is_loopback() =>
+        {
+            Ok(*addr.ip())
+        }
+        _ => Err(format!(
+            "route probe to {destination} found no external IPv4 address"
+        )),
+    }
+}
+
+#[cfg(any(not(unix), test))]
+fn portable_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    let mut addresses = Vec::new();
+    let mut errors = Vec::new();
+    for destination in ["8.8.8.8:80", "100.100.100.100:80"] {
+        match routed_ipv4_address(destination) {
+            Ok(address) if !addresses.contains(&address) => addresses.push(address),
+            Ok(_) => {}
+            Err(error) => errors.push(error),
+        }
+    }
+    if addresses.is_empty() {
+        Err(errors.join("; "))
+    } else {
+        for error in errors {
+            tracing::debug!(%error, "optional interface route probe unavailable");
+        }
+        Ok(addresses)
+    }
+}
+
+#[cfg(not(unix))]
+fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    portable_ipv4_interface_addresses()
+}
+
+fn select_local_network_address(
+    addresses: impl IntoIterator<Item = std::net::Ipv4Addr>,
+    routed: Option<std::net::Ipv4Addr>,
+) -> Option<std::net::Ipv4Addr> {
+    addresses
+        .into_iter()
+        .chain(routed)
+        .filter(|addr| {
+            !addr.is_unspecified()
+                && !addr.is_loopback()
+                && !addr.is_link_local()
+                && !addr.is_multicast()
+                && !addr.is_broadcast()
+                && !is_tailscale_cgnat_address(addr)
+        })
+        .min_by_key(|addr| (Some(*addr) != routed, !addr.is_private()))
+}
+
+/// Default [`InterfaceResolver`] backed by routing probes and, on Unix, the
+/// operating system's active interface list.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemInterfaceResolver;
+
+impl InterfaceResolver for SystemInterfaceResolver {
+    fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+        match routed_ipv4_address("8.8.8.8:80") {
+            Ok(routed) => {
+                if let Some(address) = select_local_network_address([], Some(routed)) {
+                    return Ok(address);
+                }
+            }
+            Err(error) => tracing::debug!(%error, "using interface list for LAN resolution"),
+        }
+        select_local_network_address(enumerate_ipv4_interface_addresses()?, None)
+            .ok_or_else(|| "no active local network IPv4 interface found".into())
+    }
+
+    fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+        enumerate_ipv4_interface_addresses()?
+            .into_iter()
+            .find(is_tailscale_cgnat_address)
+            .ok_or_else(|| "no active Tailscale IPv4 interface found".into())
     }
 }
 
@@ -79,6 +242,8 @@ struct PersistedRemoteGatewayConfig {
     allow_control: bool,
     #[serde(default)]
     restart_policy: RemoteRestartPolicy,
+    #[serde(default)]
+    relay_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +255,19 @@ struct WorkspaceCacheEntry {
 
 pub(crate) const WORKSPACE_SNAPSHOT_REFRESH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2);
+
+/// A pairing coordinator published by one relay owner.
+///
+/// `epoch` identifies the publishing owner so a stopping relay clears only its
+/// own entry and never a newer owner's.
+pub struct PublishedPairing {
+    pub coordinator: crate::remote::relay_client::PairingCoordinator,
+    pub epoch: u64,
+}
+
+/// Monotonic source for PublishedPairing::epoch.
+pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
@@ -104,6 +282,23 @@ pub struct RemoteGatewayState {
     pub bound_address: RwLock<Option<String>>,
     config_path: Option<PathBuf>,
     pub desktop_event_sink: RwLock<Option<DesktopEventSink>>,
+    /// The single relay pairing authority owned by the running gateway.
+    ///
+    /// Populated when the relay client starts. A pairing code is only redeemable
+    /// remotely if the PIN was registered with the relay, so GUI and CLI pairing must
+    /// go through this one coordinator instead of each minting a local-only code or
+    /// standing up a competing RelayClient for the same machine identity.
+    pub relay_pairing: RwLock<Option<PublishedPairing>>,
+    /// Single-use socket tickets minted for direct-gateway WebSocket upgrades.
+    ///
+    /// The browser `WebSocket` constructor cannot set an `Authorization` header, so a
+    /// direct connection previously put the PERMANENT device token in the URL query,
+    /// where it lands in gateway access logs and browser history. A ticket is minted
+    /// from the bearer over HTTP, scoped to one target, expires in
+    /// [`SOCKET_TICKET_TTL_SECS`], and is removed on first use.
+    ///
+    /// Maps ticket -> (device token, target, expiry unix seconds).
+    pub socket_tickets: parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     snapshot_refreshing: AtomicBool,
@@ -193,6 +388,7 @@ impl RemoteGatewayState {
                 // Port is fixed; ignore persisted value so stale custom ports heal on load.
                 port: REMOTE_GATEWAY_PORT,
                 allow_control: persisted.allow_control,
+                relay_url: persisted.relay_url,
             })
             .unwrap_or_default();
         Self {
@@ -208,6 +404,8 @@ impl RemoteGatewayState {
             bound_address: RwLock::new(None),
             config_path,
             desktop_event_sink: RwLock::new(None),
+            relay_pairing: RwLock::new(None),
+            socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
             snapshot_refreshing: AtomicBool::new(false),
@@ -450,6 +648,136 @@ fn remote_data_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A pairing requested as View must not redeem into a Control device. The relay
+    /// capability carries the permission that `exchange_pairing_code` copies onto the
+    /// issued device, so dropping it silently escalates the recipient.
+    #[tokio::test]
+    async fn relay_pairing_preserves_the_requested_permission() {
+        use crate::remote::auth::{AuthManager, DevicePermission};
+        use crate::remote::relay_client::PairingCoordinator;
+
+        for permission in [DevicePermission::View, DevicePermission::Control] {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let auth = AuthManager::with_persistence(None);
+            let coordinator =
+                PairingCoordinator::new_with_auth("perm-machine", tx, auth.clone());
+
+            let relay = tokio::spawn(async move {
+                let request = rx.recv().await.expect("registration reaches the relay");
+                let ack = crate::remote::protocol::RegisterPairingPinAck {
+                    generation: request.registration.generation,
+                    pin: request.registration.pin.clone(),
+                    machine_id: request.registration.machine_id.clone(),
+                    status: "ready".into(),
+                };
+                let token = request.registration.pairing_token.clone();
+                let _ = request.ack.send(Ok(ack));
+                token
+            });
+
+            coordinator
+                .generate_pairing_with_permission(std::time::Duration::from_secs(60), permission)
+                .await
+                .expect("pairing generation succeeds once the relay ACKs");
+            let token = relay.await.unwrap();
+
+            let (_, device) = auth
+                .exchange_pairing_code(&token, "paired device")
+                .expect("the relay capability must be redeemable");
+            assert_eq!(
+                device.permission, permission,
+                "the issued device must carry the permission the pairing requested"
+            );
+        }
+    }
+
+    /// A stopped relay must not leave a dead coordinator selected: pairing would fail
+    /// with "Relay registration channel closed" instead of falling back to local.
+    #[test]
+    fn stopping_a_relay_clears_only_its_own_published_coordinator() {
+        use crate::remote::relay_client::PairingCoordinator;
+        use std::sync::atomic::Ordering;
+
+        let published = |epoch: u64| {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            PublishedPairing {
+                coordinator: PairingCoordinator::new("m", tx),
+                epoch,
+            }
+        };
+        let slot = parking_lot::RwLock::new(Some(published(1)));
+
+        // A newer owner replaced the publication; the older handle's cleanup must be
+        // a no-op rather than clearing the live coordinator.
+        *slot.write() = Some(published(2));
+        let stale_epoch = 1;
+        {
+            let mut guard = slot.write();
+            if guard.as_ref().is_some_and(|c| c.epoch == stale_epoch) {
+                *guard = None;
+            }
+        }
+        assert!(
+            slot.read().is_some(),
+            "an older handle must not clear a newer owner's coordinator"
+        );
+
+        // The owning handle clears its own publication.
+        let owning_epoch = slot.read().as_ref().unwrap().epoch;
+        {
+            let mut guard = slot.write();
+            if guard.as_ref().is_some_and(|c| c.epoch == owning_epoch) {
+                *guard = None;
+            }
+        }
+        assert!(
+            slot.read().is_none(),
+            "a stopping relay must clear the coordinator it published"
+        );
+
+        assert!(RELAY_PAIRING_EPOCH.fetch_add(1, Ordering::Relaxed) >= 1);
+    }
+
+    /// The pairing authority the daemon serves GUI/CLI requests from must be the one
+    /// registered with the relay. A code minted only in the local AuthManager is not
+    /// redeemable remotely, because the relay never learns its PIN.
+    #[tokio::test]
+    async fn relay_pairing_coordinator_registers_the_pin_with_the_relay() {
+        use crate::remote::relay_client::PairingCoordinator;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let coordinator = PairingCoordinator::new("daemon-machine", tx);
+
+        // Answer the registration the way a connected relay control channel would.
+        let relay = tokio::spawn(async move {
+            let request = rx.recv().await.expect("pairing must be registered with the relay");
+            let pin = request.registration.pin.clone();
+            let machine = request.registration.machine_id.clone();
+            let _ = request.ack.send(Ok(
+                crate::remote::protocol::RegisterPairingPinAck {
+                    generation: request.registration.generation,
+                    pin: pin.clone(),
+                    machine_id: machine.clone(),
+                    status: "ready".into(),
+                },
+            ));
+            (pin, machine)
+        });
+
+        let info = coordinator
+            .generate_pairing(std::time::Duration::from_secs(60))
+            .await
+            .expect("pairing generation must succeed once the relay ACKs");
+
+        let (registered_pin, machine) = relay.await.unwrap();
+        assert_eq!(
+            registered_pin, info.pin,
+            "the PIN handed to the user must be the PIN registered with the relay"
+        );
+        assert_eq!(machine, "daemon-machine");
+        assert_eq!(info.pin.len(), 6);
+    }
+
     use super::*;
     use crate::remote::auth::DevicePermission;
     use crate::terminal::{PtyManager, TerminalOutputHub};
@@ -469,6 +797,173 @@ mod tests {
             Some(auth_path),
         );
         (state, registry, terminal)
+    }
+
+    /// Test-only [`InterfaceResolver`] returning fixed, injected addresses so
+    /// resolution logic can be exercised without depending on the host's
+    /// actual network configuration.
+    struct MockInterfaceResolver {
+        local_network: Result<std::net::Ipv4Addr, String>,
+        tailscale: Result<std::net::Ipv4Addr, String>,
+    }
+
+    impl InterfaceResolver for MockInterfaceResolver {
+        fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+            self.local_network.clone()
+        }
+
+        fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+            self.tailscale.clone()
+        }
+    }
+
+    #[test]
+    fn test_relay_mode_configuration() {
+        // RemoteNetworkMode::Relay serializes to the expected camelCase wire value.
+        let mode_json = serde_json::to_string(&RemoteNetworkMode::Relay).expect("serialize mode");
+        assert_eq!(mode_json, "\"relay\"");
+        let mode_back: RemoteNetworkMode =
+            serde_json::from_str(&mode_json).expect("deserialize mode");
+        assert_eq!(mode_back, RemoteNetworkMode::Relay);
+
+        // RemoteGatewayConfig with a relay_url round-trips through JSON.
+        let config = RemoteGatewayConfig {
+            mode: RemoteNetworkMode::Relay,
+            port: REMOTE_GATEWAY_PORT,
+            allow_control: true,
+            relay_url: Some("https://relay.example.com".to_string()),
+        };
+        let config_json = serde_json::to_string(&config).expect("serialize config");
+        assert!(config_json.contains(r#""mode":"relay""#));
+        assert!(config_json.contains(r#""relayUrl":"https://relay.example.com""#));
+        let config_back: RemoteGatewayConfig =
+            serde_json::from_str(&config_json).expect("deserialize config");
+        assert_eq!(config_back.mode, RemoteNetworkMode::Relay);
+        assert_eq!(
+            config_back.relay_url,
+            Some("https://relay.example.com".to_string())
+        );
+
+        // The relay URL persists to disk and is restored on reopen.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.json");
+        let auth_path = dir.path().join("auth.json");
+        let (state, registry, terminal) = test_state(config_path.clone(), auth_path.clone());
+
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::Relay;
+            config.relay_url = Some("https://relay.example.com".to_string());
+        }
+        state.persist_config().expect("persist");
+
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).expect("read persisted config"))
+                .expect("parse persisted config");
+        assert_eq!(on_disk["mode"], "relay");
+        assert_eq!(on_disk["relayUrl"], "https://relay.example.com");
+
+        let reopened = RemoteGatewayState::new_with_paths(
+            terminal,
+            registry,
+            Some(config_path),
+            Some(auth_path),
+        );
+        let reopened_config = reopened.config.read().clone();
+        assert_eq!(reopened_config.mode, RemoteNetworkMode::Relay);
+        assert_eq!(
+            reopened_config.relay_url,
+            Some("https://relay.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_interface_resolver_portable() {
+        // This smoke test requires an active IPv4 network, but no remote server
+        // or Internet response. Exercise the Windows probe path on Unix too.
+        let addresses = portable_ipv4_interface_addresses().expect("active IPv4 route");
+        assert!(!addresses.is_empty());
+        let address = SystemInterfaceResolver
+            .local_network_address()
+            .expect("active local network IPv4 interface");
+        assert!(!address.is_unspecified());
+        assert!(!address.is_loopback());
+        assert!(!is_tailscale_cgnat_address(&address));
+        std::net::UdpSocket::bind((address, 0)).expect("resolved address is locally bindable");
+    }
+
+    #[test]
+    fn test_interface_resolver_multihoming() {
+        use std::net::Ipv4Addr;
+
+        let bridge = Ipv4Addr::new(172, 17, 0, 1);
+        let lan = Ipv4Addr::new(192, 168, 1, 42);
+        let public = Ipv4Addr::new(203, 0, 113, 5);
+        let tailscale = Ipv4Addr::new(100, 88, 12, 4);
+        assert_eq!(
+            select_local_network_address([bridge, lan, public], Some(lan)),
+            Some(lan)
+        );
+        assert_eq!(
+            select_local_network_address([bridge, public], Some(public)),
+            Some(public)
+        );
+        assert_eq!(select_local_network_address([public, lan], None), Some(lan));
+        assert_eq!(
+            select_local_network_address([tailscale, lan], Some(tailscale)),
+            Some(lan)
+        );
+        assert_eq!(
+            select_local_network_address(
+                [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST, tailscale],
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_interface_resolver_address_selection() {
+        use std::net::Ipv4Addr;
+
+        let resolver = MockInterfaceResolver {
+            local_network: Ok(Ipv4Addr::new(192, 168, 1, 42)),
+            tailscale: Ok(Ipv4Addr::new(100, 88, 12, 4)),
+        };
+
+        // Off never needs an extra bind address.
+        assert_eq!(resolver.resolve(RemoteNetworkMode::Off), Ok(None));
+
+        // LocalNetwork resolves to the detected LAN address.
+        assert_eq!(
+            resolver.resolve(RemoteNetworkMode::LocalNetwork),
+            Ok(Some(Ipv4Addr::new(192, 168, 1, 42)))
+        );
+
+        // Tailscale resolves to the detected CGNAT address.
+        assert_eq!(
+            resolver.resolve(RemoteNetworkMode::Tailscale),
+            Ok(Some(Ipv4Addr::new(100, 88, 12, 4)))
+        );
+
+        // Tailscale resolution surfaces an error when no interface is found,
+        // it must never silently fall back to a wildcard bind.
+        let no_tailscale = MockInterfaceResolver {
+            local_network: Ok(Ipv4Addr::new(10, 0, 0, 5)),
+            tailscale: Err("no active Tailscale IPv4 interface found".into()),
+        };
+        assert!(no_tailscale.resolve(RemoteNetworkMode::Tailscale).is_err());
+
+        // CGNAT range classification: 100.64.0.0/10 only.
+        assert!(is_tailscale_cgnat_address(&Ipv4Addr::new(100, 64, 0, 0)));
+        assert!(is_tailscale_cgnat_address(&Ipv4Addr::new(100, 100, 1, 1)));
+        assert!(is_tailscale_cgnat_address(&Ipv4Addr::new(
+            100, 127, 255, 255
+        )));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(100, 63, 0, 0)));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(100, 128, 0, 0)));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(!is_tailscale_cgnat_address(&Ipv4Addr::new(127, 0, 0, 1)));
     }
 
     #[test]

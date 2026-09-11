@@ -109,6 +109,8 @@ pub struct DaemonRemoteStatus {
     pub allow_control: bool,
     pub is_running: bool,
     pub bound_address: Option<String>,
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -649,6 +651,7 @@ mod tests {
                 allow_control: true,
                 is_running: true,
                 bound_address: Some("0.0.0.0:43821".to_string()),
+                relay_url: None,
             },
         };
         let status_json = serde_json::to_string(&remote_status_resp).expect("serialize status");

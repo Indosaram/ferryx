@@ -1,10 +1,197 @@
-use parking_lot::RwLock;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineIdentity {
+    pub machine_id: String,
+    pub display_name: String,
+    /// Standard base64 encoded 32-byte verifying key.
+    pub public_key: String,
+    /// Standard base64 encoded 32-byte signing key seed; never send to the relay.
+    pub private_key: String,
+}
+
+/// The one directory holding this machine's remote identity.
+///
+/// The GUI/daemon gateway and the `ferryx pair` CLI must resolve the SAME file, or
+/// the machine presents two different Ed25519 keypairs depending on which entry
+/// point ran first, and the relay sees them as competing owners of one machine ID.
+/// This previously returned `FERRYX_DATA_DIR` itself while every other resolver
+/// (main.rs `remote_state_dir`/`remote_auth_manager`, state.rs
+/// `resolve_remote_data_dir`) appended `remote`, so the identity split into
+/// `<data>/identity.json` and `<data>/remote/identity.json`. It also skipped the
+/// Windows `LOCALAPPDATA` location those resolvers use.
+pub(crate) fn canonical_identity_dir() -> Result<PathBuf, String> {
+    canonical_remote_dir().ok_or_else(|| "Cannot resolve machine identity directory".to_string())
+}
+
+/// Shared `<data>/remote` resolution used by every remote-state path.
+pub(crate) fn canonical_remote_dir() -> Option<PathBuf> {
+    resolve_canonical_remote_dir(|variable| std::env::var_os(variable))
+}
+
+/// Environment-injectable form of [`canonical_remote_dir`] so the resolution can be
+/// asserted without mutating process-wide environment state from tests.
+pub(crate) fn resolve_canonical_remote_dir<F>(lookup: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    if let Some(base) = lookup("FERRYX_DATA_DIR") {
+        return Some(PathBuf::from(base).join("remote"));
+    }
+    #[cfg(windows)]
+    {
+        lookup("LOCALAPPDATA")
+            .map(|base| PathBuf::from(base).join("Ferryx").join("remote"))
+            .or_else(|| {
+                lookup("USERPROFILE").map(|base| PathBuf::from(base).join(".ferryx").join("remote"))
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        lookup("HOME")
+            .or_else(|| lookup("USERPROFILE"))
+            .map(|base| PathBuf::from(base).join(".ferryx").join("remote"))
+    }
+}
+
+/// The pairing auth store, resolved through the same directory as the identity.
+///
+/// This previously duplicated the resolution and omitted the Windows LOCALAPPDATA
+/// location the gateway and CLI use, so on Windows PairingCoordinator's auth store
+/// (`relay_client.rs`) diverged from the state directory everything else reads.
+pub(crate) fn canonical_auth_path() -> Option<PathBuf> {
+    canonical_remote_dir().map(|base| base.join("remote-auth.json"))
+}
+
+pub fn load_or_generate_machine_identity(base_dir: &Path) -> Result<MachineIdentity, String> {
+    let path = base_dir.join("identity.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            return serde_json::from_slice(&bytes)
+                .map_err(|error| format!("Failed to parse machine identity: {error}"));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to read machine identity: {error}")),
+    }
+
+    let key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let display_name = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Ferryx machine".to_string());
+    let identity = MachineIdentity {
+        machine_id: uuid::Uuid::new_v4().to_string(),
+        display_name,
+        public_key: STANDARD.encode(key.verifying_key().to_bytes()),
+        private_key: STANDARD.encode(key.to_bytes()),
+    };
+    write_private_json(&path, &identity)
+        .map_err(|error| format!("Failed to persist machine identity: {error}"))?;
+    Ok(identity)
+}
+
+pub fn sign_challenge(
+    identity: &MachineIdentity,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<String, String> {
+    sign_message(identity, &format!("{nonce}:{timestamp}"))
+}
+
+pub fn sign_control_challenge(
+    identity: &MachineIdentity,
+    audience: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<String, String> {
+    sign_message(
+        identity,
+        &format!(
+            "ferryx-control-v1:{}:{audience}:{nonce}:{timestamp}",
+            identity.machine_id
+        ),
+    )
+}
+
+pub fn verify_control_challenge(
+    public_key: &str,
+    machine_id: &str,
+    audience: &str,
+    nonce: &str,
+    timestamp: u64,
+    signature: &str,
+) -> bool {
+    verify_message(
+        public_key,
+        &format!("ferryx-control-v1:{machine_id}:{audience}:{nonce}:{timestamp}"),
+        signature,
+    )
+}
+
+fn sign_message(identity: &MachineIdentity, message: &str) -> Result<String, String> {
+    let seed: [u8; 32] = STANDARD
+        .decode(&identity.private_key)
+        .map_err(|error| format!("Invalid machine private key encoding: {error}"))?
+        .try_into()
+        .map_err(|_| "Machine private key must contain 32 bytes".to_string())?;
+    let signature = SigningKey::from_bytes(&seed).sign(message.as_bytes());
+    Ok(STANDARD.encode(signature.to_bytes()))
+}
+
+pub fn verify_machine_signature(
+    public_key_b64: &str,
+    nonce: &str,
+    timestamp: u64,
+    signature_b64: &str,
+) -> bool {
+    verify_message(
+        public_key_b64,
+        &format!("{nonce}:{timestamp}"),
+        signature_b64,
+    )
+}
+
+/// True when `public_key_b64` is a usable base64 Ed25519 verifying key. Used to reject
+/// a persisted ownership record that could never authenticate anything.
+pub(crate) fn is_valid_public_key(public_key_b64: &str) -> bool {
+    STANDARD
+        .decode(public_key_b64)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .is_some_and(|bytes| VerifyingKey::from_bytes(&bytes).is_ok())
+}
+
+fn verify_message(public_key_b64: &str, message: &str, signature_b64: &str) -> bool {
+    let Ok(bytes) = STANDARD.decode(public_key_b64) else {
+        return false;
+    };
+    let Ok(bytes) = <[u8; 32]>::try_from(bytes) else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(&bytes) else {
+        return false;
+    };
+    let Ok(bytes) = STANDARD.decode(signature_b64) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&bytes) else {
+        return false;
+    };
+    key.verify_strict(message.as_bytes(), &signature).is_ok()
+}
 
 const PAIRING_EXPIRY: Duration = Duration::from_secs(60);
 const PAIRING_FAILURE_BUDGET: u8 = 5;
@@ -32,10 +219,42 @@ pub struct DeviceInfo {
     pub revoked: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct PairingCode {
     _code: String,
+    #[serde(with = "persisted_instant")]
     created_at: Instant,
     default_permission: DevicePermission,
+    #[serde(default)]
+    approved_token: Option<String>,
+}
+
+// Preserve monotonic expiry in-process while storing portable wall-clock timestamps.
+mod persisted_instant {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        instant: &Instant,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let created = std::time::SystemTime::now()
+            .checked_sub(instant.elapsed())
+            .unwrap_or(std::time::UNIX_EPOCH)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        created.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Instant, D::Error> {
+        let created = Duration::deserialize(deserializer)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let age = now.checked_sub(created).unwrap_or(PAIRING_EXPIRY);
+        Ok(Instant::now() - age.min(PAIRING_EXPIRY))
+    }
 }
 
 #[derive(Default)]
@@ -64,13 +283,23 @@ impl PairingWindow {
 struct PersistedAuthState {
     devices: HashMap<String, DeviceInfo>,
     tokens: HashMap<String, String>,
+    #[serde(default)]
+    pairing_codes: HashMap<String, PairingCode>,
 }
 
 #[derive(Clone)]
 pub struct AuthManager {
     pairing_window: Arc<RwLock<PairingWindow>>,
+    transaction: Arc<Mutex<()>>,
     devices: Arc<RwLock<HashMap<String, DeviceInfo>>>,
+    /// Device Bearer Tokens: long-lived credentials issued to paired remote
+    /// control clients. Maps token -> owning device id.
     tokens: Arc<RwLock<HashMap<String, String>>>,
+    /// Machine Tokens: credentials used by the local daemon to authenticate
+    /// its reverse tunnel connection to the relay. Distinct tier from device
+    /// bearer tokens; a machine token identifies the host, not a paired
+    /// remote-control device, and is never handed out via pairing.
+    machine_tokens: Arc<RwLock<std::collections::HashSet<String>>>,
     revocations: Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
     persistence_path: Option<PathBuf>,
     last_persisted_at: Arc<RwLock<Instant>>,
@@ -94,16 +323,53 @@ impl AuthManager {
             .unwrap_or_default();
         prune_revoked_devices(&mut persisted);
         Self {
-            pairing_window: Arc::new(RwLock::new(PairingWindow::default())),
+            pairing_window: Arc::new(RwLock::new(PairingWindow {
+                codes: persisted.pairing_codes,
+                ..PairingWindow::default()
+            })),
+            transaction: Arc::new(Mutex::new(())),
             devices: Arc::new(RwLock::new(persisted.devices)),
             tokens: Arc::new(RwLock::new(persisted.tokens)),
+            machine_tokens: Arc::new(RwLock::new(std::collections::HashSet::new())),
             revocations: Arc::new(RwLock::new(HashMap::new())),
             persistence_path,
             last_persisted_at: Arc::new(RwLock::new(Instant::now())),
         }
     }
 
+    /// Generates a new Machine Token authenticating this daemon's reverse
+    /// tunnel connection to the relay. Distinct from Device Bearer Tokens:
+    /// it identifies the machine itself, not a paired remote-control device,
+    /// and is not subject to pairing-code exchange or device revocation.
+    pub fn generate_machine_token(&self) -> String {
+        let token: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(64)
+            .map(char::from)
+            .collect();
+        self.machine_tokens.write().insert(token.clone());
+        token
+    }
+
+    /// Validates a Machine Token presented by the daemon when establishing
+    /// a reverse tunnel to the relay. Never matches Device Bearer Tokens or
+    /// Pairing PINs; each credential tier is checked against its own store.
+    pub fn validate_machine_token(&self, token: &str) -> Result<(), AuthError> {
+        if self.machine_tokens.read().contains(token) {
+            Ok(())
+        } else {
+            Err(AuthError::Unauthorized)
+        }
+    }
+
+    /// Revokes a previously generated Machine Token so it can no longer
+    /// authenticate reverse tunnel connections.
+    pub fn revoke_machine_token(&self, token: &str) -> bool {
+        self.machine_tokens.write().remove(token)
+    }
+
     pub fn create_pairing_code(&self, default_permission: DevicePermission) -> String {
+        let _transaction = self.begin_transaction();
         let pin: u32 = rand::thread_rng().gen_range(100_000..=999_999);
         let code = format!("{pin:06}");
 
@@ -115,9 +381,49 @@ impl AuthManager {
                 _code: code.clone(),
                 created_at: Instant::now(),
                 default_permission,
+                approved_token: None,
             },
         );
+        drop(window);
+        self.persist_best_effort();
         code
+    }
+
+    /// Installs the relay capability in the same single-use authority as local PINs.
+    pub(crate) fn register_pairing_capability(&self, token: &str) {
+        self.register_pairing_capability_with_permission(token, DevicePermission::Control);
+    }
+
+    /// Registers a relay pairing capability that issues exactly `permission`.
+    ///
+    /// The permission must travel with the capability: `exchange_pairing_code` copies
+    /// it onto the issued device, so defaulting to Control here would silently upgrade
+    /// a caller that asked for View.
+    pub(crate) fn register_pairing_capability_with_permission(
+        &self,
+        token: &str,
+        permission: DevicePermission,
+    ) {
+        let _transaction = self.begin_transaction();
+        let mut window = self.pairing_window.write();
+        window.refresh(Instant::now());
+        window.codes.insert(
+            token.to_owned(),
+            PairingCode {
+                _code: token.to_owned(),
+                created_at: Instant::now(),
+                default_permission: permission,
+                approved_token: None,
+            },
+        );
+        drop(window);
+        self.persist_best_effort();
+    }
+
+    pub(crate) fn cancel_pairing_capability(&self, token: &str) {
+        let _transaction = self.begin_transaction();
+        self.pairing_window.write().codes.remove(token);
+        self.persist_best_effort();
     }
 
     pub fn exchange_pairing_code(
@@ -125,6 +431,7 @@ impl AuthManager {
         code: &str,
         device_name: &str,
     ) -> Result<(String, DeviceInfo), AuthError> {
+        let _transaction = self.begin_transaction();
         let pairing = {
             // Lookup, failure accounting and single-use consumption share one
             // lock. No concurrent request can spend the same budget slot/code.
@@ -143,6 +450,15 @@ impl AuthManager {
             }
             pairing
         };
+
+        if let Some(token) = pairing.approved_token {
+            let device_id = self.tokens.read().get(&token).cloned();
+            let info = device_id.and_then(|id| self.devices.read().get(&id).cloned());
+            self.persist_best_effort();
+            return info
+                .map(|info| (token, info))
+                .ok_or(AuthError::Unauthorized);
+        }
 
         let device_id = uuid::Uuid::new_v4().to_string();
         let token: String = rand::thread_rng()
@@ -167,7 +483,72 @@ impl AuthManager {
         Ok((token, info))
     }
 
+    /// Approves a pairing PIN from a headless/CLI context (e.g. `ferryx pair approve <pin>`).
+    /// Persists an approved device and its bearer token with the PIN so a remote
+    /// client can retrieve that same token in a single-use exchange.
+    pub fn approve_pairing_code_cli(&self, code: &str) -> Result<DeviceInfo, AuthError> {
+        if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+            return Err(AuthError::InvalidPairingCode);
+        }
+
+        let _transaction = self.begin_transaction();
+        let mut pairing = {
+            let mut window = self.pairing_window.write();
+            window.refresh(Instant::now());
+            if window.failures >= PAIRING_FAILURE_BUDGET {
+                return Err(AuthError::PairingRateLimited);
+            }
+            let Some(pairing) = window.codes.remove(code) else {
+                window.failures += 1;
+                return Err(AuthError::InvalidPairingCode);
+            };
+            if pairing.created_at.elapsed() >= PAIRING_EXPIRY {
+                window.failures += 1;
+                return Err(AuthError::ExpiredPairingCode);
+            }
+            pairing
+        };
+
+        if let Some(token) = &pairing.approved_token {
+            let device_id = self.tokens.read().get(token).cloned();
+            let info = device_id.and_then(|id| self.devices.read().get(&id).cloned());
+            self.pairing_window
+                .write()
+                .codes
+                .insert(code.to_string(), pairing);
+            return info.ok_or(AuthError::Unauthorized);
+        }
+
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let token: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(64)
+            .map(char::from)
+            .collect();
+
+        let now = unix_now();
+        let info = DeviceInfo {
+            id: device_id.clone(),
+            name: "cli-paired-device".to_string(),
+            permission: pairing.default_permission,
+            created_at: now,
+            last_seen_at: now,
+            revoked: false,
+        };
+
+        self.devices.write().insert(device_id.clone(), info.clone());
+        self.tokens.write().insert(token.clone(), device_id);
+        pairing.approved_token = Some(token);
+        self.pairing_window
+            .write()
+            .codes
+            .insert(code.to_string(), pairing);
+        self.persist_best_effort();
+        Ok(info)
+    }
+
     pub fn validate_token(&self, token: &str) -> Result<DeviceInfo, AuthError> {
+        let _transaction = self.begin_transaction();
         let device_id = {
             let tokens = self.tokens.read();
             tokens.get(token).cloned()
@@ -215,6 +596,7 @@ impl AuthManager {
     /// from [`Self::list_devices`] immediately instead of lingering as a
     /// revoked entry.
     pub fn revoke_device(&self, device_id: &str) -> bool {
+        let _transaction = self.begin_transaction();
         let changed = {
             let mut devices = self.devices.write();
             if devices.remove(device_id).is_some() {
@@ -239,6 +621,55 @@ impl AuthManager {
         *self.last_persisted_at.write() = instant;
     }
 
+    /// Test-only hook: backdates an active pairing PIN's creation time so
+    /// expiration logic can be exercised deterministically, without a real
+    /// 60-second sleep in the test suite.
+    #[cfg(test)]
+    pub(crate) fn backdate_pairing_code(&self, code: &str, age: Duration) {
+        let mut window = self.pairing_window.write();
+        if let Some(pairing) = window.codes.get_mut(code) {
+            pairing.created_at = Instant::now()
+                .checked_sub(age)
+                .expect("instant subtraction");
+        }
+    }
+
+    // A separate transaction lock file survives atomic replacement of the JSON inode
+    // and serializes reload/mutation/save across both clones and independent processes.
+    // It uses a distinct sidecar extension ("tx.lock") so holding a transaction does not
+    // deadlock with the low-level store flock ("lock") acquired during write_private_json.
+    fn begin_transaction(&self) -> (MutexGuard<'_, ()>, Option<std::fs::File>) {
+        let guard = self.transaction.lock();
+        let file = self.persistence_path.as_deref().map(|path| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create remote auth directory");
+            }
+            let mut open_opts = std::fs::OpenOptions::new();
+            open_opts
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                open_opts.mode(0o600);
+            }
+            let file = open_opts
+                .open(path.with_extension("tx.lock"))
+                .expect("open remote auth lock");
+            file.lock().expect("lock remote auth state");
+            if let Some(mut state) = load_persisted_auth(path) {
+                prune_revoked_devices(&mut state);
+                self.pairing_window.write().codes = state.pairing_codes;
+                *self.devices.write() = state.devices;
+                *self.tokens.write() = state.tokens;
+            }
+            file
+        });
+        (guard, file)
+    }
+
     fn persist_best_effort(&self) {
         let Some(path) = self.persistence_path.as_deref() else {
             return;
@@ -247,6 +678,7 @@ impl AuthManager {
         let snapshot = PersistedAuthState {
             devices: self.devices.read().clone(),
             tokens: self.tokens.read().clone(),
+            pairing_codes: self.pairing_window.read().codes.clone(),
         };
         if let Err(error) = write_private_json(path, &snapshot) {
             tracing::warn!("failed to persist remote auth state: {error}");
@@ -269,7 +701,9 @@ fn load_persisted_auth(path: &Path) -> Option<PersistedAuthState> {
 /// Drops devices that older builds tombstoned with `revoked: true`, together
 /// with their tokens, so a revoked device never resurfaces in the device list.
 fn prune_revoked_devices(state: &mut PersistedAuthState) {
-    let PersistedAuthState { devices, tokens } = state;
+    let PersistedAuthState {
+        devices, tokens, ..
+    } = state;
     devices.retain(|_, device| !device.revoked);
     tokens.retain(|_, device_id| devices.contains_key(device_id));
 }
@@ -281,25 +715,108 @@ fn prune_revoked_devices(state: &mut PersistedAuthState) {
 /// On Windows the enclosing per-user directory (`LOCALAPPDATA`, chosen by
 /// `remote::state::resolve_remote_data_dir`) already carries an ACL that excludes other standard
 /// users, and both the temporary and final file inherit it.
+/// Atomically writes `value` as an owner-only JSON file.
+///
+/// This store holds authorization state, so two properties are enforced rather than
+/// attempted:
+///
+/// - **Confidentiality.** A failure to restrict the file or its directory is
+///   returned. Previously both `set_permissions` calls were discarded with `let _`,
+///   so a store left readable by others was reported as a successful write.
+/// - **Durability.** The temp file and its directory are fsynced. `rename` is atomic
+///   with respect to readers, but without fsync the rename can reach disk while the
+///   contents have not, so a crash can leave an empty or truncated store where a
+///   valid one is expected.
+/// Holds an advisory exclusive lock for the lifetime of a store write.
+///
+/// The daemon, the GUI and the CLI are separate PROCESSES writing the same file, so
+/// an in-process mutex cannot order them: two writers could each read, modify and
+/// rename, and the later rename would silently discard the earlier writer's change.
+/// `flock` on a sidecar file serializes them across processes.
+///
+/// The lock is advisory and only effective between participants that take it, which
+/// is every writer that goes through [`write_private_json`]. It is released when the
+/// file descriptor closes, including on process death, so a crash cannot wedge it.
+#[cfg(unix)]
+struct StoreLock(std::fs::File);
+
+#[cfg(unix)]
+impl StoreLock {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(path.with_extension("lock"))?;
+        // Blocking: a concurrent writer is expected and should be waited for, not
+        // raced with or skipped.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(file))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
         }
     }
-    let temp = path.with_extension("tmp");
+    // Serialize concurrent writers across processes before touching the store, so a
+    // second process cannot interleave its own temp-write-and-rename with this one.
+    #[cfg(unix)]
+    let _lock = StoreLock::acquire(path)?;
+
+    // The temp file is per-process, so two writers cannot clobber each other's
+    // staging file even if the lock is unavailable on some platform.
+    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    std::fs::write(&temp, bytes)?;
+
+    // Create the file already restricted, so the contents are never briefly visible
+    // to another user between the write and a later permission change.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write as _;
+        let mut file = options.open(&temp)?;
+        file.write_all(&bytes)?;
+        // Flush the bytes before the rename publishes the new name.
+        file.sync_all()?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(temp, path)?;
+    std::fs::rename(&temp, path)?;
+
+    // Persist the directory entry itself, so the rename survives a crash.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 
@@ -320,8 +837,512 @@ pub enum AuthError {
 mod security_tests;
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_identity_dir_matches_the_shared_remote_state_dir() {
+        // The GUI/daemon gateway and the `ferryx pair` CLI must load the SAME identity
+        // file. canonical_identity_dir previously returned FERRYX_DATA_DIR itself while
+        // every other resolver appended "remote", so one machine ended up with two
+        // Ed25519 keypairs depending on which entry point created one first.
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            move |variable: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == variable)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            }
+        };
+
+        // This mirrors main.rs remote_state_dir() and state.rs resolve_remote_data_dir():
+        // FERRYX_DATA_DIR is joined with "remote".
+        assert_eq!(
+            resolve_canonical_remote_dir(lookup(&[("FERRYX_DATA_DIR", "/data/ferryx")])).unwrap(),
+            PathBuf::from("/data/ferryx").join("remote"),
+            "identity must live under the same <data>/remote the CLI and gateway use"
+        );
+
+        // And the per-user fallback resolves rather than returning None, so the CLI does
+        // not silently create a second identity when FERRYX_DATA_DIR is unset.
+        #[cfg(not(windows))]
+        assert_eq!(
+            resolve_canonical_remote_dir(lookup(&[("HOME", "/home/user")])).unwrap(),
+            PathBuf::from("/home/user").join(".ferryx").join("remote")
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            resolve_canonical_remote_dir(lookup(&[("LOCALAPPDATA", r"C:\Users\u\AppData\Local")]))
+                .unwrap(),
+            PathBuf::from(r"C:\Users\u\AppData\Local")
+                .join("Ferryx")
+                .join("remote"),
+            "the Windows data location used by the other resolvers must be honored"
+        );
+
+        assert!(resolve_canonical_remote_dir(lookup(&[("UNRELATED", "/x")])).is_none());
+    }
+
+    #[test]
+    fn test_auth_store_resolves_under_the_same_dir_as_the_identity() {
+        // PairingCoordinator's auth store and the gateway/CLI state directory must be
+        // the same place. canonical_auth_path used to duplicate the resolution and skip
+        // the Windows LOCALAPPDATA location, splitting them on Windows.
+        // Asserted against a literal expected path, not against the resolver itself,
+        // so this cannot pass tautologically.
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            move |variable: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == variable)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            }
+        };
+        let auth_path_for = |pairs: &'static [(&'static str, &'static str)]| {
+            resolve_canonical_remote_dir(lookup(pairs)).map(|base| base.join("remote-auth.json"))
+        };
+
+        assert_eq!(
+            auth_path_for(&[("FERRYX_DATA_DIR", "/data/ferryx")]).unwrap(),
+            PathBuf::from("/data/ferryx")
+                .join("remote")
+                .join("remote-auth.json")
+        );
+
+        // The Windows location the gateway and CLI use must be honored here too; the
+        // old canonical_auth_path only consulted HOME/USERPROFILE.
+        #[cfg(windows)]
+        assert_eq!(
+            auth_path_for(&[
+                ("LOCALAPPDATA", r"C:\Users\u\AppData\Local"),
+                ("USERPROFILE", r"C:\Users\u")
+            ])
+            .unwrap(),
+            PathBuf::from(r"C:\Users\u\AppData\Local")
+                .join("Ferryx")
+                .join("remote")
+                .join("remote-auth.json"),
+            "on Windows the auth store must follow LOCALAPPDATA, not USERPROFILE"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            auth_path_for(&[("HOME", "/home/user")]).unwrap(),
+            PathBuf::from("/home/user")
+                .join(".ferryx")
+                .join("remote")
+                .join("remote-auth.json")
+        );
+    }
+
+    #[test]
+    fn test_machine_identity_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("machine");
+        let identity = load_or_generate_machine_identity(&base).unwrap();
+        assert!(base.join("identity.json").is_file());
+        assert!(uuid::Uuid::parse_str(&identity.machine_id).is_ok());
+        assert!(!identity.display_name.is_empty());
+        assert_eq!(STANDARD.decode(&identity.public_key).unwrap().len(), 32);
+        assert_eq!(STANDARD.decode(&identity.private_key).unwrap().len(), 32);
+        let reloaded = load_or_generate_machine_identity(&base).unwrap();
+        assert_eq!(identity.machine_id, reloaded.machine_id);
+        assert_eq!(identity.display_name, reloaded.display_name);
+        assert_eq!(identity.public_key, reloaded.public_key);
+        assert_eq!(identity.private_key, reloaded.private_key);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(base.join("identity.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::write(base.join("identity.json"), b"invalid json").unwrap();
+        assert!(load_or_generate_machine_identity(&base).is_err());
+    }
+
+    #[test]
+    fn test_machine_identity_sign_and_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = load_or_generate_machine_identity(dir.path()).unwrap();
+        let nonce = "challenge-nonce";
+        let timestamp = 1_700_000_000;
+        let signature = sign_challenge(&identity, nonce, timestamp).unwrap();
+        assert!(verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp,
+            &signature
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            "wrong-nonce",
+            timestamp,
+            &signature
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp + 1,
+            &signature
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp,
+            "invalid!"
+        ));
+        assert!(!verify_machine_signature(
+            &identity.public_key,
+            nonce,
+            timestamp,
+            &STANDARD.encode([0u8; 64])
+        ));
+        assert!(!verify_machine_signature(
+            "invalid!", nonce, timestamp, &signature
+        ));
+        assert!(!verify_machine_signature(
+            &STANDARD.encode([0u8; 31]),
+            nonce,
+            timestamp,
+            &signature
+        ));
+        let mut invalid = identity.clone();
+        invalid.private_key = "invalid!".into();
+        assert!(sign_challenge(&invalid, nonce, timestamp).is_err());
+        invalid.private_key = STANDARD.encode([0u8; 31]);
+        assert!(sign_challenge(&invalid, nonce, timestamp).is_err());
+    }
+
+    #[test]
+    fn relay_capability_is_single_use_persisted_and_cancellable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-auth.json");
+        let gateway = AuthManager::with_persistence(Some(path.clone()));
+        let coordinator = AuthManager::with_persistence(Some(path));
+        coordinator.register_pairing_capability("capability");
+        let (token, device) = gateway
+            .exchange_pairing_code("capability", "browser")
+            .unwrap();
+        assert_eq!(gateway.validate_token(&token).unwrap().id, device.id);
+        assert!(gateway
+            .exchange_pairing_code("capability", "replay")
+            .is_err());
+        coordinator.register_pairing_capability("cancelled");
+        coordinator.cancel_pairing_capability("cancelled");
+        assert!(gateway
+            .exchange_pairing_code("cancelled", "browser")
+            .is_err());
+    }
+
+    #[test]
+    fn test_cli_pair_cross_process_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-auth.json");
+        let gateway = AuthManager::with_persistence(Some(path.clone()));
+        let generator = AuthManager::with_persistence(Some(path.clone()));
+        let code = generator.create_pairing_code(DevicePermission::View);
+        drop(generator);
+        let approver = AuthManager::with_persistence(Some(path.clone()));
+        let approved = approver.approve_pairing_code_cli(&code).unwrap();
+        let issued_token = load_persisted_auth(&path).unwrap().pairing_codes[&code]
+            .approved_token
+            .clone()
+            .unwrap();
+        assert_eq!(
+            approver.approve_pairing_code_cli(&code).unwrap().id,
+            approved.id
+        );
+        drop(approver);
+        let (token, device) = gateway.exchange_pairing_code(&code, "Phone").unwrap();
+        assert_eq!(token, issued_token);
+        assert_eq!(device.id, approved.id);
+        assert_eq!(device.permission, DevicePermission::View);
+        assert_eq!(gateway.validate_token(&token).unwrap().id, approved.id);
+        let reopened = AuthManager::with_persistence(Some(path.clone()));
+        assert!(matches!(
+            reopened.exchange_pairing_code(&code, "Replay"),
+            Err(AuthError::InvalidPairingCode)
+        ));
+        assert_eq!(reopened.validate_token(&token).unwrap().id, approved.id);
+        let expired = gateway.create_pairing_code(DevicePermission::Control);
+        let mut state = load_persisted_auth(&path).unwrap();
+        state.pairing_codes.get_mut(&expired).unwrap().created_at = Instant::now() - PAIRING_EXPIRY;
+        write_private_json(&path, &state).unwrap();
+        assert!(matches!(
+            reopened.approve_pairing_code_cli(&expired),
+            Err(AuthError::ExpiredPairingCode)
+        ));
+        assert!(gateway.exchange_pairing_code(&expired, "Expired").is_err());
+    }
+
+    #[test]
+    fn test_cli_pair_approve() {
+        let manager = AuthManager::new();
+        let code = manager.create_pairing_code(DevicePermission::Control);
+
+        let device = manager
+            .approve_pairing_code_cli(&code)
+            .expect("approving a freshly created pairing code must succeed");
+        assert_eq!(device.name, "cli-paired-device");
+        assert_eq!(device.permission, DevicePermission::Control);
+        assert_eq!(manager.list_devices().len(), 1);
+
+        let invalid = manager.approve_pairing_code_cli("000000");
+        assert!(matches!(invalid, Err(AuthError::InvalidPairingCode)));
+    }
+
+    /// Verifies the three credential tiers - Machine Token, 60s Pairing PIN,
+    /// and Device Bearer Token - are validated independently, that a token
+    /// from one tier never authenticates another, and that the pairing PIN
+    /// both expires after 60 seconds and is consumed on first use.
+    #[test]
+    fn test_auth_credential_separation() {
+        let manager = AuthManager::new();
+
+        // --- Tier 1: Machine Token (daemon-to-relay reverse tunnel) ---
+        let machine_token = manager.generate_machine_token();
+        assert!(
+            manager.validate_machine_token(&machine_token).is_ok(),
+            "a freshly generated machine token must validate"
+        );
+        assert!(matches!(
+            manager.validate_machine_token("not-a-real-machine-token"),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // --- Tier 2: 60-second Pairing PIN, single-use, strict expiry ---
+        let code = manager.create_pairing_code(DevicePermission::Control);
+        assert_eq!(code.len(), 6, "pairing PIN must be a 6-digit code");
+
+        // A pairing PIN must never validate as a machine token or vice versa.
+        assert!(matches!(
+            manager.validate_machine_token(&code),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // Backdate the PIN past its 60-second window and confirm it is rejected.
+        manager.backdate_pairing_code(&code, Duration::from_secs(61));
+        assert!(matches!(
+            manager.exchange_pairing_code(&code, "Expired Phone"),
+            Err(AuthError::ExpiredPairingCode)
+        ));
+
+        // Issue a fresh PIN and consume it exactly once.
+        let code = manager.create_pairing_code(DevicePermission::View);
+        let (device_token, device) = manager
+            .exchange_pairing_code(&code, "Tablet")
+            .expect("a fresh, unexpired pairing code must exchange successfully");
+        assert_eq!(device.permission, DevicePermission::View);
+
+        // Re-using the same PIN must fail: pairing codes are single-use.
+        assert!(matches!(
+            manager.exchange_pairing_code(&code, "Second Device"),
+            Err(AuthError::InvalidPairingCode)
+        ));
+
+        // --- Tier 3: Device Bearer Token ---
+        let validated = manager
+            .validate_token(&device_token)
+            .expect("a token minted by pairing exchange must validate as a device bearer token");
+        assert_eq!(validated.id, device.id);
+
+        // A device bearer token must never validate as a machine token.
+        assert!(matches!(
+            manager.validate_machine_token(&device_token),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // A machine token must never validate as a device bearer token.
+        assert!(matches!(
+            manager.validate_token(&machine_token),
+            Err(AuthError::Unauthorized)
+        ));
+
+        // Revoking the machine token removes it from the machine-token tier only.
+        assert!(manager.revoke_machine_token(&machine_token));
+        assert!(matches!(
+            manager.validate_machine_token(&machine_token),
+            Err(AuthError::Unauthorized)
+        ));
+        assert!(
+            manager.validate_token(&device_token).is_ok(),
+            "revoking a machine token must not affect device bearer tokens"
+        );
+    }
+}
+
+#[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    /// The resolver is well covered, but nothing proved that `canonical_auth_path`
+    /// actually routes through it, so a divergent path could ship with the resolver
+    /// still green. This drives the real environment variable and requires the
+    /// public path to follow it.
+    #[test]
+    fn canonical_auth_path_follows_the_canonical_remote_dir() {
+        // Whatever the ambient environment resolves to, the public path must be that
+        // directory plus the store file name - never an independently built path.
+        match (canonical_remote_dir(), canonical_auth_path()) {
+            (Some(dir), Some(auth)) => {
+                assert_eq!(
+                    auth,
+                    dir.join("remote-auth.json"),
+                    "the auth path must be the canonical remote dir plus the store file name"
+                );
+                assert_eq!(
+                    auth.parent().map(Path::to_path_buf),
+                    Some(dir),
+                    "the auth path must live in the directory the resolver chose"
+                );
+            }
+            (None, None) => {}
+            (dir, auth) => panic!(
+                "canonical_auth_path must resolve exactly when the remote dir does: \
+                 dir={dir:?} auth={auth:?}"
+            ),
+        }
+
+        // Driving the resolver directly pins the shape the delegation must produce,
+        // including the FERRYX_DATA_DIR branch, without mutating process state.
+        let explicit = resolve_canonical_remote_dir(|key| {
+            (key == "FERRYX_DATA_DIR").then(|| std::ffi::OsString::from("/tmp/ferryx-canonical"))
+        })
+        .expect("an explicit data dir must resolve");
+        assert_eq!(explicit, Path::new("/tmp/ferryx-canonical").join("remote"));
+    }
+
+    /// The store holds authorization state (machine ownership, device records), so it
+    /// must be owner-only and an unwritable location must be reported rather than
+    /// silently reported as written.
+    ///
+    /// Note on scope: the previous code also DISCARDED both `set_permissions` results
+    /// with `let _`. Those are now propagated, but a portable test cannot observe that
+    /// specific propagation (an unwritable parent fails earlier, at `create_dir_all`),
+    /// so this asserts the observable properties: the resulting mode, correction of a
+    /// pre-existing permissive file, and a real error for an impossible path.
+    #[cfg(unix)]
+    #[test]
+    fn the_store_is_written_owner_only_or_reports_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("nested").join("remote-auth.json");
+        write_private_json(&path, &serde_json::json!({"devices": {}})).expect("write succeeds");
+
+        // The written file is owner-only, and so is its directory.
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the store must not be readable by others");
+        let parent = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(parent, 0o700, "the store directory must be owner-only");
+
+        // An unwritable location must FAIL rather than report a successful write of
+        // an authorization store that does not exist.
+        let not_a_dir = dir.path().join("occupied");
+        std::fs::write(&not_a_dir, b"this is a file, not a directory").unwrap();
+        assert!(
+            write_private_json(&not_a_dir.join("remote-auth.json"), &serde_json::json!({}))
+                .is_err(),
+            "a store that cannot be created must report an error"
+        );
+
+        // Rewriting an existing store must not widen its mode, so a pre-existing
+        // permissive file is corrected rather than preserved.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_json(&path, &serde_json::json!({"devices": {}})).expect("rewrite succeeds");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "rewriting the store must restore owner-only access"
+        );
+    }
+
+    /// Independent PROCESSES write this store, so writers must be serialized across
+    /// process boundaries: an in-process mutex cannot stop two processes from each
+    /// reading, modifying and renaming, with the later rename discarding the earlier
+    /// change. Concurrent writers must therefore never observe a torn store.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_writers_never_observe_a_torn_store() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("remote-auth.json");
+        write_private_json(&path, &serde_json::json!({"devices": {}})).unwrap();
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (path, stop) = (path.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut reads = 0_u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        // A reader must never see a partial document. An empty read
+                        // is impossible too: rename always publishes a complete file.
+                        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|e| {
+                            panic!("torn store observed after {reads} clean reads: {e}")
+                        });
+                        reads += 1;
+                    }
+                }
+                reads
+            })
+        };
+
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..40 {
+                        let payload = serde_json::json!({
+                            "devices": {format!("device-{w}"): {"seq": i, "pad": "x".repeat(512)}}
+                        });
+                        write_private_json(&path, &payload).expect("concurrent write succeeds");
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        reader.join().expect("reader observed only complete documents");
+
+        // The surviving store is a complete, valid document.
+        let final_state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("store is valid JSON");
+        assert!(final_state.get("devices").is_some());
+    }
+
+    /// An interrupted write must not leave a half-written store: the rename is atomic,
+    /// but without fsync the rename can be visible while the bytes are not, so a crash
+    /// or power loss yields an empty or truncated authorization store.
+    #[test]
+    fn a_completed_write_leaves_a_fully_readable_store() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("remote-auth.json");
+        let payload = serde_json::json!({"devices": {"a": {"permission": "view"}}});
+        write_private_json(&path, &payload).expect("write succeeds");
+
+        // No staging file is left behind to be mistaken for the store.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a completed write must leave no staging file: {leftovers:?}"
+        );
+        let read: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("store is valid JSON");
+        assert_eq!(read, payload);
+    }
 
     #[test]
     fn revoked_devices_are_deleted_outright_and_never_reappear() {

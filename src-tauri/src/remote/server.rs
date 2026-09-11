@@ -1,5 +1,5 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
-use crate::remote::backend::{RemoteSessionBackend, RecoveryStream, RemoteRecoveryStatus};
+use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
 #[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
 #[cfg(feature = "native-terminal")]
@@ -10,11 +10,12 @@ use crate::remote::protocol::{
     RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
     RemoteWorkspaceState, RemoteWorktreeInfo,
 };
+use crate::remote::push::{global_push_store, PushSubscriptionInfo};
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
 };
 use crate::terminal::{AttachmentSnapshot, OutputChunk, SessionAttachment, TerminalSignal};
-use crate::worktree::{CreateWorktreeOptions, WorktreeIdentity};
+use crate::worktree::{parse_host_scoped_session_id, CreateWorktreeOptions, WorktreeIdentity};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -63,10 +64,21 @@ pub(crate) struct RemoteTerminalFrameMetadata {
 pub(crate) fn encode_remote_terminal_output_frame(chunk: &OutputChunk) -> Vec<u8> {
     encode_remote_terminal_frame(
         RemoteTerminalFrameMetadata {
-            kind: if chunk.replay_gap.is_some() { "replayGap" } else { "output" }.into(),
+            kind: if chunk.replay_gap.is_some() {
+                "replayGap"
+            } else {
+                "output"
+            }
+            .into(),
             sequence: Some(chunk.sequence.to_string()),
-            requested_after_sequence: chunk.replay_gap.as_ref().map(|gap| gap.requested_after_sequence.to_string()),
-            available_from_sequence: chunk.replay_gap.as_ref().map(|gap| gap.available_from_sequence.to_string()),
+            requested_after_sequence: chunk
+                .replay_gap
+                .as_ref()
+                .map(|gap| gap.requested_after_sequence.to_string()),
+            available_from_sequence: chunk
+                .replay_gap
+                .as_ref()
+                .map(|gap| gap.available_from_sequence.to_string()),
             start_sequence: None,
             end_sequence: None,
         },
@@ -156,14 +168,19 @@ struct PairExchangeRequest {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PairExchangeResponse {
     token: String,
     device: DeviceInfo,
+    machine_id: String,
+    display_name: String,
 }
 
 #[derive(Deserialize)]
 struct AuthQuery {
-    token: Option<String>,
+    /// Single-use credential minted by `/api/v1/socket-ticket`, used instead of a
+    /// permanent device token because a browser WebSocket cannot send headers.
+    ticket: Option<String>,
     render: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -180,13 +197,132 @@ fn requested_grid_geometry(query: &AuthQuery) -> Option<(u16, u16)> {
     validated_grid_geometry(query.cols?, query.rows?)
 }
 
-fn extract_token(headers: &HeaderMap, query: Option<&AuthQuery>) -> Option<String> {
-    if let Some(auth_header) = headers.get("authorization").and_then(|h| h.to_str().ok()) {
-        if let Some(token) = auth_header.strip_prefix("Bearer ") {
-            return Some(token.trim().to_string());
-        }
+/// Reads the device bearer from the `Authorization` header ONLY.
+///
+/// A permanent device token must never travel in a URL: it would persist in
+/// browser history and gateway access logs long after the request. Sockets, which
+/// cannot set headers from a browser, use a single-use ticket instead
+/// (`POST /api/v1/socket-ticket`).
+fn extract_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|token| token.trim().to_string())
+}
+
+/// How long a direct-gateway socket ticket stays redeemable.
+///
+/// Matches the relay's `SOCKET_TICKET_TTL`. A ticket only has to survive the gap
+/// between minting it over HTTP and opening the socket, so the window is short.
+pub(crate) const SOCKET_TICKET_TTL_SECS: u64 = 30;
+
+/// Upper bound on tickets held for a gateway, so a client that mints without
+/// connecting cannot grow the map without limit.
+const MAX_PENDING_SOCKET_TICKETS: usize = 256;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SocketTicketRequest {
+    target: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SocketTicketResponse {
+    ticket: String,
+    expires_at: u64,
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A ticket may only name a socket route on this gateway.
+fn valid_socket_target(target: &str) -> bool {
+    target == "/api/v1/events"
+        || target.strip_prefix("/api/v1/terminal/").is_some_and(|id| {
+            !id.is_empty()
+                && id.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
+                })
+        })
+}
+
+/// Mints a single-use ticket for one WebSocket upgrade.
+///
+/// The bearer is presented in the `Authorization` header and never appears in a URL.
+/// The returned ticket is what the browser puts in the socket query string, so a
+/// leaked URL exposes only a one-shot credential that expires in seconds.
+async fn issue_socket_ticket(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocketTicketRequest>,
+) -> Result<Json<SocketTicketResponse>, (StatusCode, String)> {
+    let token = extract_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".to_string()))?;
+    // Authorize with the real device store, so a revoked or unknown bearer cannot
+    // trade an unusable token for a working ticket.
+    state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".to_string()))?;
+    if !valid_socket_target(&request.target) {
+        return Err((StatusCode::BAD_REQUEST, "Unsupported socket target".into()));
     }
-    query.and_then(|q| q.token.clone())
+
+    let ticket = uuid::Uuid::new_v4().to_string();
+    let expires_at = unix_now_secs() + SOCKET_TICKET_TTL_SECS;
+    {
+        let mut tickets = state.socket_tickets.lock();
+        let now = unix_now_secs();
+        tickets.retain(|_, (_, _, expiry)| *expiry > now);
+        if tickets.len() >= MAX_PENDING_SOCKET_TICKETS {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many pending socket tickets".into(),
+            ));
+        }
+        tickets.insert(ticket.clone(), (token, request.target, expires_at));
+    }
+    Ok(Json(SocketTicketResponse { ticket, expires_at }))
+}
+
+/// Redeems a ticket for the device token it was minted from, removing it so the
+/// same ticket cannot authorize a second upgrade.
+fn consume_socket_ticket(
+    state: &RemoteGatewayState,
+    ticket: &str,
+    target: &str,
+) -> Option<String> {
+    let (token, issued_target, expiry) = state.socket_tickets.lock().remove(ticket)?;
+    if issued_target != target || expiry <= unix_now_secs() {
+        return None;
+    }
+    Some(token)
+}
+
+/// Resolves the device token authorizing a WebSocket upgrade.
+///
+/// A `ticket` is preferred and is single-use: presenting one consumes it, so a
+/// replayed URL cannot open a second socket. The `Authorization` header and the
+/// legacy `token` query parameter remain accepted so existing clients keep working
+/// while they migrate.
+fn socket_credential(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+    query: &AuthQuery,
+    target: &str,
+) -> Option<String> {
+    if let Some(ticket) = query.ticket.as_deref() {
+        // A supplied ticket must stand on its own; falling back to another
+        // credential here would let an invalid ticket be ignored rather than refused.
+        return consume_socket_ticket(state, ticket, target);
+    }
+    extract_token(headers)
 }
 
 async fn health_check() -> Json<HealthResponse> {
@@ -200,6 +336,16 @@ async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
     Json(payload): Json<PairExchangeRequest>,
 ) -> Result<Json<PairExchangeResponse>, Response> {
+    let identity = crate::remote::auth::canonical_identity_dir()
+        .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir))
+        .map_err(|error| {
+            tracing::error!(%error, "Unable to load pairing machine identity");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Machine identity unavailable",
+            )
+                .into_response()
+        })?;
     let (token, device) = state
         .auth_manager
         .exchange_pairing_code(&payload.code, &payload.device_name)
@@ -218,7 +364,12 @@ async fn pair_exchange(
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
         })?;
 
-    Ok(Json(PairExchangeResponse { token, device }))
+    Ok(Json(PairExchangeResponse {
+        token,
+        device,
+        machine_id: identity.machine_id,
+        display_name: identity.display_name,
+    }))
 }
 
 /// Canonicalize a filesystem path for comparison purposes. When the path itself
@@ -513,8 +664,15 @@ pub(crate) async fn get_active_running_sessions(
         if !details.running {
             continue;
         }
-        if let Some(id) = details.workspace_id.as_deref().filter(|id| crate::ssh::projects::is_remote(id)) {
-            if let Some(project) = ssh_projects.iter().find(|project| project.workspace_id == id) {
+        if let Some(id) = details
+            .workspace_id
+            .as_deref()
+            .filter(|id| crate::ssh::projects::is_remote(id))
+        {
+            if let Some(project) = ssh_projects
+                .iter()
+                .find(|project| project.workspace_id == id)
+            {
                 sessions.push(RemoteTerminalSession {
                     session_id: details.session_id,
                     title: None,
@@ -533,12 +691,9 @@ pub(crate) async fn get_active_running_sessions(
         let workspace_id = derived_ws
             .or(details.workspace_id)
             .or_else(|| selected.and_then(|selection| selection.workspace_id.clone()));
-        let Some(workspace_id) = workspace_id else {
-            continue;
-        };
-        if selected.is_none() && state.workspace_registry.manager(&workspace_id).is_err() {
-            continue;
-        }
+        // Sessions are listed for authenticated remote callers regardless of
+        // desktop active selection; `active_selection` only supplies extra
+        // label metadata when it matches this session, it never filters.
         let worktree_label = derived_label.or(details.worktree_label).or_else(|| {
             selected.and_then(|selection| {
                 selection
@@ -550,7 +705,7 @@ pub(crate) async fn get_active_running_sessions(
         sessions.push(RemoteTerminalSession {
             session_id: details.session_id,
             title: None,
-            workspace_id: Some(workspace_id),
+            workspace_id,
             worktree_label,
             running: true,
         });
@@ -564,7 +719,7 @@ async fn list_sessions(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<RemoteTerminalSession>>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -575,8 +730,12 @@ async fn list_sessions(
         .workspace_snapshot()
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    let ssh_projects = super::ssh::projects(&state).await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
+    let ssh_projects = super::ssh::projects(&state).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SSH inventory unavailable".into(),
+        )
+    })?;
     let sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
 
     Ok(Json(sessions))
@@ -587,7 +746,7 @@ async fn get_workspace_state(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<RemoteWorkspaceState>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -599,12 +758,18 @@ async fn get_workspace_state(
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
-    let ssh_projects = super::ssh::projects(&state).await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
+    let ssh_projects = super::ssh::projects(&state).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SSH inventory unavailable".into(),
+        )
+    })?;
     let active_selection = state.active_selection.read().clone().filter(|selection| {
         selection.workspace_id.as_deref().is_none_or(|id| {
             !crate::ssh::projects::is_remote(id)
-                || ssh_projects.iter().any(|project| project.workspace_id == id)
+                || ssh_projects
+                    .iter()
+                    .any(|project| project.workspace_id == id)
         })
     });
     let mut projects = cache.projects(active_selection.as_ref());
@@ -651,7 +816,7 @@ async fn select_workspace(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteSelectWorkspaceRequest>,
 ) -> Result<Json<RemoteSelectionRequestPayload>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -667,23 +832,38 @@ async fn select_workspace(
 
     let is_ssh = crate::ssh::projects::is_remote(&payload.workspace_id);
     if is_ssh {
-        let projects = super::ssh::projects(&state).await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "SSH inventory unavailable".into()))?;
-        if !projects.iter().any(|project| project.workspace_id == payload.workspace_id)
-            || payload.worktree.is_some() || payload.worktree_slug.is_some()
+        let projects = super::ssh::projects(&state).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SSH inventory unavailable".into(),
+            )
+        })?;
+        if !projects
+            .iter()
+            .any(|project| project.workspace_id == payload.workspace_id)
+            || payload.worktree.is_some()
+            || payload.worktree_slug.is_some()
         {
             return Err((StatusCode::BAD_REQUEST, "SSH project is unavailable".into()));
         }
     } else {
-        state.workspace_registry.manager(&payload.workspace_id)
+        state
+            .workspace_registry
+            .manager(&payload.workspace_id)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
 
     if let Some(session_id) = payload.session_id.as_deref() {
-        let details = state.session_backend.describe_session(session_id).await
+        let details = state
+            .session_backend
+            .describe_session(session_id)
+            .await
             .map_err(|_| (StatusCode::BAD_REQUEST, "Session unavailable".into()))?;
         if !details.running || details.workspace_id.as_deref() != Some(&payload.workspace_id) {
-            return Err((StatusCode::BAD_REQUEST, "Session does not belong to project".into()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Session does not belong to project".into(),
+            ));
         }
     }
 
@@ -722,8 +902,15 @@ async fn select_workspace(
             selection.workspace_id.as_deref() == Some(payload.workspace_id.as_str())
                 && selection.terminal_tabs.iter().any(|tab| {
                     tab.id == tab_id
-                        && tab.worktree_slug.as_deref().or(selection.worktree_slug.as_deref()) == worktree_slug.as_deref()
-                        && payload.session_id.as_deref().is_none_or(|id| tab.session_id.as_deref() == Some(id))
+                        && tab
+                            .worktree_slug
+                            .as_deref()
+                            .or(selection.worktree_slug.as_deref())
+                            == worktree_slug.as_deref()
+                        && payload
+                            .session_id
+                            .as_deref()
+                            .is_none_or(|id| tab.session_id.as_deref() == Some(id))
                 })
         });
         if !tab_is_available {
@@ -757,7 +944,7 @@ async fn create_worktree(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteCreateWorktreeRequest>,
 ) -> Result<Json<RemoteWorktreeInfo>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -804,7 +991,7 @@ async fn delete_worktree(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteDeleteWorktreeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -834,7 +1021,7 @@ async fn list_devices(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<DeviceInfo>>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -850,7 +1037,7 @@ async fn revoke_device(
     Query(query): Query<AuthQuery>,
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -877,7 +1064,7 @@ async fn ws_events_handler(
     headers: HeaderMap,
     State(state): State<Arc<RemoteGatewayState>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = socket_credential(&state, &headers, &query, "/api/v1/events")
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -939,13 +1126,25 @@ async fn handle_events_socket(
 
 async fn ws_terminal_handler(
     ws: WebSocketUpgrade,
-    AxumPath(session_id): AxumPath<String>,
+    AxumPath(requested_session_id): AxumPath<String>,
     Query(query): Query<AuthQuery>,
     headers: HeaderMap,
     State(state): State<Arc<RemoteGatewayState>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    // Callers may address a session by its raw ID or by a host-scoped ID of the form
+    // "<host_id>::<session_id>" (see `worktree::parse_host_scoped_session_id`). The
+    // session backend itself only knows about raw session IDs, so unwrap the scope
+    // (if present) before doing any lookups or routing.
+    let session_id = parse_host_scoped_session_id(&requested_session_id)
+        .map(|(_host_id, session_id)| session_id.to_string())
+        .unwrap_or(requested_session_id);
+    let token = socket_credential(
+        &state,
+        &headers,
+        &query,
+        &format!("/api/v1/terminal/{session_id}"),
+    )
+    .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
@@ -976,9 +1175,14 @@ async fn ws_terminal_handler(
     }
 
     let attachment = while_device_authorized(&mut revocation, async {
-        if let Some((cols, rows)) = requested_geometry.filter(|_| device.permission == DevicePermission::Control) {
+        if let Some((cols, rows)) =
+            requested_geometry.filter(|_| device.permission == DevicePermission::Control)
+        {
             if state.session_backend.recovery(&session_id).await?.is_none() {
-            state.session_backend.resize(&session_id, cols, rows).await?;
+                state
+                    .session_backend
+                    .resize(&session_id, cols, rows)
+                    .await?;
             }
         }
         state
@@ -1014,14 +1218,27 @@ async fn handle_terminal_socket(
     };
     let is_ssh = recovery.is_some();
     if let Some(stream) = recovery.as_mut() {
-        let Some(status) = stream.next().await else { return; };
+        let Some(status) = stream.next().await else {
+            return;
+        };
         *recovery_state.write() = Some(status.clone());
-        if socket.send(recovery_message(status)).await.is_err() { return; }
+        if socket.send(recovery_message(status)).await.is_err() {
+            return;
+        }
     }
     if render_grid {
         #[cfg(feature = "native-terminal")]
         {
-            handle_terminal_grid_socket(socket, session_id, attachment, device, state, recovery, recovery_state).await;
+            handle_terminal_grid_socket(
+                socket,
+                session_id,
+                attachment,
+                device,
+                state,
+                recovery,
+                recovery_state,
+            )
+            .await;
             return;
         }
         #[cfg(not(feature = "native-terminal"))]
@@ -1062,7 +1279,9 @@ async fn handle_terminal_socket(
             };
             match output {
                 Ok(chunk) => {
-                    if chunk.replay_gap.is_none() && last_emitted_sequence.is_some_and(|last| chunk.sequence <= last) {
+                    if chunk.replay_gap.is_none()
+                        && last_emitted_sequence.is_some_and(|last| chunk.sequence <= last)
+                    {
                         continue;
                     }
                     let frame = encode_remote_terminal_output_frame(&chunk);
@@ -1114,18 +1333,25 @@ async fn handle_terminal_socket(
                                 | crate::terminal::remote::RemoteConnectionState::Expired
                         )
                     });
-                    if can_control && !is_outage {
+                    if can_control && !is_outage && !is_ssh {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
-                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control).await;
-                            if !matches!(ctrl, ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping) { continue; }
+                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control)
+                                .await;
+                            if !matches!(
+                                ctrl,
+                                ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                            ) {
+                                continue;
+                            }
                         }
                         match ctrl {
-                            ClientControlMessage::RemoteWrite { .. } | ClientControlMessage::RemoteResize { .. } => {}
+                            ClientControlMessage::RemoteWrite { .. }
+                            | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
@@ -1172,9 +1398,16 @@ async fn handle_terminal_socket(
 }
 
 fn recovery_message(status: RemoteRecoveryStatus) -> Message {
-    Message::Text(serde_json::to_string(&crate::remote::protocol::ServerControlMessage::RemoteStatus {
-        state: status.state, generation: status.generation.to_string(),
-    }).expect("recovery status serializes").into())
+    Message::Text(
+        serde_json::to_string(
+            &crate::remote::protocol::ServerControlMessage::RemoteStatus {
+                state: status.state,
+                generation: status.generation.to_string(),
+            },
+        )
+        .expect("recovery status serializes")
+        .into(),
+    )
 }
 
 async fn next_recovery(stream: &mut Option<RecoveryStream>) -> Option<RemoteRecoveryStatus> {
@@ -1186,16 +1419,32 @@ async fn next_recovery(stream: &mut Option<RecoveryStream>) -> Option<RemoteReco
 
 /// SSH input always carries the generation chosen by the client, never one sampled
 /// by the gateway after buffering or recovery. The runtime performs atomic admission.
-async fn ssh_control(backend: &Arc<dyn RemoteSessionBackend>, id: &str, control: &ClientControlMessage, can_control: bool) {
-    if !can_control { return; }
+async fn ssh_control(
+    backend: &Arc<dyn RemoteSessionBackend>,
+    id: &str,
+    control: &ClientControlMessage,
+    can_control: bool,
+) {
+    if !can_control {
+        return;
+    }
     match control {
         ClientControlMessage::RemoteWrite { generation, data } => {
             if let Ok(generation) = generation.parse::<u64>() {
-                let _ = backend.write_generation(id, generation, data.as_bytes()).await;
+                let _ = backend
+                    .write_generation(id, generation, data.as_bytes())
+                    .await;
             }
         }
-        ClientControlMessage::RemoteResize { generation, cols, rows } => {
-            if let (Ok(generation), Some((cols, rows))) = (generation.parse::<u64>(), validated_grid_geometry(*cols, *rows)) {
+        ClientControlMessage::RemoteResize {
+            generation,
+            cols,
+            rows,
+        } => {
+            if let (Ok(generation), Some((cols, rows))) = (
+                generation.parse::<u64>(),
+                validated_grid_geometry(*cols, *rows),
+            ) {
                 let _ = backend.resize_generation(id, generation, cols, rows).await;
             }
         }
@@ -1281,7 +1530,9 @@ async fn handle_terminal_grid_socket(
     let mut status_task = std::pin::pin!(async move {
         while let Some(status) = next_recovery(&mut recovery).await {
             *status_recovery_state.write() = Some(status.clone());
-            if status_tx.send(recovery_message(status)).is_err() { break; }
+            if status_tx.send(recovery_message(status)).is_err() {
+                break;
+            }
         }
     });
     let mut writer_task = std::pin::pin!(async move {
@@ -1455,18 +1706,25 @@ async fn handle_terminal_grid_socket(
                                 | crate::terminal::remote::RemoteConnectionState::Expired
                         )
                     });
-                    if can_control && !is_outage {
+                    if can_control && !is_outage && !is_ssh {
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                     }
                 }
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
-                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control).await;
-                            if !matches!(ctrl, ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping) { continue; }
+                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control)
+                                .await;
+                            if !matches!(
+                                ctrl,
+                                ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                            ) {
+                                continue;
+                            }
                         }
                         match ctrl {
-                            ClientControlMessage::RemoteWrite { .. } | ClientControlMessage::RemoteResize { .. } => {}
+                            ClientControlMessage::RemoteWrite { .. }
+                            | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
@@ -1663,13 +1921,50 @@ async fn get_terminal_preferences(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
     Ok(Json(crate::terminal::load_terminal_preferences()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PushUnsubscribeRequest {
+    endpoint: String,
+}
+
+async fn push_subscribe(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+    Json(payload): Json<PushSubscriptionInfo>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let token = extract_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    global_push_store().subscribe(payload);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn push_unsubscribe(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+    Json(payload): Json<PushUnsubscribeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let token = extract_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    global_push_store().unsubscribe(&payload.endpoint);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
@@ -1695,8 +1990,11 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
+        .route("/api/v1/socket-ticket", post(issue_socket_ticket))
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
+        .route("/api/push/subscribe", post(push_subscribe))
+        .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(get(serve_static_or_index))
         .layer(cors)
         .with_state(state)
@@ -1704,27 +2002,48 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
 
 pub struct RemoteServerHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    relay_task: Option<tokio::task::JoinHandle<()>>,
+    // Keeps every spawned listener task alive for the handle's lifetime; each
+    // task independently unwinds `is_running`/`bound_address` on shutdown, so
+    // handles are not required for correctness, only to avoid detached-task
+    // warnings and to make the fan-out explicit at the call site.
+    _extra_shutdown_txs: Vec<tokio::sync::oneshot::Sender<()>>,
+    /// State this handle published a pairing coordinator into, if any, plus the
+    /// coordinator's identity. Retained so stopping clears its own coordinator and
+    /// leaves a newer owner's in place.
+    published_pairing: Option<(Arc<RemoteGatewayState>, u64)>,
 }
 
 impl RemoteServerHandle {
     pub fn stop(self) {
+        if let Some(task) = self.relay_task {
+            task.abort();
+        }
+        // A stopped relay must not leave a dead coordinator selected for pairing:
+        // requests would fail with "Relay registration channel closed" instead of
+        // falling back to local pairing. Only clear our own publication.
+        if let Some((state, epoch)) = self.published_pairing {
+            let mut slot = state.relay_pairing.write();
+            if slot.as_ref().is_some_and(|current| current.epoch == epoch) {
+                *slot = None;
+            }
+        }
         let _ = self.shutdown_tx.send(());
+        for tx in self._extra_shutdown_txs {
+            let _ = tx.send(());
+        }
     }
 }
 
-pub async fn start_remote_server(
+/// Binds a single listener and spawns the axum server loop on it, wiring the
+/// shutdown receiver and `is_running`/`bound_address` bookkeeping. Returns
+/// the bound local address and a shutdown sender for the caller to hold.
+async fn bind_and_serve(
+    bind_addr: SocketAddr,
     state: Arc<RemoteGatewayState>,
-) -> Result<(RemoteServerHandle, SocketAddr), String> {
-    let config = state.config.read().clone();
-    let bind_host = match config.mode {
-        RemoteNetworkMode::Off => return Err("Remote gateway is OFF".into()),
-        _ => "0.0.0.0",
-    };
-
-    let bind_addr: SocketAddr = format!("{bind_host}:{}", config.port)
-        .parse()
-        .map_err(|e| format!("Invalid bind address: {e}"))?;
-
+    router: Router,
+    track_bound_address: bool,
+) -> Result<(SocketAddr, tokio::sync::oneshot::Sender<()>), String> {
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .map_err(|e| format!("Failed to bind to {bind_addr}: {e}"))?;
@@ -1733,11 +2052,11 @@ pub async fn start_remote_server(
         .local_addr()
         .map_err(|e| format!("Failed to get local address: {e}"))?;
 
-    let router = create_remote_router(Arc::clone(&state));
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    *state.is_running.write() = true;
-    *state.bound_address.write() = Some(local_addr.to_string());
+    if track_bound_address {
+        *state.bound_address.write() = Some(local_addr.to_string());
+    }
 
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
@@ -1748,9 +2067,436 @@ pub async fn start_remote_server(
             .await
             .ok();
 
-        *state_clone.is_running.write() = false;
-        *state_clone.bound_address.write() = None;
+        if track_bound_address {
+            *state_clone.is_running.write() = false;
+            *state_clone.bound_address.write() = None;
+        }
     });
 
-    Ok((RemoteServerHandle { shutdown_tx }, local_addr))
+    Ok((local_addr, shutdown_tx))
+}
+
+/// Starts the remote gateway HTTP/WebSocket server.
+///
+/// The server ALWAYS binds a loopback (`127.0.0.1`) listener, regardless of
+/// mode, so that same-machine callers (e.g. companion tooling) keep working.
+/// When the configured mode requires exposing the gateway on an external
+/// interface (`LocalNetwork` or `Tailscale`), an additional listener is
+/// bound on that specific resolved interface address. The server never binds
+/// the wildcard address `0.0.0.0`: doing so would expose the gateway on every
+/// interface, including ones the user did not opt into.
+pub async fn start_remote_server(
+    state: Arc<RemoteGatewayState>,
+) -> Result<(RemoteServerHandle, SocketAddr), String> {
+    start_remote_server_with_resolver(
+        state,
+        Arc::new(crate::remote::state::SystemInterfaceResolver),
+    )
+    .await
+}
+
+/// Same as [`start_remote_server`] but takes an explicit
+/// [`InterfaceResolver`], primarily so tests can inject deterministic
+/// addresses instead of depending on the host's real network interfaces.
+pub async fn start_remote_server_with_resolver(
+    state: Arc<RemoteGatewayState>,
+    resolver: Arc<dyn crate::remote::state::InterfaceResolver>,
+) -> Result<(RemoteServerHandle, SocketAddr), String> {
+    let config = state.config.read().clone();
+    if config.mode == RemoteNetworkMode::Off {
+        return Err("Remote gateway is OFF".into());
+    }
+
+    let relay_url = config
+        .relay_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    if config.mode == RemoteNetworkMode::Relay && relay_url.is_none() {
+        return Err("Relay mode requires a non-empty relay URL".into());
+    }
+    let relay_token = std::env::var("FERRYX_MACHINE_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty());
+    let relay_identity = if config.mode == RemoteNetworkMode::Relay && relay_token.is_none() {
+        Some(crate::remote::auth::load_or_generate_machine_identity(
+            &crate::remote::auth::canonical_identity_dir()?,
+        )?)
+    } else {
+        None
+    };
+
+    // Baseline listener: always loopback, never the wildcard address.
+    let loopback_addr: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, config.port).into();
+    let router = create_remote_router(Arc::clone(&state));
+    let (primary_local_addr, shutdown_tx) =
+        bind_and_serve(loopback_addr, Arc::clone(&state), router, true).await?;
+
+    *state.is_running.write() = true;
+    *state.bound_address.write() = Some(primary_local_addr.to_string());
+
+    let mut extra_shutdown_txs = Vec::new();
+
+    // Extra listener on the specific external interface the mode requires.
+    // Resolution or bind failures abort startup and tear down the loopback
+    // listener that was already bound above, rather than ever widening the
+    // bind to 0.0.0.0 as a fallback.
+    let resolved = resolver.resolve(config.mode);
+    match resolved {
+        // The baseline loopback listener already covers loopback addresses;
+        // skip binding a second listener on the same address/port rather
+        // than attempting (and failing) a duplicate bind.
+        Ok(Some(extra_ip)) if extra_ip.is_loopback() => {}
+        Ok(Some(extra_ip)) => {
+            // Use the actual bound loopback port when the caller requested
+            // an OS-assigned port (0), so the external listener matches it.
+            let extra_addr: SocketAddr = (extra_ip, primary_local_addr.port()).into();
+            let extra_router = create_remote_router(Arc::clone(&state));
+            match bind_and_serve(extra_addr, Arc::clone(&state), extra_router, false).await {
+                Ok((_extra_local_addr, extra_shutdown_tx)) => {
+                    extra_shutdown_txs.push(extra_shutdown_tx);
+                }
+                Err(err) => {
+                    let _ = shutdown_tx.send(());
+                    *state.is_running.write() = false;
+                    *state.bound_address.write() = None;
+                    return Err(err);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let _ = shutdown_tx.send(());
+            *state.is_running.write() = false;
+            *state.bound_address.write() = None;
+            return Err(err);
+        }
+    }
+
+    let mut published_pairing: Option<(Arc<RemoteGatewayState>, u64)> = None;
+    let relay_task = relay_url
+        .filter(|_| config.mode == RemoteNetworkMode::Relay)
+        .map(|url| {
+            let client = match relay_token {
+                Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
+                    url,
+                    token,
+                    primary_local_addr.to_string(),
+                ),
+                None => crate::remote::relay_client::RelayClient::with_identity(
+                    url,
+                    relay_identity.expect("relay identity loaded before binding"),
+                    primary_local_addr.to_string(),
+                ),
+            }
+            .with_auth_manager((*state.auth_manager).clone());
+            // Publish the one relay pairing authority so daemon/GUI pairing registers
+            // its PIN with the relay instead of minting a local-only code.
+            let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *state.relay_pairing.write() = Some(crate::remote::state::PublishedPairing {
+                coordinator: client.pairing_coordinator(),
+                epoch,
+            });
+            published_pairing = Some((Arc::clone(&state), epoch));
+            // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
+            tokio::spawn(async move { client.run().await })
+        });
+
+    Ok((
+        RemoteServerHandle {
+            shutdown_tx,
+            relay_task,
+            published_pairing,
+            _extra_shutdown_txs: extra_shutdown_txs,
+        },
+        primary_local_addr,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::state::RemoteGatewayState;
+    use crate::terminal::TerminalOutputHub;
+    use crate::terminal::TerminalService;
+    use crate::worktree::WorkspaceRegistry;
+
+    #[tokio::test]
+    async fn relay_startup_connects_without_machine_token() {
+        use crate::remote::protocol::{ControlAuth, ControlAuthResponse, ControlChallenge};
+        use futures_util::{SinkExt, StreamExt};
+        assert!(
+            std::env::var("FERRYX_MACHINE_TOKEN")
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "run zero-config regression without FERRYX_MACHINE_TOKEN"
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let (authenticated_tx, authenticated_rx) = tokio::sync::oneshot::channel();
+        let relay = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let challenge = ControlChallenge {
+                audience: None,
+                nonce: "startup-challenge".into(),
+                timestamp: 1234,
+            };
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&challenge).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let frame = socket.next().await.unwrap().unwrap();
+            let auth: ControlAuth = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert!(crate::remote::auth::verify_control_challenge(
+                &auth.public_key,
+                &auth.machine_id,
+                "relay",
+                &challenge.nonce,
+                auth.timestamp,
+                &auth.signature
+            ));
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&ControlAuthResponse {
+                        success: true,
+                        error: None,
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            authenticated_tx.send(auth.machine_id).unwrap();
+            while let Some(frame) = socket.next().await {
+                if frame.is_err() {
+                    break;
+                }
+            }
+        });
+        let terminal = Arc::new(TerminalService::new(
+            Arc::new(crate::terminal::PtyManager::new()),
+            Arc::new(TerminalOutputHub::default()),
+        ));
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            terminal,
+            WorkspaceRegistry::new(),
+            None,
+            None,
+        ));
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::Relay;
+            config.port = 0;
+            config.relay_url = Some(format!("http://{relay_addr}"));
+        }
+        let (handle, address) = start_remote_server(state).await.unwrap();
+        assert!(address.ip().is_loopback());
+        let machine = tokio::time::timeout(std::time::Duration::from_secs(5), authenticated_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let identity = crate::remote::auth::load_or_generate_machine_identity(
+            &crate::remote::auth::canonical_identity_dir().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(machine, identity.machine_id);
+        handle.stop();
+        relay.abort();
+    }
+
+    /// Running daemon sessions must be listed for authenticated remote callers
+    /// regardless of desktop active selection. `active_selection` may only supply
+    /// extra label metadata for a matching session; it must never filter the
+    /// session list itself, in particular when it is `None`.
+    #[tokio::test]
+    async fn test_get_active_running_sessions_independent_of_desktop() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+        let state = RemoteGatewayState::new(Arc::clone(&terminal_service), registry.clone());
+
+        let (session_id, mut rx) = pty
+            .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn session");
+        hub.register_session(&session_id);
+        let session_id_clone = session_id.clone();
+        let hub_clone = Arc::clone(&hub);
+        tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                hub_clone.publish(&session_id_clone, chunk);
+            }
+        });
+
+        // No active desktop selection at all.
+        assert!(state.active_selection().is_none());
+
+        let cache = WorkspaceSnapshotCache::build(&registry);
+        let sessions = get_active_running_sessions(&state, &cache, &[]).await;
+
+        assert_eq!(
+            sessions.len(),
+            1,
+            "running daemon sessions must be returned even when active_selection is None, got: {:?}",
+            sessions
+        );
+        assert_eq!(sessions[0].session_id, session_id);
+        assert!(sessions[0].running);
+
+        pty.close_session(&session_id)
+            .await
+            .expect("close fixture PTY");
+    }
+
+    /// Starting the gateway in `Loopback`-equivalent (`Off`-free, no
+    /// external interface requested) mode with an OS-assigned port (0) must
+    /// bind loopback only, never the wildcard address `0.0.0.0`.
+    #[tokio::test]
+    async fn test_listener_bind_loopback() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+
+        // Scenario 1: the external-interface resolver errors (e.g. "no LAN
+        // interface available"). Startup must fail rather than silently
+        // widening the loopback bind to 0.0.0.0.
+        struct NoExternalInterfaceResolver;
+        impl crate::remote::state::InterfaceResolver for NoExternalInterfaceResolver {
+            fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Err("no active local network IPv4 interface found".into())
+            }
+            fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Err("no active Tailscale IPv4 interface found".into())
+            }
+        }
+
+        let state_no_external = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+        {
+            let mut config = state_no_external.config.write();
+            config.mode = RemoteNetworkMode::LocalNetwork;
+            config.port = 0;
+        }
+        let result = start_remote_server_with_resolver(
+            Arc::clone(&state_no_external),
+            Arc::new(NoExternalInterfaceResolver),
+        )
+        .await;
+        assert!(result.is_err(), "expected resolver error to propagate");
+        assert!(
+            !*state_no_external.is_running.read(),
+            "failed startup must not leave the gateway marked as running"
+        );
+
+        // Scenario 2: the external-interface resolver succeeds. The primary
+        // (loopback) listener returned to the caller must still be bound to
+        // 127.0.0.1 with an OS-assigned port, never 0.0.0.0.
+        struct LoopbackOnlyResolver;
+        impl crate::remote::state::InterfaceResolver for LoopbackOnlyResolver {
+            fn local_network_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Ok(std::net::Ipv4Addr::new(127, 0, 0, 1))
+            }
+            fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
+                Err("no active Tailscale IPv4 interface found".into())
+            }
+        }
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+        {
+            let mut config = state.config.write();
+            config.mode = RemoteNetworkMode::LocalNetwork;
+            config.port = 0;
+        }
+
+        let (handle, local_addr) =
+            start_remote_server_with_resolver(Arc::clone(&state), Arc::new(LoopbackOnlyResolver))
+                .await
+                .expect("server should start with a loopback-resolving resolver");
+
+        assert!(
+            local_addr.ip().is_loopback(),
+            "primary listener must bind a loopback address, got {}",
+            local_addr.ip()
+        );
+        assert_ne!(
+            local_addr.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            "primary listener must never bind the wildcard address 0.0.0.0"
+        );
+
+        handle.stop();
+    }
+
+    /// Push subscribe/unsubscribe endpoints must require a valid Bearer
+    /// device token, matching every other authenticated remote route, and
+    /// must reject unauthenticated requests with 401 rather than silently
+    /// registering/removing push subscriptions.
+    #[tokio::test]
+    async fn test_push_auth() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+
+        fn no_auth_query() -> AuthQuery {
+            AuthQuery {
+                ticket: None,
+                render: None,
+                cols: None,
+                rows: None,
+            }
+        }
+
+        let subscribe_result = push_subscribe(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Query(no_auth_query()),
+            Json(PushSubscriptionInfo {
+                endpoint: "https://push.example.com/sub/unauth".to_string(),
+                keys: crate::remote::push::PushSubscriptionKeys {
+                    p256dh: "p256dh-key".to_string(),
+                    auth: "auth-key".to_string(),
+                },
+            }),
+        )
+        .await;
+        let (status, _) = subscribe_result.expect_err("unauthenticated subscribe must be rejected");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let unsubscribe_result = push_unsubscribe(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Query(no_auth_query()),
+            Json(PushUnsubscribeRequest {
+                endpoint: "https://push.example.com/sub/unauth".to_string(),
+            }),
+        )
+        .await;
+        let (status, _) =
+            unsubscribe_result.expect_err("unauthenticated unsubscribe must be rejected");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        assert!(
+            global_push_store()
+                .list_subscriptions()
+                .iter()
+                .all(|sub| sub.endpoint != "https://push.example.com/sub/unauth"),
+            "unauthenticated request must not have registered a subscription"
+        );
+    }
 }
