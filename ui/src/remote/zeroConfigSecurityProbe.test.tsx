@@ -165,3 +165,34 @@ it("never places the device token in an HTTP or WebSocket request URL", async ()
     expect(socket.url).not.toMatch(/[?&](token|access_token)=/);
   }
 });
+
+// The direct-gateway terminal transport is not reached by the probe above, because
+// that test only inspects sockets the mounted app opens. It is the one remaining
+// place that put a PERMANENT device token in a WebSocket URL, so it needs its own
+// regression: the URL must carry a single-use ticket minted over HTTP instead.
+it("attaches the direct terminal socket with a single-use ticket, not the device token", async () => {
+  const { WebSocketTerminalTransport } = await import("../lib/terminalTransport/remoteTransport");
+  const token = "audit-device";
+  const fetch = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+    new Response(JSON.stringify({ ticket: "one-shot-ticket-123", expiresAt: 99 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+  vi.stubGlobal("fetch", fetch);
+  vi.stubGlobal("WebSocket", Socket);
+
+  const transport = new WebSocketTerminalTransport("https://gateway.example", token);
+  await transport.attach("session-42");
+
+  const socket = Socket.instances.at(-1);
+  expect(socket, "the transport must open a socket").toBeDefined();
+  expect(socket!.url).not.toContain(token);
+  expect(socket!.url).not.toMatch(/[?&](token|access_token)=/);
+  expect(socket!.url).toContain("ticket=one-shot-ticket-123");
+
+  // The bearer is spent on the ticket request, in the header rather than the URL.
+  const [url, init] = fetch.mock.calls.at(-1)!;
+  expect(String(url)).toContain("/api/v1/socket-ticket");
+  expect(String(url)).not.toContain(token);
+  expect(new Headers(init?.headers).get("Authorization")).toBe(`Bearer ${token}`);
+});

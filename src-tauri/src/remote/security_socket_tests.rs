@@ -53,21 +53,36 @@ impl SocketBackend {
 }
 
 impl RemoteSessionBackend for SocketBackend {
-    fn recovery<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Option<crate::remote::backend::RecoveryStream>, String>> {
+    fn recovery<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<Option<crate::remote::backend::RecoveryStream>, String>> {
         Box::pin(async move {
             Ok(self.recovery_tx.as_ref().map(|tx| {
-                Box::pin(futures_util::stream::unfold((tx.subscribe(), true), |(mut rx, initial)| async move {
-                    if !initial && rx.changed().await.is_err() { return None; }
-                    let value = rx.borrow_and_update().clone();
-                    Some((value, (rx, false)))
-                })) as crate::remote::backend::RecoveryStream
+                Box::pin(futures_util::stream::unfold(
+                    (tx.subscribe(), true),
+                    |(mut rx, initial)| async move {
+                        if !initial && rx.changed().await.is_err() {
+                            return None;
+                        }
+                        let value = rx.borrow_and_update().clone();
+                        Some((value, (rx, false)))
+                    },
+                )) as crate::remote::backend::RecoveryStream
             }))
         })
     }
-    fn write_generation<'a>(&'a self, _: &'a str, generation: u64, bytes: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+    fn write_generation<'a>(
+        &'a self,
+        _: &'a str,
+        generation: u64,
+        bytes: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let status = self.recovery_tx.as_ref().unwrap().borrow();
-            if status.generation == generation && status.state == crate::terminal::remote::RemoteConnectionState::Connected {
+            if status.generation == generation
+                && status.state == crate::terminal::remote::RemoteConnectionState::Connected
+            {
                 self.hub.publish("session", bytes.to_vec()).unwrap();
                 self.completed_inputs.fetch_add(1, Ordering::SeqCst);
             }
@@ -157,14 +172,27 @@ async fn ssh_reconnect_safety_web_raw_gap_order() {
     let (token, _) = pair(&state, DevicePermission::Control);
     let server = SecurityServer::start(state).await;
     let mut socket = open_ws_stream(server.addr, "/api/v1/terminal/session", Some(&token)).await;
-    assert!(matches!(frame(&mut socket).await, ServerWebSocketFrame::Binary(_)));
+    assert!(matches!(
+        frame(&mut socket).await,
+        ServerWebSocketFrame::Binary(_)
+    ));
     backend.hub.publish_gap("session").unwrap();
-    backend.hub.publish("session", b"RECOVERED".to_vec()).unwrap();
-    let ServerWebSocketFrame::Binary(gap) = frame(&mut socket).await else { panic!("gap frame") };
-    let metadata: serde_json::Value = serde_json::from_slice(&gap[b"\x1b]777;ferryx;".len()..gap.iter().position(|b| *b == 7).unwrap()]).unwrap();
+    backend
+        .hub
+        .publish("session", b"RECOVERED".to_vec())
+        .unwrap();
+    let ServerWebSocketFrame::Binary(gap) = frame(&mut socket).await else {
+        panic!("gap frame")
+    };
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &gap[b"\x1b]777;ferryx;".len()..gap.iter().position(|b| *b == 7).unwrap()],
+    )
+    .unwrap();
     assert_eq!(metadata["kind"], "replayGap");
     assert!(gap.ends_with(b"\x1bc"));
-    let ServerWebSocketFrame::Binary(output) = frame(&mut socket).await else { panic!("output frame") };
+    let ServerWebSocketFrame::Binary(output) = frame(&mut socket).await else {
+        panic!("output frame")
+    };
     assert!(output.ends_with(b"RECOVERED"));
     drop(socket);
     server.stop().await;
@@ -177,33 +205,56 @@ async fn ssh_reconnect_safety_web_grid_gap_order() {
     let state = socket_state(backend.clone());
     let (token, _) = pair(&state, DevicePermission::Control);
     let server = SecurityServer::start(state).await;
-    let mut socket = open_ws_stream(server.addr, "/api/v1/terminal/session?render=grid", Some(&token)).await;
-    assert!(matches!(frame(&mut socket).await, ServerWebSocketFrame::Text(_)));
+    let mut socket = open_ws_stream(
+        server.addr,
+        "/api/v1/terminal/session?render=grid",
+        Some(&token),
+    )
+    .await;
+    assert!(matches!(
+        frame(&mut socket).await,
+        ServerWebSocketFrame::Text(_)
+    ));
     backend.hub.publish("session", b"OLD".to_vec()).unwrap();
     backend.hub.publish_gap("session").unwrap();
-    backend.hub.publish("session", b"RECOVERED".to_vec()).unwrap();
-    let ServerWebSocketFrame::Text(reset) = frame(&mut socket).await else { panic!("reset grid") };
+    backend
+        .hub
+        .publish("session", b"RECOVERED".to_vec())
+        .unwrap();
+    let ServerWebSocketFrame::Text(reset) = frame(&mut socket).await else {
+        panic!("reset grid")
+    };
     let reset: serde_json::Value = serde_json::from_str(&reset).unwrap();
     assert_eq!(reset["type"], "grid");
     assert!(!reset.to_string().contains("OLD"));
     assert!(!reset.to_string().contains("READY"));
-    let ServerWebSocketFrame::Text(output) = frame(&mut socket).await else { panic!("recovered grid") };
+    let ServerWebSocketFrame::Text(output) = frame(&mut socket).await else {
+        panic!("recovered grid")
+    };
     assert!(output.contains("RECOVERED"));
     drop(socket);
     server.stop().await;
 }
 
 async fn recovery_status(socket: &mut tokio::net::TcpStream, expected: &str, generation: &str) {
-    let ServerWebSocketFrame::Text(text) = frame(socket).await else { panic!("status frame") };
+    let ServerWebSocketFrame::Text(text) = frame(socket).await else {
+        panic!("status frame")
+    };
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(value, serde_json::json!({"type":"remoteStatus","state":expected,"generation":generation}));
+    assert_eq!(
+        value,
+        serde_json::json!({"type":"remoteStatus","state":expected,"generation":generation})
+    );
 }
 
 async fn ssh_input_probe(path: &str) {
     use crate::remote::backend::RemoteRecoveryStatus;
     use crate::terminal::remote::RemoteConnectionState::*;
     let mut backend = SocketBackend::new(None);
-    let (tx, _) = tokio::sync::watch::channel(RemoteRecoveryStatus { state: Connected, generation: 7 });
+    let (tx, _) = tokio::sync::watch::channel(RemoteRecoveryStatus {
+        state: Connected,
+        generation: 7,
+    });
     Arc::get_mut(&mut backend).unwrap().recovery_tx = Some(tx.clone());
     let state = socket_state(backend.clone());
     let (token, _) = pair(&state, DevicePermission::Control);
@@ -211,22 +262,53 @@ async fn ssh_input_probe(path: &str) {
     let mut socket = open_ws_stream(server.addr, path, Some(&token)).await;
     recovery_status(&mut socket, "connected", "7").await;
     frame(&mut socket).await;
-    tx.send_replace(RemoteRecoveryStatus { state: Reconnecting, generation: 8 });
+    tx.send_replace(RemoteRecoveryStatus {
+        state: Reconnecting,
+        generation: 8,
+    });
     recovery_status(&mut socket, "reconnecting", "8").await;
     write_client_ws_frame(&mut socket, 2, b"unsafe-binary").await;
-    write_client_ws_frame(&mut socket, 1, br#"{"type":"remoteWrite","generation":"8","data":"outage"}"#).await;
+    write_client_ws_frame(
+        &mut socket,
+        1,
+        br#"{"type":"remoteWrite","generation":"8","data":"outage"}"#,
+    )
+    .await;
     // Ordered input barrier: the following close control is not required; a
     // current-generation write after recovery provides the backend completion signal.
-    tx.send_replace(RemoteRecoveryStatus { state: Disconnected, generation: 9 });
+    tx.send_replace(RemoteRecoveryStatus {
+        state: Disconnected,
+        generation: 9,
+    });
     recovery_status(&mut socket, "disconnected", "9").await;
-    tx.send_replace(RemoteRecoveryStatus { state: Connected, generation: 10 });
+    tx.send_replace(RemoteRecoveryStatus {
+        state: Connected,
+        generation: 10,
+    });
     recovery_status(&mut socket, "connected", "10").await;
-    write_client_ws_frame(&mut socket, 1, br#"{"type":"remoteWrite","generation":"7","data":"stale"}"#).await;
-    write_client_ws_frame(&mut socket, 1, br#"{"type":"remoteWrite","generation":"10","data":"FRESH"}"#).await;
-    let output = match frame(&mut socket).await { ServerWebSocketFrame::Text(s) => s, ServerWebSocketFrame::Binary(b) => String::from_utf8(b).unwrap(), _ => panic!("fresh output") };
+    write_client_ws_frame(
+        &mut socket,
+        1,
+        br#"{"type":"remoteWrite","generation":"7","data":"stale"}"#,
+    )
+    .await;
+    write_client_ws_frame(
+        &mut socket,
+        1,
+        br#"{"type":"remoteWrite","generation":"10","data":"FRESH"}"#,
+    )
+    .await;
+    let output = match frame(&mut socket).await {
+        ServerWebSocketFrame::Text(s) => s,
+        ServerWebSocketFrame::Binary(b) => String::from_utf8(b).unwrap(),
+        _ => panic!("fresh output"),
+    };
     assert!(output.contains("FRESH"));
     assert_eq!(backend.completed_inputs.load(Ordering::SeqCst), 1);
-    tx.send_replace(RemoteRecoveryStatus { state: Expired, generation: 11 });
+    tx.send_replace(RemoteRecoveryStatus {
+        state: Expired,
+        generation: 11,
+    });
     recovery_status(&mut socket, "expired", "11").await;
     drop(socket);
     server.stop().await;
@@ -306,6 +388,118 @@ async fn revocation_closes_device_sockets(path: &str) {
     ));
     drop(victims);
     drop(other);
+    server.stop().await;
+}
+
+/// The browser WebSocket constructor cannot set an `Authorization` header, so the
+/// direct-gateway terminal URL carried a PERMANENT device token in its query string,
+/// where it lands in gateway access logs and browser history. The relay already
+/// solved this with single-use tickets; the gateway must offer the same, so a URL
+/// only ever carries a short-lived one-shot credential.
+#[tokio::test]
+async fn gateway_issues_single_use_socket_tickets_and_rejects_a_replayed_one() {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(Arc::clone(&backend));
+    let (token, _device) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+
+    // Minting requires the bearer, which stays in the header and never reaches a URL.
+    let (status, body) = http_request(
+        server.addr,
+        "POST",
+        "/api/v1/socket-ticket",
+        Some(&token),
+        Some(r#"{"target":"/api/v1/terminal/session"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "the gateway must issue socket tickets: {body}");
+    let issued: serde_json::Value =
+        serde_json::from_str(body.trim()).expect("ticket response is JSON");
+    let ticket = issued["ticket"].as_str().expect("ticket string").to_owned();
+    assert!(!ticket.is_empty());
+    assert_ne!(
+        ticket, token,
+        "a ticket must be a distinct one-shot credential, not the device token"
+    );
+
+    // The ticket authorizes exactly one upgrade, with no bearer on the request.
+    let mut socket = open_ws_stream(
+        server.addr,
+        &format!("/api/v1/terminal/session?ticket={ticket}"),
+        None,
+    )
+    .await;
+    assert!(matches!(
+        frame(&mut socket).await,
+        ServerWebSocketFrame::Binary(_)
+    ));
+
+    // Replaying the same ticket must not authorize a second attachment.
+    let replayed = ws_handshake_status(
+        server.addr,
+        &format!("/api/v1/terminal/session?ticket={ticket}"),
+        None,
+    )
+    .await;
+    assert_eq!(replayed, 401, "a socket ticket must be single-use");
+
+    drop(socket);
+    server.stop().await;
+}
+
+/// A ticket is scoped to the target it was minted for; it must not be a skeleton key
+/// for another session's socket.
+#[tokio::test]
+async fn gateway_socket_ticket_is_bound_to_its_requested_target() {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(Arc::clone(&backend));
+    let (token, _device) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+
+    let (status, body) = http_request(
+        server.addr,
+        "POST",
+        "/api/v1/socket-ticket",
+        Some(&token),
+        Some(r#"{"target":"/api/v1/events"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let issued: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+    let ticket = issued["ticket"].as_str().unwrap().to_owned();
+
+    let crossed = ws_handshake_status(
+        server.addr,
+        &format!("/api/v1/terminal/session?ticket={ticket}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        crossed, 401,
+        "an events ticket must not open a terminal socket"
+    );
+    server.stop().await;
+}
+
+/// Minting must require a real bearer; otherwise the ticket endpoint would become an
+/// unauthenticated credential vending machine.
+#[tokio::test]
+async fn gateway_refuses_to_mint_a_socket_ticket_without_a_valid_bearer() {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(Arc::clone(&backend));
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+
+    for bearer in [None, Some("never-issued-anywhere-000")] {
+        let (status, _) = http_request(
+            server.addr,
+            "POST",
+            "/api/v1/socket-ticket",
+            bearer,
+            Some(r#"{"target":"/api/v1/terminal/session"}"#),
+        )
+        .await;
+        assert_eq!(status, 401, "unauthenticated ticket minting must be refused");
+    }
     server.stop().await;
 }
 

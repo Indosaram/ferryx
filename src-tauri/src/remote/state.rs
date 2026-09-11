@@ -289,6 +289,16 @@ pub struct RemoteGatewayState {
     /// go through this one coordinator instead of each minting a local-only code or
     /// standing up a competing RelayClient for the same machine identity.
     pub relay_pairing: RwLock<Option<PublishedPairing>>,
+    /// Single-use socket tickets minted for direct-gateway WebSocket upgrades.
+    ///
+    /// The browser `WebSocket` constructor cannot set an `Authorization` header, so a
+    /// direct connection previously put the PERMANENT device token in the URL query,
+    /// where it lands in gateway access logs and browser history. A ticket is minted
+    /// from the bearer over HTTP, scoped to one target, expires in
+    /// [`SOCKET_TICKET_TTL_SECS`], and is removed on first use.
+    ///
+    /// Maps ticket -> (device token, target, expiry unix seconds).
+    pub socket_tickets: parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     snapshot_refreshing: AtomicBool,
@@ -395,6 +405,7 @@ impl RemoteGatewayState {
             config_path,
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
+            socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
             snapshot_refreshing: AtomicBool::new(false),

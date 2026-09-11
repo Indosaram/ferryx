@@ -179,6 +179,9 @@ struct PairExchangeResponse {
 #[derive(Deserialize)]
 struct AuthQuery {
     token: Option<String>,
+    /// Single-use credential minted by `/api/v1/socket-ticket`, used instead of a
+    /// permanent device token because a browser WebSocket cannot send headers.
+    ticket: Option<String>,
     render: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -202,6 +205,120 @@ fn extract_token(headers: &HeaderMap, query: Option<&AuthQuery>) -> Option<Strin
         }
     }
     query.and_then(|q| q.token.clone())
+}
+
+/// How long a direct-gateway socket ticket stays redeemable.
+///
+/// Matches the relay's `SOCKET_TICKET_TTL`. A ticket only has to survive the gap
+/// between minting it over HTTP and opening the socket, so the window is short.
+pub(crate) const SOCKET_TICKET_TTL_SECS: u64 = 30;
+
+/// Upper bound on tickets held for a gateway, so a client that mints without
+/// connecting cannot grow the map without limit.
+const MAX_PENDING_SOCKET_TICKETS: usize = 256;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SocketTicketRequest {
+    target: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SocketTicketResponse {
+    ticket: String,
+    expires_at: u64,
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A ticket may only name a socket route on this gateway.
+fn valid_socket_target(target: &str) -> bool {
+    target == "/api/v1/events"
+        || target.strip_prefix("/api/v1/terminal/").is_some_and(|id| {
+            !id.is_empty()
+                && id.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
+                })
+        })
+}
+
+/// Mints a single-use ticket for one WebSocket upgrade.
+///
+/// The bearer is presented in the `Authorization` header and never appears in a URL.
+/// The returned ticket is what the browser puts in the socket query string, so a
+/// leaked URL exposes only a one-shot credential that expires in seconds.
+async fn issue_socket_ticket(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(request): Json<SocketTicketRequest>,
+) -> Result<Json<SocketTicketResponse>, (StatusCode, String)> {
+    let token = extract_token(&headers, None)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".to_string()))?;
+    // Authorize with the real device store, so a revoked or unknown bearer cannot
+    // trade an unusable token for a working ticket.
+    state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".to_string()))?;
+    if !valid_socket_target(&request.target) {
+        return Err((StatusCode::BAD_REQUEST, "Unsupported socket target".into()));
+    }
+
+    let ticket = uuid::Uuid::new_v4().to_string();
+    let expires_at = unix_now_secs() + SOCKET_TICKET_TTL_SECS;
+    {
+        let mut tickets = state.socket_tickets.lock();
+        let now = unix_now_secs();
+        tickets.retain(|_, (_, _, expiry)| *expiry > now);
+        if tickets.len() >= MAX_PENDING_SOCKET_TICKETS {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many pending socket tickets".into(),
+            ));
+        }
+        tickets.insert(ticket.clone(), (token, request.target, expires_at));
+    }
+    Ok(Json(SocketTicketResponse { ticket, expires_at }))
+}
+
+/// Redeems a ticket for the device token it was minted from, removing it so the
+/// same ticket cannot authorize a second upgrade.
+fn consume_socket_ticket(
+    state: &RemoteGatewayState,
+    ticket: &str,
+    target: &str,
+) -> Option<String> {
+    let (token, issued_target, expiry) = state.socket_tickets.lock().remove(ticket)?;
+    if issued_target != target || expiry <= unix_now_secs() {
+        return None;
+    }
+    Some(token)
+}
+
+/// Resolves the device token authorizing a WebSocket upgrade.
+///
+/// A `ticket` is preferred and is single-use: presenting one consumes it, so a
+/// replayed URL cannot open a second socket. The `Authorization` header and the
+/// legacy `token` query parameter remain accepted so existing clients keep working
+/// while they migrate.
+fn socket_credential(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+    query: &AuthQuery,
+    target: &str,
+) -> Option<String> {
+    if let Some(ticket) = query.ticket.as_deref() {
+        // A supplied ticket must stand on its own; falling back to another
+        // credential here would let an invalid ticket be ignored rather than refused.
+        return consume_socket_ticket(state, ticket, target);
+    }
+    extract_token(headers, Some(query))
 }
 
 async fn health_check() -> Json<HealthResponse> {
@@ -943,7 +1060,7 @@ async fn ws_events_handler(
     headers: HeaderMap,
     State(state): State<Arc<RemoteGatewayState>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = socket_credential(&state, &headers, &query, "/api/v1/events")
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -1017,8 +1134,13 @@ async fn ws_terminal_handler(
     let session_id = parse_host_scoped_session_id(&requested_session_id)
         .map(|(_host_id, session_id)| session_id.to_string())
         .unwrap_or(requested_session_id);
-    let token = extract_token(&headers, Some(&query))
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token = socket_credential(
+        &state,
+        &headers,
+        &query,
+        &format!("/api/v1/terminal/{session_id}"),
+    )
+    .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
@@ -1864,6 +1986,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
+        .route("/api/v1/socket-ticket", post(issue_socket_ticket))
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
         .route("/api/push/subscribe", post(push_subscribe))
@@ -2328,6 +2451,7 @@ mod tests {
         fn no_auth_query() -> AuthQuery {
             AuthQuery {
                 token: None,
+                ticket: None,
                 render: None,
                 cols: None,
                 rows: None,

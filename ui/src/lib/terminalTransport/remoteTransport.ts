@@ -21,10 +21,32 @@ export class WebSocketTerminalTransport implements TerminalTransport {
     return data.map((s: { sessionId: string }) => ({ sessionId: s.sessionId }));
   }
 
+  /// Trades the device token for a single-use ticket.
+  ///
+  /// A browser `WebSocket` cannot send an `Authorization` header, so the socket URL
+  /// has to carry its credential in the query string. Minting a short-lived ticket
+  /// over HTTP keeps the permanent token in a header, so the URL that reaches
+  /// browser history and gateway access logs is only redeemable once.
+  private async mintSocketTicket(target: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/api/v1/socket-ticket`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ target }),
+    });
+    if (!res.ok) throw new Error(`Failed to mint socket ticket: ${res.statusText}`);
+    const { ticket } = await res.json();
+    if (!ticket) throw new Error("Socket ticket response did not contain a ticket");
+    return ticket as string;
+  }
+
   async attach(sessionId: string, _afterSequence?: string | null): Promise<TerminalAttachment> {
     const wsProto = this.baseUrl.startsWith("https") ? "wss" : "ws";
     const host = this.baseUrl.replace(/^https?:\/\//, "");
-    const wsUrl = `${wsProto}://${host}/api/v1/terminal/${sessionId}?token=${encodeURIComponent(this.token)}`;
+    const ticket = await this.mintSocketTicket(`/api/v1/terminal/${sessionId}`);
+    const wsUrl = `${wsProto}://${host}/api/v1/terminal/${sessionId}?ticket=${encodeURIComponent(ticket)}`;
 
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
