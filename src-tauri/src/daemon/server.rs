@@ -1912,6 +1912,16 @@ impl DaemonServer {
                     let config = self.remote_state.config.read().clone();
                     let is_running = *self.remote_state.is_running.read();
                     let bound_address = self.remote_state.bound_address.read().clone();
+                    let identity = crate::remote::auth::canonical_identity_dir()
+                        .ok()
+                        .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok());
+                    let machine_id = identity.map(|id| id.machine_id);
+                    let relay_pairing = self.remote_state.relay_pairing.read();
+                    let (relay_connected, control_channel_connected) = if relay_pairing.is_some() {
+                        (Some(true), Some(true))
+                    } else {
+                        (Some(false), Some(false))
+                    };
                     DaemonResponse::RemoteStatusOk {
                         status: DaemonRemoteStatus {
                             mode: config.mode,
@@ -1920,6 +1930,9 @@ impl DaemonServer {
                             is_running,
                             bound_address,
                             relay_url: config.relay_url,
+                            machine_id,
+                            relay_connected,
+                            control_channel_connected,
                         },
                     }
                 }
@@ -1931,6 +1944,20 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::RemoteCreatePairingCode { permission }) => {
                     let perm = permission.unwrap_or(DevicePermission::Control);
+                    if self.remote_state.relay_pairing.read().is_none() {
+                        let mode = self.remote_state.config.read().mode;
+                        if mode == RemoteNetworkMode::Off {
+                            let mut config = self.remote_state.config.read().clone();
+                            config.mode = RemoteNetworkMode::Relay;
+                            let relay_url = std::env::var("FERRYX_RELAY_URL")
+                                .ok()
+                                .filter(|s| !s.trim().is_empty())
+                                .or_else(|| config.relay_url.clone())
+                                .unwrap_or_else(|| crate::remote::state::DEFAULT_RELAY_URL.to_string());
+                            config.relay_url = Some(relay_url);
+                            let _ = self.handle_remote_configure(config).await;
+                        }
+                    }
                     // In relay mode a code is only redeemable remotely if its PIN was
                     // registered with the relay, so go through the gateway's single
                     // pairing coordinator rather than minting a local-only code.
@@ -1951,6 +1978,8 @@ impl DaemonServer {
                             {
                                 Ok(info) => DaemonResponse::RemotePairingCodeOk {
                                     code: info.pin,
+                                    pairing_token: Some(info.pairing_token),
+                                    machine_id: Some(info.machine_id),
                                 },
                                 Err(message) => DaemonResponse::Error { message },
                             }
@@ -1958,7 +1987,15 @@ impl DaemonServer {
                         None => {
                             let code =
                                 self.remote_state.auth_manager.create_pairing_code(perm);
-                            DaemonResponse::RemotePairingCodeOk { code }
+                            let machine_id = crate::remote::auth::canonical_identity_dir()
+                                .ok()
+                                .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+                                .map(|id| id.machine_id);
+                            DaemonResponse::RemotePairingCodeOk {
+                                code,
+                                pairing_token: None,
+                                machine_id,
+                            }
                         }
                     }
                 }
@@ -4095,7 +4132,7 @@ mod tests {
         reader.read_line(&mut line).await.unwrap();
         let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
         match resp {
-            DaemonResponse::RemotePairingCodeOk { code } => {
+            DaemonResponse::RemotePairingCodeOk { code, .. } => {
                 assert_eq!(code.len(), 6);
             }
             other => panic!("Expected RemotePairingCodeOk, got {other:?}"),

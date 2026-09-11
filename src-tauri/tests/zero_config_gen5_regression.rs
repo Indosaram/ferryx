@@ -143,7 +143,7 @@ async fn request(daemon: &Arc<DaemonServer>, req: DaemonRequest) -> DaemonRespon
 
 async fn pin(daemon: &Arc<DaemonServer>, permission: DevicePermission) -> String {
     match request(daemon, DaemonRequest::RemoteCreatePairingCode { permission: Some(permission) }).await {
-        DaemonResponse::RemotePairingCodeOk { code } => code,
+        DaemonResponse::RemotePairingCodeOk { code, .. } => code,
         other => panic!("expected a pairing code, got {other:?}"),
     }
 }
@@ -248,10 +248,12 @@ async fn cli_success_uses_daemon_pin_and_leaves_it_redeemable_after_exit() {
     let (_ipc, observed) = serve_one_cli_request(&f).await;
     let child = pair_cli().env("FERRYX_RELAY_URL", &f.base).spawn().unwrap();
     let response = timeout(LIMIT, observed).await.unwrap().unwrap();
-    let DaemonResponse::RemotePairingCodeOk { code } = response else { panic!("expected PIN, got {response:?}"); };
+    let DaemonResponse::RemotePairingCodeOk { code, .. } = response else { panic!("expected PIN, got {response:?}"); };
     let output = timeout(LIMIT, child.wait_with_output()).await.unwrap().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), code);
+    let stdout_str = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout_str.lines().any(|line| line.trim() == code));
+    assert!(stdout_str.contains("#pair="));
     assert!(String::from_utf8(output.stderr).unwrap().contains("Pairing registered by the running daemon"));
     assert_issued_permission(&f, &code, DevicePermission::Control).await;
 }
@@ -266,7 +268,6 @@ async fn no_daemon_socket_fails_missing_relay_url_without_spawning_daemon() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("No running daemon answered"), "{stderr}");
     assert!(stderr.contains("Pairing requires a configured relay URL"), "{stderr}");
     assert!(!stderr.contains("Pairing registered by the running daemon"), "{stderr}");
     assert!(!socket.exists(), "CLI must not create a daemon socket on this path");

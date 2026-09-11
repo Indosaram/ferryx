@@ -433,9 +433,18 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
       .then((data) => {
         if (cancelled || typeof data.token !== "string") return;
         handlePaired(data.token, data);
+        if (window.history && typeof window.history.replaceState === "function") {
+          window.history.replaceState(null, "", window.location.pathname + window.location.search);
+        }
         window.location.hash = "";
       })
-      .catch((error) => console.warn("QR pairing failed", error));
+      .catch((error) => {
+        console.warn("QR pairing failed", error);
+        if (window.history && typeof window.history.replaceState === "function") {
+          window.history.replaceState(null, "", window.location.pathname + window.location.search);
+        }
+        window.location.hash = "";
+      });
     return () => { cancelled = true; };
   }, [handlePaired, readUrlHints, pairingBaseUrl]);
 

@@ -126,6 +126,8 @@ pub struct PublicPairExchangeRequest {
     pub code: Option<String>,
     pub pairing_token: Option<String>,
     pub device_name: String,
+    #[serde(default)]
+    pub installation_id: Option<String>,
 }
 
 /// Also cleans up failed upgrades and cancelled connection tasks.
@@ -348,16 +350,16 @@ impl RelayState {
         fresh
     }
 
-    async fn authorize_device_token(&self, machine_id: &str, token: &str) -> bool {
+    async fn authorize_device_token(&self, machine_id: &str, token: &str) -> Result<bool, StatusCode> {
         if self.has_fresh_device_token(machine_id, token) {
-            return true;
+            return Ok(true);
         }
         let mut headers = HeaderMap::new();
         let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
-            return false;
+            return Ok(false);
         };
         headers.insert(header::AUTHORIZATION, value);
-        let authorized = proxy_http(
+        let response = proxy_http(
             self,
             machine_id,
             None,
@@ -366,12 +368,17 @@ impl RelayState {
             headers,
             Vec::new(),
         )
-        .await
-        .is_ok_and(|response| response.status().is_success());
-        if authorized {
+        .await?;
+        if response.status().is_success() {
             self.register_device_token(machine_id, token);
+            Ok(true)
+        } else if response.status() == StatusCode::UNAUTHORIZED
+            || response.status() == StatusCode::FORBIDDEN
+        {
+            Ok(false)
+        } else {
+            Err(response.status())
         }
-        authorized
     }
 
     fn bind_machine_key(&self, auth: &ControlAuth) -> Result<(), String> {
@@ -887,14 +894,18 @@ async fn socket_ticket_handler(
     {
         return Err(StatusCode::NOT_FOUND);
     }
-    if !state.authorize_device_token(&machine, &device_token).await {
-        return Ok((
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({
-                "error": "Device token not authorized for this machine"
-            })),
-        )
-            .into_response());
+    match state.authorize_device_token(&machine, &device_token).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "Device token not authorized for this machine"
+                })),
+            )
+                .into_response());
+        }
+        Err(status) => return Err(status),
     }
     let now = current_time_secs();
     let mut tickets = state.inner.pending_socket_tickets.lock();
@@ -1196,7 +1207,13 @@ async fn exchange_http(
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let (machine, pin, token, control_generation) = state.claim_pairing(ip, &payload, machine)?;
     // The loopback gateway calls its pairing secret `code`.
-    let body = serde_json::to_vec(&serde_json::json!({"code": token, "pairingToken": token, "deviceName": payload.device_name})).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "code": token,
+        "pairingToken": token,
+        "deviceName": payload.device_name,
+        "installationId": payload.installation_id,
+    }))
+    .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
     let response = proxy_http(
@@ -1449,6 +1466,7 @@ pub fn relay_router(state: RelayState) -> Router {
         .route("/tunnel/control", get(control_handler))
         .route("/tunnel/data/{session_id}", get(data_handler))
         .route("/tunnel/client/{session_id}", get(client_handler))
+        .fallback(axum::routing::get(crate::remote::server::serve_static_or_index))
         .with_state(state)
 }
 
@@ -2528,6 +2546,7 @@ mod tests {
             code: None,
             pairing_token: None,
             device_name: "second-device".into(),
+            installation_id: None,
         };
         let (claimed, _, _, _) = state
             .claim_pairing("127.0.0.1".parse().unwrap(), &request, None)
@@ -2562,6 +2581,7 @@ mod tests {
             code: None,
             pairing_token: None,
             device_name: "stale-device".into(),
+            installation_id: None,
         };
         assert_eq!(
             state
@@ -2600,6 +2620,7 @@ mod tests {
             code: None,
             pairing_token: None,
             device_name: "test-device".into(),
+            installation_id: None,
         };
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
 
@@ -3254,6 +3275,7 @@ mod tests {
             assert_eq!(ack.status, "ready");
             let mut payload = credential;
             payload["deviceName"] = "test-device".into();
+            payload["installationId"] = "test-inst-uuid-1234".into();
             let url = format!("{}{route}", base.replace("ws://", "http://"));
             let request = client
                 .post(&url)
@@ -3279,6 +3301,7 @@ mod tests {
                     serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
                 assert_eq!(body["code"], token);
                 assert_eq!(body["deviceName"], "test-device");
+                assert_eq!(body["installationId"], "test-inst-uuid-1234");
                 let body = br#"{"token":"device-token"}"#;
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Daemon: yes\r\nContent-Length: {}\r\n\r\n", body.len());
                 data.send(TMessage::Binary(response.into_bytes().into()))

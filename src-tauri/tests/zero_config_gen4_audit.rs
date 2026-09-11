@@ -100,7 +100,7 @@ async fn request(daemon: &Arc<DaemonServer>, req: DaemonRequest) -> DaemonRespon
 }
 async fn pin(daemon: &Arc<DaemonServer>, permission: DevicePermission) -> String {
     match request(daemon, DaemonRequest::RemoteCreatePairingCode { permission: Some(permission) }).await {
-        DaemonResponse::RemotePairingCodeOk { code } => code,
+        DaemonResponse::RemotePairingCodeOk { code, .. } => code,
         other => panic!("expected a pairing code, got {other:?}"),
     }
 }

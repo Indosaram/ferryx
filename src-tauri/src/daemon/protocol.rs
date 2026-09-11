@@ -111,6 +111,12 @@ pub struct DaemonRemoteStatus {
     pub bound_address: Option<String>,
     #[serde(default)]
     pub relay_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_connected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_channel_connected: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +331,10 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     RemotePairingCodeOk {
         code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pairing_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     RemoteListDevicesOk {
@@ -652,6 +662,9 @@ mod tests {
                 is_running: true,
                 bound_address: Some("0.0.0.0:43821".to_string()),
                 relay_url: None,
+                machine_id: None,
+                relay_connected: None,
+                control_channel_connected: None,
             },
         };
         let status_json = serde_json::to_string(&remote_status_resp).expect("serialize status");
@@ -660,6 +673,8 @@ mod tests {
 
         let pair_resp = DaemonResponse::RemotePairingCodeOk {
             code: "123456".to_string(),
+            pairing_token: None,
+            machine_id: None,
         };
         let pair_json = serde_json::to_string(&pair_resp).expect("serialize pair code");
         assert!(pair_json.contains(r#""code":"123456""#));

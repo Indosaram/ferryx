@@ -106,6 +106,12 @@ pub struct RemoteGatewayStatusResponse {
     pub local_ip: Option<String>,
     pub restart_policy: RemoteRestartPolicy,
     pub relay_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_connected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_channel_connected: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +130,10 @@ pub struct EnableRemoteGatewayRequest {
 pub struct CreatePairingCodeResponse {
     pub code: String,
     pub expires_in_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
 }
 
 #[tauri::command]
@@ -143,12 +153,25 @@ pub async fn cmd_remote_status(
                 local_ip,
                 restart_policy: RemoteRestartPolicy::RestoreListener,
                 relay_url: status.relay_url,
+                machine_id: status.machine_id,
+                relay_connected: status.relay_connected,
+                control_channel_connected: status.control_channel_connected,
             })
         }
         RemoteGatewayManagerInner::State { state, .. } => {
             let config = state.config.read().clone();
             let is_running = *state.is_running.read();
             let bound_address = state.bound_address.read().clone();
+            let identity = crate::remote::auth::canonical_identity_dir()
+                .ok()
+                .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok());
+            let machine_id = identity.map(|id| id.machine_id);
+            let relay_pairing = state.relay_pairing.read();
+            let (relay_connected, control_channel_connected) = if relay_pairing.is_some() {
+                (Some(true), Some(true))
+            } else {
+                (Some(false), Some(false))
+            };
             Ok(RemoteGatewayStatusResponse {
                 enabled: is_running,
                 mode: config.mode,
@@ -157,6 +180,9 @@ pub async fn cmd_remote_status(
                 local_ip,
                 restart_policy: config.restart_policy(),
                 relay_url: config.relay_url,
+                machine_id,
+                relay_connected,
+                control_channel_connected,
             })
         }
     }
@@ -251,18 +277,47 @@ pub async fn cmd_remote_pairing_create(
     let perm = permission.unwrap_or(DevicePermission::Control);
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => {
-            let code = client.remote_create_pairing_code(Some(perm)).await?;
+            let (code, pairing_token, machine_id) = client.remote_create_pairing_code_detailed(Some(perm)).await?;
             Ok(CreatePairingCodeResponse {
                 code,
                 expires_in_seconds: 60,
+                pairing_token,
+                machine_id,
             })
         }
         RemoteGatewayManagerInner::State { state, .. } => {
-            let code = state.auth_manager.create_pairing_code(perm);
-            Ok(CreatePairingCodeResponse {
-                code,
-                expires_in_seconds: 60,
-            })
+            let coordinator = state
+                .relay_pairing
+                .read()
+                .as_ref()
+                .map(|published| published.coordinator.clone());
+            if let Some(coordinator) = coordinator {
+                let info = coordinator
+                    .generate_pairing_with_permission(
+                        std::time::Duration::from_secs(60),
+                        perm,
+                    )
+                    .await
+                    .map_err(|e| IpcError::internal(e))?;
+                Ok(CreatePairingCodeResponse {
+                    code: info.pin,
+                    expires_in_seconds: 60,
+                    pairing_token: Some(info.pairing_token),
+                    machine_id: Some(info.machine_id),
+                })
+            } else {
+                let code = state.auth_manager.create_pairing_code(perm);
+                let machine_id = crate::remote::auth::canonical_identity_dir()
+                    .ok()
+                    .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+                    .map(|id| id.machine_id);
+                Ok(CreatePairingCodeResponse {
+                    code,
+                    expires_in_seconds: 60,
+                    pairing_token: None,
+                    machine_id,
+                })
+            }
         }
     }
 }

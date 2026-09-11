@@ -1366,7 +1366,30 @@ impl DaemonClient {
             .send_request(DaemonRequest::RemoteCreatePairingCode { permission })
             .await?;
         match resp {
-            DaemonResponse::RemotePairingCodeOk { code } => Ok(code),
+            DaemonResponse::RemotePairingCodeOk { code, .. } => Ok(code),
+            DaemonResponse::Error { message } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn remote_create_pairing_code_detailed(
+        &self,
+        permission: Option<DevicePermission>,
+    ) -> Result<(String, Option<String>, Option<String>), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::RemoteCreatePairingCode { permission })
+            .await?;
+        match resp {
+            DaemonResponse::RemotePairingCodeOk {
+                code,
+                pairing_token,
+                machine_id,
+            } => Ok((code, pairing_token, machine_id)),
             DaemonResponse::Error { message } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }

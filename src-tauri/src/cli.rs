@@ -230,103 +230,50 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             Ok(())
         }
         PairCliCommand::GeneratePin => {
-            // The daemon owns the machine's single relay control connection and pairing
-            // coordinator. Ask it first: standing up a second RelayClient here would
-            // contend for the same machine identity on the relay, and a PIN minted
-            // outside the relay-registered coordinator is not redeemable remotely.
+            if let Ok(val) = std::env::var("FERRYX_RELAY_URL") {
+                if val.trim().is_empty() {
+                    return Err("Pairing requires a configured relay URL (FERRYX_RELAY_URL)".to_string());
+                }
+            }
+
             let daemon_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|error| error.to_string())?;
-            // Only defer to a daemon that is ALREADY running. DaemonClient will happily
-            // start one on demand, but silently spawning a daemon is not this command's
-            // job, and it would also make the message below untrue.
-            let daemon_socket = crate::daemon::server::get_socket_path();
-            if daemon_socket.exists() {
-                // A daemon is present, so it owns this machine's relay identity. Its
-                // answer is authoritative: an explicit refusal must surface as an error
-                // rather than silently starting a competing relay owner, which would
-                // replace the daemon's control generation and invalidate its live PIN.
-                let answer = daemon_runtime.block_on(async {
-                    let client = crate::daemon::client::DaemonClient::new();
-                    client
-                        .remote_create_pairing_code(Some(
-                            crate::remote::auth::DevicePermission::Control,
-                        ))
-                        .await
-                });
-                match answer {
-                    Ok(code) => {
-                        println!("{code}");
-                        std::io::stdout().flush().map_err(|error| error.to_string())?;
-                        eprintln!(
-                            "Pairing registered by the running daemon; it holds the relay control connection."
-                        );
-                        return Ok(());
+
+            let answer = daemon_runtime.block_on(async {
+                let client = crate::daemon::client::DaemonClient::new();
+                client
+                    .remote_create_pairing_code_detailed(Some(
+                        crate::remote::auth::DevicePermission::Control,
+                    ))
+                    .await
+            });
+
+            match answer {
+                Ok((code, pairing_token, _machine_id)) => {
+                    println!("{code}");
+                    if let Some(token) = pairing_token {
+                        let relay_url = std::env::var("FERRYX_RELAY_URL")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| crate::remote::state::DEFAULT_RELAY_URL.to_string());
+                        println!("{}#pair={token}", relay_url.trim_end_matches('/'));
                     }
-                    Err(error) => {
-                        return Err(format!(
-                            "The running daemon refused this pairing request: {}. \
-                             It owns this machine's relay identity, so pairing standalone \
-                             would replace its control connection and invalidate any PIN it \
-                             already issued.",
-                            error.message
-                        ));
-                    }
+                    eprintln!(
+                        "Pairing registered by the running daemon; it holds the relay control connection."
+                    );
+                    std::io::stdout().flush().map_err(|error| error.to_string())?;
+                    Ok(())
                 }
+                Err(error) => Err(format!(
+                    "The running daemon refused this pairing request: {}. \
+                     It owns this machine's relay identity, so pairing standalone \
+                     would replace its control connection and invalidate any PIN it \
+                     already issued.",
+                    error.message
+                )),
             }
-            eprintln!(
-                "No running daemon answered; pairing standalone from this process instead."
-            );
-            let directory =
-                remote_state_dir().ok_or("Cannot persist machine identity: set FERRYX_DATA_DIR")?;
-            let config_path = directory.join("remote-config.json");
-            let config: crate::remote::RemoteGatewayConfig = match std::fs::read(&config_path)
-            {
-                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
-                Err(error) => return Err(error.to_string()),
-            };
-            let relay_url = match std::env::var("FERRYX_RELAY_URL") {
-                Ok(val) if val.trim().is_empty() => {
-                    return Err("Pairing requires a configured relay URL (FERRYX_RELAY_URL)".to_string());
-                }
-                Ok(val) => val,
-                Err(_) => config
-                    .relay_url
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(|| crate::remote::state::DEFAULT_RELAY_URL.to_string()),
-            };
-            let identity = crate::remote::auth::load_or_generate_machine_identity(&directory)?;
-            let client = crate::remote::relay_client::RelayClient::with_identity(
-                &relay_url,
-                identity,
-                format!("127.0.0.1:{}", config.port),
-            );
-            let coordinator = client.pairing_coordinator();
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())?;
-            runtime.block_on(async move {
-                let relay_task = tokio::spawn(async move { client.run().await });
-                let result = coordinator.generate_pairing(std::time::Duration::from_secs(60)).await;
-                match result {
-                    Ok(session) => {
-                        println!("{}", session.pin);
-                        println!("{}#pair={}", relay_url.trim_end_matches('/'), session.pairing_token);
-                        std::io::stdout().flush().map_err(|error| error.to_string())?;
-                        eprintln!("Pairing registered; keep this command running until pairing completes or expires.");
-                        // This process owns the authenticated control connection; do not drop
-                        // it immediately after printing the relay-acknowledged credentials.
-                        let deadline = std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at);
-                        tokio::time::sleep(deadline.duration_since(std::time::SystemTime::now()).unwrap_or_default()).await;
-                        relay_task.abort();
-                        Ok(())
-                    }
-                    Err(error) => { relay_task.abort(); Err(error) }
-                }
-            })
         }
         PairCliCommand::Approve { pin } => match manager.approve_pairing_code_cli(&pin) {
             Ok(_device) => {

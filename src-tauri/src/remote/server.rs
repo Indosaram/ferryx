@@ -1873,7 +1873,7 @@ fn static_relative_path(raw: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
+pub(crate) async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
     let Some(path) = static_relative_path(uri.path()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };

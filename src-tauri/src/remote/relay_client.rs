@@ -40,6 +40,7 @@ pub struct RegisterPairingPinRequest {
 pub struct PairingSessionInfo {
     pub pin: String,
     pub pairing_token: String,
+    pub machine_id: String,
     pub expires_at: u64,
 }
 
@@ -107,7 +108,9 @@ impl PairingCoordinator {
             target,
             PairingState::Consumed | PairingState::Expired | PairingState::Cancelled
         ) {
-            *self.active_pin.write() = None;
+            if let Some(pin) = self.active_pin.write().take() {
+                self.auth.cancel_pairing_capability(&pin);
+            }
             if let Some(token) = self.active_token.write().take() {
                 self.auth.cancel_pairing_capability(&token);
             }
@@ -147,6 +150,8 @@ impl PairingCoordinator {
             *self.active_token.write() = Some(pairing_token.clone());
             self.auth
                 .register_pairing_capability_with_permission(&pairing_token, permission);
+            self.auth
+                .register_pairing_capability_with_permission(&pin, permission);
             (*generation, pin, pairing_token)
         };
         let registration = RegisterPairingPin {
@@ -208,6 +213,7 @@ impl PairingCoordinator {
         Ok(PairingSessionInfo {
             pin,
             pairing_token,
+            machine_id: self.machine_id.clone(),
             expires_at,
         })
     }
@@ -855,6 +861,40 @@ mod tests {
             .is_err());
         assert_eq!(coordinator.state(), PairingState::Cancelled);
         reject.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pairing_coordinator_pin_can_be_redeemed_directly() {
+        let (tx, mut rx) = mpsc::channel::<RegisterPairingPinRequest>(1);
+        let mut coordinator = PairingCoordinator::new("machine", tx);
+        coordinator.auth = AuthManager::with_persistence(None);
+        let responder = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            request
+                .ack
+                .send(Ok(RegisterPairingPinAck {
+                    generation: request.registration.generation,
+                    pin: request.registration.pin,
+                    machine_id: "machine".into(),
+                    status: "ready".into(),
+                }))
+                .unwrap();
+        });
+        let session = coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .unwrap();
+        // The PIN itself is registered with the local auth authority for direct LAN redemption
+        let exchanged = coordinator
+            .auth
+            .exchange_pairing_code_with_installation(&session.pin, "DirectPhone", None);
+        assert!(exchanged.is_ok(), "Direct pairing with PIN must succeed");
+        coordinator.transition(PairingState::Claimed).unwrap();
+        coordinator.transition(PairingState::Consumed).unwrap();
+        // The paired token is also cleaned up
+        assert!(coordinator.active_pin.read().is_none());
+        assert!(coordinator.active_token.read().is_none());
+        responder.await.unwrap();
 
         let (tx, mut rx) = mpsc::channel::<RegisterPairingPinRequest>(1);
         let coordinator = PairingCoordinator::new("machine", tx);
