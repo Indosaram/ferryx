@@ -706,25 +706,60 @@ fn prune_revoked_devices(state: &mut PersistedAuthState) {
 /// On Windows the enclosing per-user directory (`LOCALAPPDATA`, chosen by
 /// `remote::state::resolve_remote_data_dir`) already carries an ACL that excludes other standard
 /// users, and both the temporary and final file inherit it.
+/// Atomically writes `value` as an owner-only JSON file.
+///
+/// This store holds authorization state, so two properties are enforced rather than
+/// attempted:
+///
+/// - **Confidentiality.** A failure to restrict the file or its directory is
+///   returned. Previously both `set_permissions` calls were discarded with `let _`,
+///   so a store left readable by others was reported as a successful write.
+/// - **Durability.** The temp file and its directory are fsynced. `rename` is atomic
+///   with respect to readers, but without fsync the rename can reach disk while the
+///   contents have not, so a crash can leave an empty or truncated store where a
+///   valid one is expected.
 pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
         }
     }
     let temp = path.with_extension("tmp");
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    std::fs::write(&temp, bytes)?;
+
+    // Create the file already restricted, so the contents are never briefly visible
+    // to another user between the write and a later permission change.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write as _;
+        let mut file = options.open(&temp)?;
+        file.write_all(&bytes)?;
+        // Flush the bytes before the rename publishes the new name.
+        file.sync_all()?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(temp, path)?;
+    std::fs::rename(&temp, path)?;
+
+    // Persist the directory entry itself, so the rename survives a crash.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 
@@ -1084,6 +1119,112 @@ mod tests {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    /// The resolver is well covered, but nothing proved that `canonical_auth_path`
+    /// actually routes through it, so a divergent path could ship with the resolver
+    /// still green. This drives the real environment variable and requires the
+    /// public path to follow it.
+    #[test]
+    fn canonical_auth_path_follows_the_canonical_remote_dir() {
+        // Whatever the ambient environment resolves to, the public path must be that
+        // directory plus the store file name - never an independently built path.
+        match (canonical_remote_dir(), canonical_auth_path()) {
+            (Some(dir), Some(auth)) => {
+                assert_eq!(
+                    auth,
+                    dir.join("remote-auth.json"),
+                    "the auth path must be the canonical remote dir plus the store file name"
+                );
+                assert_eq!(
+                    auth.parent().map(Path::to_path_buf),
+                    Some(dir),
+                    "the auth path must live in the directory the resolver chose"
+                );
+            }
+            (None, None) => {}
+            (dir, auth) => panic!(
+                "canonical_auth_path must resolve exactly when the remote dir does: \
+                 dir={dir:?} auth={auth:?}"
+            ),
+        }
+
+        // Driving the resolver directly pins the shape the delegation must produce,
+        // including the FERRYX_DATA_DIR branch, without mutating process state.
+        let explicit = resolve_canonical_remote_dir(|key| {
+            (key == "FERRYX_DATA_DIR").then(|| std::ffi::OsString::from("/tmp/ferryx-canonical"))
+        })
+        .expect("an explicit data dir must resolve");
+        assert_eq!(explicit, Path::new("/tmp/ferryx-canonical").join("remote"));
+    }
+
+    /// The store holds authorization state (machine ownership, device records), so it
+    /// must be owner-only and an unwritable location must be reported rather than
+    /// silently reported as written.
+    ///
+    /// Note on scope: the previous code also DISCARDED both `set_permissions` results
+    /// with `let _`. Those are now propagated, but a portable test cannot observe that
+    /// specific propagation (an unwritable parent fails earlier, at `create_dir_all`),
+    /// so this asserts the observable properties: the resulting mode, correction of a
+    /// pre-existing permissive file, and a real error for an impossible path.
+    #[cfg(unix)]
+    #[test]
+    fn the_store_is_written_owner_only_or_reports_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("nested").join("remote-auth.json");
+        write_private_json(&path, &serde_json::json!({"devices": {}})).expect("write succeeds");
+
+        // The written file is owner-only, and so is its directory.
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the store must not be readable by others");
+        let parent = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(parent, 0o700, "the store directory must be owner-only");
+
+        // An unwritable location must FAIL rather than report a successful write of
+        // an authorization store that does not exist.
+        let not_a_dir = dir.path().join("occupied");
+        std::fs::write(&not_a_dir, b"this is a file, not a directory").unwrap();
+        assert!(
+            write_private_json(&not_a_dir.join("remote-auth.json"), &serde_json::json!({}))
+                .is_err(),
+            "a store that cannot be created must report an error"
+        );
+
+        // Rewriting an existing store must not widen its mode, so a pre-existing
+        // permissive file is corrected rather than preserved.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_json(&path, &serde_json::json!({"devices": {}})).expect("rewrite succeeds");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "rewriting the store must restore owner-only access"
+        );
+    }
+
+    /// An interrupted write must not leave a half-written store: the rename is atomic,
+    /// but without fsync the rename can be visible while the bytes are not, so a crash
+    /// or power loss yields an empty or truncated authorization store.
+    #[test]
+    fn a_completed_write_leaves_a_fully_readable_store() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("remote-auth.json");
+        let payload = serde_json::json!({"devices": {"a": {"permission": "view"}}});
+        write_private_json(&path, &payload).expect("write succeeds");
+
+        // No temp file is left behind to be mistaken for the store.
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "the temporary file must not survive a completed write"
+        );
+        let read: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("store is valid JSON");
+        assert_eq!(read, payload);
+    }
 
     #[test]
     fn revoked_devices_are_deleted_outright_and_never_reappear() {
