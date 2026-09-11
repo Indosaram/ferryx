@@ -48,6 +48,16 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as unknown as Response;
 }
 
+function ticketed(inner: typeof fetch): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return jsonResponse({ ticket: "ui-test-ticket", expiresAt: 9999999999 });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
+
 class EventWebSocket {
   static latest: EventWebSocket | null = null;
   readonly url: string;
@@ -226,7 +236,7 @@ describe("Remote UI Components", () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     vi.stubGlobal(
       "fetch",
-      vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(currentNativeState)),
+      ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(currentNativeState))),
     );
 
     render(<RemoteApp />);
@@ -244,7 +254,7 @@ describe("Remote UI Components", () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     vi.stubGlobal(
       "fetch",
-      vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(safeServerWorkspaceState)),
+      ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(safeServerWorkspaceState))),
     );
 
     render(<RemoteApp />);
@@ -272,7 +282,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(focusedState))
       .mockImplementationOnce(() => selectionResponse.promise)
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -347,13 +357,13 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(focusedState))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
 
     await screen.findByTestId("remote-terminal");
-    expect(eventSocket().url).toMatch(/\/api\/v1\/events\?token=test-token$/);
+    expect(eventSocket().url).toMatch(/\/api\/v1\/events\?ticket=ui-test-ticket$/);
     fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
     const selector = screen.getByRole("dialog", { name: /Workspace context/i });
     fireEvent.click(
@@ -401,7 +411,7 @@ describe("Remote UI Components", () => {
         .mockResolvedValueOnce(jsonResponse(focusedState))
         .mockResolvedValueOnce(jsonResponse({ accepted: true }))
         .mockResolvedValue(jsonResponse(focusedState));
-      vi.stubGlobal("fetch", fetchMock);
+      vi.stubGlobal("fetch", ticketed(fetchMock));
       vi.stubGlobal("WebSocket", EventWebSocket);
 
       render(<RemoteApp />);
@@ -447,7 +457,7 @@ describe("Remote UI Components", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(focusedState))
       .mockResolvedValueOnce(jsonResponse(secondFocusedState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -491,7 +501,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(focusedState))
       .mockImplementationOnce(() => firstFocusRefresh.promise)
       .mockResolvedValueOnce(jsonResponse(secondFocusedState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -535,7 +545,7 @@ describe("Remote UI Components", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(focusedState))
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -560,12 +570,12 @@ describe("Remote UI Components", () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     vi.stubGlobal(
       "fetch",
-      vi.fn<typeof fetch>().mockResolvedValue(
+      ticketed(vi.fn<typeof fetch>().mockResolvedValue(
         jsonResponse({
           ...confirmedNoFocusState,
           sessions: [focusedState.sessions[1]],
         }),
-      ),
+      )),
     );
 
     render(<RemoteApp />);
@@ -590,7 +600,7 @@ describe("Remote UI Components", () => {
 
   it("retains legacy authentication without rendering old Orca branding", async () => {
     localStorage.setItem("rorca_remote_token", "legacy-token");
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(confirmedNoFocusState)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(confirmedNoFocusState))));
 
     render(<RemoteApp />);
 
@@ -612,7 +622,7 @@ describe("Remote UI Components", () => {
         ],
       },
     };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithTabs)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithTabs))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -669,7 +679,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(firstState))
       .mockResolvedValueOnce(jsonResponse(secondState))
       .mockResolvedValueOnce(jsonResponse(confirmedNoFocusState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     const { unmount } = render(<RemoteApp />);
@@ -785,7 +795,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(multiTabState2));
 
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -946,7 +956,7 @@ describe("Remote UI Components", () => {
     };
 
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithTabs));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1027,7 +1037,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(devServerState))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(editorState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1114,7 +1124,7 @@ describe("Remote UI Components", () => {
   it("retains authorization across normal page reload when server returns transient error", async () => {
     localStorage.setItem("ferryx_remote_token", "paired-device-token");
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ error: "gateway busy" }, false));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
 
     render(<RemoteApp />);
 
@@ -1133,7 +1143,7 @@ describe("Remote UI Components", () => {
       status: 401,
       json: vi.fn(async () => ({ error: "Invalid or revoked token" })),
     } as unknown as Response);
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
 
     render(<RemoteApp />);
 
@@ -1211,7 +1221,7 @@ describe("Remote UI Components", () => {
         ],
       },
     };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithActivity)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithActivity))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1241,7 +1251,7 @@ describe("Remote UI Components", () => {
         terminalTabs: [{ id: "tab-1", label: "Editor", worktreeSlug: "main", worktreeLabel: "main" }],
       },
     };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(inventoryWithoutFocus)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(inventoryWithoutFocus))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1273,7 +1283,7 @@ describe("Remote UI Components", () => {
       },
     };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(crossWorktreeState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1311,7 +1321,7 @@ describe("Remote UI Components", () => {
         ],
       },
     };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithAgents)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithAgents))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1358,7 +1368,7 @@ describe("Remote UI Components", () => {
         },
       ],
     };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithAttention)));
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(stateWithAttention))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1416,7 +1426,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockImplementationOnce(() => selectionResponse.promise)
       .mockResolvedValueOnce(jsonResponse(switchedState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1495,11 +1505,11 @@ describe("Remote UI Components", () => {
         tabId: "tab-2",
       },
     };
-    vi.stubGlobal("fetch", vi
+    vi.stubGlobal("fetch", ticketed(vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(switchedState)));
+      .mockResolvedValueOnce(jsonResponse(switchedState))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1550,11 +1560,11 @@ describe("Remote UI Components", () => {
         tabId: "tab-2",
       },
     };
-    vi.stubGlobal("fetch", vi
+    vi.stubGlobal("fetch", ticketed(vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(switchedState)));
+      .mockResolvedValueOnce(jsonResponse(switchedState))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1605,11 +1615,11 @@ describe("Remote UI Components", () => {
         tabId: "tab-2",
       },
     };
-    vi.stubGlobal("fetch", vi
+    vi.stubGlobal("fetch", ticketed(vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(switchedState)));
+      .mockResolvedValueOnce(jsonResponse(switchedState))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1665,11 +1675,11 @@ describe("Remote UI Components", () => {
         tabId: "tab-2",
       },
     };
-    vi.stubGlobal("fetch", vi
+    vi.stubGlobal("fetch", ticketed(vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
-      .mockResolvedValueOnce(jsonResponse(switchedState)));
+      .mockResolvedValueOnce(jsonResponse(switchedState))));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1728,7 +1738,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockResolvedValueOnce(jsonResponse({ accepted: true }))
       .mockResolvedValueOnce(jsonResponse(switchedState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1806,7 +1816,7 @@ describe("Remote UI Components", () => {
         .fn<typeof fetch>()
         .mockResolvedValueOnce(jsonResponse(stateWithSessions))
         .mockResolvedValueOnce(jsonResponse({ accepted: true }));
-      vi.stubGlobal("fetch", fetchMock);
+      vi.stubGlobal("fetch", ticketed(fetchMock));
       vi.stubGlobal("WebSocket", EventWebSocket);
 
       render(<RemoteApp />);
@@ -1856,7 +1866,7 @@ describe("Remote UI Components", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockResolvedValueOnce(jsonResponse({ error: "gateway busy" }, false));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1899,7 +1909,7 @@ describe("Remote UI Components", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(stateWithSessions))
       .mockImplementationOnce(() => selectionResponse.promise);
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1928,7 +1938,7 @@ describe("Remote UI Components", () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(focusedState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -1954,7 +1964,7 @@ describe("Remote UI Components", () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(focusedState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);
@@ -2007,7 +2017,7 @@ describe("Remote UI Components", () => {
       .mockResolvedValueOnce(jsonResponse(stateWithThreeTabs))
       .mockImplementationOnce(() => selectionResponse.promise)
       .mockResolvedValueOnce(jsonResponse(differentAuthoritativeState));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", ticketed(fetchMock));
     vi.stubGlobal("WebSocket", EventWebSocket);
 
     render(<RemoteApp />);

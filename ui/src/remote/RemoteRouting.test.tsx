@@ -24,6 +24,19 @@ const workspace = () => new Response(JSON.stringify({
   projects: [], sessions: [],
 }));
 
+function ticketed(inner: (input: any, init?: any) => any): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return new Response(JSON.stringify({ ticket: "ui-test-ticket", expiresAt: 9999999999 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
+
 afterEach(() => {
   cleanup();
   remoteHostStore.reset();
@@ -38,14 +51,14 @@ it("switches API and event sockets to the selected host without reusing local cr
   localStorage.setItem("ferryx_remote_token_host-b", "host-b-token");
   remoteHostStore.setHosts([{ hostId: "host-b", name: "B", address: "http://192.168.1.9:8787", transport: "mdns", authStatus: "paired", online: true }]);
   const fetcher = vi.fn(async () => workspace());
-  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("fetch", ticketed(fetcher));
   vi.stubGlobal("WebSocket", EventSocket);
   await act(async () => { render(<RemoteApp />); });
   const first = EventSocket.instances[0];
   await act(async () => { remoteHostStore.setActiveHost("host-b"); });
   expect(first.close).toHaveBeenCalledOnce();
   expect(fetcher).toHaveBeenLastCalledWith("http://192.168.1.9:8787/api/v1/workspace/state", { headers: { Authorization: "Bearer host-b-token" } });
-  expect(EventSocket.instances.at(-1)?.url).toBe("ws://192.168.1.9:8787/api/v1/events?token=host-b-token");
+  expect(EventSocket.instances.at(-1)?.url).toBe("ws://192.168.1.9:8787/api/v1/events?ticket=ui-test-ticket");
   expect(screen.getByTestId("terminal-transport").textContent).toBe("http://192.168.1.9:8787");
 });
 
@@ -96,6 +109,38 @@ it("requests a new target-bound ticket for every terminal dial without exposing 
   });
 });
 
+it("never includes device token or token/access_token parameters in socket URLs for direct or relay transports", async () => {
+  const fetcher = vi.fn(async (url: string | Request) => {
+    const targetUrl = String(url instanceof Request ? url.url : url);
+    if (targetUrl.includes("/api/v1/socket-ticket")) {
+      return new Response(JSON.stringify({ ticket: "regression-ticket-123", expiresAt: 9999999999 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("not found", { status: 404 });
+  });
+  vi.stubGlobal("fetch", fetcher);
+
+  const deviceToken = "super-secret-device-token-xyz";
+  const transports = [
+    { name: "relay transport", baseUrl: "https://relay.example/host/machine-a", target: "/api/v1/events" },
+    { name: "direct transport", baseUrl: "http://192.168.1.9:8787", target: "/api/v1/events" },
+    { name: "direct terminal", baseUrl: "http://192.168.1.9:8787", target: "/api/v1/terminal/session-1" },
+    { name: "relay terminal", baseUrl: "https://relay.example/host/machine-a", target: "/api/v1/terminal/session-1" },
+  ];
+
+  for (const { name, baseUrl, target } of transports) {
+    const socketUrl = await remoteSocketUrl(baseUrl, target, deviceToken);
+    const parsed = new URL(socketUrl);
+
+    expect(socketUrl, `${name} must not contain device token`).not.toContain(deviceToken);
+    expect(parsed.searchParams.has("token"), `${name} must not contain token query param`).toBe(false);
+    expect(parsed.searchParams.has("access_token"), `${name} must not contain access_token query param`).toBe(false);
+    expect(parsed.searchParams.get("ticket"), `${name} must contain ticket query param`).toBe("regression-ticket-123");
+  }
+});
+
 it("migrates a single-host inventory and its scoped token without borrowing an origin-wide token", () => {
   localStorage.setItem("ferryx_remote_token", "unrelated-token");
   localStorage.setItem("ferryx_remote_token_old-a", "a-token");
@@ -122,7 +167,7 @@ it("parses fragment PIN and hints separately and keeps transport on the relay", 
     }
     return workspace();
   });
-  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("fetch", ticketed(fetcher));
   vi.stubGlobal("WebSocket", EventSocket);
   await act(async () => { render(<RemoteApp />); });
   const pairing = fetcher.mock.calls.find(([url]) => url.includes("pair/exchange"));

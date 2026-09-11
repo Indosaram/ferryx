@@ -25,6 +25,19 @@ afterEach(() => {
   EventSocket.instances = [];
 });
 
+function ticketed(inner: typeof fetch): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return new Response(JSON.stringify({ ticket: "ui-test-ticket", expiresAt: 9999999999 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
+
 it("reconnects events and refreshes missed focus without losing pairing", async () => {
   // Given a paired browser that has loaded one desktop selection.
   vi.useFakeTimers();
@@ -36,7 +49,7 @@ it("reconnects events and refreshes missed focus without losing pairing", async 
     projects: [],
     sessions: [],
   })));
-  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("fetch", ticketed(fetcher));
   let unmount = () => {};
   await act(async () => { unmount = render(<RemoteApp />).unmount; });
   expect(screen.getByTestId("session").textContent).toBe("before-outage");

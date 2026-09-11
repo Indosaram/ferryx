@@ -29,13 +29,26 @@ it("lists each SSH session separately without treating background sessions as fo
     .toEqual(["ssh-one", "ssh-two"]);
 });
 
+function ticketed(inner: typeof fetch): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/api/v1/socket-ticket")) {
+      return new Response(JSON.stringify({ ticket: "ui-test-ticket", expiresAt: 9999999999 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
+
 it("sends the backend session identity when selecting an SSH session", async () => {
   localStorage.setItem("ferryx_remote_token", "paired");
   vi.stubGlobal("WebSocket", class {
     close() {}
   });
   const fetcher = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) => new Response(JSON.stringify(inventory)));
-  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("fetch", ticketed(fetcher));
   await act(async () => { render(<RemoteApp />); });
   fireEvent.click(screen.getByRole("button", { name: "Change workspace context" }));
   const option = screen.getByRole("button", { name: /Terminal 2/ });
