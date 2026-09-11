@@ -2107,10 +2107,14 @@ pub async fn start_remote_server_with_resolver(
         .relay_url
         .as_deref()
         .map(str::trim)
-        .filter(|url| !url.is_empty());
-    if config.mode == RemoteNetworkMode::Relay && relay_url.is_none() {
-        return Err("Relay mode requires a non-empty relay URL".into());
-    }
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            if config.mode == RemoteNetworkMode::Relay {
+                Some(crate::remote::state::DEFAULT_RELAY_URL)
+            } else {
+                None
+            }
+        });
     let relay_token = std::env::var("FERRYX_MACHINE_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());

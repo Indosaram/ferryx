@@ -261,7 +261,7 @@ async fn no_daemon_socket_fails_missing_relay_url_without_spawning_daemon() {
     let env = IsolatedEnv::new();
     let socket = env.dir.path().join("runtime/daemon.sock");
     assert!(!socket.exists());
-    let child = pair_cli().spawn().unwrap();
+    let child = pair_cli().env("FERRYX_RELAY_URL", "").spawn().unwrap();
     let output = timeout(LIMIT, child.wait_with_output()).await.unwrap().unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());

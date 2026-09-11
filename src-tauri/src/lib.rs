@@ -1,6 +1,7 @@
 pub mod agent_detect;
 pub mod browser;
 pub mod clipboard_image;
+pub mod cli;
 pub mod daemon;
 pub mod dag;
 pub mod ipc;

@@ -1,7 +1,8 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-pub use ferryx_lib::cli::*;
+use ferryx_lib::cli::{
+    parse_browser_cli, parse_handover_from, parse_launch_mode, parse_pair_cli, parse_remote_cli,
+    print_browser_cli_error, run_browser_cli, run_daemon_headless, run_pair_cli, run_remote_cli,
+    LaunchMode,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -41,7 +42,8 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            ferryx_lib::run();
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <pair|remote|browser|--daemon>");
+            std::process::exit(1);
         }
     }
 }

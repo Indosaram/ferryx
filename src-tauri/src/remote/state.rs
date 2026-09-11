@@ -17,6 +17,7 @@ use tokio::sync::{broadcast, watch};
 
 pub type DesktopEventSink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 pub const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT: &str = "remote_active_selection_changed";
+pub const DEFAULT_RELAY_URL: &str = "https://relay.checka.cc";
 #[cfg(not(test))]
 pub const REMOTE_GATEWAY_PORT: u16 = 43821;
 #[cfg(test)]
