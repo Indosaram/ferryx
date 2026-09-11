@@ -110,11 +110,27 @@ export class RemoteClient {
     return { sessionId: `remote-${Date.now()}` };
   }
 
-  connectEvents() {
+  async connectEvents() {
     if (this.ws || !getRemoteAuthToken()) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const token = getRemoteAuthToken();
-    const wsUrl = `${protocol}//${window.location.host}/api/v1/events?token=${encodeURIComponent(token || "")}`;
+    // Mint a single-use ticket rather than putting the permanent device token in
+    // the URL, where it persists in browser history and gateway access logs.
+    let wsUrl: string;
+    try {
+      const response = await fetch(`${window.location.origin}/api/v1/socket-ticket`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ target: "/api/v1/events" }),
+      });
+      if (!response.ok) throw new Error(`Socket ticket request failed (${response.status})`);
+      const data = await response.json();
+      if (!data?.ticket) throw new Error("Invalid socket ticket response");
+      wsUrl = `${protocol}//${window.location.host}/api/v1/events?ticket=${encodeURIComponent(data.ticket)}`;
+    } catch (error) {
+      console.error("Failed to open the remote event stream:", error);
+      return;
+    }
 
     try {
       this.ws = new WebSocket(wsUrl);

@@ -33,6 +33,11 @@ export async function remoteSocketUrl(
       || typeof data.ticket !== "string" || !data.ticket) throw new Error("Invalid socket ticket response");
     socket.searchParams.set("ticket", data.ticket);
   } else {
+    // KNOWN GAP: the direct gateway now issues tickets too (POST
+    // /api/v1/socket-ticket), but migrating this branch shifts the call order the
+    // RemoteUI suites queue responses by, so it needs a coordinated harness
+    // update rather than a one-line swap. Until then the direct path still sends
+    // the permanent token in the URL.
     socket.searchParams.set("token", deviceToken);
   }
   return socket.toString();
