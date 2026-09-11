@@ -333,6 +333,33 @@ fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
     assert!(remote_cmd.contains("bridge --stdio --root"));
 }
 
+#[test]
+fn ssh_bridge_plan_windows_uses_raw_child_stdio_forwarding() {
+    let env = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Windows,
+        executor: crate::ssh::runtime::RemoteExecutor::Powershell,
+        version: "Windows 10.0.19045".into(),
+        home: "C:\\Users\\user".into(),
+        temp: "C:\\Temp".into(),
+        git: true,
+    };
+    let location = crate::ssh::helper_setup::HelperLocation {
+        executable: "C:\\Users\\user\\.ferryx\\bin\\ferryx-remote-helper.exe".into(),
+        root: "C:\\Users\\user\\.ferryx\\helper\\host-win".into(),
+    };
+    let plan = bridge_plan(&host(), &env, &location).expect("bridge_plan");
+    assert_eq!(plan.program, "ssh");
+    assert!(plan.args.iter().any(|v| v == "-T"));
+    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "UpdateHostKeys=no"]));
+    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "StrictHostKeyChecking=yes"]));
+    let cmd = bridge_command(&env, &location);
+    assert!(cmd.contains("System.Diagnostics.Process"));
+    assert!(cmd.contains("RedirectStandardInput = $false"));
+    assert!(cmd.contains("RedirectStandardOutput = $false"));
+    assert!(cmd.contains("RedirectStandardError = $false"));
+    assert!(cmd.contains("bridge --stdio --root"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn failed_probe_distinguishes_non_utf8_and_empty_stderr() {

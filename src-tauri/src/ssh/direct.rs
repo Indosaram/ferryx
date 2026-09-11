@@ -246,11 +246,23 @@ pub fn bridge_command(
             quote_posix(&location.executable),
             quote_posix(&location.root),
         ),
-        super::runtime::RemotePlatform::Windows => format!(
-            "& {} bridge --stdio --root {}",
-            super::runtime::powershell_data(&location.executable),
-            super::runtime::powershell_data(&location.root),
-        ),
+        super::runtime::RemotePlatform::Windows => {
+            let exe_data = super::runtime::powershell_data(&location.executable);
+            let root_data = super::runtime::powershell_data(&location.root);
+            format!(
+                "$p = New-Object System.Diagnostics.Process; \
+                 $p.StartInfo.FileName = {exe_data}; \
+                 $p.StartInfo.Arguments = ('bridge --stdio --root ' + {root_data}); \
+                 $p.StartInfo.UseShellExecute = $false; \
+                 $p.StartInfo.RedirectStandardInput = $false; \
+                 $p.StartInfo.RedirectStandardOutput = $false; \
+                 $p.StartInfo.RedirectStandardError = $false; \
+                 $p.StartInfo.CreateNoWindow = $true; \
+                 $null = $p.Start(); \
+                 $p.WaitForExit(); \
+                 [Environment]::Exit($p.ExitCode)"
+            )
+        }
     }
 }
 

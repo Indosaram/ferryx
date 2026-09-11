@@ -56,6 +56,11 @@ pub async fn cmd_native_terminal_set_scrollbar_overlay() -> Result<(), IpcError>
 }
 
 #[tauri::command]
+pub async fn cmd_native_terminal_set_preedit() -> Result<(), IpcError> {
+    Err(IpcError::native_terminal_unsupported())
+}
+
+#[tauri::command]
 pub async fn cmd_native_terminal_set_attention_frame() -> Result<(), IpcError> {
     Err(IpcError::native_terminal_unsupported())
 }
