@@ -14,6 +14,7 @@ export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "ferryx.update.dismissedVersion";
 export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.onboarding-dismissed";
 export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
+export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],
@@ -24,6 +25,7 @@ export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [TERMINAL_SETTINGS_STORAGE_KEY]: ["orca.terminal.settings", "rorca.terminal.settings"],
   [NOTIFICATION_SETTINGS_STORAGE_KEY]: ["rorca:settings:notifications:v1", "orca:settings:notifications:v1"],
   [GENERAL_SETTINGS_STORAGE_KEY]: ["rorca.settings.general", "orca.settings.general"],
+  [REMOTE_INSTALLATION_ID_STORAGE_KEY]: ["rorca.remote.installation-id", "orca.remote.installation-id"],
 };
 
 export function getMigratedItem(
@@ -48,3 +50,24 @@ export function getMigratedItem(
   }
   return null;
 }
+
+export function getOrCreateInstallationId(
+  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+): string {
+  const existing = getMigratedItem(REMOTE_INSTALLATION_ID_STORAGE_KEY, storage);
+  if (existing && existing.trim().length > 0) {
+    return existing.trim();
+  }
+  const next = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  if (storage) {
+    try {
+      storage.setItem(REMOTE_INSTALLATION_ID_STORAGE_KEY, next);
+    } catch {
+      // ignore quota or disabled storage error
+    }
+  }
+  return next;
+}
+

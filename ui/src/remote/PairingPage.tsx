@@ -1,4 +1,6 @@
 import React, { useState } from "react";
+import { getOrCreateInstallationId } from "../lib/storageKeys";
+import { suggestDeviceName } from "./deviceIdentity";
 
 type PairingPageProps = {
   onPaired: (token: string, metadata?: { machineId?: unknown; displayName?: unknown }) => void;
@@ -7,6 +9,7 @@ type PairingPageProps = {
 
 export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl = window.location.origin }) => {
   const [code, setCode] = useState("");
+  const [deviceName, setDeviceName] = useState(() => suggestDeviceName());
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -17,13 +20,15 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
     setLoading(true);
     setError(null);
 
+    const installationId = getOrCreateInstallationId();
     try {
       const res = await fetch(transportUrl === window.location.origin ? "/api/v1/pair/exchange" : `${transportUrl}/api/v1/pair/exchange`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           code: code.trim(),
-          deviceName: navigator.userAgent.includes("Mobile") ? "Mobile Device" : "Browser Device",
+          deviceName: deviceName.trim() || suggestDeviceName(),
+          installationId,
         }),
       });
 
@@ -56,12 +61,29 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
+              Device Name
+            </label>
+            <input
+              type="text"
+              value={deviceName}
+              onChange={(e) => setDeviceName(e.target.value)}
+              placeholder="Device name"
+              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded text-sm focus:outline-none focus:border-ring"
+              disabled={loading}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">
+              Pairing PIN
+            </label>
             <input
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value)}
               placeholder="6-digit PIN" maxLength={6} inputMode="numeric" pattern="[0-9]*"
-              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded font-mono text-sm text-foreground focus:outline-none focus:border-ring"
+              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded font-mono text-sm focus:outline-none focus:border-ring"
               disabled={loading}
               autoFocus
             />

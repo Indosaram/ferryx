@@ -13,8 +13,10 @@ import {
   setRemoteAuthToken,
 } from "../lib/remoteClient";
 import { remoteHostKey, remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
+import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { hostAgentTotals, MobileHostDrawer } from "./MobileHostDrawer";
 import { PairingPage } from "./PairingPage";
+import { suggestDeviceName } from "./deviceIdentity";
 import {
   contextName,
   getRemoteDocumentTitle,
@@ -414,12 +416,14 @@ const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrl
     const code = new URLSearchParams(hash.slice(1)).get("pair");
     if (!code || !/^([0-9a-fA-F]{32}|[0-9]{6})$/i.test(code)) return;
     let cancelled = false;
+    const installationId = getOrCreateInstallationId();
     fetch(apiUrl(pairingBaseUrl, "/api/v1/pair/exchange"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         code,
-        deviceName: navigator.userAgent.includes("Mobile") ? "Mobile Device" : "Browser Device",
+        deviceName: suggestDeviceName(),
+        installationId,
       }),
     })
       .then((response) => {
