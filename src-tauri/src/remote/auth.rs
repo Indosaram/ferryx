@@ -467,7 +467,7 @@ impl AuthManager {
         let effective_name = if trimmed_name.is_empty() {
             "Remote Device".to_string()
         } else {
-            trimmed_name.to_string()
+            trimmed_name.chars().take(100).collect()
         };
 
         let effective_installation_id = installation_id
@@ -660,7 +660,13 @@ impl AuthManager {
     }
 
     pub fn list_devices(&self) -> Vec<DeviceInfo> {
-        self.devices.read().values().cloned().collect()
+        let now = unix_now();
+        self.devices
+            .read()
+            .values()
+            .filter(|d| !d.revoked && now.saturating_sub(d.last_seen_at) <= DEVICE_IDLE_EXPIRY_SECS)
+            .cloned()
+            .collect()
     }
 
     /// Registration and revocation both hold the devices lock before the
@@ -1324,6 +1330,32 @@ mod tests {
         );
         let validated = manager.validate_token(&token2).expect("valid token");
         assert_eq!(validated.permission, DevicePermission::View);
+    }
+
+    #[test]
+    fn test_device_name_length_capped_and_list_devices_filters_idle() {
+        let auth = AuthManager::new();
+        let code = auth.create_pairing_code(DevicePermission::Control);
+        let long_name = "A".repeat(150);
+        let (token, device) = auth
+            .exchange_pairing_code_with_installation(&code, &long_name, Some("inst-len"))
+            .expect("exchange");
+        assert_eq!(device.name.len(), 100, "name must be capped at 100 chars");
+
+        // Immediately visible in list_devices
+        let active = auth.list_devices();
+        assert_eq!(active.len(), 1);
+
+        // Manually age the device past idle expiry
+        {
+            let mut devices = auth.devices.write();
+            let d = devices.get_mut(&device.id).unwrap();
+            d.last_seen_at = unix_now().saturating_sub(DEVICE_IDLE_EXPIRY_SECS + 10);
+        }
+
+        // list_devices filters it out even without store reload
+        let filtered = auth.list_devices();
+        assert_eq!(filtered.len(), 0, "idle devices must be filtered from list_devices");
     }
 
     #[test]
