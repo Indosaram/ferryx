@@ -717,7 +717,6 @@ pub(crate) async fn get_active_running_sessions(
 async fn list_sessions(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<RemoteTerminalSession>>, (StatusCode, String)> {
     let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
@@ -744,7 +743,6 @@ async fn list_sessions(
 async fn get_workspace_state(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
 ) -> Result<Json<RemoteWorkspaceState>, (StatusCode, String)> {
     let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
@@ -813,7 +811,6 @@ async fn get_workspace_state(
 async fn select_workspace(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteSelectWorkspaceRequest>,
 ) -> Result<Json<RemoteSelectionRequestPayload>, (StatusCode, String)> {
     let token = extract_token(&headers)
@@ -941,7 +938,6 @@ async fn select_workspace(
 async fn create_worktree(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteCreateWorktreeRequest>,
 ) -> Result<Json<RemoteWorktreeInfo>, (StatusCode, String)> {
     let token = extract_token(&headers)
@@ -988,7 +984,6 @@ async fn create_worktree(
 async fn delete_worktree(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteDeleteWorktreeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let token = extract_token(&headers)
@@ -1019,7 +1014,6 @@ async fn delete_worktree(
 async fn list_devices(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<DeviceInfo>>, (StatusCode, String)> {
     let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
@@ -1034,7 +1028,6 @@ async fn list_devices(
 async fn revoke_device(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let token = extract_token(&headers)
@@ -1919,7 +1912,6 @@ const EMBEDDED_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 async fn get_terminal_preferences(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
 ) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
     let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
@@ -1938,7 +1930,6 @@ struct PushUnsubscribeRequest {
 async fn push_subscribe(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
     Json(payload): Json<PushSubscriptionInfo>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let token = extract_token(&headers)
@@ -1954,7 +1945,6 @@ async fn push_subscribe(
 async fn push_unsubscribe(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
     Json(payload): Json<PushUnsubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let token = extract_token(&headers)
@@ -2465,7 +2455,6 @@ mod tests {
         let subscribe_result = push_subscribe(
             State(Arc::clone(&state)),
             HeaderMap::new(),
-            Query(no_auth_query()),
             Json(PushSubscriptionInfo {
                 endpoint: "https://push.example.com/sub/unauth".to_string(),
                 keys: crate::remote::push::PushSubscriptionKeys {
@@ -2481,7 +2470,6 @@ mod tests {
         let unsubscribe_result = push_unsubscribe(
             State(Arc::clone(&state)),
             HeaderMap::new(),
-            Query(no_auth_query()),
             Json(PushUnsubscribeRequest {
                 endpoint: "https://push.example.com/sub/unauth".to_string(),
             }),
