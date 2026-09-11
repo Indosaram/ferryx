@@ -2236,6 +2236,7 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
             let challenge = ControlChallenge {
+                audience: None,
                 nonce: "startup-challenge".into(),
                 timestamp: 1234,
             };

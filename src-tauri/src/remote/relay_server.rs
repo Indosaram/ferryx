@@ -159,6 +159,13 @@ struct CachedDeviceToken {
 
 struct RelayInner {
     machine_tokens: Vec<String>,
+    /// Audience this relay announces in its control challenge and requires in the
+    /// signed transcript, so a signature is bound to THIS relay.
+    ///
+    /// Defaults to [`LEGACY_CONTROL_AUDIENCE`]; set from `FERRYX_RELAY_AUDIENCE`
+    /// (normally the public origin, e.g. `relay.checka.cc`) to stop a signature
+    /// captured by one relay from being replayed against another.
+    control_audience: String,
     control_channels: Mutex<HashMap<String, ControlChannel>>,
     machine_public_keys: Mutex<HashMap<String, String>>,
     key_store_path: Option<std::path::PathBuf>,
@@ -169,6 +176,13 @@ struct RelayInner {
     pending_sessions: Mutex<HashMap<String, WaitingHalf>>,
     pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
 }
+
+/// Audience used before challenges carried one.
+///
+/// A client that predates the audience field signs this constant, so the relay keeps
+/// accepting it; a relay that sets a distinct audience no longer shares a transcript
+/// with any other deployment.
+pub const LEGACY_CONTROL_AUDIENCE: &str = "relay";
 
 const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 const CONTROL_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -224,6 +238,35 @@ impl RelayState {
         Self::with_key_store(machine_tokens, Some(path.as_ref().to_path_buf()))
     }
 
+    /// Builds a relay that announces and verifies `audience`.
+    ///
+    /// Normally the deployment's public origin. Binding it makes a control
+    /// signature usable only against this relay.
+    pub fn new_with_audience(
+        machine_tokens: Vec<String>,
+        path: impl AsRef<std::path::Path>,
+        audience: impl Into<String>,
+    ) -> std::io::Result<Self> {
+        let state = Self::with_key_store(machine_tokens, Some(path.as_ref().to_path_buf()))?;
+        let keys = state.inner.machine_public_keys.lock().clone();
+        Ok(Self {
+            paired_tokens: Arc::clone(&state.paired_tokens),
+            inner: Arc::new(RelayInner {
+                control_audience: audience.into(),
+                machine_tokens: state.inner.machine_tokens.clone(),
+                control_channels: Mutex::new(HashMap::new()),
+                machine_public_keys: Mutex::new(keys),
+                key_store_path: state.inner.key_store_path.clone(),
+                admission: Mutex::new(HashMap::new()),
+                pairing_admission: Mutex::new(HashMap::new()),
+                pairings: Mutex::new(HashMap::new()),
+                next_generation: AtomicU64::new(1),
+                pending_sessions: Mutex::new(HashMap::new()),
+                pending_socket_tickets: Mutex::new(HashMap::new()),
+            }),
+        })
+    }
+
     fn with_key_store(
         machine_tokens: Vec<String>,
         key_store_path: Option<std::path::PathBuf>,
@@ -253,6 +296,11 @@ impl RelayState {
             paired_tokens: Arc::new(Mutex::new(HashMap::new())),
             inner: Arc::new(RelayInner {
                 machine_tokens,
+                control_audience: std::env::var("FERRYX_RELAY_AUDIENCE")
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| LEGACY_CONTROL_AUDIENCE.to_string()),
                 next_generation: AtomicU64::new(1),
                 control_channels: Mutex::new(HashMap::new()),
                 machine_public_keys: Mutex::new(keys),
@@ -1488,6 +1536,7 @@ async fn authenticate_control_socket(
     let challenge = ControlChallenge {
         nonce: uuid::Uuid::new_v4().to_string(),
         timestamp: current_time_secs(),
+        audience: Some(state.inner.control_audience.clone()),
     };
     let authenticate = async {
         socket
@@ -1507,11 +1556,15 @@ async fn authenticate_control_socket(
         if current_time_secs().abs_diff(auth.timestamp) > 60 {
             return Err("Authentication timestamp expired".to_string());
         }
+        // The signature must cover THIS relay's audience. A client that predates the
+        // audience field is accepted only while this relay still runs the legacy
+        // audience, so a deployment that sets its own origin cannot be presented with
+        // a signature minted for a different relay.
         if auth.timestamp != challenge.timestamp
             || !verify_control_challenge(
                 &auth.public_key,
                 &auth.machine_id,
-                "relay",
+                &state.inner.control_audience,
                 &challenge.nonce,
                 auth.timestamp,
                 &auth.signature,
@@ -3422,6 +3475,96 @@ mod tests {
             Some("test-machine-token"),
         )
         .await
+    }
+
+    /// A control signature must be bound to the relay that issued the challenge.
+    ///
+    /// With a constant audience shared by every deployment, a signature captured by
+    /// one relay authenticates the same machine on another. The relay announces its
+    /// audience and requires it in the transcript, so a signature minted for a
+    /// different relay is refused even though nonce, timestamp and key are valid.
+    #[tokio::test]
+    async fn a_control_signature_minted_for_another_relay_is_refused() {
+        let identity = identity(9, "audience-machine");
+        let store = tempfile::tempdir().unwrap();
+        // This relay identifies itself as a specific origin rather than the shared
+        // legacy constant.
+        let state = RelayState::new_with_audience(
+            vec!["enrollment".into()],
+            store.path().join("keys.json"),
+            "relay.example.test",
+        )
+        .unwrap();
+        let (base, _running) = spawn_test_relay_with_state(state).await;
+
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap();
+        let challenge: ControlChallenge = receive_json(&mut socket).await;
+        assert_eq!(
+            challenge.audience.as_deref(),
+            Some("relay.example.test"),
+            "the relay must announce the audience it will verify"
+        );
+
+        // An attacker replays a signature minted against a DIFFERENT relay, reusing
+        // this relay's live nonce and timestamp.
+        let auth = ControlAuth {
+            enrollment_token: Some("enrollment".into()),
+            machine_id: identity.machine_id.clone(),
+            display_name: identity.display_name.clone(),
+            public_key: identity.public_key.clone(),
+            timestamp: challenge.timestamp,
+            signature: crate::remote::auth::sign_control_challenge(
+                &identity,
+                "relay.attacker.test",
+                &challenge.nonce,
+                challenge.timestamp,
+            )
+            .unwrap(),
+        };
+        socket
+            .send(TMessage::Text(
+                serde_json::to_string(&auth).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let response: ControlAuthResponse = receive_json(&mut socket).await;
+        assert!(
+            !response.success,
+            "a signature minted for another relay must not authenticate here"
+        );
+
+        // The same machine authenticates when it signs THIS relay's audience.
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap();
+        let challenge: ControlChallenge = receive_json(&mut socket).await;
+        let auth = ControlAuth {
+            enrollment_token: Some("enrollment".into()),
+            machine_id: identity.machine_id.clone(),
+            display_name: identity.display_name.clone(),
+            public_key: identity.public_key.clone(),
+            timestamp: challenge.timestamp,
+            signature: crate::remote::auth::sign_control_challenge(
+                &identity,
+                challenge.audience.as_deref().unwrap(),
+                &challenge.nonce,
+                challenge.timestamp,
+            )
+            .unwrap(),
+        };
+        socket
+            .send(TMessage::Text(
+                serde_json::to_string(&auth).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let response: ControlAuthResponse = receive_json(&mut socket).await;
+        assert!(
+            response.success,
+            "signing the announced audience must authenticate"
+        );
     }
 
     async fn authenticate_with_token(

@@ -342,9 +342,15 @@ impl RelayClient {
                     machine_id: identity.machine_id.clone(),
                     display_name: identity.display_name.clone(),
                     public_key: identity.public_key.clone(),
+                    // Sign the audience this relay announced, so the signature is
+                    // only usable against that relay. A relay that omits the field
+                    // predates it and still expects the legacy constant.
                     signature: sign_control_challenge(
                         identity,
-                        "relay",
+                        challenge
+                            .audience
+                            .as_deref()
+                            .unwrap_or(crate::remote::relay_server::LEGACY_CONTROL_AUDIENCE),
                         &challenge.nonce,
                         challenge.timestamp,
                     )
@@ -630,6 +636,7 @@ mod tests {
             let challenge = ControlChallenge {
                 nonce: "unique-challenge".into(),
                 timestamp: 1234,
+                audience: None,
             };
             socket
                 .send(Message::Text(
