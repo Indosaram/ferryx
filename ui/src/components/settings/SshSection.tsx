@@ -35,6 +35,7 @@ import {
   type SshRemoteEnvironment,
   type SystemSshConfig,
 } from "../../lib/sshHosts";
+import { safeRandomUUID } from "../../lib/uuid";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -261,7 +262,7 @@ export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string)
 
     const portNumber = formData.port.trim() ? Number(formData.port) : 22;
     const newHost: SshHost = {
-      id: editingHost ? editingHost.id : (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `ssh-${Date.now()}`),
+      id: editingHost ? editingHost.id : safeRandomUUID(),
       label: formData.label.trim(),
       hostname: formData.hostname.trim(),
       username: formData.username.trim() || undefined,
@@ -315,7 +316,7 @@ export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string)
     try {
       await updateSshHost({
         ...sysHost,
-        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `ssh-${Date.now()}`,
+        id: safeRandomUUID(),
         source: "config",
       });
     } catch (err) {

@@ -1,4 +1,5 @@
 import { closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
+import { safeRandomUUID } from "./uuid";
 import type { SpawnTerminalResult } from "./tauri";
 import type { StructuredIpcError, TerminalSession } from "./types";
 import { isRemoteWorkspaceId } from "./remoteProject";
@@ -44,7 +45,7 @@ export function replaceExitedShellSession(
         workspaceId: initial.workspaceId,
         worktree: initial.worktree,
         cwd: initial.cwd,
-        clientRequestId: (dependencies.createRequestId ?? (() => `shell-replacement-${crypto.randomUUID()}`))(),
+        clientRequestId: (dependencies.createRequestId ?? (() => `shell-replacement-${safeRandomUUID()}`))(),
         startup: null,
       });
       const requireCurrent = (): TerminalSession => {

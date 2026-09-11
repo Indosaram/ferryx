@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { safeRandomUUID } from "../../../lib/uuid";
 import type { TargetRef, JsonValue } from "../../../lib/scopedContracts";
 import { ControlClient } from "./client";
 import { Button } from "../../../components/ui/button";
@@ -10,7 +11,7 @@ export function TaskControls({client,target,hostId,workspaceId,canControl,onChan
   async function send(operation:"create"|"start"|"prompt"|"stop") {
     const params:JsonValue=operation==="create"?{hostId,workspaceId}:operation==="prompt"?{text}:{};
     const key=JSON.stringify([operation,target,params]);
-    const id=request?.key===key?request.id:crypto.randomUUID();
+    const id=request?.key===key?request.id:safeRandomUUID();
     setRequest({key,id});setBusy(true);setError(null);
     try {await client.mutate(operation,id,params,operation==="create"?undefined:target!);setRequest(null);if(operation==="prompt")setText("");onChanged();}
     catch(e){setError(e instanceof Error?e.message:"Request failed");}

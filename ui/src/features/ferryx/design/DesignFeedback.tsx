@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from "react";
+import { safeRandomUUID } from "../../../lib/uuid";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { Label } from "../../../components/ui/label";
@@ -57,7 +58,7 @@ export function DesignFeedback({ session, identity, targets, maskPreview }: Desi
         {!session.draft && <Button size="sm" disabled={busy || !targets.some(t => JSON.stringify(t.target) === targetKey && t.supportsImages)} onClick={() => void run(async () => {
           const chosen = targets.find(t => JSON.stringify(t.target) === targetKey && t.supportsImages);
           if (!chosen) throw new Error("TARGET_EXPIRED");
-          await session.confirm(chosen.target, note, crypto.randomUUID());
+          await session.confirm(chosen.target, note, safeRandomUUID());
         })}>{busy ? "Transferring image..." : "Confirm draft"}</Button>}
         <Button data-testid="design-send" size="sm" disabled={busy || !session.draft || !!status} onClick={() => void run(async () => { const receipt = await session.send(); setStatus(receipt.stage); })}>{busy ? "Sending..." : "Send feedback"}</Button>
       </div>

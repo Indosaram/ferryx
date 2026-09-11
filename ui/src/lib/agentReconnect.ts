@@ -1,4 +1,5 @@
 import { getAgentReconnectAffordance } from "./agentResumeAffordance";
+import { safeRandomUUID } from "./uuid";
 import { closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
 import type { SpawnTerminalResult } from "./tauri";
 import type { StructuredIpcError, TerminalSession } from "./types";
@@ -20,7 +21,7 @@ export type AgentReconnectDependencies = {
 const inFlightReconnects = new Map<string, Promise<SpawnTerminalResult>>();
 
 function defaultRequestId(): string {
-  return `agent-reconnect-${crypto.randomUUID()}`;
+  return `agent-reconnect-${safeRandomUUID()}`;
 }
 
 function invalidReconnect(message: string): StructuredIpcError {

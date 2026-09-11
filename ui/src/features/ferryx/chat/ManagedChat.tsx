@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { safeRandomUUID } from "../../../lib/uuid";
 import type { AttachmentReceipt, ChatDraft, DeliveryReceipt, TargetRef } from "../../../lib/scopedContracts";
 import { ATTACHMENT_MAX_FILE_BYTES, ATTACHMENT_MAX_FILES_PER_TURN, ATTACHMENT_MAX_TURN_BYTES } from "../../../lib/scopedContracts";
 import { Button } from "../../../components/ui/button";
@@ -30,7 +31,7 @@ function ChatSession({target,kind,service,storage,items,callbacks,revoked,termin
   if(busy||uploading||revoked||(!draft.text.trim()&&!draft.attachments.length))return;
   setBusy(true);setError(undefined);
   try{
-   const receipt=await service.send(Object.freeze({...target}),structuredClone(draft),crypto.randomUUID());
+   const receipt=await service.send(Object.freeze({...target}),structuredClone(draft),safeRandomUUID());
    if(receipt.stage==="staged"||draftKey(receipt.target)!==draftKey(target))throw Error("Provider has not accepted this draft");
    if(alive.current&&!denied.current){update({text:"",attachments:[]});setPreviews([]);for(const url of urls.current)URL.revokeObjectURL(url);urls.current=[];}
   }catch(e){if(alive.current)setError(String(e));}finally{if(alive.current)setBusy(false);}

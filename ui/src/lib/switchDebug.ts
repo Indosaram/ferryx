@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { safeRandomUUID } from "./uuid";
 
 export type SwitchDebugEntry = {
   runId: string;
@@ -61,7 +62,7 @@ const debugEnabled = resolveSwitchDebugEnabled({
   MODE: import.meta.env.MODE,
   VITE_SWITCH_DEBUG: import.meta.env.VITE_SWITCH_DEBUG as string | undefined,
 });
-const runId = globalThis.crypto.randomUUID();
+const runId = safeRandomUUID();
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 let sinkTail = Promise.resolve();
 
