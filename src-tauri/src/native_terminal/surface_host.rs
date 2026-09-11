@@ -294,6 +294,11 @@ pub struct NativeTerminalSession {
     detach_sender: tokio::sync::watch::Sender<()>,
     pub render_coordinator: Arc<RenderScheduleCoordinator>,
     pub last_agent_activity: Option<crate::agent_detect::AgentActivity>,
+    /// Last provider session reported by the agent extension. An agent rotates its conversation
+    /// id in place (`/new`) without changing its activity state, so the rotation has to be part
+    /// of the change test; otherwise the report is swallowed here and the pane keeps resuming
+    /// the conversation it was opened with.
+    pub last_provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
     pub last_agent_detect_at: Option<std::time::Instant>,
     /// Set when the throttle skipped detection on an output chunk; the pump re-runs a forced
     /// detection once the burst drains so the trailing frame still produces transitions.
@@ -969,6 +974,7 @@ impl NativeTerminalSurfaceHostState {
                         detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator,
                         last_agent_activity: None,
+                        last_provider_session: None,
                         last_agent_detect_at: None,
                         agent_detect_pending: false,
                         last_scrollbar: None,
@@ -1318,6 +1324,7 @@ impl NativeTerminalSurfaceHostState {
                         detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator: Arc::clone(&render_coordinator),
                         last_agent_activity: None,
+                        last_provider_session: None,
                         last_agent_detect_at: None,
                         agent_detect_pending: false,
                         last_scrollbar: None,
@@ -1585,7 +1592,18 @@ impl NativeTerminalSurfaceHostState {
                                 match sessions_guard.get_mut(&session_id_owned) {
                                     Some(sess) => {
                                         sess.agent_reports_own_state = true;
-                                        if !is_snapshot && sess.last_agent_activity == Some(reported) {
+                                        // `/new` gives the pane a new conversation while the
+                                        // activity state stays put, so a rotated provider session
+                                        // is a change in its own right.
+                                        let provider_rotated = provider_session.is_some()
+                                            && sess.last_provider_session != provider_session;
+                                        if provider_rotated {
+                                            sess.last_provider_session = provider_session.clone();
+                                        }
+                                        if !is_snapshot
+                                            && sess.last_agent_activity == Some(reported)
+                                            && !provider_rotated
+                                        {
                                             false
                                         } else {
                                             sess.last_agent_activity = Some(reported);
@@ -1826,6 +1844,7 @@ impl NativeTerminalSurfaceHostState {
                         detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator,
                         last_agent_activity: None,
+                        last_provider_session: None,
                         last_agent_detect_at: None,
                         agent_detect_pending: false,
                         last_scrollbar: None,
@@ -3953,6 +3972,107 @@ mod tests {
             observed.lock().len(),
             1,
             "screen inference must stay disabled once the agent reports its own state"
+        );
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn rotated_provider_session_reaches_the_frontend_without_an_activity_change() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "conversation-rotation-session";
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed);
+        let (reported, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::AgentState(payload) = event {
+                observed_for_sink
+                    .lock()
+                    .push(payload.provider_session.map(|session| session.id));
+                reported.send(()).expect("report receiver alive");
+            }
+        }));
+
+        let (tx, messages) = tokio::sync::mpsc::channel(4);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: Vec::new(),
+            history_segments: Vec::new(),
+            pty_cols: None,
+            pty_rows: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach");
+
+        let report = |conversation: &'static str| DaemonStreamMessage::AgentState {
+            session_id: session_id.into(),
+            state: "working".into(),
+            agent: Some("omo".into()),
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+                id: conversation.to_string(),
+                transcript_path: None,
+            }),
+            is_snapshot: false,
+        };
+
+        // The agent stays "working" across `/new`, so an activity-only change test swallows the
+        // new conversation and the pane keeps resuming the one it was opened with.
+        for conversation in ["conversation-first", "conversation-after-new"] {
+            tx.send(report(conversation))
+                .await
+                .expect("send agent state report");
+            tokio::time::timeout(std::time::Duration::from_secs(5), reports.recv())
+                .await
+                .expect("agent report delivered")
+                .expect("event sink alive");
+        }
+
+        assert_eq!(
+            observed.lock().clone(),
+            vec![
+                Some("conversation-first".to_string()),
+                Some("conversation-after-new".to_string()),
+            ],
+            "a rotated conversation id must reach the frontend even while the activity repeats"
+        );
+
+        // A repeat of the same conversation carries no news and must not be forwarded. The
+        // following output frame is the barrier that proves the repeat was already processed.
+        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
+        tx.send(report("conversation-after-new"))
+            .await
+            .expect("send repeated agent state report");
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 2,
+            data: b"barrier\r\n".to_vec().into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send barrier output");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                updates.changed().await.expect("native pump alive");
+                if state.sessions.lock()[session_id].last_sequence == Some(2) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("barrier output processed");
+
+        assert_eq!(
+            observed.lock().len(),
+            2,
+            "an unchanged report must stay coalesced"
         );
 
         state.teardown();

@@ -71,6 +71,7 @@ export default function (pi): void {
   let agentActive = false;
   let blockedCount = 0;
   let lastState: AgentState | undefined;
+  let lastProviderSessionId: string | undefined;
   let rootSession = false;
 
   function desiredState(): AgentState {
@@ -81,9 +82,16 @@ export default function (pi): void {
 
   function publishState(force = false, ctx?: unknown): void {
     const next = desiredState();
-    if (!force && next === lastState) return;
+    const providerSession = providerSessionFromContext(ctx);
+    const providerSessionId = (providerSession as { id?: string } | undefined)?.id;
+    // Starting a new conversation (`/new`) leaves the activity state untouched, so a rotated
+    // session id is news in its own right. Suppressing it here leaves Ferryx resuming the
+    // conversation this pane opened with, whatever the rest of the pipeline does.
+    const rotated = typeof providerSessionId === "string" && providerSessionId !== lastProviderSessionId;
+    if (!force && !rotated && next === lastState) return;
     lastState = next;
-    send(next, providerSessionFromContext(ctx));
+    if (typeof providerSessionId === "string") lastProviderSessionId = providerSessionId;
+    send(next, providerSession);
   }
 
   pi.on("session_start", (_event, ctx) => {

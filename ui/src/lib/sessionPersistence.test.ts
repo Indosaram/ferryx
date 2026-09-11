@@ -6,6 +6,7 @@ import {
   deserializeWorkspaceState,
   migrateLegacyAgentType,
   serializeWorkspaceState,
+  sessionPersistenceKey,
   WORKSPACE_SESSION_VERSION,
 } from "./sessionPersistence";
 
@@ -1496,5 +1497,43 @@ describe("sessionPersistence v2 serialization and migration", () => {
       agentType: "claude",
       seen: true,
     });
+  });
+});
+
+describe("sessionPersistenceKey", () => {
+  function agentSessions(providerSessionId: string): WorkspaceState["sessions"] {
+    const sessions = workspaceState().sessions;
+    return {
+      ...sessions,
+      "sess-1": {
+        ...sessions["sess-1"],
+        agentType: "claude",
+        providerSession: { key: "session_id", id: providerSessionId },
+      },
+    };
+  }
+
+  it("changes when an agent rotates its conversation id inside the same pane", () => {
+    // `/new` keeps the pane, the backend session and the lifecycle; only the resume identity
+    // moves. If that does not change the key, no save is scheduled and the restart resumes the
+    // conversation the pane started with.
+    expect(sessionPersistenceKey(agentSessions("claude-after-new"))).not.toBe(
+      sessionPersistenceKey(agentSessions("claude-first")),
+    );
+  });
+
+  it("is stable while nothing persistable changed", () => {
+    expect(sessionPersistenceKey(agentSessions("claude-first"))).toBe(
+      sessionPersistenceKey(agentSessions("claude-first")),
+    );
+  });
+
+  it("still changes on backend rebinding and lifecycle transitions", () => {
+    const base = agentSessions("claude-first");
+    const rebound = { ...base, "sess-1": { ...base["sess-1"], backendSessionId: "backend-rebound" } };
+    const exited = { ...base, "sess-1": { ...base["sess-1"], lifecycle: "exited" as const } };
+
+    expect(sessionPersistenceKey(rebound)).not.toBe(sessionPersistenceKey(base));
+    expect(sessionPersistenceKey(exited)).not.toBe(sessionPersistenceKey(base));
   });
 });

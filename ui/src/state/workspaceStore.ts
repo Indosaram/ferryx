@@ -41,6 +41,20 @@ import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTre
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
+/** Lower bound between two fallback session-id probes for the same pane and agent. */
+const PROVIDER_SESSION_PROBE_INTERVAL_MS = 2_000;
+
+/**
+ * Provider sessions arrive as freshly materialized IPC payloads, so reference equality is
+ * meaningless: compare by value or every agent heartbeat churns the session map.
+ */
+function sameProviderSession(
+  a: AgentProviderSession | null | undefined,
+  b: AgentProviderSession | null | undefined,
+): boolean {
+  if (!a || !b) return !a && !b;
+  return a.key === b.key && a.id === b.id && (a.transcriptPath ?? null) === (b.transcriptPath ?? null);
+}
 
 /**
  * How long after arming an auto-resume attention suppression that suppression stays
@@ -200,7 +214,7 @@ export type WorkspaceAction =
       error?: StructuredIpcError | null;
       requestId?: string | null;
     }
-  | { type: "APPLY_PROVIDER_SESSION_IF_MISSING"; sessionId: string; providerSession: AgentProviderSession; agentType?: string }
+  | { type: "APPLY_PROVIDER_SESSION"; sessionId: string; providerSession: AgentProviderSession; agentType?: string }
   | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string; observed?: boolean }
   | {
@@ -399,7 +413,7 @@ export function useWorkspaceStore({
     let unlistenBell: (() => void) | undefined;
     let unlistenAgentState: (() => void) | undefined;
     let unlistenFocus: (() => void) | undefined;
-    const fallbackAttemptedAgents = new Map<string, Set<string>>();
+    const fallbackProbesByAgent = new Map<string, { inFlight: boolean; startedAt: number }>();
     let subscribed = true;
 
     void onNativeTerminalTitle((payload) => {
@@ -469,22 +483,33 @@ export function useWorkspaceStore({
         && ["claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc", "antigravity"].includes(payload.manifestId)
       ) {
         const discoveryAgent = payload.manifestId === "cursor-agent" ? "cursor" : payload.manifestId;
-        // A pane can surface several manifest ids over its lifetime (shared TUI
-        // patterns across pi-family agents), so track attempts per agent id: a
-        // failed probe under one id must not block a more specific id later.
-        const attempted = fallbackAttemptedAgents.get(resolved.sessionId) ?? new Set<string>();
-        if (!attempted.has(discoveryAgent)) {
-          attempted.add(discoveryAgent);
-          fallbackAttemptedAgents.set(resolved.sessionId, attempted);
-          void discoverAgentProviderSession(payload.sessionId, discoveryAgent).then((id) => {
-            if (!id) return;
-            dispatch({
-              type: "APPLY_PROVIDER_SESSION_IF_MISSING",
-              sessionId: resolved.sessionId,
-              providerSession: { key: "session_id", id },
-              agentType: discoveryAgent,
+        // An agent starts new conversations inside the same pane and process (`/new`), so its
+        // session id is a live property of the pane rather than a one-shot capture: re-probe on
+        // reported transitions instead of latching the first answer. A pane can surface several
+        // manifest ids over its lifetime (shared TUI patterns across pi-family agents), so probes
+        // are tracked per agent id: a failed probe under one id must not block a more specific id
+        // later. This entry only de-duplicates an in-flight probe and rate-limits repeats, because
+        // each probe walks the process tree and its open files.
+        const probeKey = `${resolved.sessionId}\u0000${discoveryAgent}`;
+        const probe = fallbackProbesByAgent.get(probeKey);
+        const startedAt = Date.now();
+        if (!probe?.inFlight && (!probe || startedAt - probe.startedAt >= PROVIDER_SESSION_PROBE_INTERVAL_MS)) {
+          fallbackProbesByAgent.set(probeKey, { inFlight: true, startedAt });
+          void discoverAgentProviderSession(payload.sessionId, discoveryAgent)
+            .then((id) => {
+              if (!id) return;
+              dispatch({
+                type: "APPLY_PROVIDER_SESSION",
+                sessionId: resolved.sessionId,
+                providerSession: { key: "session_id", id },
+                agentType: discoveryAgent,
+              });
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              const entry = fallbackProbesByAgent.get(probeKey);
+              if (entry) entry.inFlight = false;
             });
-          });
         }
       }
     })
@@ -2154,12 +2179,17 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         },
       };
     }
-    case "APPLY_PROVIDER_SESSION_IF_MISSING": {
+    case "APPLY_PROVIDER_SESSION": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
-      const nextProviderSession = session.providerSession ?? action.providerSession;
+      // The freshest answer wins. Keeping the id already on the session is what pinned a pane to
+      // the first conversation it ever ran: `/new` rotates the agent's session id in place, and a
+      // pane restored from disk always arrives with the previous id already set.
       const nextAgentType = session.agentType ?? (action.agentType || null);
-      if (nextProviderSession === session.providerSession && nextAgentType === session.agentType) {
+      if (
+        sameProviderSession(session.providerSession, action.providerSession)
+        && nextAgentType === session.agentType
+      ) {
         return state;
       }
       return {
@@ -2168,7 +2198,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           ...state.sessions,
           [action.sessionId]: {
             ...session,
-            providerSession: nextProviderSession,
+            providerSession: action.providerSession,
             ...(nextAgentType ? { agentType: nextAgentType } : {}),
           },
         },
@@ -2264,7 +2294,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const updatedAgentType = session.agentType ?? (agentType || null);
       const updatedProviderSession = action.providerSession ?? session.providerSession;
 
-      if (updatedAgentType === session.agentType && updatedProviderSession === session.providerSession) {
+      if (
+        updatedAgentType === session.agentType
+        && sameProviderSession(session.providerSession, updatedProviderSession)
+      ) {
         return nextState;
       }
 

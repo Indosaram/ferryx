@@ -119,4 +119,19 @@ mod tests {
             "provider reference must use the daemon's session_id key"
         );
     }
+
+    #[test]
+    fn bundled_extension_publishes_a_rotated_provider_session() {
+        // Starting a new conversation (`/new`) keeps the activity state, so an extension that
+        // only publishes on state changes never tells Ferryx which conversation the pane moved
+        // to, and restore resumes the one it was opened with.
+        assert!(
+            EXTENSION_SOURCE.contains("lastProviderSessionId"),
+            "extension must remember the provider session id it last published"
+        );
+        assert!(
+            EXTENSION_SOURCE.contains("!rotated"),
+            "a rotated provider session must publish even when the activity state repeats"
+        );
+    }
 }

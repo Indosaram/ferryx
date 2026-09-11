@@ -29,6 +29,21 @@ import {
 
 export const WORKSPACE_SESSION_VERSION = 2;
 
+/**
+ * Identity of everything about the live sessions that has to reach disk. Saves are scheduled off
+ * this key, so anything missing from it can change in memory and never be persisted. The agent
+ * resume identity belongs here because an agent starts a new conversation inside the same pane
+ * (`/new`) without touching its backend id or lifecycle.
+ */
+export function sessionPersistenceKey(sessions: Record<string, TerminalSession>): string {
+  return Object.entries(sessions)
+    .map(
+      ([id, session]) =>
+        `${id}:${session.backendSessionId ?? ""}:${session.lifecycle}:${session.agentType ?? ""}:${session.providerSession?.key ?? ""}:${session.providerSession?.id ?? ""}`,
+    )
+    .join(",");
+}
+
 export function serializeWorkspaceState(
   workspaceId: string,
   repoRoot: string,

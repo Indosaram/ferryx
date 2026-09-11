@@ -1614,13 +1614,13 @@ describe("worktree tab and session isolation", () => {
       expect(nextState.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "omo-sess-456" });
     });
 
-    it("APPLY_PROVIDER_SESSION_IF_MISSING sets providerSession and agentType when session.agentType is unset", () => {
+    it("APPLY_PROVIDER_SESSION sets providerSession and agentType when session.agentType is unset", () => {
       const baseState = restoredSplitState();
       expect(baseState.sessions["session-1"].agentType).toBeUndefined();
       expect(baseState.sessions["session-1"].providerSession).toBeUndefined();
 
       const nextState = workspaceReducer(baseState, {
-        type: "APPLY_PROVIDER_SESSION_IF_MISSING",
+        type: "APPLY_PROVIDER_SESSION",
         sessionId: "session-1",
         providerSession: { key: "session_id", id: "claude-sess-789" },
         agentType: "claude",
@@ -1628,6 +1628,69 @@ describe("worktree tab and session isolation", () => {
 
       expect(nextState.sessions["session-1"].agentType).toBe("claude");
       expect(nextState.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "claude-sess-789" });
+    });
+
+    it("APPLY_PROVIDER_SESSION adopts the id of a conversation the agent opened later", () => {
+      // `/new` gives the same pane a new conversation. Keeping the first id here is what made a
+      // restart resume the conversation the user had already left.
+      const withFirstConversation = workspaceReducer(restoredSplitState(), {
+        type: "APPLY_PROVIDER_SESSION",
+        sessionId: "session-1",
+        providerSession: { key: "session_id", id: "claude-first" },
+        agentType: "claude",
+      });
+
+      const afterNew = workspaceReducer(withFirstConversation, {
+        type: "APPLY_PROVIDER_SESSION",
+        sessionId: "session-1",
+        providerSession: { key: "session_id", id: "claude-after-new" },
+        agentType: "claude",
+      });
+
+      expect(afterNew.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "claude-after-new" });
+      expect(afterNew.sessions["session-1"].agentType).toBe("claude");
+    });
+
+    it("APPLY_PROVIDER_SESSION keeps state identity when a repeated probe reports the same id", () => {
+      const baseState = workspaceReducer(restoredSplitState(), {
+        type: "APPLY_PROVIDER_SESSION",
+        sessionId: "session-1",
+        providerSession: { key: "session_id", id: "claude-first" },
+        agentType: "claude",
+      });
+
+      const repeated = workspaceReducer(baseState, {
+        type: "APPLY_PROVIDER_SESSION",
+        sessionId: "session-1",
+        providerSession: { key: "session_id", id: "claude-first" },
+        agentType: "claude",
+      });
+
+      expect(repeated).toBe(baseState);
+    });
+
+    it("SESSION_SCREEN_ACTIVITY adopts a rotated provider session from a self-reporting agent", () => {
+      const baseState = workspaceReducer(restoredSplitState(), {
+        type: "SESSION_SCREEN_ACTIVITY",
+        tabId: "tab-primary",
+        sessionId: "session-1",
+        state: "working",
+        ruleId: "omo_screen",
+        manifestId: "omo",
+        providerSession: { key: "session_id", id: "omo-first" },
+      });
+
+      const afterNew = workspaceReducer(baseState, {
+        type: "SESSION_SCREEN_ACTIVITY",
+        tabId: "tab-primary",
+        sessionId: "session-1",
+        state: "working",
+        ruleId: "omo_screen",
+        manifestId: "omo",
+        providerSession: { key: "session_id", id: "omo-after-new" },
+      });
+
+      expect(afterNew.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "omo-after-new" });
     });
   });
 });

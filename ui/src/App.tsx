@@ -25,7 +25,7 @@ import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
-import { serializeWorkspaceState } from "./lib/sessionPersistence";
+import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
 import { initUpdateToasts } from "./lib/updateToast";
 import {
@@ -1114,10 +1114,10 @@ function WorkspaceApp({
     return unregister;
   }, [persistSession]);
 
-  const persistedSessionsKey = useMemo(
-    () => Object.entries(state.sessions).map(([id, s]) => `${id}:${s.backendSessionId ?? ""}:${s.lifecycle}`).join(","),
-    [state.sessions],
-  );
+  // Saves are scheduled off this key, so it has to carry the agent resume identity too: `/new`
+  // rotates providerSession without touching the backend id or the lifecycle, and a rotation that
+  // does not schedule a save only reaches disk if some unrelated change saves later.
+  const persistedSessionsKey = useMemo(() => sessionPersistenceKey(state.sessions), [state.sessions]);
 
   useEffect(() => {
     const hasTabs =
