@@ -634,20 +634,29 @@ impl AuthManager {
         }
     }
 
-    // A separate lock file survives atomic replacement of the JSON inode.
-    // Serialize reload/mutation/save across both clones and independent processes.
+    // A separate transaction lock file survives atomic replacement of the JSON inode
+    // and serializes reload/mutation/save across both clones and independent processes.
+    // It uses a distinct sidecar extension ("tx.lock") so holding a transaction does not
+    // deadlock with the low-level store flock ("lock") acquired during write_private_json.
     fn begin_transaction(&self) -> (MutexGuard<'_, ()>, Option<std::fs::File>) {
         let guard = self.transaction.lock();
         let file = self.persistence_path.as_deref().map(|path| {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).expect("create remote auth directory");
             }
-            let file = std::fs::OpenOptions::new()
+            let mut open_opts = std::fs::OpenOptions::new();
+            open_opts
                 .create(true)
                 .truncate(false)
                 .read(true)
-                .write(true)
-                .open(path.with_extension("lock"))
+                .write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                open_opts.mode(0o600);
+            }
+            let file = open_opts
+                .open(path.with_extension("tx.lock"))
                 .expect("open remote auth lock");
             file.lock().expect("lock remote auth state");
             if let Some(mut state) = load_persisted_auth(path) {
@@ -718,6 +727,47 @@ fn prune_revoked_devices(state: &mut PersistedAuthState) {
 ///   with respect to readers, but without fsync the rename can reach disk while the
 ///   contents have not, so a crash can leave an empty or truncated store where a
 ///   valid one is expected.
+/// Holds an advisory exclusive lock for the lifetime of a store write.
+///
+/// The daemon, the GUI and the CLI are separate PROCESSES writing the same file, so
+/// an in-process mutex cannot order them: two writers could each read, modify and
+/// rename, and the later rename would silently discard the earlier writer's change.
+/// `flock` on a sidecar file serializes them across processes.
+///
+/// The lock is advisory and only effective between participants that take it, which
+/// is every writer that goes through [`write_private_json`]. It is released when the
+/// file descriptor closes, including on process death, so a crash cannot wedge it.
+#[cfg(unix)]
+struct StoreLock(std::fs::File);
+
+#[cfg(unix)]
+impl StoreLock {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(path.with_extension("lock"))?;
+        // Blocking: a concurrent writer is expected and should be waited for, not
+        // raced with or skipped.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(file))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -727,7 +777,14 @@ pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::i
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
         }
     }
-    let temp = path.with_extension("tmp");
+    // Serialize concurrent writers across processes before touching the store, so a
+    // second process cannot interleave its own temp-write-and-rename with this one.
+    #[cfg(unix)]
+    let _lock = StoreLock::acquire(path)?;
+
+    // The temp file is per-process, so two writers cannot clobber each other's
+    // staging file even if the lock is unavailable on some platform.
+    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
 
@@ -1206,6 +1263,61 @@ mod persistence_tests {
         );
     }
 
+    /// Independent PROCESSES write this store, so writers must be serialized across
+    /// process boundaries: an in-process mutex cannot stop two processes from each
+    /// reading, modifying and renaming, with the later rename discarding the earlier
+    /// change. Concurrent writers must therefore never observe a torn store.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_writers_never_observe_a_torn_store() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("remote-auth.json");
+        write_private_json(&path, &serde_json::json!({"devices": {}})).unwrap();
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (path, stop) = (path.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut reads = 0_u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        // A reader must never see a partial document. An empty read
+                        // is impossible too: rename always publishes a complete file.
+                        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|e| {
+                            panic!("torn store observed after {reads} clean reads: {e}")
+                        });
+                        reads += 1;
+                    }
+                }
+                reads
+            })
+        };
+
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..40 {
+                        let payload = serde_json::json!({
+                            "devices": {format!("device-{w}"): {"seq": i, "pad": "x".repeat(512)}}
+                        });
+                        write_private_json(&path, &payload).expect("concurrent write succeeds");
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        reader.join().expect("reader observed only complete documents");
+
+        // The surviving store is a complete, valid document.
+        let final_state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("store is valid JSON");
+        assert!(final_state.get("devices").is_some());
+    }
+
     /// An interrupted write must not leave a half-written store: the rename is atomic,
     /// but without fsync the rename can be visible while the bytes are not, so a crash
     /// or power loss yields an empty or truncated authorization store.
@@ -1216,10 +1328,16 @@ mod persistence_tests {
         let payload = serde_json::json!({"devices": {"a": {"permission": "view"}}});
         write_private_json(&path, &payload).expect("write succeeds");
 
-        // No temp file is left behind to be mistaken for the store.
+        // No staging file is left behind to be mistaken for the store.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
         assert!(
-            !path.with_extension("tmp").exists(),
-            "the temporary file must not survive a completed write"
+            leftovers.is_empty(),
+            "a completed write must leave no staging file: {leftovers:?}"
         );
         let read: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("store is valid JSON");
