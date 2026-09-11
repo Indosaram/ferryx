@@ -447,6 +447,41 @@ async fn gateway_issues_single_use_socket_tickets_and_rejects_a_replayed_one() {
     server.stop().await;
 }
 
+/// Once every client mints tickets, the legacy `?token=` query credential must stop
+/// being accepted. Leaving it enabled keeps the vulnerable shape reachable: anything
+/// that captured a URL-borne token from logs or history could still use it.
+#[tokio::test]
+async fn a_permanent_device_token_in_the_query_string_is_rejected() {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(Arc::clone(&backend));
+    let (token, _device) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+
+    for path in [
+        format!("/api/v1/terminal/session?token={token}"),
+        format!("/api/v1/events?token={token}"),
+    ] {
+        assert_eq!(
+            ws_handshake_status(server.addr, &path, None).await,
+            401,
+            "a device token in the URL must not authorize a socket: {path}"
+        );
+    }
+
+    // The same token still works as a bearer, so this rejects the LOCATION of the
+    // credential rather than the credential itself.
+    let (status, _) = http_request(
+        server.addr,
+        "POST",
+        "/api/v1/socket-ticket",
+        Some(&token),
+        Some(r#"{"target":"/api/v1/events"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "the bearer must still be accepted in a header");
+    server.stop().await;
+}
+
 /// A ticket is scoped to the target it was minted for; it must not be a skeleton key
 /// for another session's socket.
 #[tokio::test]

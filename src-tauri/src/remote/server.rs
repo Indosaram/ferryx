@@ -178,7 +178,6 @@ struct PairExchangeResponse {
 
 #[derive(Deserialize)]
 struct AuthQuery {
-    token: Option<String>,
     /// Single-use credential minted by `/api/v1/socket-ticket`, used instead of a
     /// permanent device token because a browser WebSocket cannot send headers.
     ticket: Option<String>,
@@ -198,13 +197,18 @@ fn requested_grid_geometry(query: &AuthQuery) -> Option<(u16, u16)> {
     validated_grid_geometry(query.cols?, query.rows?)
 }
 
-fn extract_token(headers: &HeaderMap, query: Option<&AuthQuery>) -> Option<String> {
-    if let Some(auth_header) = headers.get("authorization").and_then(|h| h.to_str().ok()) {
-        if let Some(token) = auth_header.strip_prefix("Bearer ") {
-            return Some(token.trim().to_string());
-        }
-    }
-    query.and_then(|q| q.token.clone())
+/// Reads the device bearer from the `Authorization` header ONLY.
+///
+/// A permanent device token must never travel in a URL: it would persist in
+/// browser history and gateway access logs long after the request. Sockets, which
+/// cannot set headers from a browser, use a single-use ticket instead
+/// (`POST /api/v1/socket-ticket`).
+fn extract_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|token| token.trim().to_string())
 }
 
 /// How long a direct-gateway socket ticket stays redeemable.
@@ -258,7 +262,7 @@ async fn issue_socket_ticket(
     headers: HeaderMap,
     Json(request): Json<SocketTicketRequest>,
 ) -> Result<Json<SocketTicketResponse>, (StatusCode, String)> {
-    let token = extract_token(&headers, None)
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".to_string()))?;
     // Authorize with the real device store, so a revoked or unknown bearer cannot
     // trade an unusable token for a working ticket.
@@ -318,7 +322,7 @@ fn socket_credential(
         // credential here would let an invalid ticket be ignored rather than refused.
         return consume_socket_ticket(state, ticket, target);
     }
-    extract_token(headers, Some(query))
+    extract_token(headers)
 }
 
 async fn health_check() -> Json<HealthResponse> {
@@ -715,7 +719,7 @@ async fn list_sessions(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<RemoteTerminalSession>>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -742,7 +746,7 @@ async fn get_workspace_state(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<RemoteWorkspaceState>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -812,7 +816,7 @@ async fn select_workspace(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteSelectWorkspaceRequest>,
 ) -> Result<Json<RemoteSelectionRequestPayload>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -940,7 +944,7 @@ async fn create_worktree(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteCreateWorktreeRequest>,
 ) -> Result<Json<RemoteWorktreeInfo>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -987,7 +991,7 @@ async fn delete_worktree(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<RemoteDeleteWorktreeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -1017,7 +1021,7 @@ async fn list_devices(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<Vec<DeviceInfo>>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -1033,7 +1037,7 @@ async fn revoke_device(
     Query(query): Query<AuthQuery>,
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
@@ -1917,7 +1921,7 @@ async fn get_terminal_preferences(
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -1937,7 +1941,7 @@ async fn push_subscribe(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<PushSubscriptionInfo>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -1953,7 +1957,7 @@ async fn push_unsubscribe(
     Query(query): Query<AuthQuery>,
     Json(payload): Json<PushUnsubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers, Some(&query))
+    let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
@@ -2451,7 +2455,6 @@ mod tests {
 
         fn no_auth_query() -> AuthQuery {
             AuthQuery {
-                token: None,
                 ticket: None,
                 render: None,
                 cols: None,
