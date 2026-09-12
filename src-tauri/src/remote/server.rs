@@ -1331,6 +1331,9 @@ async fn handle_terminal_socket(
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
                                         session_backend.resize(&session_id_clone, cols, rows).await;
@@ -1701,6 +1704,9 @@ async fn handle_terminal_grid_socket(
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
                                         session_backend.resize(&session_id_clone, cols, rows).await;

@@ -1,0 +1,41 @@
+{
+  "task_id": "st_01a093c8",
+  "status": "source_ready_for_parent_RED_not_executed",
+  "worktree": "/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean",
+  "baseline": "4de9d285 (V04 committed by parent; source hash preserved)",
+  "candidate_validated": false,
+  "ownership_manifest": [
+    {"path":"src-tauri/src/remote/resize_security_tests.rs","sha256":"171b61ae105053b961fd6a9c4d0ff0d096bf4e631d7332264021b5a6a71a2891","ownership":"New focused V06 real PTY/socket test module only."},
+    {"path":"src-tauri/src/remote/security_tests.rs","sha256":"77d9434ba87780ace2fda9ed2d38a92fd1d5140a2c09bbe0707bcd28df7149d1","ownership":"Three-line registration of resize test module only.","before_sha256":"fc197928f485106b1e9f221c28209bda576241ff835d35b9b6f4ab0c2794b572"}
+  ],
+  "preserved_production": {"path":"src-tauri/src/remote/server.rs","sha256_before_and_after":"92a8783066a14d45d9819a37f47c02032985f28f126cbf8ecee3f46decd4a671","edited":false},
+  "tests": [
+    "remote::tests::security::resize::v06_view_resize_denied_raw_control_allowed",
+    "remote::tests::security::resize::v06_view_resize_denied_grid_control_allowed"
+  ],
+  "coverage": {
+    "surface":"Real axum router bound to 127.0.0.1:0, real authenticated HTTP WebSocket upgrades and masked client frames; separate ephemeral View and Control devices. In-memory pairing uses existing fixture helper, not persistent credentials.",
+    "backend":"Production TerminalService, PtyManager and disposable /bin/sh PTY; no backend mock, daemon, custom emulator or user repository. Backend get_size plus child /bin/stty size independently observe geometry. Grid uses production Ghostty mirror without native-terminal feature gate.",
+    "barrier":"Send Resize then Close on the SAME socket; consume frames until server Close/EOF. Both receive loops await resize inline before reading Close. No revocation or selection change can cancel processing. The retained hub sender keeps output alive. Child size subscription is installed before triggering its sentinel-delimited response. Bounded deadlines detect missing events, never establish absence.",
+    "positive_control":"Both tests run Control Resize before asserting saved View observations, so RED still exercises positive permission. Control must set real backend and child geometry to 63x19; grid must emit matching full grid frame. Blanket denial fails.",
+    "policy":"View grid attach requests 47x18 but initial PTY/mirror remain 80x24. Active desktop selection is set to fixture session and asserted unchanged. Live View resize requests 51x17 and must leave backend/child at 80x24. Control full-frame wait tolerates preceding real output diffs and matches exact geometry rather than a delay."
+  },
+  "cleanup_design":"Private TempDir supplies child cwd and HOME. No repo is created. Server uses existing JoinSet-owned SecurityServer. Test body catches unwind including bounded timeout failures; socket locals drop, server stop awaits shutdown, fixture PTY close is awaited with a deadline, output pump is joined with panic propagation, hub is removed, TempDir dropped, and original assertion panic resumes. This covers expected RED as well as GREEN; setup failures before the catch are not claimed to have async cleanup guarantees. No sleeps, polling delays, process-wide HOME mutation or canonical daemon controls are introduced.",
+  "exact_red_command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote::tests::security::resize::v06_ -- --nocapture --test-threads=1",
+  "parent_execution": {
+    "cwd":"/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean",
+    "environment":"Use existing parent-owned private CARGO_TARGET_DIR and pinned Ghostty/Zig environment; CARGO_BUILD_JOBS=4. Keep private parent HOME/FERRYX_DATA_DIR/FERRYX_RUNTIME_DIR. Clear ambient A03_PRIVATE_ROOT, A03_CLI_BINARY, FERRYX_MACHINE_TOKEN and FERRYX_RELAY_URL. Do not create a new target or run concurrent Cargo gates.",
+    "diagnostics":"Parent owns Rust diagnostics on both changed source files before Cargo execution. Child deliberately did not launch LSP auto-check, Cargo tests, builds or runnable entry points.",
+    "red_acceptance":"Both named tests execute (including headless grid) and fail at V06 saved View backend geometry assertion: actual (51,17), expected (80,24), after positive Control backend/child checks. A compile error, cleanup timeout or earlier assertion is not the requested behavioral RED and must be diagnosed without production edits first.",
+    "logs":"Retain complete RED command output and exit status in parent evidence; do not infer RED from this request.",
+    "after_approved_fix":"Repeat identical focused command for GREEN, then parent-owned related remote tests/build gates for headless and default features."
+  },
+  "next_minimal_production_fix_proposal":"After parent observes RED, add can_control admission to ClientControlMessage::Resize in both raw and grid receive loops in server.rs (original locations around 1333 and 1703). Enclose existing validated geometry, backend resize, and grid mirror resize/enqueue together in that permission check, or return continue immediately for !can_control. Do not alter initial requested_geometry Control-only policy, SSH generation admission, Scroll, active selection or V04 feature boundaries. Child has not applied this fix.",
+  "verification_observed":[
+    "Read both production receive loops, initial attachment authorization, real backend resize, existing HTTP/socket and PTY fixture mechanisms.",
+    "rustfmt on new module completed successfully; git diff --check exited 0.",
+    "server.rs before/after SHA256 identical; git diff --stat for server.rs empty after V04 parent commit.",
+    "No tests/builds/diagnostics executed by child, as requested. Runtime correctness and RED remain unverified."
+  ],
+  "source_control":"Separate uncommitted V06 scope: new test module, module registration, this evidence request only. No production edits or commit."
+}
