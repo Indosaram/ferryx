@@ -11,6 +11,11 @@ export function isWindowForegroundFocused(): boolean {
   );
 }
 
+export interface NotificationDecision {
+  accepted: boolean;
+  suppressed?: boolean;
+}
+
 export interface NotificationCoordinatorOptions {
   isWindowFocused?: () => boolean;
   getSettings?: () => NotificationSettings;
@@ -78,22 +83,23 @@ export class NotificationCoordinator {
     return loadNotificationSettings();
   }
 
-  handleTerminalBell(params: TerminalBellEventParams): void {
+  handleTerminalBell(params: TerminalBellEventParams): NotificationDecision {
     const key = params.sessionId || params.tabId || 'default';
     const settings = this.resolveSettings(params.settings);
 
     const now = Date.now();
     const lastBell = this.lastBellTimestamp.get(key) ?? 0;
     if (now - lastBell < this.bellThrottleMs) {
-      return;
+      return { accepted: false };
     }
     this.lastBellTimestamp.set(key, now);
 
     const lastCompletion = this.lastAgentCompletionTimestamp.get(key) ?? 0;
     if (now - lastCompletion < this.bellAgentSuppressionMs) {
-      return;
+      return { accepted: false, suppressed: true };
     }
 
+    const decision = { accepted: true };
     const isFocused = this.isFocused();
 
     if (!isFocused) {
@@ -153,9 +159,10 @@ export class NotificationCoordinator {
           });
       }
     }
+    return decision;
   }
 
-  handleAgentStateChange(params: AgentStateChangeEventParams): void {
+  handleAgentStateChange(params: AgentStateChangeEventParams): NotificationDecision {
     const key = params.sessionId || params.tabId || 'default';
     const next = params.nextState || params.newState || '';
     const settings = this.resolveSettings(params.settings);
@@ -175,9 +182,12 @@ export class NotificationCoordinator {
       (!wasAttentionState || effectivePrev !== next);
 
     if (!isCompletionEdge || params.notificationSuppressed) {
-      return;
+      return params.notificationSuppressed
+        ? { accepted: false, suppressed: true }
+        : { accepted: false };
     }
 
+    const decision = { accepted: true };
     const now = Date.now();
     this.lastAgentCompletionTimestamp.set(key, now);
 
@@ -238,6 +248,7 @@ export class NotificationCoordinator {
           });
       }
     }
+    return decision;
   }
 
   reset(): void {

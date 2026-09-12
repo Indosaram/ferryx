@@ -64,6 +64,29 @@ describe("isWindowForegroundFocused", () => {
   });
 });
 
+describe("pre-focus acceptance decisions", () => {
+  it.each([true, false])("accepts attention edges regardless of focus (%s)", (focused) => {
+    const { instance } = coordinator({ isWindowFocused: () => focused });
+    expect(instance.handleAgentStateChange({ sessionId: "s", previousState: "working", nextState: "done" }))
+      .toEqual({ accepted: true });
+    expect(instance.handleAgentStateChange({ sessionId: "s", nextState: "done" }))
+      .toEqual({ accepted: false });
+    expect(instance.handleAgentStateChange({ sessionId: "s", nextState: "waiting", notificationSuppressed: true }))
+      .toEqual({ accepted: false, suppressed: true });
+    expect(instance.handleAgentStateChange({ sessionId: "baseline", nextState: "done" }))
+      .toEqual({ accepted: false });
+  });
+
+  it("reports accepted, throttled, and post-completion-suppressed bells before focus", () => {
+    const { instance } = coordinator({ isWindowFocused: () => true });
+    expect(instance.handleTerminalBell({ sessionId: "bell" })).toEqual({ accepted: true });
+    expect(instance.handleTerminalBell({ sessionId: "bell" })).toEqual({ accepted: false });
+    instance.handleAgentStateChange({ sessionId: "agent", previousState: "working", nextState: "done" });
+    expect(instance.handleTerminalBell({ sessionId: "agent" })).toEqual({ accepted: false, suppressed: true });
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("terminal bell", () => {
   it("marks the tab and worktree unread and notifies while unfocused", () => {
     const { instance, marks } = coordinator();

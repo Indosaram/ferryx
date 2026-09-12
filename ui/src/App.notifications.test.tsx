@@ -19,7 +19,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { act, cleanup, render } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 
@@ -232,9 +232,17 @@ vi.mock("./state/workspaceRuntime", () => ({
   useWorkspaceRuntime: () => runtime,
 }));
 
+let renderNotificationCenter = false;
+let sidebarProps: {
+  onNavigateToSession?: (target: { workspaceId: string; sessionId: string; revision: number }) => void;
+  isSessionNavigable?: (workspaceId: string, sessionId: string) => boolean;
+} = {};
 vi.mock("./components/Sidebar", () => ({
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY: "ferryx.sidebar.collapsedProjects",
-  Sidebar: () => <div data-testid="mock-sidebar" />,
+  Sidebar: (props: typeof sidebarProps) => {
+    sidebarProps = props;
+    return <div data-testid="mock-sidebar">{renderNotificationCenter ? <NotificationCenterButton {...props} /> : null}</div>;
+  },
 }));
 
 vi.mock("./components/CommandPalette", () => ({
@@ -253,6 +261,14 @@ vi.mock("./components/TerminalSplitView", () => ({
   TerminalSplitView: () => <div data-testid="mock-terminal-split-view" />,
 }));
 
+const inboxModule = await vi.importActual<typeof import("./lib/notificationCenter/notificationCenterStore")>("./lib/notificationCenter/notificationCenterStore");
+let inbox = inboxModule.createNotificationCenterStore();
+vi.mock("./lib/notificationCenter/notificationCenterStore", () => ({
+  ...inboxModule,
+  get notificationCenterStore() { return inbox; },
+}));
+const { notificationEntryId } = await import("./lib/notificationCenter/types");
+const { NotificationCenterButton } = await import("./components/notification/NotificationCenterButton");
 const { App } = await import("./App");
 const { getWorkspaceRestoreStatus, resetWorkspaceRestore } = await import("./state/workspaceRestore");
 const { getWorkspaceSnapshot, setWorkspaceSnapshot, clearWorkspaceSnapshot } = await import("./state/workspaceSnapshotCache");
@@ -314,7 +330,11 @@ function seedTwoProjects() {
 describe("App notification coordinator wiring", () => {
   beforeEach(() => {
     resetWorkspaceRestore();
+    inbox.dispose();
     localStorage.clear();
+    inbox = inboxModule.createNotificationCenterStore();
+    sidebarProps = {};
+    renderNotificationCenter = false;
     saveNotificationSettings({ enabled: true, terminalBell: true, agentTaskComplete: true });
     native.isTauriRuntime.mockReset();
     native.isTauriRuntime.mockReturnValue(false);
@@ -647,6 +667,186 @@ describe("App notification coordinator wiring", () => {
     expect(native.playNotificationSound).not.toHaveBeenCalled();
     expect(markTabUnread).not.toHaveBeenCalled();
     expect(markWorktreeUnread).not.toHaveBeenCalled();
+  });
+
+  describe("notification center recording and seen bridge", () => {
+    const target: ActivityNotificationTarget = {
+      workspaceId: "default", workspaceLabel: "Project", sessionId: "sess-1", tabId: "tab-1",
+      worktreePath: "/repo/main", worktreeLabel: "main", agentLabel: "Codex",
+      terminalTitle: "Task", state: "done",
+    };
+    const seedUnread = (workspaceId = "default", sessionId = "sess-1") => {
+      inbox.recordActivity({ workspaceId, sessionId, labels: {}, subject: "agent",
+        previousState: "working", state: "done", occurredAt: 100, observed: false });
+      return { workspaceId, sessionId, revision: inbox.getSnapshot().entries[0].revision };
+    };
+    const clickRow = async (clicked: ReturnType<typeof seedUnread>) => {
+      expect(sidebarProps.onNavigateToSession).toEqual(expect.any(Function));
+      await act(async () => { sidebarProps.onNavigateToSession!(clicked); });
+    };
+
+    it("records focused observed done as seen despite the focus gate", async () => {
+      currentActivityTargets = [target];
+      await act(async () => { render(<App />); });
+      await nativeFocusTrackingReady;
+      nativeFocusChanged?.({ payload: true });
+      act(() => { emitActivityTargets(); });
+      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({
+        workspaceId: "default", sessionId: "sess-1", reason: "done", subject: "agent",
+        labels: { workspaceLabel: "Project", worktreeLabel: "main", agentLabel: "Codex", terminalTitle: "Task" },
+        read: { seen: true, seenAt: expect.any(Number) },
+      })]);
+      expect(native.dispatchNotification).not.toHaveBeenCalled();
+    });
+
+    it("records unfocused done as unread independently of desktop dispatch outcome", async () => {
+      currentActivityTargets = [target];
+      const dispatchResult = deferred<import("./lib/types").DispatchNotificationResult>();
+      native.dispatchNotification.mockReturnValue(dispatchResult.promise);
+      await act(async () => { render(<App />); });
+      await nativeFocusTrackingReady;
+      nativeFocusChanged?.({ payload: false });
+      act(() => { emitActivityTargets(); });
+      expect(inbox.getSnapshot().entries[0]?.read).toEqual({ unread: true });
+      expect(native.dispatchNotification).toHaveBeenCalledTimes(1);
+      await act(async () => { dispatchResult.resolve({ submitted: true }); });
+    });
+
+    it("records focused background tabs as unread and rejects suppressed baseline events", async () => {
+      currentActivityTargets = [{ ...target, sessionId: "sess-2", tabId: "tab-2" },
+        { ...target, notificationSuppressed: true }];
+      await act(async () => { render(<App />); });
+      await nativeFocusTrackingReady;
+      nativeFocusChanged?.({ payload: true });
+      act(() => { emitActivityTargets(); });
+      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-2", read: { unread: true } })]);
+      expect(native.dispatchNotification).not.toHaveBeenCalled();
+    });
+
+    it("records focused bells with fallback workspace identity and filters throttled bells", async () => {
+      await act(async () => { render(<App />); });
+      await nativeFocusTrackingReady;
+      nativeFocusChanged?.({ payload: true });
+      act(() => { emitTerminalBell(); emitTerminalBell(); });
+      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({
+        workspaceId: "default", sessionId: "sess-1", reason: "bell", subject: "terminal",
+        revision: 1, read: { seen: true, seenAt: expect.any(Number) },
+      })]);
+      expect(native.dispatchNotification).not.toHaveBeenCalled();
+    });
+
+    it("acknowledges the clicked revision only after focusing a live target", async () => {
+      const clicked = seedUnread();
+      const acknowledge = vi.spyOn(inbox, "markEntriesRead");
+      await act(async () => { render(<App />); });
+      expect(sidebarProps.isSessionNavigable?.("default", "sess-1")).toBe(true);
+      await clickRow(clicked);
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
+      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("default", "sess-1"), expectedRevision: clicked.revision }]);
+      expect(dispatchWorkspaceAction.mock.invocationCallOrder.at(-1)).toBeLessThan(acknowledge.mock.invocationCallOrder[0]);
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+    });
+
+    it("does not acknowledge a newer occurrence when a stale revision is clicked", async () => {
+      const clicked = seedUnread();
+      await act(async () => { render(<App />); });
+      inbox.recordActivity({ workspaceId: "default", sessionId: "sess-1", labels: {}, subject: "agent",
+        previousState: "done", state: "waiting", occurredAt: 200, observed: false });
+      await clickRow(clicked);
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
+      expect(inbox.getSnapshot().entries[0]).toMatchObject({ revision: 2, read: { unread: true } });
+    });
+
+    it.each([ ["ghost", "sess-1"], ["default", "closed"], ["other", "closed"] ])(
+      "does not acknowledge missing or closed target %s/%s", async (workspaceId, sessionId) => {
+        seedTwoProjects();
+        setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
+        const clicked = seedUnread(workspaceId, sessionId);
+        const acknowledge = vi.spyOn(inbox, "markEntriesRead");
+        await act(async () => { render(<App />); });
+        expect(sidebarProps.isSessionNavigable?.(workspaceId, sessionId)).toBe(false);
+        dispatchWorkspaceAction.mockClear();
+        await clickRow(clicked);
+        expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
+        expect(acknowledge).not.toHaveBeenCalled();
+        expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+      },
+    );
+
+    it("acknowledges a cross-project click after the target workspace mounts", async () => {
+      seedTwoProjects();
+      setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));
+      const clicked = seedUnread("other", "sess-remote");
+      const acknowledge = vi.spyOn(inbox, "markEntriesRead");
+      await act(async () => { render(<App />); });
+      await clickRow(clicked);
+      expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("other");
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
+      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote"), expectedRevision: clicked.revision }]);
+      expect(dispatchWorkspaceAction.mock.invocationCallOrder.at(-1)).toBeLessThan(acknowledge.mock.invocationCallOrder[0]);
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+    });
+
+    it.each(["newer occurrence", "closed target"])("handles %s while a cross-project target is mounting", async (change) => {
+      seedTwoProjects();
+      setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));
+      const clicked = seedUnread("other", "sess-remote");
+      const acknowledge = vi.spyOn(inbox, "markEntriesRead");
+      await act(async () => { render(<App />); });
+      const original = storeSpy.getMockImplementation();
+      let changed = false;
+      storeSpy.mockImplementation((options: { workspaceId: string }) => {
+        if (options.workspaceId === "other" && !changed) {
+          changed = true;
+          if (change === "closed target") setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
+          else inbox.recordActivity({ workspaceId: "other", sessionId: "sess-remote", labels: {}, subject: "agent",
+            previousState: "done", state: "waiting", occurredAt: 200, observed: false });
+        }
+        return original(options);
+      });
+      dispatchWorkspaceAction.mockClear();
+      await clickRow(clicked);
+      expect(changed).toBe(true);
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+      if (change === "closed target") {
+        expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
+        expect(acknowledge).not.toHaveBeenCalled();
+      } else {
+        expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
+        expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote"), expectedRevision: clicked.revision }]);
+        expect(inbox.getSnapshot().entries[0].revision).toBe(2);
+      }
+    });
+
+    it("opens the real center and acknowledges a row clicked through its visible surface", async () => {
+      renderNotificationCenter = true;
+      currentActivityTargets = [target];
+      const view = render(<App />);
+      await act(async () => { await nativeFocusTrackingReady; });
+      nativeFocusChanged?.({ payload: false });
+      act(() => { emitActivityTargets(); });
+      expect(view.getByTestId("notification-center-badge")).toHaveTextContent("1");
+      fireEvent.click(view.getByTestId("notification-center-button"));
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+      fireEvent.click(view.getByTestId(`notification-row-${notificationEntryId("default", "sess-1")}`));
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+      expect(view.queryByTestId("notification-center-badge")).toBeNull();
+    });
+
+    it("preserves unread history across unmount and restart from persisted storage", async () => {
+      currentActivityTargets = [target];
+      await act(async () => { render(<App />); });
+      await nativeFocusTrackingReady;
+      nativeFocusChanged?.({ payload: false });
+      act(() => { emitActivityTargets(); });
+      expect(inbox.getSnapshot().entries[0]?.read).toEqual({ unread: true });
+      cleanup();
+      inbox.dispose();
+      inbox = inboxModule.createNotificationCenterStore();
+      await act(async () => { render(<App />); });
+      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-1", revision: 1, read: { unread: true } })]);
+    });
   });
 
   describe("activation navigation", () => {

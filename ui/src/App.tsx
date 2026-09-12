@@ -26,6 +26,9 @@ import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserShortcutReques
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
+import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
+import { notificationCenterStore } from "./lib/notificationCenter/notificationCenterStore";
+import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
@@ -124,6 +127,16 @@ import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
+type InboxNavigationTarget = NotificationTarget & { revision?: number };
+
+function acknowledgeNotificationTarget(target: InboxNavigationTarget): void {
+  // Native activations carry no inbox revision and retain their existing navigation-only behavior.
+  if (target.revision === undefined) return;
+  notificationCenterStore.markEntriesRead([{
+    id: notificationEntryId(target.workspaceId, target.sessionId), expectedRevision: target.revision,
+  }]);
+}
+
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
 const loadSettingsDialog = () =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
@@ -641,11 +654,19 @@ function WorkspaceApp({
   const activityNotificationTargetsRef = useRef(activityNotificationTargets);
   activityNotificationTargetsRef.current = activityNotificationTargets;
 
-  useEffect(() => subscribeActivityNotification((event) => {
-    coordinatorRef.current?.handleAgentStateChange({ ...event, nextState: event.state });
-  }), [subscribeActivityNotification]);
+  const isNotificationObserved = useCallback((target: RecordingTarget) => isNotificationTargetObserved(
+    stateRef.current, target, getNativeWindowFocused() ?? isWindowForegroundFocused(),
+  ), []);
 
-  const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget?: import("./state/workspaceStore").ActivityNotificationTarget) => {
+  useEffect(() => wireActivityRecording({
+    events: (record) => subscribeActivityNotification((event) => {
+      const decision = coordinatorRef.current!.handleAgentStateChange({ ...event, nextState: event.state });
+      record({ ...event, workspaceId: event.workspaceId ?? stateRef.current.workspaceId }, decision);
+    }),
+    isObserved: isNotificationObserved,
+  }), [subscribeActivityNotification, isNotificationObserved]);
+
+  const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined, record: RecordingListener<RecordingTarget>) => {
     const targets = activityNotificationTargetsRef.current ?? [];
     const target = eventTarget ?? targets.find(
       (candidate) => candidate.sessionId === sessionId,
@@ -667,7 +688,7 @@ function WorkspaceApp({
       terminalTitle = "";
     }
 
-    coordinatorRef.current?.handleTerminalBell({
+    const decision = coordinatorRef.current!.handleTerminalBell({
       workspaceId: target?.workspaceId,
       workspaceLabel,
       sessionId,
@@ -676,11 +697,19 @@ function WorkspaceApp({
       worktreeLabel,
       terminalTitle,
     });
+    record({
+      workspaceId: target?.workspaceId ?? stateRef.current.workspaceId,
+      workspaceLabel, sessionId, tabId, worktreeLabel: worktreeLabel ?? "",
+      terminalTitle: terminalTitle ?? "", agentLabel: target?.agentLabel,
+    }, decision);
   }, []);
 
   // The bell arrives from the store's global native subscription, not from a pane prop: only the
   // active tab's panes are mounted, and a bell in the tab you are watching is not what notifies.
-  useEffect(() => subscribeTerminalBell(handleTerminalBell), [handleTerminalBell, subscribeTerminalBell]);
+  useEffect(() => wireBellRecording({
+    events: (record) => subscribeTerminalBell((sessionId, tabId, target) => handleTerminalBell(sessionId, tabId, target, record)),
+    isObserved: isNotificationObserved,
+  }), [handleTerminalBell, subscribeTerminalBell, isNotificationObserved]);
   useEffect(() => {
     switchDebug("workspace.render", {
       activeProjectId: activeProject.workspaceId,
@@ -1203,7 +1232,7 @@ function WorkspaceApp({
     slug?: string | null;
     tabId?: string | null;
   } | null>(null);
-  const [pendingNotificationTarget, setPendingNotificationTarget] = useState<NotificationTarget | null>(null);
+  const [pendingNotificationTarget, setPendingNotificationTarget] = useState<InboxNavigationTarget | null>(null);
 
   const focusedTerminalPayload = useMemo(
     () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots()),
@@ -1535,7 +1564,7 @@ function WorkspaceApp({
   }, [handleRemoteSelectionRequested]);
 
   const handleNotificationTarget = useCallback(
-    (target: NotificationTarget) => {
+    (target: InboxNavigationTarget) => {
       if (!target || !target.workspaceId || !target.sessionId) return;
       const project = projectsRef.current.find((candidate) => candidate.workspaceId === target.workspaceId);
       // An unregistered/removed project is stale: never navigate or fall back to another pane.
@@ -1545,6 +1574,7 @@ function WorkspaceApp({
         // no-ops on the same check, but guarding here avoids a needless dispatch.
         if (!hasNavigableSession(stateRef.current, target.sessionId)) return;
         dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId: target.sessionId });
+        acknowledgeNotificationTarget(target);
         return;
       }
       // Cross-project: inspect the target workspace's cached state BEFORE switching. A stale or
@@ -1573,6 +1603,7 @@ function WorkspaceApp({
     setPendingNotificationTarget(null);
     if (hasNavigableSession(state, sessionId)) {
       dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId });
+      acknowledgeNotificationTarget(pendingNotificationTarget);
     }
   }, [
     activeProject.workspaceId,
@@ -2352,6 +2383,14 @@ function WorkspaceApp({
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
           onOpenSettings={handleOpenSettings}
+          onNavigateToSession={handleNotificationTarget}
+          isSessionNavigable={(workspaceId, sessionId) => {
+            if (!projectsRef.current.some((project) => project.workspaceId === workspaceId)) return false;
+            const snapshot = workspaceId === activeProjectRef.current.workspaceId
+              ? stateRef.current
+              : getHmrWorkspaceState(workspaceId) ?? getWorkspaceSnapshot(workspaceId);
+            return Boolean(snapshot && hasNavigableSession(snapshot, sessionId));
+          }}
           onToggle={toggleSidebar}
         />
       ) : (
