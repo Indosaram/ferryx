@@ -579,11 +579,16 @@ describe("App project workspace flow", () => {
     await waitFor(() => expect(workspace.closeTab).toHaveBeenCalledWith("tab-1"));
   });
 
-  it("routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab", async () => {
+  it.each([
+    { kind: undefined, pinned: false },
+    { kind: "terminal", pinned: false },
+    { kind: undefined, pinned: true },
+    { kind: "terminal", pinned: true },
+  ] as const)("routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab ($kind, pinned=$pinned)", async ({ kind, pinned }) => {
     const previousLayout = workspace.storeState.layout;
     workspace.storeState.layout = {
       ...previousLayout,
-      tabs: previousLayout.tabs.map((tab) => (tab.id === "tab-1" ? { ...tab, kind: "terminal" } : tab)),
+      tabs: previousLayout.tabs.map((tab) => (tab.id === "tab-1" ? { ...tab, kind, pinned } : tab)),
       layoutsByTabId: {
         ...previousLayout.layoutsByTabId,
         "tab-1": {
@@ -602,23 +607,31 @@ describe("App project workspace flow", () => {
     } as any;
 
     try {
-      render(<App />);
+      // Given: both newly spawned (untagged) and explicitly tagged terminal tabs.
+      await act(async () => { render(<App />); });
+      expect(native.closeMenuHandler).toBeTypeOf("function");
 
-      await waitFor(() => expect(native.onCloseTabMenu).toHaveBeenCalledOnce());
-      native.closeMenuHandler?.();
+      // When: the native close accelerator is delivered.
+      act(() => { native.closeMenuHandler?.(); });
 
-      await waitFor(() => expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-2"));
+      // Then: only the focused split leaf is closed.
+      expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-2");
       expect(workspace.closeTab).not.toHaveBeenCalled();
     } finally {
       workspace.storeState.layout = previousLayout;
     }
   });
 
-  it("routes the web Cmd+W shortcut to close the focused pane in a split terminal tab", async () => {
+  it.each([
+    { kind: undefined, pinned: false },
+    { kind: "terminal", pinned: false },
+    { kind: undefined, pinned: true },
+    { kind: "terminal", pinned: true },
+  ] as const)("routes the web Cmd+W shortcut to close the focused pane in a split terminal tab ($kind, pinned=$pinned)", async ({ kind, pinned }) => {
     const previousLayout = workspace.storeState.layout;
     workspace.storeState.layout = {
       ...previousLayout,
-      tabs: previousLayout.tabs.map((tab) => (tab.id === "tab-1" ? { ...tab, kind: "terminal" } : tab)),
+      tabs: previousLayout.tabs.map((tab) => (tab.id === "tab-1" ? { ...tab, kind, pinned } : tab)),
       layoutsByTabId: {
         ...previousLayout.layoutsByTabId,
         "tab-1": {
@@ -637,11 +650,14 @@ describe("App project workspace flow", () => {
     } as any;
 
     try {
-      render(<App />);
+      // Given: both newly spawned (untagged) and explicitly tagged terminal tabs.
+      await act(async () => { render(<App />); });
 
+      // When: the browser close shortcut is delivered.
       fireEvent.keyDown(window, { key: "w", metaKey: true });
 
-      await waitFor(() => expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-2"));
+      // Then: only the focused split leaf is closed.
+      expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-2");
       expect(workspace.closeTab).not.toHaveBeenCalled();
     } finally {
       workspace.storeState.layout = previousLayout;

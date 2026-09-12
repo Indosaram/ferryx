@@ -1774,7 +1774,7 @@ function WorkspaceApp({
 
     const activeTab = currentState.layout.tabs.find((tab) => tab.id === activeTabId);
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTabId];
-    if (activeTab?.kind === "terminal" && activeLayout?.root.type === "split") {
+    if (activeTab && activeTab.kind !== "browser" && activeLayout?.root.type === "split") {
       const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
       if (activeLeafId) {
         void closePane(activeTabId, activeLeafId).catch(reportRuntimeError);
