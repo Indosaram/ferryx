@@ -8,7 +8,18 @@ import {
   previewWorktreeDelete,
   toIpcError,
 } from "../lib/tauri";
-import { worktreeIdentity, type BranchDeletionPreview, type StructuredIpcError, type Worktree } from "../lib/types";
+import {
+  worktreeIdentity,
+  type BranchDeletionPreview,
+  type DirtyFile,
+  type StructuredIpcError,
+  type Worktree,
+} from "../lib/types";
+
+// Destructive deletion is irreversible, so the confirmation has to name what is being
+// discarded rather than describing it in the abstract. Long lists are truncated with a
+// remainder count so the dialog cannot be pushed off-screen by a large dirty worktree.
+const DIRTY_FILES_SHOWN = 8;
 
 export type WorktreeDeleteServices = {
   previewDelete: (worktree: Worktree) => Promise<BranchDeletionPreview>;
@@ -22,6 +33,8 @@ type WorktreeDeleteDialogProps = {
   onClose: () => void;
   onDeleted: () => void;
   services?: WorktreeDeleteServices;
+  initialDirty?: boolean;
+  dirtyFiles?: DirtyFile[];
 };
 
 function createDefaultServices(workspaceId: string): WorktreeDeleteServices {
@@ -47,18 +60,39 @@ export function WorktreeDeleteDialog({
   onClose,
   onDeleted,
   services,
+  initialDirty = false,
+  dirtyFiles = [],
 }: WorktreeDeleteDialogProps) {
   const resolvedServices = useMemo(() => services ?? createDefaultServices(workspaceId), [services, workspaceId]);
   const [preview, setPreview] = useState<BranchDeletionPreview | null>(null);
-  const [error, setError] = useState<StructuredIpcError | null>(null);
-  const [destructiveRequired, setDestructiveRequired] = useState(false);
+  const [error, setError] = useState<StructuredIpcError | null>(
+    initialDirty
+      ? {
+          code: "DIRTY_WORKTREE",
+          message:
+            "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
+          details: {},
+        }
+      : null,
+  );
+  const [destructiveRequired, setDestructiveRequired] = useState(initialDirty);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setPreview(null);
-    setError(null);
-    setDestructiveRequired(false);
+    if (initialDirty) {
+      setError({
+        code: "DIRTY_WORKTREE",
+        message:
+          "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
+        details: {},
+      });
+      setDestructiveRequired(true);
+    } else {
+      setError(null);
+      setDestructiveRequired(false);
+    }
     setBusy(true);
     void resolvedServices
       .previewDelete(worktree)
@@ -74,7 +108,7 @@ export function WorktreeDeleteDialog({
     return () => {
       cancelled = true;
     };
-  }, [resolvedServices, worktree]);
+  }, [resolvedServices, worktree, initialDirty]);
 
   const finishDelete = () => {
     onDeleted();
@@ -163,6 +197,26 @@ export function WorktreeDeleteDialog({
                       ? "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently."
                       : "Safe deletion refused to discard unmerged commits. Destructive deletion is a separate explicit action."}
                   </p>
+                  {error?.code === "DIRTY_WORKTREE" && dirtyFiles.length > 0 ? (
+                    <div className="mt-2" data-testid="dirty-file-preview">
+                      <div className="text-[11px] font-semibold text-destructive">
+                        {dirtyFiles.length} file{dirtyFiles.length === 1 ? "" : "s"} will be discarded
+                      </div>
+                      <ul className="mt-1 space-y-0.5 font-mono text-[10px] leading-relaxed text-destructive/80">
+                        {dirtyFiles.slice(0, DIRTY_FILES_SHOWN).map((file) => (
+                          <li key={file.path} className="flex gap-1.5">
+                            <span className="shrink-0 opacity-70">{file.statusCode.trim() || "?"}</span>
+                            <span className="truncate">{file.path}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      {dirtyFiles.length > DIRTY_FILES_SHOWN ? (
+                        <div className="mt-1 text-[10px] text-destructive/70">
+                          and {dirtyFiles.length - DIRTY_FILES_SHOWN} more
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
               <button

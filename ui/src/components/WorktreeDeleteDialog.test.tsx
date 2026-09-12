@@ -146,6 +146,61 @@ describe("WorktreeDeleteDialog", () => {
     await waitFor(() => expect(services.deleteDestructive).toHaveBeenCalledWith(worktree));
   });
 
+  it("names the files a destructive deletion will discard, with a count and a truncated remainder", async () => {
+    // The scope document requires the preview to show the file list AND the count before an
+    // irreversible delete: showing only "has uncommitted changes" does not tell the user what
+    // they are about to lose.
+    const dirtyFiles = [
+      { statusCode: " M", path: "src/main.rs" },
+      { statusCode: "??", path: "notes/scratch.md" },
+      ...Array.from({ length: 9 }, (_, i) => ({ statusCode: " M", path: `src/generated/file-${i}.ts` })),
+    ];
+    const services = createServices({
+      deleteSafe: vi.fn(async () => {
+        throw { code: "DIRTY_WORKTREE", message: "uncommitted changes", details: {} };
+      }),
+    });
+    render(
+      <WorktreeDeleteDialog
+        worktree={worktree}
+        services={services}
+        dirtyFiles={dirtyFiles}
+        onClose={vi.fn()}
+        onDeleted={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("orca/ws-main/feature");
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
+
+    const listing = await screen.findByTestId("dirty-file-preview");
+    expect(listing).toHaveTextContent("11 files will be discarded");
+    // Specific paths, not a generic phrase.
+    expect(listing).toHaveTextContent("src/main.rs");
+    expect(listing).toHaveTextContent("notes/scratch.md");
+    // Bounded so a large dirty worktree cannot push the confirm button off-screen.
+    expect(listing).toHaveTextContent("and 3 more");
+    expect(listing.querySelectorAll("li")).toHaveLength(8);
+  });
+
+  it("omits the file listing when no dirty files were supplied", async () => {
+    const services = createServices({
+      deleteSafe: vi.fn(async () => {
+        throw { code: "DIRTY_WORKTREE", message: "uncommitted changes", details: {} };
+      }),
+    });
+    render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+
+    await screen.findByText("orca/ws-main/feature");
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
+
+    // The destructive path must still be offered; only the listing is absent.
+    expect(
+      await screen.findByRole("button", { name: "Delete worktree and discard changes permanently" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("dirty-file-preview")).not.toBeInTheDocument();
+  });
+
   it("does not infer destructive deletion from an error message", async () => {
     const services = createServices({
       deleteSafe: vi.fn(async () => {

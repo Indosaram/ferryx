@@ -96,6 +96,7 @@ type SidebarProps = {
   onSelectWorktree: (worktree: Worktree) => void;
   onCreateWorktree: (project?: RegisteredProject) => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
+  onManageDisk?: (project: RegisteredProject) => void;
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   onToggle?: () => void;
@@ -124,6 +125,7 @@ export function Sidebar({
   onSelectWorktree,
   onCreateWorktree,
   onDeleteWorktree = () => undefined,
+  onManageDisk,
   onOpenSettings,
   onToggle,
   onHide,
@@ -427,6 +429,7 @@ export function Sidebar({
                     }}
                     onCreateWorktree={() => onCreateWorktree(project)}
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
+                    onManageDisk={onManageDisk ? () => onManageDisk(project) : undefined}
                     isStandaloneRemote={isStandaloneRemote}
                   />
                 );
@@ -585,6 +588,7 @@ type ProjectHeaderProps = {
   onSelect?: () => void;
   onCreateWorktree?: () => void;
   onRemoveProject?: () => void;
+  onManageDisk?: () => void;
   inert?: boolean;
   isStandaloneRemote?: boolean;
 };
@@ -599,6 +603,7 @@ function ProjectHeader({
   onSelect,
   onCreateWorktree,
   onRemoveProject,
+  onManageDisk,
   inert = false,
   isStandaloneRemote = true,
 }: ProjectHeaderProps) {
@@ -628,6 +633,7 @@ function ProjectHeader({
     event.stopPropagation();
     const items: NativeMenuEntry[] = [
       { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
+      { kind: "item", id: "manage-disk", label: "Manage Worktree Disk…", enabled: !remote && project.gitRoot !== null, icon: "disk" },
       { kind: "item", id: "reveal", label: remote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !remote, icon: "reveal" },
       { kind: "item", id: "copy-path", label: "Copy Project Path" },
       { kind: "separator" },
@@ -642,6 +648,7 @@ function ProjectHeader({
         menuUnlistenRef.current?.();
         menuUnlistenRef.current = null;
         if (id === "add-worktree") onCreateWorktree?.();
+        else if (id === "manage-disk") onManageDisk?.();
         else if (id === "reveal" && !remote) {
           revealPath(project.repoRoot).catch((err: unknown) => {
             toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);

@@ -14,6 +14,7 @@ import { TerminalSplitView } from "./components/TerminalSplitView";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
+import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
@@ -1301,6 +1302,7 @@ function WorkspaceApp({
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
+  const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
   const [pendingTabClose, setPendingTabClose] = useState<{ id: string; label: string } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
@@ -2459,6 +2461,7 @@ function WorkspaceApp({
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
+          onManageDisk={setDiskManageProject}
           onOpenSettings={handleOpenSettings}
           onNavigateToSession={handleNotificationTarget}
           isSessionNavigable={(workspaceId, sessionId) => {
@@ -2695,6 +2698,13 @@ function WorkspaceApp({
           tabLabel={pendingTabClose.label}
           onCancel={handleCancelTabClose}
           onConfirm={handleConfirmTabClose}
+        />
+      ) : null}
+      {diskManageProject ? (
+        <WorktreeDiskDialog
+          workspaceId={diskManageProject.workspaceId}
+          projectName={diskManageProject.workspaceId}
+          onClose={() => setDiskManageProject(null)}
         />
       ) : null}
     </div>

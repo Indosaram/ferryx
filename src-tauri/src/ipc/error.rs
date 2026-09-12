@@ -20,6 +20,7 @@ pub enum IpcErrorCode {
     InvalidRepoRoot,
     GitError,
     IoError,
+    ScanCancelled,
     ParseError,
     SessionNotFound,
     AgentResumeInvalid,

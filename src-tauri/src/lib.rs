@@ -1043,6 +1043,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(daemon_client)
         .manage(remote_manager)
         .manage(workspace_registry)
+        .manage(ipc::worktree_disk::WorktreeDiskScans::default())
         .manage(notification_audio)
         .manage(notification_activations)
         .manage(browser_manager);
@@ -1133,6 +1134,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_worktree_delete_destructive,
         cmd_worktree_delete_preview,
         cmd_worktree_status,
+        cmd_worktree_disk_scan_start,
+        cmd_worktree_disk_scan_cancel,
+        cmd_worktree_disk_scan_result,
         cmd_notification_dispatch,
         cmd_notification_get_permission_status,
         cmd_notification_request_permission,
