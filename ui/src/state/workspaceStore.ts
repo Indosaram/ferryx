@@ -864,6 +864,7 @@ export function useWorkspaceStore({
         worktree: sourceSession.worktree,
         backendSessionId: null,
         lifecycle: "working",
+        reconnectLifecycle: "spawning",
       };
 
       dispatch({
@@ -914,7 +915,8 @@ export function useWorkspaceStore({
           });
         }
 
-        if (stateRef.current.sessions[localSessionId]) {
+        const currentSession = stateRef.current.sessions[localSessionId];
+        if (currentSession && currentSession.backendSessionId === null) {
           dispatch({
             type: "REBIND_SESSION_BACKEND",
             sessionId: localSessionId,
@@ -2171,7 +2173,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "SESSION_BACKEND_UNAVAILABLE": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
-      if (action.backendSessionId !== null && session.backendSessionId !== action.backendSessionId) return state;
+      if (action.backendSessionId !== null) {
+        if (session.backendSessionId !== action.backendSessionId) return state;
+      } else {
+        if (session.backendSessionId !== null) return state;
+      }
       if (action.bindingKey && session.backendSessionId) {
         const currentBindingKey = `${session.backendSessionId}:${session.daemonEpoch ?? ""}:${session.remoteGeneration ?? 0}:${session.remoteConnectionState ?? ""}`;
         if (action.bindingKey !== currentBindingKey) return state;
@@ -2190,6 +2196,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
                 message: action.reason ?? "Failed to spawn terminal",
               },
               lifecycle: "exited",
+              reconnectLifecycle: "idle",
             },
           },
         };

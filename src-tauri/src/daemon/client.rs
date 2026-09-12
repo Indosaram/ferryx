@@ -272,6 +272,7 @@ pub struct DaemonAttachment {
     pub history_segments: Vec<crate::terminal::output_hub::HistorySegment>,
     pub pty_cols: Option<u16>,
     pub pty_rows: Option<u16>,
+    pub remote_generation: Option<u64>,
     pub messages: mpsc::Receiver<DaemonStreamMessage<'static>>,
     pub stream_task: tokio::task::JoinHandle<()>,
 }
@@ -702,11 +703,17 @@ impl DaemonClient {
         let mut conn_guard = slot.lock().await;
         let retry_safe = request_is_retry_safe(&req);
 
-        if let Some(conn) = conn_guard.as_mut() {
+        // Take the connection out of the slot while awaiting the reply.
+        // If this future is cancelled mid-request, `conn` is dropped, closing
+        // the socket and preventing an unconsumed response from corrupting the pool.
+        let active = conn_guard.take();
+        if let Some(mut conn) = active {
             match conn.request(&req).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    *conn_guard = Some(conn);
+                    return Ok(resp);
+                }
                 Err(error) => {
-                    *conn_guard = None;
                     if !retry_safe {
                         return Err(error.into_ipc_error(&req, true));
                     }
@@ -1143,6 +1150,7 @@ impl DaemonClient {
                 pty_cols,
                 pty_rows,
                 history_segments,
+                remote_generation,
             } => {
                 let segments = history_segments
                     .into_iter()
@@ -1185,6 +1193,7 @@ impl DaemonClient {
                     history_segments: segments,
                     pty_cols,
                     pty_rows,
+                    remote_generation,
                     messages: rx,
                     stream_task: task,
                 })
@@ -1623,7 +1632,7 @@ mod tests {
         state.attach_daemon_attachment::<tauri::test::MockRuntime>("remote", DaemonAttachment {
             session_id: "remote".into(), epoch: 1, start_sequence: None, end_sequence: None,
             gap: None, history: b"\x1b[?1000h\x1b[?1006h".to_vec(), history_segments: vec![],
-            pty_cols: Some(80), pty_rows: Some(24), messages: rx,
+            pty_cols: Some(80), pty_rows: Some(24), remote_generation: None, messages: rx,
             stream_task: tokio::spawn(std::future::pending()),
         }, None).unwrap();
         let key = serde_json::from_value::<NativeTerminalInput>(serde_json::json!({"keyEvent":{

@@ -204,14 +204,14 @@ impl Connector for SshConnector {
         )))
     }
 }
-struct Session {
-    details: RemoteSessionDetails,
+pub(crate) struct Session {
+    pub(crate) details: RemoteSessionDetails,
     transport: Option<Arc<dyn Transport>>,
     task: Option<tokio::task::JoinHandle<()>>,
     updates: watch::Sender<RemoteSessionDetails>,
 }
-struct Entry {
-    state: Mutex<Session>,
+pub(crate) struct Entry {
+    pub(crate) state: Mutex<Session>,
     control: Arc<AsyncMutex<()>>,
 }
 impl Entry {
@@ -360,11 +360,31 @@ impl RemoteRuntime {
     pub fn details(&self, id: &str) -> Option<RemoteSessionDetails> {
         self.entry(id).ok().map(|e| e.state.lock().details.clone())
     }
+    #[cfg(test)]
+    pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
+        self.entry(id)
+    }
     pub fn subscribe(
         &self,
         id: &str,
     ) -> Result<watch::Receiver<RemoteSessionDetails>, RemoteFailure> {
         Ok(self.entry(id)?.state.lock().updates.subscribe())
+    }
+    /// Atomically captures the history snapshot from the hub while holding the remote session lock,
+    /// guaranteeing the snapshot and remote generation cannot desync across reconnects.
+    pub fn attach_snapshot_with_generation(
+        &self,
+        id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<(crate::terminal::output_hub::SessionAttachment, u64), RemoteFailure> {
+        let e = self.entry(id)?;
+        let s = e.state.lock();
+        let generation = s.details.generation;
+        let attachment = self
+            .hub
+            .subscribe_with_sequence(id, after_sequence)
+            .ok_or_else(|| RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub"))?;
+        Ok((attachment, generation))
     }
     fn launch(&self, entry: &Arc<Entry>, initial: Option<Arc<dyn Transport>>) {
         let mut state = entry.state.lock();

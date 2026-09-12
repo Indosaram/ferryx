@@ -184,7 +184,7 @@ type TerminalSplitViewProps = {
   ) => string | null | void;
   onRenameTab?: (tabId: string, label: string) => void;
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
-  onAddTab?: () => void;
+  onAddTab?: (shell?: string) => void;
   onAddBrowserTab?: (url?: string, profileId?: string) => void;
   onDuplicateBrowserTab?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
@@ -644,7 +644,7 @@ type TabGroupViewProps = {
   onCloseTabsToLeft?: (tabId: string) => void;
   onRenameTab?: (tabId: string, label: string) => void;
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
-  onAddTab: () => void;
+  onAddTab: (shell?: string) => void;
   onAddBrowserTab: (url?: string, profileId?: string) => void;
   onDuplicateBrowserTab: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
@@ -770,9 +770,13 @@ function TabGroupView({
         onSplitRight={(tabId) => splitTerminalTab(tabId, "horizontal")}
         onSplitDown={(tabId) => splitTerminalTab(tabId, "vertical")}
         onMoveTabToSplit={moveTabToSplitEdge}
-        onAdd={() => {
+        onAdd={(shell) => {
           focusGroup();
-          onAddTab();
+          if (shell !== undefined) {
+            onAddTab(shell);
+          } else {
+            onAddTab();
+          }
         }}
         onAddBrowser={(url, profileId) => {
           focusGroup();

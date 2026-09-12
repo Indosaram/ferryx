@@ -89,12 +89,13 @@ export function TerminalPane({
   const descId = useId();
 
   const isSshSession = isRemoteWorkspaceId(session.workspaceId);
+  const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
   const remoteState = session.remoteConnectionState;
-  const isSshReconnecting = isSshSession && remoteState === "reconnecting";
+  const isSshReconnecting = isSshSession && (remoteState === "reconnecting" || isSpawning);
   const isSshDisconnected =
-    isSshSession && (remoteState === "disconnected" || (!remoteState && (session.backendSessionId === null || session.lifecycle === "exited")));
-  const isSshExpired = isSshSession && (remoteState === "expired" || remoteState === "missing");
-  const isSshLegacyLost = isSshSession && remoteState === "legacyLost";
+    isSshSession && !isSpawning && (remoteState === "disconnected" || (!remoteState && (session.backendSessionId === null || session.lifecycle === "exited")));
+  const isSshExpired = isSshSession && !isSpawning && (remoteState === "expired" || remoteState === "missing");
+  const isSshLegacyLost = isSshSession && !isSpawning && remoteState === "legacyLost";
   const showSshOverlay = isSshSession && (isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
   const isExited = isSshSession ? showSshOverlay : session.backendSessionId === null || session.lifecycle === "exited";
   const affordance = getAgentReconnectAffordance(session, sessions);
@@ -112,7 +113,7 @@ export function TerminalPane({
   const logo = resolveAgentLogo(effectiveAgentType);
   const isMonochrome = isMonochromeAgentLogo(effectiveAgentType);
 
-  const isPending = pendingLocal || (isSshSession ? isSshReconnecting : affordance.isReconnecting);
+  const isPending = pendingLocal || isSpawning || (isSshSession ? isSshReconnecting : affordance.isReconnecting);
   const errorDescription =
     replacementError ?? (isSshSession ? session.remoteFailure?.message ?? null : resolveAffordanceErrorDescription(affordance));
 

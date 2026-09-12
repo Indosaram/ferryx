@@ -99,3 +99,31 @@ fn ssh_reconnect_safety_retry_is_additive_protocol() {
     assert!(matches!(request, DaemonRequest::RetryRemoteSession { session_id } if session_id == "original"));
     assert_eq!(DAEMON_PROTOCOL_VERSION, 3);
 }
+
+#[tokio::test]
+async fn ssh_reconnect_safety_atomic_attach_remote_generation_consistency() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(serde_json::json!({
+        "backendSessionId":"atomic-gen-backend", "target":{"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"target"},
+        "config":{"host":{"id":"host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:abcd","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId":"req","remoteCursor":"1","cols":80,"rows":24
+    })).unwrap();
+    server.terminal_service.remote().restore(descriptor).unwrap();
+    server.terminal_service.output_hub().publish("atomic-gen-backend", b"initial query\x1b[6n".to_vec());
+
+    // Call attach_remote_with_sequence directly to verify that the generation is atomically bound to the snapshot
+    let (attachment, gen) = server.terminal_service.attach_remote_with_sequence("atomic-gen-backend", None).unwrap();
+    assert_eq!(gen, Some(1));
+    assert_eq!(attachment.snapshot.history, b"initial query\x1b[6n");
+
+    // Advance generation via disconnect + retry
+    let entry = server.terminal_service.remote().entry_for_test("atomic-gen-backend").unwrap();
+    entry.state.lock().details.state = crate::terminal::remote::RemoteConnectionState::Disconnected;
+    server.terminal_service.remote().retry("atomic-gen-backend").unwrap();
+
+    // The next atomic attachment snapshot immediately reflects the updated generation
+    let (attachment2, gen2) = server.terminal_service.attach_remote_with_sequence("atomic-gen-backend", None).unwrap();
+    assert_eq!(gen2, Some(2));
+    assert_eq!(attachment2.snapshot.history, b"initial query\x1b[6n");
+}

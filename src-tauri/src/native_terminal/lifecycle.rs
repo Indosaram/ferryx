@@ -42,6 +42,8 @@ pub fn create_native_terminal(
     let context = Box::new(TerminalContext {
         bell_counter: AtomicU64::new(0),
         title_updated: AtomicBool::new(false),
+        pty_writes_suppressed: AtomicBool::new(false),
+        remote_generation: parking_lot::Mutex::new(None),
         write_pty_buffer: parking_lot::Mutex::new(Vec::new()),
         pty_write_tx: parking_lot::Mutex::new(None),
     });

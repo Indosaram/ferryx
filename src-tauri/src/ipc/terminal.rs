@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, Response};
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const TERMINAL_OUTPUT_EVENT: &str = "terminal_output";
 pub const TERMINAL_LIFECYCLE_EVENT: &str = "terminal_lifecycle";
@@ -586,7 +586,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
 
     let cols = request.cols.unwrap_or(80);
     let rows = request.rows.unwrap_or(24);
-    let spawn_result = if crate::ssh::projects::is_remote(&request.workspace_id) {
+    let is_remote_workspace = crate::ssh::projects::is_remote(&request.workspace_id);
+    let spawn_result = if is_remote_workspace {
         if request.startup.is_some() {
             return Err(crate::ssh::projects::unsupported());
         }
@@ -741,9 +742,15 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     };
 
     let session_id = spawn_result.session_id.clone();
+    if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+        host.mark_pending_startup(&session_id);
+    }
     let attachment = match daemon_client.attach(&session_id, None).await {
         Ok(attachment) => attachment,
         Err(err) => {
+            if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+                host.clear_pending_session(&session_id);
+            }
             eprintln!(
                 "[cmd_terminal_spawn] stage=daemon_attach failed code={:?}",
                 err.code
@@ -760,6 +767,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         reason: None,
     };
     if let Err(error) = app.emit(TERMINAL_LIFECYCLE_EVENT, started) {
+        if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+            host.clear_pending_session(&session_id);
+        }
         eprintln!("[cmd_terminal_spawn] stage=emit_lifecycle failed");
         let _ = daemon_client.close_terminal(&session_id).await;
         return Err(IpcError::internal(format!(

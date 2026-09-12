@@ -1035,6 +1035,7 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                                     pty_cols: Some(90),
                                     pty_rows: Some(30),
                                     history_segments: vec![],
+                                    remote_generation: None,
                                 }
                             }
                             _ => DaemonResponse::Pong,

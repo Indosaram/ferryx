@@ -186,6 +186,28 @@ impl TerminalService {
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))
     }
 
+    /// Attaches to a session while snapshotting remote generation under the remote state lock.
+    ///
+    /// For remote sessions, this holds the entry's state lock while taking the hub snapshot,
+    /// guaranteeing that the generation and history snapshot are atomically consistent and
+    /// cannot race a concurrent reconnect/retry advancing generation.
+    pub fn attach_remote_with_sequence(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<(SessionAttachment, Option<u64>), PtyError> {
+        if self.remote.contains(session_id) {
+            let (attachment, generation) = self
+                .remote
+                .attach_snapshot_with_generation(session_id, after_sequence)
+                .map_err(|_| PtyError::SessionNotFound(session_id.to_string()))?;
+            Ok((attachment, Some(generation)))
+        } else {
+            let attachment = self.attach_with_sequence(session_id, after_sequence)?;
+            Ok((attachment, None))
+        }
+    }
+
     pub fn write_input(&self, session_id: &str, data: &[u8]) -> Result<(), PtyError> {
         if self.remote.contains(session_id) {
             return Err(PtyError::Other(

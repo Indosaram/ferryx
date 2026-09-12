@@ -149,14 +149,31 @@ impl NativeTerminal {
         })
     }
 
-    pub fn set_pty_write_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+    pub fn set_pty_write_sender(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<super::bell::PtyWriteRecord>,
+    ) {
         let mut guard = self.context.pty_write_tx.lock();
         let mut buffer = self.context.write_pty_buffer.lock();
         if !buffer.is_empty() {
             let drained = std::mem::take(&mut *buffer);
-            let _ = tx.send(drained);
+            for record in drained {
+                let _ = tx.send(record);
+            }
         }
         *guard = Some(tx);
+    }
+
+    /// Sets the authoritative remote generation for tagging outbound VT query responses.
+    pub fn set_remote_generation(&self, generation: Option<u64>) {
+        *self.context.remote_generation.lock() = generation;
+    }
+
+    /// Suppresses or resumes PTY writes from VT callbacks (used during historical replay and Lagged recovery).
+    pub fn set_pty_writes_suppressed(&self, suppressed: bool) {
+        self.context
+            .pty_writes_suppressed
+            .store(suppressed, Ordering::Release);
     }
 
     /// Drains and discards buffered PTY writes without delivering them.
@@ -166,6 +183,11 @@ impl NativeTerminal {
     /// into the live process.
     pub fn discard_buffered_pty_writes(&self) {
         self.context.write_pty_buffer.lock().clear();
+    }
+
+    /// Returns a copy of currently buffered PTY writes (for inspection and tests).
+    pub fn buffered_pty_writes(&self) -> Vec<super::bell::PtyWriteRecord> {
+        self.context.write_pty_buffer.lock().clone()
     }
 
     pub(crate) fn synchronized_output_enabled(&self) -> Result<bool, NativeTerminalError> {

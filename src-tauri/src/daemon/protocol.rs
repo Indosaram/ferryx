@@ -316,6 +316,8 @@ pub enum DaemonResponse {
         pty_rows: Option<u16>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         history_segments: Vec<HistorySegmentWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_generation: Option<u64>,
     },
     SaveSessionOk,
     #[serde(rename_all = "camelCase")]
@@ -714,6 +716,7 @@ mod tests {
             pty_cols: None,
             pty_rows: None,
             history_segments: Vec::new(),
+            remote_generation: None,
         };
         let resp_json = serde_json::to_string(&attach_resp).expect("serialize attach resp");
         assert!(!resp_json.contains('['));
@@ -734,6 +737,7 @@ mod tests {
                 pty_cols,
                 pty_rows,
                 history_segments,
+                remote_generation,
             } => {
                 assert_eq!(epoch, 12345);
                 assert_eq!(session_id, "term-1");
@@ -744,6 +748,7 @@ mod tests {
                 assert_eq!(pty_cols, None);
                 assert_eq!(pty_rows, None);
                 assert_eq!(history_segments, Vec::<HistorySegmentWire>::new());
+                assert_eq!(remote_generation, None);
             }
             _ => panic!("Expected AttachOk variant"),
         }
@@ -763,6 +768,7 @@ mod tests {
                 pty_cols,
                 pty_rows,
                 history_segments,
+                remote_generation,
             } => {
                 assert_eq!(epoch, 12345);
                 assert_eq!(session_id, "term-1");
@@ -773,6 +779,7 @@ mod tests {
                 assert_eq!(pty_cols, None);
                 assert_eq!(pty_rows, None);
                 assert_eq!(history_segments, Vec::<HistorySegmentWire>::new());
+                assert_eq!(remote_generation, None);
             }
             _ => panic!("Expected AttachOk variant"),
         }
@@ -799,6 +806,7 @@ mod tests {
                     bytes: b"B".to_vec(),
                 },
             ],
+            remote_generation: None,
         };
         let seg_resp_json =
             serde_json::to_string(&segmented_attach_resp).expect("serialize segmented attach resp");
@@ -841,6 +849,7 @@ mod tests {
             pty_cols: Some(120),
             pty_rows: Some(30),
             history_segments: Vec::new(),
+            remote_generation: None,
         };
         let sized_resp_json =
             serde_json::to_string(&sized_attach_resp).expect("serialize sized attach resp");

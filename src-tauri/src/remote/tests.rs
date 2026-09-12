@@ -3916,6 +3916,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                                 pty_cols: Some(80),
                                 pty_rows: Some(24),
                                 history_segments: Vec::new(),
+                                remote_generation: None,
                             })
                             .unwrap()
                                 + "\n";
@@ -4227,6 +4228,7 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                                 pty_cols: Some(80),
                                 pty_rows: Some(24),
                                 history_segments: Vec::new(),
+                                remote_generation: None,
                             })
                             .unwrap()
                                 + "\n";

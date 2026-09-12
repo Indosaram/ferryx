@@ -6,12 +6,21 @@ use parking_lot::Mutex;
 
 use super::sys::types::GhosttyTerminal;
 
+/// A pending or in-flight PTY write record holding its observed generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PtyWriteRecord {
+    pub generation: Option<u64>,
+    pub data: Vec<u8>,
+}
+
 /// Shared thread-safe event context attached via GHOSTTY_TERMINAL_OPT_USERDATA.
 pub struct TerminalContext {
     pub bell_counter: AtomicU64,
     pub title_updated: AtomicBool,
-    pub write_pty_buffer: Mutex<Vec<u8>>,
-    pub pty_write_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
+    pub pty_writes_suppressed: AtomicBool,
+    pub remote_generation: Mutex<Option<u64>>,
+    pub write_pty_buffer: Mutex<Vec<PtyWriteRecord>>,
+    pub pty_write_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<PtyWriteRecord>>>,
 }
 
 /// Safe C callback for terminal BEL character (0x07) events.
@@ -60,20 +69,29 @@ pub unsafe extern "C" fn terminal_write_pty_callback(
     // SAFETY: FFI pointer dereference invariant.
     // userdata is guaranteed by NativeTerminal to point to a valid pinned heap TerminalContext.
     let ctx = unsafe { &*(userdata as *const TerminalContext) };
+    if ctx.pty_writes_suppressed.load(Ordering::Acquire) {
+        return;
+    }
+    let generation = *ctx.remote_generation.lock();
     let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+    let record = PtyWriteRecord {
+        generation,
+        data: bytes,
+    };
     if let Some(guard) = ctx.pty_write_tx.try_lock() {
         if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(bytes);
+            let _ = tx.send(record);
             return;
         }
     }
     if let Some(mut guard) = ctx.write_pty_buffer.try_lock() {
         // Bound the buffer: observer terminals with no PTY writer registered (e.g.
         // RemoteTerminalMirror) must not accumulate VT responses without limit.
+        // Cap by whole records to avoid truncating escape sequences.
         const MAX_WRITE_PTY_BUFFER: usize = 16 * 1024;
-        if guard.len() < MAX_WRITE_PTY_BUFFER {
-            let take = (MAX_WRITE_PTY_BUFFER - guard.len()).min(bytes.len());
-            guard.extend_from_slice(&bytes[..take]);
+        let current_bytes: usize = guard.iter().map(|r| r.data.len()).sum();
+        if current_bytes + record.data.len() <= MAX_WRITE_PTY_BUFFER {
+            guard.push(record);
         }
     }
 }

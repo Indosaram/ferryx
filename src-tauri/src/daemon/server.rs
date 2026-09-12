@@ -1814,13 +1814,13 @@ impl DaemonServer {
                     if let Err(error) = self.validate_session_ssh_target(&session_id).await {
                         DaemonResponse::Error { message: error.to_string() }
                     } else if self.session_router.is_local_session(&session_id) {
-                        let remote = self.terminal_service.remote().details(&session_id);
+                        let is_remote = self.terminal_service.remote().contains(&session_id);
                         match self
                             .terminal_service
-                            .attach_with_sequence(&session_id, if remote.is_some() { None } else { after_sequence })
+                            .attach_remote_with_sequence(&session_id, if is_remote { None } else { after_sequence })
                         {
-                            Ok(mut attachment) => {
-                                if remote.is_some() {
+                            Ok((mut attachment, remote_generation)) => {
+                                if is_remote {
                                     attachment.snapshot.gap = Some(crate::terminal::output_hub::ReplayGap {
                                         requested_after_sequence: after_sequence.unwrap_or(0),
                                         available_from_sequence: attachment.snapshot.history_start_sequence.unwrap_or(1),
@@ -1830,7 +1830,7 @@ impl DaemonServer {
                                     .terminal_service
                                     .get_session(&session_id)
                                     .map(|s| s.get_size())
-                                    .or_else(|| remote.as_ref().map(|d| (d.descriptor.cols, d.descriptor.rows)))
+                                    .or_else(|| self.terminal_service.remote().details(&session_id).map(|d| (d.descriptor.cols, d.descriptor.rows)))
                                     .map(|(c, r)| (Some(c), Some(r)))
                                     .unwrap_or((None, None));
                                 let hub = Arc::clone(self.terminal_service.output_hub());
@@ -1854,6 +1854,7 @@ impl DaemonServer {
                                     pty_cols,
                                     pty_rows,
                                     history_segments,
+                                    remote_generation,
                                 };
                                 let mut resp_json = serde_json::to_string(&resp).unwrap();
                                 resp_json.push('\n');

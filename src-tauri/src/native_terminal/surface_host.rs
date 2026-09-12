@@ -1,6 +1,6 @@
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, PhysicalSize, Runtime, Window};
@@ -290,6 +290,7 @@ pub struct NativeTerminalSession {
     pub stream_task: Option<tokio::task::JoinHandle<()>>,
     pub pump_task: Option<tokio::task::JoinHandle<()>>,
     pub pty_write_task: Option<tokio::task::JoinHandle<()>>,
+    pub is_remote: bool,
     pub remote_generation: Option<u64>,
     pub last_sequence: Option<u64>,
     pub update_sender: tokio::sync::watch::Sender<()>,
@@ -330,6 +331,29 @@ pub struct NativeTerminalSurfaceHostState {
     sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
     pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
+    pending_startups: Arc<Mutex<HashSet<String>>>,
+}
+
+impl NativeTerminalSurfaceHostState {
+    /// Marks a session as freshly spawned so its initial startup VT queries (e.g. CPR) are preserved.
+    pub fn mark_pending_startup(&self, session_id: &str) {
+        self.pending_startups.lock().insert(session_id.to_string());
+    }
+
+    /// Checks if a session has an unconsumed pending startup marker.
+    pub fn is_pending_startup(&self, session_id: &str) -> bool {
+        self.pending_startups.lock().contains(session_id)
+    }
+
+    /// Consumes the pending startup marker if present.
+    pub fn consume_pending_startup(&self, session_id: &str) -> bool {
+        self.pending_startups.lock().remove(session_id)
+    }
+
+    /// Clears any pending startup markers for a session.
+    pub fn clear_pending_session(&self, session_id: &str) {
+        self.pending_startups.lock().remove(session_id);
+    }
 }
 
 fn dispatch_scheduled_render<R: Runtime>(
@@ -478,6 +502,7 @@ impl Clone for NativeTerminalSurfaceHostState {
             sessions: Arc::clone(&self.sessions),
             event_sink: Arc::clone(&self.event_sink),
             pty_resize_sink: Arc::clone(&self.pty_resize_sink),
+            pending_startups: Arc::clone(&self.pending_startups),
         }
     }
 }
@@ -489,6 +514,7 @@ impl Default for NativeTerminalSurfaceHostState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_sink: Arc::new(RwLock::new(None)),
             pty_resize_sink: Arc::new(RwLock::new(None)),
+            pending_startups: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -992,6 +1018,7 @@ impl NativeTerminalSurfaceHostState {
                         stream_task: None,
                         pump_task: None,
                         pty_write_task: None,
+                        is_remote: false,
                         remote_generation: None,
                         last_sequence: None,
                         update_sender,
@@ -1266,6 +1293,9 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
 
+        let is_fresh_startup = self.consume_pending_startup(session_id);
+        let is_remote = attachment.remote_generation.is_some();
+        let initial_generation = attachment.remote_generation;
         let initial_dims = (80, 24);
 
         let (update_sender, render_coordinator, events) = {
@@ -1285,6 +1315,13 @@ impl NativeTerminalSurfaceHostState {
                 if let Some(task) = session.pty_write_task.take() {
                     task.abort();
                 }
+                if is_remote {
+                    session.is_remote = true;
+                    if initial_generation.is_some() {
+                        session.remote_generation = initial_generation;
+                        session.terminal.set_remote_generation(initial_generation);
+                    }
+                }
                 if attachment.history_segments.is_empty() {
                     if let (Some(cols), Some(rows)) = (attachment.pty_cols, attachment.pty_rows) {
                         if session.terminal.dimensions()? != (cols, rows) {
@@ -1302,12 +1339,28 @@ impl NativeTerminalSurfaceHostState {
                 }
                 let was_bracketed = session.bracketed_paste_seen
                     || session.terminal.bracketed_paste_enabled().unwrap_or(false);
-                session.terminal.reset();
-                feed_attachment_history(
-                    &mut session.terminal,
-                    &attachment.history,
-                    &attachment.history_segments,
-                )?;
+                if !is_fresh_startup {
+                    // An existing resident session re-attaching is display reconstruction:
+                    // suppress and discard buffered writes so scrollback queries are not re-emitted.
+                    session.terminal.discard_buffered_pty_writes();
+                    session.terminal.set_pty_writes_suppressed(true);
+                    session.terminal.reset();
+                    feed_attachment_history(
+                        &mut session.terminal,
+                        &attachment.history,
+                        &attachment.history_segments,
+                    )?;
+                    session.terminal.set_pty_writes_suppressed(false);
+                    session.terminal.discard_buffered_pty_writes();
+                } else {
+                    // Fresh startup (even if prepare_session_layout created the session placeholder):
+                    // do NOT suppress or discard PTY writes!
+                    feed_attachment_history(
+                        &mut session.terminal,
+                        &attachment.history,
+                        &attachment.history_segments,
+                    )?;
+                }
                 if was_bracketed && !session.terminal.bracketed_paste_enabled().unwrap_or(false) {
                     let _ = session.terminal.feed_str("\x1b[?2004h");
                     session.bracketed_paste_seen = true;
@@ -1346,11 +1399,24 @@ impl NativeTerminalSurfaceHostState {
                     );
                 }
                 let _ = terminal.set_scrollback_limit_lines(Some(prefs.scrollback));
-                feed_attachment_history(
-                    &mut terminal,
-                    &attachment.history,
-                    &attachment.history_segments,
-                )?;
+                terminal.set_remote_generation(initial_generation);
+                if !is_fresh_startup {
+                    // Display reconstruction of an existing session: suppress PTY writes
+                    terminal.set_pty_writes_suppressed(true);
+                    feed_attachment_history(
+                        &mut terminal,
+                        &attachment.history,
+                        &attachment.history_segments,
+                    )?;
+                    terminal.discard_buffered_pty_writes();
+                    terminal.set_pty_writes_suppressed(false);
+                } else {
+                    feed_attachment_history(
+                        &mut terminal,
+                        &attachment.history,
+                        &attachment.history_segments,
+                    )?;
+                }
                 let _ = terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 let bracketed_paste_seen = terminal.bracketed_paste_enabled().unwrap_or(false);
                 // A fresh session created by an attach owns a surface by definition.
@@ -1368,7 +1434,8 @@ impl NativeTerminalSurfaceHostState {
                         stream_task: None,
                         pump_task: None,
                         pty_write_task: None,
-                        remote_generation: None,
+                        is_remote,
+                        remote_generation: initial_generation,
                         last_sequence: attachment.end_sequence,
                         update_sender: update_sender.clone(),
                         detach_sender: tokio::sync::watch::channel(()).0,
@@ -1404,7 +1471,7 @@ impl NativeTerminalSurfaceHostState {
         let hosts = Arc::clone(&self.hosts);
         let event_sink = Arc::clone(&self.event_sink);
         let session_id_owned = session_id.to_string();
-        let app_handle = app;
+        let app_handle = app.clone();
         let pump_task = tokio::spawn(async move {
             let schedule_render = || {
                 if render_coordinator.schedule_render() {
@@ -1530,6 +1597,7 @@ impl NativeTerminalSurfaceHostState {
                             if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
                                 let was_bracketed = sess.bracketed_paste_seen
                                     || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
+                                sess.terminal.set_pty_writes_suppressed(true);
                                 sess.terminal.reset();
                                 let parsed_segments: Vec<HistorySegment> = segments
                                     .into_iter()
@@ -1550,6 +1618,8 @@ impl NativeTerminalSurfaceHostState {
                                         "Failed to feed recovery history to native terminal"
                                     );
                                 }
+                                sess.terminal.set_pty_writes_suppressed(false);
+                                sess.terminal.discard_buffered_pty_writes();
                                 if was_bracketed
                                     && !sess.terminal.bracketed_paste_enabled().unwrap_or(false)
                                 {
@@ -1690,7 +1760,9 @@ impl NativeTerminalSurfaceHostState {
                         {
                             let mut sessions_guard = sessions.lock();
                             if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                                sess.is_remote = true;
                                 sess.remote_generation = Some(generation);
+                                sess.terminal.set_remote_generation(Some(generation));
                             }
                         }
                         if let Some(app) = app_handle.as_ref() {
@@ -1714,66 +1786,113 @@ impl NativeTerminalSurfaceHostState {
         });
 
         let pty_write_task = if let Some(daemon_client) = daemon_client {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::native_terminal::bell::PtyWriteRecord>();
             {
                 let sessions_guard = self.sessions.lock();
                 if let Some(session) = sessions_guard.get(session_id) {
-                    // A re-attach of an existing session (gap recovery) replays
-                    // scrollback through the emulator, which answers stale VT
-                    // queries into the buffer; those responses must not be echoed
-                    // into the live process. Only fresh initial startups flush.
-                    let lagged_recovery =
-                        attachment.gap.is_some() || attachment.start_sequence.unwrap_or(0) > 1;
-                    if lagged_recovery {
-                        session.terminal.discard_buffered_pty_writes();
-                    }
                     session.terminal.set_pty_write_sender(tx);
                 }
             }
             let client = daemon_client.clone();
             let sessions = Arc::clone(&self.sessions);
             let id = session_id.to_string();
+            let app_handle_for_writer = app.as_ref().map(|a| a.clone());
             Some(tokio::spawn(async move {
-                while let Some(bytes) = rx.recv().await {
-                    let generation = sessions.lock().get(&id).and_then(|s| s.remote_generation);
-                    let Some(generation) = generation else {
-                        // Local session (or remote generation not yet observed):
-                        // the daemon fails generation-less writes closed for
-                        // remote sessions, so this only delivers locally.
-                        let _ = client.write_terminal_at_generation(&id, None, bytes).await;
-                        continue;
+                while let Some(record) = rx.recv().await {
+                    let crate::native_terminal::bell::PtyWriteRecord { generation: orig_gen, data } = record;
+                    let (is_remote, current_gen) = {
+                        let guard = sessions.lock();
+                        let sess = guard.get(&id);
+                        (sess.map(|s| s.is_remote).unwrap_or(false), sess.and_then(|s| s.remote_generation))
                     };
-                    let mut retries = 0u32;
-                    loop {
-                        match client
-                            .write_terminal_at_generation(&id, Some(generation), bytes.clone())
-                            .await
-                        {
-                            Ok(()) => break,
-                            Err(err)
-                                if is_busy_error(&err) && retries < 2 =>
-                            {
-                                retries += 1;
-                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                                let current =
-                                    sessions.lock().get(&id).and_then(|s| s.remote_generation);
-                                if current != Some(generation) {
+
+                    if is_remote || orig_gen.is_some() {
+                        let target_gen = match orig_gen {
+                            Some(gen) => {
+                                if current_gen != Some(gen) {
                                     tracing::warn!(
                                         session_id = %id,
-                                        "Discarding terminal pty write after remote generation changed"
+                                        orig_gen = gen,
+                                        current_gen = ?current_gen,
+                                        "Discarding terminal pty write because originating generation no longer matches"
+                                    );
+                                    continue;
+                                }
+                                gen
+                            }
+                            None => {
+                                // Startup reply generated before generation was observed:
+                                // wait up to 2 seconds for pump_task to install remote_generation.
+                                let start = tokio::time::Instant::now();
+                                let mut resolved_gen = None;
+                                while tokio::time::Instant::now() - start < std::time::Duration::from_millis(2000) {
+                                    if let Some(gen) = sessions.lock().get(&id).and_then(|s| s.remote_generation) {
+                                        resolved_gen = Some(gen);
+                                        break;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                }
+                                let Some(gen) = resolved_gen else {
+                                    tracing::warn!(
+                                        session_id = %id,
+                                        "Timed out waiting for remote generation to deliver startup pty write"
+                                    );
+                                    continue;
+                                };
+                                gen
+                            }
+                        };
+
+                        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2000);
+                        let mut backoff_ms = 5u64;
+                        loop {
+                            match client
+                                .write_terminal_at_generation(&id, Some(target_gen), data.clone())
+                                .await
+                            {
+                                Ok(()) => break,
+                                Err(err) if is_busy_error(&err) => {
+                                    let current =
+                                        sessions.lock().get(&id).and_then(|s| s.remote_generation);
+                                    if current != Some(target_gen) {
+                                        tracing::warn!(
+                                            session_id = %id,
+                                            "Discarding terminal pty write after remote generation changed during busy retry"
+                                        );
+                                        break;
+                                    }
+                                    if tokio::time::Instant::now() >= deadline {
+                                        tracing::error!(
+                                            session_id = %id,
+                                            "Exhausted busy retries (2s) delivering VT response to remote session; remote control stalled"
+                                        );
+                                        if let Some(app) = app_handle_for_writer.as_ref() {
+                                            let _ = app.emit("terminal_remote_status", serde_json::json!({
+                                                "sessionId": id,
+                                                "state": "disconnected",
+                                                "generation": target_gen,
+                                                "replayGap": null,
+                                                "failure": { "kind": "network", "message": "Remote terminal control connection timed out" },
+                                            }));
+                                        }
+                                        break;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                                    backoff_ms = (backoff_ms * 2).min(50);
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        session_id = %id,
+                                        %err,
+                                        "Failed to deliver terminal pty write to remote session"
                                     );
                                     break;
                                 }
                             }
-                            Err(err) => {
-                                tracing::warn!(
-                                    session_id = %id,
-                                    %err,
-                                    "Failed to deliver terminal pty write to remote session"
-                                );
-                                break;
-                            }
                         }
+                    } else {
+                        // Local session: deliver locally with None
+                        let _ = client.write_terminal_at_generation(&id, None, data).await;
                     }
                 }
             }))
@@ -1818,6 +1937,7 @@ impl NativeTerminalSurfaceHostState {
 
     /// Discards a session entirely, aborting its daemon stream and pump tasks.
     pub fn close_session(&self, session_id: &str) {
+        self.clear_pending_session(session_id);
         let mut hosts = self.hosts.lock();
         let mut sessions = self.sessions.lock();
         if let Some(mut session) = sessions.remove(session_id) {
@@ -1971,6 +2091,7 @@ impl NativeTerminalSurfaceHostState {
                         stream_task: None,
                         pump_task: None,
                         pty_write_task: None,
+                        is_remote: false,
                         remote_generation: None,
                         last_sequence: None,
                         update_sender,
@@ -2691,7 +2812,7 @@ mod tests {
                             .into_bytes(),
                         history_segments: Vec::new(),
                         pty_cols: Some(80),
-                        pty_rows: Some(24),
+                        pty_rows: Some(24), remote_generation: None,
                         messages,
                         stream_task: tokio::spawn(std::future::pending()),
                     },
@@ -3437,7 +3558,7 @@ mod tests {
                     history: b"retained screen".to_vec(),
                     history_segments: Vec::new(),
                     pty_cols: Some(80),
-                    pty_rows: Some(24),
+                    pty_rows: Some(24), remote_generation: None,
                     messages,
                     stream_task: tokio::spawn(std::future::pending()),
                 },
@@ -3578,7 +3699,7 @@ mod tests {
                 history: format!("\x1b]2;{title}\x07").into_bytes(),
                 history_segments: Vec::new(),
                 pty_cols: None,
-                pty_rows: None,
+                pty_rows: None, remote_generation: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -3919,7 +4040,7 @@ mod tests {
                 history: b"Working (esc to interrupt)\r\n".to_vec(),
                 history_segments: Vec::new(),
                 pty_cols: None,
-                pty_rows: None,
+                pty_rows: None, remote_generation: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -3944,7 +4065,7 @@ mod tests {
                 history: b"Still Working (esc to interrupt)\r\n".to_vec(),
                 history_segments: Vec::new(),
                 pty_cols: None,
-                pty_rows: None,
+                pty_rows: None, remote_generation: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -3968,7 +4089,7 @@ mod tests {
                 history: b"\x1b[2J\x1b[HAction Required: allow command?\r\npress enter to confirm or esc to cancel\r\n".to_vec(),
                 history_segments: Vec::new(),
                 pty_cols: None,
-                pty_rows: None,
+                pty_rows: None, remote_generation: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -4006,7 +4127,7 @@ mod tests {
             history: b"Working (esc to interrupt)\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4069,7 +4190,7 @@ mod tests {
             history: Vec::new(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4147,7 +4268,7 @@ mod tests {
             history: Vec::new(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4239,7 +4360,7 @@ mod tests {
             history: b"orca selection rendering verification\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages: rx,
             stream_task,
         };
@@ -4309,7 +4430,7 @@ mod tests {
             history: b"\x1b[100GX".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(120),
-            pty_rows: Some(30),
+            pty_rows: Some(30), remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4352,7 +4473,7 @@ mod tests {
                 },
             ],
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4385,7 +4506,7 @@ mod tests {
             history: b"hello".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(80),
-            pty_rows: Some(24),
+            pty_rows: Some(24), remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4459,7 +4580,7 @@ mod tests {
             history: text.into_bytes(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4550,7 +4671,7 @@ mod tests {
             history: text.into_bytes(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4615,7 +4736,7 @@ mod tests {
             history: b"Working (esc to interrupt)\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4693,7 +4814,7 @@ mod tests {
             history: b"seed\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None,
+            pty_rows: None, remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4772,7 +4893,7 @@ mod tests {
             history: b"hello\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(80),
-            pty_rows: Some(24),
+            pty_rows: Some(24), remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4824,7 +4945,7 @@ mod tests {
             history: b"hello\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(80),
-            pty_rows: Some(24),
+            pty_rows: Some(24), remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4854,6 +4975,105 @@ mod tests {
             session.terminal.dimensions().expect("terminal dimensions")
         };
         assert_eq!(dims, (80, 24), "terminal should keep existing dimensions");
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn test_fresh_startup_with_bounds_preserves_startup_pty_writes() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-fresh-startup-bounds";
+        state.mark_pending_startup(session_id);
+
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            // Shell emits CPR query during startup
+            history: b"\x1b[6n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            remote_generation: Some(1),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        let initial_bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            scale_factor: 1.0,
+        };
+
+        // Attach with bounds: prepare_session_layout runs first and pre-creates session
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::Wry>(
+                session_id,
+                attachment,
+                None,
+                Some(initial_bounds),
+            )
+            .expect("attach with bounds");
+
+        let buffered_writes = {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            session.terminal.buffered_pty_writes()
+        };
+
+        // H1 regression check: Startup CPR must be retained in buffer with its remote generation, NOT discarded
+        assert!(
+            !buffered_writes.is_empty(),
+            "fresh startup with bounds must retain startup CPR response"
+        );
+        assert_eq!(buffered_writes[0].generation, Some(1));
+        assert!(buffered_writes[0].data.ends_with(b"R"));
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn test_reconstruction_without_pending_startup_discards_buffered_queries() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-reconstruction-discard";
+        // Do NOT mark pending startup: this is a display reconstruction of an existing session
+
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        let attachment = DaemonAttachment {
+            session_id: session_id.to_string(),
+            epoch: 1,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: b"\x1b[6n".to_vec(),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            remote_generation: Some(1),
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        };
+
+        state
+            .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+            .expect("attach reconstruction");
+
+        let buffered_writes = {
+            let sessions = state.sessions.lock();
+            let session = sessions.get(session_id).expect("session exists");
+            session.terminal.buffered_pty_writes()
+        };
+
+        // R7/H1 regression check: Display reconstruction must discard replayed queries
+        assert!(
+            buffered_writes.is_empty(),
+            "display reconstruction must discard replayed query responses"
+        );
 
         state.teardown();
     }

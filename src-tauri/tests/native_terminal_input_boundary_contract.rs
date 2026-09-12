@@ -26,7 +26,7 @@ fn create_attachment(
         epoch: 1,
         start_sequence: None,
         end_sequence: None,
-        gap: None,
+        gap: None, remote_generation: None,
         history: Vec::new(),
         history_segments: Vec::new(),
         pty_cols: None,

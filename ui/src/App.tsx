@@ -1160,6 +1160,7 @@ function WorkspaceApp({
         }
         if (stateRef.current.workspaceId !== targetWorkspaceId || !stateRef.current.sessions[sessionId]) return;
         let spawned: Awaited<ReturnType<typeof spawnTerminalDetailed>> | null = null;
+        let adopted = false;
         try {
           spawned = await spawnTerminalDetailed({
             workspaceId: session.workspaceId,
@@ -1187,9 +1188,14 @@ function WorkspaceApp({
             cwd: spawned.session.cwd ?? session.cwd,
             daemonEpoch: spawned.daemonEpoch,
           });
-          await persistSessionStrict(targetWorkspaceId, activeProject.repoRoot, nextState);
+          adopted = true;
+          try {
+            await persistSessionStrict(targetWorkspaceId, activeProject.repoRoot, nextState);
+          } catch (persistError) {
+            reportRuntimeError(persistError);
+          }
         } catch (error) {
-          if (spawned) await closeTerminal(spawned.sessionId).catch(() => undefined);
+          if (spawned && !adopted) await closeTerminal(spawned.sessionId).catch(() => undefined);
           reportRuntimeError(error);
           throw error;
         }
