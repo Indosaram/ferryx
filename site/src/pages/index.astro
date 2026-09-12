@@ -101,10 +101,14 @@ const structuredData = {
             <p class="mx-auto mt-4 max-w-2xl text-[15px] leading-relaxed text-ink-soft">This live preview mounts the genuine Ferryx sidebar, tab bar, and split terminal view against a mocked backend, so you can explore the multi-agent workspace layout before you install anything.</p>
           </div>
           <div class="relative">
-            <div
-              class="absolute inset-x-0 top-0 h-[860px] bg-cover bg-center scale-105 blur-[1px]"
-              style={`background-image: url('${baseUrl}demo-bg.jpg');`}
-            />
+            <!-- The clip matters: scale-105 exists to hide the blur's soft edges, and without it
+                 the image overflows the wash below and leaves an unwashed bright band on top. -->
+            <div class="absolute inset-x-0 top-0 h-[860px] overflow-hidden">
+              <div
+                class="h-full w-full bg-cover bg-center scale-105 blur-[1px]"
+                style={`background-image: url('${baseUrl}demo-bg.jpg');`}
+              />
+            </div>
             <div class="absolute inset-x-0 top-0 h-[860px] bg-demo-wash" />
             <div class="relative mx-auto max-w-5xl px-4 sm:px-6 pt-20">
               <LiveFerryxDemo client:only="react" />
