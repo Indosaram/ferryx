@@ -50,6 +50,20 @@ type TabBarProps = {
   activityByTabId?: Record<string, ActivitySummary | undefined>;
 };
 
+const WINDOWS_SHELL_OPTIONS = [
+  { id: "new-terminal:pwsh", shell: "pwsh", label: "PowerShell" },
+  { id: "new-terminal:powershell", shell: "powershell", label: "Windows PowerShell" },
+  { id: "new-terminal:cmd", shell: "cmd", label: "Command Prompt" },
+  { id: "new-terminal:wsl", shell: "wsl", label: "WSL" },
+] as const;
+
+function isWindowsPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const platform = typeof navigator.platform === "string" ? navigator.platform : "";
+  const userAgent = typeof navigator.userAgent === "string" ? navigator.userAgent : "";
+  return platform.toLowerCase().startsWith("win") || userAgent.includes("Windows");
+}
+
 export function TabBar({
   groupId = "group-default",
   tabs,
@@ -85,6 +99,7 @@ export function TabBar({
   const addButtonRef = useRef<HTMLDivElement>(null);
   const menuUnlistenRef = useRef<(() => void) | null>(null);
   const isMac = isMacShortcutPlatform();
+  const isWindows = isWindowsPlatform();
   const { settings: browserSettings } = useBrowserSettings();
 
   useEffect(() => {
@@ -128,13 +143,24 @@ export function TabBar({
         label: "New Terminal",
         shortcut: shortcutLabel("tab.newTerminal", isMac),
       },
-      {
-        kind: "item",
-        id: "new-browser",
-        label: "New Browser Tab",
-        shortcut: shortcutLabel("tab.newBrowser", isMac),
-      },
     ];
+    if (isWindows) {
+      items.push({
+        kind: "submenu",
+        label: "New Terminal Profile",
+        items: WINDOWS_SHELL_OPTIONS.map((option) => ({
+          kind: "item",
+          id: option.id,
+          label: option.label,
+        })),
+      });
+    }
+    items.push({
+      kind: "item",
+      id: "new-browser",
+      label: "New Browser Tab",
+      shortcut: shortcutLabel("tab.newBrowser", isMac),
+    });
     if (onAddMarkdown) {
       items.push({
         kind: "item",
@@ -185,6 +211,11 @@ export function TabBar({
       "new-browser": () => onAddBrowser?.(newBrowserTabUrl(browserSettings)),
       "agent-settings": () => onOpenSettings?.(),
     };
+    if (isWindows) {
+      for (const option of WINDOWS_SHELL_OPTIONS) {
+        actions[option.id] = () => onAdd(option.shell);
+      }
+    }
     if (onAddMarkdown) actions["new-markdown"] = () => onAddMarkdown();
     if (onAddMobileEmulator) actions["new-mobile-emulator"] = () => onAddMobileEmulator();
     if (onLaunchAgent) {

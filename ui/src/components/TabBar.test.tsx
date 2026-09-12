@@ -45,13 +45,28 @@ function menuItems() {
   return nativeMenu.lastCall.items;
 }
 
+function findEntryRecursively(
+  items: Array<Record<string, unknown>>,
+  idOrLabel: string,
+): { id: string; label: string; enabled?: boolean } | undefined {
+  for (const item of items) {
+    if (
+      (item as { id?: string }).id === idOrLabel ||
+      ((item as { label?: string }).label ?? "").includes(idOrLabel)
+    ) {
+      return item as { id: string; label: string; enabled?: boolean };
+    }
+    if (item.kind === "submenu" && Array.isArray(item.items)) {
+      const found = findEntryRecursively(item.items as Array<Record<string, unknown>>, idOrLabel);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 function menuItem(idOrLabel: string) {
   const items = menuItems();
-  const found = items.find(
-    (item) =>
-      (item as { id?: string }).id === idOrLabel ||
-      ((item as { label?: string }).label ?? "").includes(idOrLabel),
-  );
+  const found = findEntryRecursively(items, idOrLabel);
   if (!found) {
     throw new Error(`menu item not found: ${idOrLabel}; got ${JSON.stringify(items)}`);
   }
@@ -480,5 +495,99 @@ describe("TabBar", () => {
     const tabBarSource = fs.readFileSync(path.resolve(__dirname, "TabBar.tsx"), "utf8");
     expect(tabBarSource).toMatch(/const sortableItems = useMemo\(\(\) => tabs\.map\(/);
     expect(tabBarSource).toMatch(/<SortableContext\s+items=\{sortableItems\}/);
+  });
+
+  it("offers Windows terminal shell options in the new-tab menu on Windows and forwards selected shell to onAdd", () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Windows NT 10.0; Win64; x64",
+        configurable: true,
+      });
+
+      const onAdd = vi.fn();
+      render(
+        <TabBar
+          groupId="group-win"
+          tabs={[terminalTab("tab-1", "main")]}
+          activeTabId="tab-1"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={onAdd}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expect(nativeMenu.lastCall?.command).toBe("cmd_native_new_tab_menu");
+
+      const items = menuItems();
+      const shells = [
+        { id: "new-terminal:pwsh", shell: "pwsh", label: "PowerShell" },
+        { id: "new-terminal:powershell", shell: "powershell", label: "Windows PowerShell" },
+        { id: "new-terminal:cmd", shell: "cmd", label: "Command Prompt" },
+        { id: "new-terminal:wsl", shell: "wsl", label: "WSL" },
+      ];
+
+      for (const target of shells) {
+        const found = findEntryRecursively(items, target.label);
+        expect(found).toBeDefined();
+        expect(found?.id).toBe(target.id);
+
+        act(() => {
+          nativeMenu.lastCall?.onAction(target.id);
+        });
+        expect(onAdd).toHaveBeenLastCalledWith(target.shell);
+      }
+
+      // Default generic action invokes onAdd without shell
+      act(() => {
+        nativeMenu.lastCall?.onAction("new-terminal");
+      });
+      expect(onAdd).toHaveBeenLastCalledWith();
+    } finally {
+      Object.defineProperty(navigator, "platform", { value: originalPlatform, configurable: true });
+      Object.defineProperty(navigator, "userAgent", { value: originalUserAgent, configurable: true });
+    }
+  });
+
+  it("does not offer Windows shell options in the new-tab menu on non-Windows platforms", () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        configurable: true,
+      });
+
+      const onAdd = vi.fn();
+      render(
+        <TabBar
+          groupId="group-mac"
+          tabs={[terminalTab("tab-1", "main")]}
+          activeTabId="tab-1"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={onAdd}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expect(nativeMenu.lastCall?.command).toBe("cmd_native_new_tab_menu");
+
+      const items = menuItems();
+      expect(findEntryRecursively(items, "Command Prompt")).toBeUndefined();
+      expect(findEntryRecursively(items, "new-terminal:cmd")).toBeUndefined();
+      expect(findEntryRecursively(items, "new-terminal:pwsh")).toBeUndefined();
+      expect(findEntryRecursively(items, "new-terminal:powershell")).toBeUndefined();
+      expect(findEntryRecursively(items, "new-terminal:wsl")).toBeUndefined();
+    } finally {
+      Object.defineProperty(navigator, "platform", { value: originalPlatform, configurable: true });
+      Object.defineProperty(navigator, "userAgent", { value: originalUserAgent, configurable: true });
+    }
   });
 });
