@@ -43,17 +43,26 @@ expected base, which is what catches a half-applied prefix change.
 
 ## Deployment
 
-`site/wrangler.jsonc` declares the Worker, the asset directory and both custom domains, so
-`wrangler deploy` reproduces the whole routing setup rather than depending on dashboard
-state. `.github/workflows/deploy-cloudflare.yml` runs the same build and deploy in CI.
+Deploys are manual and run from a laptop, so that publishing is a deliberate act rather than
+a side effect of merging. There is no CI deploy workflow, and adding one would need a
+`CLOUDFLARE_API_TOKEN` repository secret, because a `wrangler login` OAuth session cannot be
+used outside an interactive machine.
 
-Two repository secrets are required for CI:
+```sh
+bun run --cwd site deploy
+```
 
-- `CLOUDFLARE_API_TOKEN`, a custom token with Account, Workers Scripts, Edit, plus Zone,
-  Workers Routes, Edit on `ferryx.dev`.
-- `CLOUDFLARE_ACCOUNT_ID`.
+That builds with the production origin and deploys both Workers. Use it rather than calling
+`wrangler deploy` by hand: the build only produces correct URLs when `SITE_URL` is set and
+`BASE_URL` is empty, and the www redirect is a second Worker that is easy to forget.
 
-An OAuth session from `wrangler login` deploys fine from a laptop but cannot be used in CI.
+`site/wrangler.jsonc` declares the Worker, the asset directory and both custom domains, so a
+deploy reproduces the whole routing setup rather than depending on dashboard state.
+
+Cloudflare's own Git integration, Workers Builds, is a poor fit here: it installs
+dependencies in one root directory, while this site also needs `ui/` installed because
+`astro.config.mjs` aliases `@ui` to `../ui/src` and the live demo imports real components
+from it.
 
 ## Two Workers, on purpose
 
