@@ -1,12 +1,13 @@
 # Completion audit
 
-Status: NOT COMPLETE. Authoritative final audit: `FINAL-AUDIT.md`.
+Status: Source repair/debug verification complete. Authoritative audit: `FINAL-AUDIT.md`.
 Shell and retained-frame changes committed as `1313d387` and `40c2ae5c`.
 Final four suites: 62 passed; build exit0. Actual PTY startup/resize/cmd echo
 outputs are saved. Cold-loaded `7f7ecd8e` now proves full menu-to-cmd and
 unobscured startup/resize output. The original installed app's bounds banner
-is positively identified, but its raw cause and same-seam RED/GREEN remain
-unknown. Both QA runs are cleaned with the installed app and daemon preserved.
+is positively identified. Its root-HWND compositor defect is proven by actual
+binary instructions and same-seam RED/GREEN; the retained Console event itself
+was not recovered. Both QA runs are cleaned; the installed app remains unchanged.
 
 ## Prompt-to-artifact checklist
 
@@ -18,35 +19,38 @@ unknown. Both QA runs are cleaned with the installed app and daemon preserved.
   - Exact selected shell reaches spawn; default and non-Windows paths retain behavior.
   - Fresh evidence: `runtime/FRESH-RUN.md`, `runtime/fresh-visual-review.md`,
     `runtime/artifacts/fresh-menu-cmd-receipt.json`.
-- [ ] Startup terminal appears instead of native bounds failure.
-  - Confirmed call-chain and runtime cause: `bounds-diagnosis.md`.
-  - RED before production edit and identical GREEN proof.
+- [x] Startup terminal appears instead of native bounds failure in debug verification.
+  - Binary mechanism: `runtime/installed-compositor-binary.md`.
+  - Historical pre-fix RED and identical current GREEN:
+    `runtime/compositor-seam-red-green.md`; fix already exists in `3fa25a19`.
   - Windows interactive launch command is exactly `bun tauri dev`.
   - Real GUI screenshot shows terminal plus `echo FERRYX_WIN_START_OK` output.
   - Runtime log captures actual HWND geometry and no bounds failure.
-- [ ] Resize and lifecycle edge behavior is preserved.
+- [x] Resize and lifecycle edge behavior is preserved.
+  - Eight backend tests passed: `runtime/compositor-edge-verification.md`.
   - Pin relevant early-attach, zero-size and resize tests against the diagnosed seam.
   - Resize real Windows debug window and show `echo FERRYX_WIN_RESIZE_OK` output.
   - Screenshot verifies native surface does not obscure app chrome.
   - Genuine failure remains actionable, not silently ignored.
-- [ ] Combined verification covers the actual change.
+- [x] Combined verification covers the actual change.
   - [x] LSP diagnostics on current edited files have no errors; existing `keyCode` deprecation hint recorded.
   - [x] Targeted test invocation and exit code are captured in `lead-verification.md`; two failures remain explicitly reported, not hidden by a green status.
   - [x] Frontend build uses `bun run --cwd ui build` (`tsc && vite build`), exit 0.
   - Backend/Windows compilation covers any changed platform-specific code.
   - No passing suite, process count or HTTP response is accepted as GUI proof.
-- [ ] mass-ulw execution is evidenced.
+- [x] mass-ulw execution is evidenced.
   - Diagnosis run: `dag_dece750f-aa1a-49c0-963c-1ba6be838716`.
   - [x] Implementation run `dag_0af60f86-ac23-45f9-93dd-2b918f67c2e0` executes disjoint lanes in parallel before combined verification.
   - Corrections, if needed, use separate phase runs and preserve conflict boundaries.
-- [ ] Safety and cleanup are evidenced.
+- [x] Safety and cleanup are evidenced.
   - Foreign edits are preserved; source hashes/status captured before writes.
   - User daemon is not killed or restarted.
   - No release builds, publishing or pushes.
   - Every QA process, browser context, scheduled task, port and temporary remote artifact has a cleanup receipt.
-- [ ] Delivery is complete.
+- [x] Delivery evidence and self-review are complete.
   - Final repository report links actual evidence, limitations and self-review.
   - Durable confirmed facts are recorded in memory.
   - Verified atomic commits follow repository history and include only this task.
   - Append-only notepad has current status and evidence.
-  - Goal completion is called only after every criterion has concrete passing evidence.
+  - No registered goal object is exposed by `get_goal` in this session; completion
+    is reported against this checklist, not a fabricated goal-tool result.

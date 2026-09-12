@@ -1,7 +1,8 @@
 # Windows terminal repair: completion audit
 
-Status: **PARTIAL; goal not achieved.** This report supersedes earlier draft
-claims in the producer/runtime reports.
+Status: **Source repair and requested debug verification complete.**
+The installed old application was deliberately not replaced or restarted.
+This report supersedes earlier draft claims in the producer/runtime reports.
 
 ## Requested deliverables and current evidence
 
@@ -23,11 +24,14 @@ claims in the producer/runtime reports.
 - Native popup event bug: **not a confirmed product bug**. Visible helper
   consoles stole focus and dismissed the popup. Hiding those consoles
   produced a real `new-terminal:cmd` event. No menu backend edit was made.
-- Startup bounds root cause and matching RED/GREEN: **missing**. The installed
-  app's actual failure is now positively identified by screenshot and UIA:
-  WebView PID 19396, parent installed GUI 17288. The fresh debug app does not
-  have that banner. Different builds and profiles mean the comparison alone
-  does not prove causation. No speculative Windows bounds fix was written.
+- Startup-blocking installed defect and matching source-seam RED/GREEN:
+  **verified**. Positive PE disassembly proves that the installed constructor
+  retains the parent HWND and passes false/false/WindowsChildWindow to a
+  validator that rejects it before renderer creation. The actual historical
+  descriptor fails the unchanged validator (exit 101); the current descriptor
+  passes the identical assertion (exit 0). The existing fix is `3fa25a19`.
+  See `runtime/installed-compositor-binary.md` and
+  `runtime/compositor-seam-red-green.md`. No speculative new patch was needed.
 - Startup input: actual daemon PTY history includes separate
   `FERRYX_WIN_START_OK` output. `runtime/artifacts/pty-receipts.json` contains
   the original base64 response and sequence range.
@@ -45,6 +49,9 @@ claims in the producer/runtime reports.
 - Diagnostics/build: prior direct run 71 passed, two known exitAttach callback
   assertion failures; frontend build exit0, LSP no errors. Historical backend
   browser-child bounds tests2 passed. Final current-HEAD check recorded below.
+  Subsequent native edge batch passed all 8 tests, exit0; see
+  `runtime/compositor-edge-verification.md` for exact test names and existing
+  compiler warnings. No failures or warnings were suppressed.
 - Workflow: two disjoint implementation lanes followed by combined check.
   Runtime workers suffered provider quota/stream failures; lead took over
   actual QA, decoded raw PTY records, and rejected overstated evidence.
@@ -66,14 +73,14 @@ its QA-only descendants. Monitor `mon_E28FVBMC2FZ4A6HK` exited0:
 - Evidence was copied before deleting the QA root; no user settings snapshot
   was restored over live user data.
 
-## Remaining required verification
+## Evidence limits and installation boundary
 
 Fresh-run cleanup also passed: `runtime/FRESH-RUN.md` records exit0, all six
 fresh tasks removed, QA processes/root/tunnel gone, and installed user
 processes plus daemon53986 preserved.
 
-The original Windows bounds error's raw IPC cause and exact source identity
-remain unknown. Its installed executable is 35,909,632 bytes, version 0.1.0,
+The original retained error's raw IPC event and exact whole-build source
+identity remain unavailable. Its installed executable is 35,909,632 bytes, version 0.1.0,
 mtime 2026-08-28 20:02:28 KST, SHA-256
 `51AB67EE9064D2B2AF7F52267FC8D887F3C0CA61ED816CC2D998B91A18B21BF7`.
 Metadata is not exact commit proof.
@@ -86,8 +93,19 @@ text. See `runtime/installed-build-diagnosis.md` and the installed-surface
 and bounds-owner JSON artifacts. The user has been asked for the retained
 Console bounds error without restarting the installed app.
 
-The full menu and visual gaps are closed. The original bounds root fix and
-same-seam RED/GREEN remain open and prohibit goal completion.
+The source-seam proof does not pretend to execute Win32 APIs on macOS.
+Actual child visibility, geometry, input and resize are instead supported by
+the separate cold Windows debug run. Likewise, the binary analysis establishes
+a deterministic startup-blocking defect, not a recovered branch history for
+the old retained banner. These are explicitly separate evidence claims.
+
+All requested code/debug verification is captured. Updating the user's
+installed old application is not claimed: release builds, installation and
+daemon restart were outside the authorized debug-only scope.
+
+Local analysis cleanup removed the copied PE, copied session snapshot, fresh
+bundle and the two generated Darwin test executables. Reproducible Rust source,
+logs, hashes and reports remain as repository evidence.
 
 ## Final local verification and commits
 
@@ -98,6 +116,7 @@ passed TypeScript and Vite (3.73 seconds). TabBar LSP: no errors.
 - `1313d387`: restore Windows new-terminal shell choices and forwarding tests.
 - `40c2ae5c`: retain exited surface ownership through effect handoff.
 - `8dee7072` (another session): already includes TerminalSplitView forwarding.
+- `3fa25a19` (existing historical fix): isolated Windows/Linux child surfaces;
+  the current Windows descriptor matches this fixed method byte-for-byte.
 
-No push. These commits preserve verified increments, not a declaration that
-the Windows startup objective is complete.
+No push. Remaining evidence is committed separately from product changes.

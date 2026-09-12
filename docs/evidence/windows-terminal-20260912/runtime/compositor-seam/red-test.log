@@ -1,0 +1,23 @@
+command=["docs/evidence/windows-terminal-20260912/runtime/compositor-seam/red-test","--exact","windows_platform_descriptor_passes_desktop_composition_validation","--nocapture","--test-threads=1"]
+started=2026-09-12T16:01:27.592Z
+exitCode=101
+timedOut=false
+STDOUT:
+
+running 1 test
+test windows_platform_descriptor_passes_desktop_composition_validation ... descriptor=PlatformCompositorDescriptor { target_kind: WindowsChildWindow, pointer_transparent: false, layer_backed: false }
+FAILED
+
+failures:
+
+failures:
+    windows_platform_descriptor_passes_desktop_composition_validation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+STDERR:
+
+thread 'windows_platform_descriptor_passes_desktop_composition_validation' (20192438) panicked at docs/evidence/windows-terminal-20260912/runtime/compositor-seam/red.rs:95:47:
+platform descriptor must pass desktop composition validation: GpuPipelineError("Windows native terminal composition target is not layer-backed (child window clipping not established)")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

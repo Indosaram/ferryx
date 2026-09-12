@@ -1,0 +1,7 @@
+command=["rustc","--edition=2021","--test","docs/evidence/windows-terminal-20260912/runtime/compositor-seam/green.rs","-o","docs/evidence/windows-terminal-20260912/runtime/compositor-seam/green-test"]
+started=2026-09-12T16:01:33.500Z
+exitCode=0
+timedOut=false
+STDOUT:
+
+STDERR:
