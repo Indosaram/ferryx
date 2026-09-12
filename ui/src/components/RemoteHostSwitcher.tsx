@@ -1,7 +1,8 @@
-import { Cable, Check, ChevronDown, Laptop, Radio, Wifi } from "lucide-react";
+import { Cable, Check, ChevronDown, Laptop, Plus, Radio, Wifi } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { cn } from "../lib/cn";
+import { PairMachineModal } from "./PairMachineModal";
 import {
   remoteHostStore,
   selectActiveHost,
@@ -82,6 +83,7 @@ type RemoteHostSwitcherProps = {
 export function RemoteHostSwitcher({ className }: RemoteHostSwitcherProps) {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const [open, setOpen] = useState(false);
+  const [pairModalOpen, setPairModalOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const hosts = useMemo(() => selectHostList(state), [state]);
@@ -206,8 +208,24 @@ export function RemoteHostSwitcher({ className }: RemoteHostSwitcherProps) {
               );
             })
           )}
+
+          <div className="my-1 h-px bg-worktree-sidebar-border" />
+          <button
+            type="button"
+            data-testid="pair-remote-machine-button"
+            onClick={() => {
+              setOpen(false);
+              setPairModalOpen(true);
+            }}
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs font-medium text-worktree-sidebar-foreground transition-colors hover:bg-accent"
+          >
+            <Plus className="size-3.5 shrink-0" aria-hidden="true" />
+            <span>Pair Remote Machine...</span>
+          </button>
         </div>
       ) : null}
+
+      <PairMachineModal open={pairModalOpen} onClose={() => setPairModalOpen(false)} />
     </div>
   );
 }

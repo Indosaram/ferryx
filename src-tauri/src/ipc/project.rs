@@ -55,14 +55,38 @@ pub fn initial_project(registry: &WorkspaceRegistry) -> Result<RegisteredProject
             reason: format!("the startup working directory is unavailable: {error}"),
         })
     })?;
-    let canonical = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-    if canonical.parent().is_none() {
-        return Err(IpcError::from(WorktreeError::InvalidPath {
-            path: canonical,
-            reason: "filesystem root cannot be registered as a startup workspace".to_string(),
-        }));
-    }
-    register_canonical_project(registry, &canonical, None)
+    initial_project_from_path(registry, &cwd)
+}
+
+pub fn initial_project_from_path(
+    registry: &WorkspaceRegistry,
+    path: &Path,
+) -> Result<RegisteredProject, IpcError> {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = if canonical.parent().is_none() {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        if let Some(home_path) = home {
+            let canonical_home = std::fs::canonicalize(&home_path).unwrap_or(home_path);
+            if canonical_home.parent().is_some() {
+                canonical_home
+            } else {
+                return Err(IpcError::from(WorktreeError::InvalidPath {
+                    path: canonical,
+                    reason: "filesystem root cannot be registered as a startup workspace".to_string(),
+                }));
+            }
+        } else {
+            return Err(IpcError::from(WorktreeError::InvalidPath {
+                path: canonical,
+                reason: "filesystem root cannot be registered as a startup workspace".to_string(),
+            }));
+        }
+    } else {
+        canonical
+    };
+    register_canonical_project(registry, &target, None)
 }
 
 /// Registers a repository root under exactly one workspace ID.

@@ -75,6 +75,14 @@ const native = {
   onNewTerminalTabMenu: vi.fn(),
   onCloseTabMenu: vi.fn(),
   onSelectWorktreeMenu: vi.fn(),
+  onSelectTabMenu: vi.fn().mockResolvedValue(() => {}),
+  onNextTabMenu: vi.fn().mockResolvedValue(() => {}),
+  onPrevTabMenu: vi.fn().mockResolvedValue(() => {}),
+  onSplitRightMenu: vi.fn().mockResolvedValue(() => {}),
+  onSplitDownMenu: vi.fn().mockResolvedValue(() => {}),
+  onCommandPaletteMenu: vi.fn().mockResolvedValue(() => {}),
+  onToggleSidebarMenu: vi.fn().mockResolvedValue(() => {}),
+  onOpenSettingsMenu: vi.fn().mockResolvedValue(() => {}),
   selectWorktreeMenuHandler: null as ((digit: number) => void) | null,
   onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
   onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
@@ -184,6 +192,14 @@ vi.mock("./lib/tauri", () => ({
   onNewTerminalTabMenu: native.onNewTerminalTabMenu,
   onCloseTabMenu: native.onCloseTabMenu,
   onSelectWorktreeMenu: native.onSelectWorktreeMenu,
+  onSelectTabMenu: native.onSelectTabMenu,
+  onNextTabMenu: native.onNextTabMenu,
+  onPrevTabMenu: native.onPrevTabMenu,
+  onSplitRightMenu: native.onSplitRightMenu,
+  onSplitDownMenu: native.onSplitDownMenu,
+  onCommandPaletteMenu: native.onCommandPaletteMenu,
+  onToggleSidebarMenu: native.onToggleSidebarMenu,
+  onOpenSettingsMenu: native.onOpenSettingsMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
   onTerminalOutput: native.onTerminalOutput,
   publishFocusedTerminal: native.publishFocusedTerminal,
@@ -456,6 +472,22 @@ describe("App project workspace flow", () => {
         if (native.closeMenuHandler === handler) native.closeMenuHandler = null;
       };
     });
+    native.onSelectTabMenu.mockReset();
+    native.onSelectTabMenu.mockResolvedValue(() => {});
+    native.onNextTabMenu.mockReset();
+    native.onNextTabMenu.mockResolvedValue(() => {});
+    native.onPrevTabMenu.mockReset();
+    native.onPrevTabMenu.mockResolvedValue(() => {});
+    native.onSplitRightMenu.mockReset();
+    native.onSplitRightMenu.mockResolvedValue(() => {});
+    native.onSplitDownMenu.mockReset();
+    native.onSplitDownMenu.mockResolvedValue(() => {});
+    native.onCommandPaletteMenu.mockReset();
+    native.onCommandPaletteMenu.mockResolvedValue(() => {});
+    native.onToggleSidebarMenu.mockReset();
+    native.onToggleSidebarMenu.mockResolvedValue(() => {});
+    native.onOpenSettingsMenu.mockReset();
+    native.onOpenSettingsMenu.mockResolvedValue(() => {});
     native.onRemoteSelectionRequested.mockReset();
     updater.checkForUpdate.mockReset();
     updater.checkForUpdate.mockResolvedValue(undefined);
@@ -715,6 +747,19 @@ describe("App project workspace flow", () => {
     render(<App />);
 
     expect(await screen.findByText("Active project my-project")).toBeInTheDocument();
+  });
+
+  it("renders genuine empty state and does not create phantom default workspace when getInitialProject rejects without stored projects", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.getInitialProject.mockRejectedValue(new Error("filesystem root cannot be registered as a startup workspace"));
+
+    render(<App />);
+
+    expect(await screen.findByTestId("no-projects-view")).toBeInTheDocument();
+    expect(screen.getByText("No projects")).toBeInTheDocument();
+    expect(screen.queryByText("default")).not.toBeInTheDocument();
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
   });
 
   it("checks for a signed update when the native app starts", async () => {

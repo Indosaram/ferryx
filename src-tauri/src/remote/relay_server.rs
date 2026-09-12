@@ -27,6 +27,7 @@
 //! after 30 seconds; sends time out after 30 seconds and sessions after one hour.
 
 use crate::remote::auth::{verify_control_challenge, write_private_json};
+pub use crate::remote::state::DEFAULT_RELAY_URL;
 use crate::remote::protocol::{
     ControlAuth, ControlAuthResponse, ControlChallenge, PairingState, RegisterPairingPin,
     RegisterPairingPinAck, SocketTicketRequest, SocketTicketResponse,
@@ -1446,6 +1447,39 @@ fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Respo
     Ok(Some(response))
 }
 
+fn apply_cors_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static(
+            "Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept",
+        ),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("86400"),
+    );
+}
+
+async fn relay_cors_middleware(request: Request<Body>, next: axum::middleware::Next) -> Response {
+    if request.method() == Method::OPTIONS {
+        let mut response = StatusCode::OK.into_response();
+        apply_cors_headers(response.headers_mut());
+        return response;
+    }
+
+    let mut response = next.run(request).await;
+    apply_cors_headers(response.headers_mut());
+    response
+}
+
 /// Builds the Axum router exposing the three tunnel endpoints.
 pub fn relay_router(state: RelayState) -> Router {
     Router::new()
@@ -1467,6 +1501,7 @@ pub fn relay_router(state: RelayState) -> Router {
         .route("/tunnel/data/{session_id}", get(data_handler))
         .route("/tunnel/client/{session_id}", get(client_handler))
         .fallback(axum::routing::get(crate::remote::server::serve_static_or_index))
+        .layer(axum::middleware::from_fn(relay_cors_middleware))
         .with_state(state)
 }
 
@@ -3115,6 +3150,15 @@ mod tests {
         let ticket: SocketTicketResponse =
             serde_json::from_slice(&ticket.bytes().await.unwrap()).unwrap();
 
+        // Declare desktop selection as a different session to test that unselected sessions are rejected.
+        state.set_active_selection(crate::remote::RemoteActiveDesktopSelection {
+            workspace_id: None,
+            worktree_slug: None,
+            worktree_label: None,
+            session_id: Some("different-session".into()),
+            ..Default::default()
+        });
+
         // The gateway attaches only the active desktop session. A valid ticket for a
         // non-selected session therefore carries no terminal data: the relay completes the
         // upgrade before it learns the upstream verdict, so the stream is torn down instead
@@ -4045,5 +4089,97 @@ mod tests {
         state.unregister_control_channel("tok", new);
         assert!(!state.notify_incoming_session("tok", "no-control"));
         drop((waiting, handoff));
+    }
+
+    #[tokio::test]
+    async fn test_relay_cors_preflight_and_headers() {
+        let (base, server) = spawn_test_relay().await;
+        let http_base = base.replace("ws://", "http://");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        for (endpoint, send_origin) in [
+            ("/api/v1/pair/exchange", false),
+            ("/api/v1/pair/exchange", true),
+            ("/host/m1/api/v1/workspace/state", false),
+            ("/host/m1/api/v1/workspace/state", true),
+        ] {
+            let url = format!("{http_base}{endpoint}");
+            let mut req = client.request(reqwest::Method::OPTIONS, &url);
+            if send_origin {
+                req = req.header("Origin", "https://relay.checka.cc");
+                req = req.header("Access-Control-Request-Method", "POST");
+                req = req.header(
+                    "Access-Control-Request-Headers",
+                    "authorization, content-type",
+                );
+            }
+            let res = req.send().await.expect("OPTIONS request should succeed");
+            assert_eq!(
+                res.status(),
+                reqwest::StatusCode::OK,
+                "OPTIONS {endpoint} must return 200 OK"
+            );
+            assert_eq!(
+                res.headers()
+                    .get("access-control-allow-origin")
+                    .and_then(|v| v.to_str().ok()),
+                Some("*")
+            );
+            assert_eq!(
+                res.headers()
+                    .get("access-control-allow-methods")
+                    .and_then(|v| v.to_str().ok()),
+                Some("GET, POST, PUT, DELETE, OPTIONS")
+            );
+            assert_eq!(
+                res.headers()
+                    .get("access-control-allow-headers")
+                    .and_then(|v| v.to_str().ok()),
+                Some("Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept")
+            );
+            assert_eq!(
+                res.headers()
+                    .get("access-control-max-age")
+                    .and_then(|v| v.to_str().ok()),
+                Some("86400")
+            );
+        }
+
+        // Verify actual requests also carry the CORS headers
+        let res = client
+            .post(format!("{http_base}/api/v1/pair/exchange"))
+            .body("{}")
+            .send()
+            .await
+            .expect("POST request should complete");
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-methods")
+                .and_then(|v| v.to_str().ok()),
+            Some("GET, POST, PUT, DELETE, OPTIONS")
+        );
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-headers")
+                .and_then(|v| v.to_str().ok()),
+            Some("Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept")
+        );
+        assert_eq!(
+            res.headers()
+                .get("access-control-max-age")
+                .and_then(|v| v.to_str().ok()),
+            Some("86400")
+        );
+
+        server.abort();
     }
 }

@@ -3,7 +3,7 @@ use ferryx_lib::daemon::client::DaemonClient;
 use ferryx_lib::daemon::server::DaemonServer;
 use ferryx_lib::ipc::{
     cmd_project_branches, cmd_project_initial, cmd_project_register, derive_workspace_id,
-    initial_project, IpcErrorCode, ProjectBranchesRequest, RegisterProjectRequest,
+    initial_project, initial_project_from_path, IpcErrorCode, ProjectBranchesRequest, RegisterProjectRequest,
     LEGACY_DEFAULT_WORKSPACE_ID,
 };
 use ferryx_lib::terminal::{
@@ -359,6 +359,17 @@ async fn initial_project_is_the_single_canonical_checkout_without_a_default_alia
     assert!(json.get("workspace_id").is_none());
 }
 
+#[tokio::test]
+async fn initial_project_from_root_falls_back_to_home_dir() {
+    let registry = WorkspaceRegistry::new();
+    let root = Path::new("/");
+    let initial = initial_project_from_path(&registry, root).expect("home dir fallback succeeds");
+    assert_ne!(initial.repo_root, Path::new("/"));
+    assert!(!initial.workspace_id.is_empty());
+    assert_ne!(initial.workspace_id, LEGACY_DEFAULT_WORKSPACE_ID);
+    assert!(registry.contains(&initial.workspace_id));
+}
+
 /// Clients that persisted `workspaceId: "default"` migrate by adopting the ID
 /// returned by the typed initial-project command. The legacy ID itself stays
 /// unregistered and unresolvable, so a stale request fails loudly instead of
@@ -694,6 +705,7 @@ fn local_overrides_replace_imported_font_and_option_as_alt() {
             font_family: Some("JetBrains Mono".into()),
             font_size: Some(17.0),
             macos_option_as_alt: Some(false),
+            ..Default::default()
         },
     );
     assert_eq!(effective.font_family, "JetBrains Mono");
@@ -713,6 +725,7 @@ fn local_overrides_replace_imported_font_and_option_as_alt() {
             font_family: Some("   ".into()),
             font_size: Some(0.0),
             macos_option_as_alt: None,
+            ..Default::default()
         },
     );
     assert_eq!(

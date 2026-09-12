@@ -273,6 +273,7 @@ pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 =
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
+    pub terminal_service: Arc<TerminalService>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
@@ -316,9 +317,12 @@ impl RemoteGatewayState {
         terminal_service: Arc<TerminalService>,
         workspace_registry: WorkspaceRegistry,
     ) -> Self {
-        Self::new_with_backend(
-            terminal_service as Arc<dyn RemoteSessionBackend>,
+        Self::new_with_paths_and_service(
+            Arc::clone(&terminal_service) as Arc<dyn RemoteSessionBackend>,
+            terminal_service,
             workspace_registry,
+            None,
+            None,
         )
     }
 
@@ -333,14 +337,27 @@ impl RemoteGatewayState {
         terminal_service: Arc<TerminalService>,
         workspace_registry: WorkspaceRegistry,
     ) -> Self {
-        Self::new_persistent_with_backend(
-            terminal_service as Arc<dyn RemoteSessionBackend>,
+        Self::new_persistent_with_service(
+            Arc::clone(&terminal_service) as Arc<dyn RemoteSessionBackend>,
+            terminal_service,
             workspace_registry,
         )
     }
 
     pub fn new_persistent_with_backend(
         session_backend: Arc<dyn RemoteSessionBackend>,
+        workspace_registry: WorkspaceRegistry,
+    ) -> Self {
+        Self::new_persistent_with_service(
+            session_backend,
+            Arc::new(TerminalService::default()),
+            workspace_registry,
+        )
+    }
+
+    pub fn new_persistent_with_service(
+        session_backend: Arc<dyn RemoteSessionBackend>,
+        terminal_service: Arc<TerminalService>,
         workspace_registry: WorkspaceRegistry,
     ) -> Self {
         let base = remote_data_dir();
@@ -350,8 +367,9 @@ impl RemoteGatewayState {
                  kept in memory only and lost on exit"
             );
         }
-        Self::new_with_paths_backend(
+        Self::new_with_paths_and_service(
             session_backend,
+            terminal_service,
             workspace_registry,
             base.as_ref().map(|base| base.join("remote-config.json")),
             base.as_ref().map(|base| base.join("remote-auth.json")),
@@ -364,8 +382,9 @@ impl RemoteGatewayState {
         config_path: Option<PathBuf>,
         auth_path: Option<PathBuf>,
     ) -> Self {
-        Self::new_with_paths_backend(
-            terminal_service as Arc<dyn RemoteSessionBackend>,
+        Self::new_with_paths_and_service(
+            Arc::clone(&terminal_service) as Arc<dyn RemoteSessionBackend>,
+            terminal_service,
             workspace_registry,
             config_path,
             auth_path,
@@ -374,6 +393,22 @@ impl RemoteGatewayState {
 
     pub fn new_with_paths_backend(
         session_backend: Arc<dyn RemoteSessionBackend>,
+        workspace_registry: WorkspaceRegistry,
+        config_path: Option<PathBuf>,
+        auth_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_with_paths_and_service(
+            session_backend,
+            Arc::new(TerminalService::default()),
+            workspace_registry,
+            config_path,
+            auth_path,
+        )
+    }
+
+    pub fn new_with_paths_and_service(
+        session_backend: Arc<dyn RemoteSessionBackend>,
+        terminal_service: Arc<TerminalService>,
         workspace_registry: WorkspaceRegistry,
         config_path: Option<PathBuf>,
         auth_path: Option<PathBuf>,
@@ -395,6 +430,7 @@ impl RemoteGatewayState {
         Self {
             config: RwLock::new(config),
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
+            terminal_service,
             session_backend,
             workspace_registry,
             active_selection: RwLock::new(None),

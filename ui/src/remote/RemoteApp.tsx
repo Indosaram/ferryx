@@ -289,7 +289,7 @@ export const RemoteApp: React.FC = () => {
   return <RemoteHostConnection key={`${hostId}:${relayUrl}:${pairingRequested ? pairingHash : ""}`} hostId={hostId} relayUrl={relayUrl} readUrlHints={pairingRequested || state.activeHostId === null} />;
 };
 
-const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrlHints: boolean }> = ({ hostId, relayUrl, readUrlHints }) => {
+export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; readUrlHints: boolean }> = ({ hostId, relayUrl, readUrlHints }) => {
   const [token, setToken] = useState<string | null>(() => {
     if (readUrlHints && /^#pair=([0-9a-fA-F]{32}|[0-9]{6})(?:&|$)/i.test(window.location.hash)) return null;
     const storedHost = remoteHostStore.getState().hosts[hostId];

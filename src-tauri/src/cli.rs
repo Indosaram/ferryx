@@ -251,12 +251,16 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             });
 
             match answer {
-                Ok((code, pairing_token, _machine_id)) => {
+                Ok((code, pairing_token, _machine_id, daemon_relay_url)) => {
                     println!("{code}");
                     if let Some(token) = pairing_token {
-                        let relay_url = std::env::var("FERRYX_RELAY_URL")
-                            .ok()
+                        let relay_url = daemon_relay_url
                             .filter(|s| !s.trim().is_empty())
+                            .or_else(|| {
+                                std::env::var("FERRYX_RELAY_URL")
+                                    .ok()
+                                    .filter(|s| !s.trim().is_empty())
+                            })
                             .unwrap_or_else(|| crate::remote::state::DEFAULT_RELAY_URL.to_string());
                         println!("{}#pair={token}", relay_url.trim_end_matches('/'));
                     }
@@ -474,6 +478,13 @@ pub fn run_daemon_headless(
     rt.block_on(async {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let server = Arc::new(crate::daemon::server::DaemonServer::new());
+        if let Ok(initial) = crate::ipc::project::initial_project(server.workspace_registry()) {
+            tracing::info!(
+                workspace_id = %initial.workspace_id,
+                repo_root = %initial.repo_root.display(),
+                "Registered startup workspace for headless daemon"
+            );
+        }
         let server_clone = Arc::clone(&server);
         let server_task = tokio::spawn(async move {
             server_clone

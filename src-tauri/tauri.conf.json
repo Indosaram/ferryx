@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' http://127.0.0.1:5173 http://localhost:5173; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://127.0.0.1:5173 http://localhost:5173; style-src 'self' 'unsafe-inline' http://127.0.0.1:5173 http://localhost:5173; img-src 'self' data: http://127.0.0.1:5173 http://localhost:5173; font-src 'self' data: http://127.0.0.1:5173 http://localhost:5173; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:5173 ws://localhost:5173 http://127.0.0.1:5173 http://localhost:5173; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      "csp": "default-src 'self' http://127.0.0.1:5173 http://localhost:5173; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://127.0.0.1:5173 http://localhost:5173; style-src 'self' 'unsafe-inline' http://127.0.0.1:5173 http://localhost:5173; img-src 'self' data: http://127.0.0.1:5173 http://localhost:5173; font-src 'self' data: http://127.0.0.1:5173 http://localhost:5173; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:5173 ws://localhost:5173 http://127.0.0.1:5173 http://localhost:5173 https://relay.checka.cc wss://relay.checka.cc https://*.checka.cc wss://*.checka.cc; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "plugins": {

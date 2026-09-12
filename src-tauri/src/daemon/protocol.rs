@@ -335,6 +335,8 @@ pub enum DaemonResponse {
         pairing_token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_url: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     RemoteListDevicesOk {
@@ -675,6 +677,7 @@ mod tests {
             code: "123456".to_string(),
             pairing_token: None,
             machine_id: None,
+            relay_url: None,
         };
         let pair_json = serde_json::to_string(&pair_resp).expect("serialize pair code");
         assert!(pair_json.contains(r#""code":"123456""#));

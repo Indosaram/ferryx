@@ -134,6 +134,8 @@ pub struct CreatePairingCodeResponse {
     pub pairing_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
 }
 
 #[tauri::command]
@@ -277,12 +279,13 @@ pub async fn cmd_remote_pairing_create(
     let perm = permission.unwrap_or(DevicePermission::Control);
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => {
-            let (code, pairing_token, machine_id) = client.remote_create_pairing_code_detailed(Some(perm)).await?;
+            let (code, pairing_token, machine_id, relay_url) = client.remote_create_pairing_code_detailed(Some(perm)).await?;
             Ok(CreatePairingCodeResponse {
                 code,
                 expires_in_seconds: 60,
                 pairing_token,
                 machine_id,
+                relay_url,
             })
         }
         RemoteGatewayManagerInner::State { state, .. } => {
@@ -299,11 +302,19 @@ pub async fn cmd_remote_pairing_create(
                     )
                     .await
                     .map_err(|e| IpcError::internal(e))?;
+                let effective_relay = state
+                    .config
+                    .read()
+                    .relay_url
+                    .clone()
+                    .or_else(|| std::env::var("FERRYX_RELAY_URL").ok().filter(|s| !s.trim().is_empty()))
+                    .or_else(|| Some(crate::remote::relay_server::DEFAULT_RELAY_URL.to_string()));
                 Ok(CreatePairingCodeResponse {
                     code: info.pin,
                     expires_in_seconds: 60,
                     pairing_token: Some(info.pairing_token),
                     machine_id: Some(info.machine_id),
+                    relay_url: effective_relay,
                 })
             } else {
                 let code = state.auth_manager.create_pairing_code(perm);
@@ -316,6 +327,7 @@ pub async fn cmd_remote_pairing_create(
                     expires_in_seconds: 60,
                     pairing_token: None,
                     machine_id,
+                    relay_url: None,
                 })
             }
         }

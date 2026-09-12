@@ -807,12 +807,20 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
         ws_state.sessions
     );
 
-    // Attach to s1 or s2 without active selection must return 403 Forbidden
+    // Attach to valid session without active selection (headless mode) must succeed (101)
     let ws_status =
         ws_handshake_status(addr, &format!("/api/v1/terminal/{s1}"), Some(&token_ctrl)).await;
     assert_eq!(
-        ws_status, 403,
-        "Attach to session without declared active selection must return 403 Forbidden"
+        ws_status, 101,
+        "Attach to valid session without active selection in headless mode must succeed"
+    );
+
+    // Attach to missing session without active selection returns 403 Forbidden
+    let ws_status_missing =
+        ws_handshake_status(addr, "/api/v1/terminal/nonexistent-session", Some(&token_ctrl)).await;
+    assert_eq!(
+        ws_status_missing, 403,
+        "Attach to non-existent session without active selection must return 403 Forbidden"
     );
 
     // 2. Set active selection to s1 (safe IDs only)
@@ -4090,6 +4098,280 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
     assert!(
         matches!(close_frame, ServerWebSocketFrame::Close),
         "WS must close on exit"
+    );
+
+    server_handle.stop();
+    mock_server.abort();
+}
+
+#[tokio::test]
+async fn test_headless_handover_workspace_state_selects_live_session_without_desktop_selection() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
+        DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::daemon::proxy::{LegacyPeer, SessionRouter};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("set mode 700");
+    }
+    let socket_path = dir.path().join("legacy.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind legacy socket");
+
+    let legacy_session_id = "legacy-peer-session-handover-99".to_string();
+    let legacy_session_clone = legacy_session_id.clone();
+
+    let (exit_tx, _) = tokio::sync::broadcast::channel::<()>(5);
+    let exit_tx_for_accept = exit_tx.clone();
+
+    // Spawn mock legacy daemon server
+    let mock_server = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+
+            // 1. Handshake
+            if reader.read_line(&mut line).await.is_err() || line.trim().is_empty() {
+                continue;
+            }
+            let hs: DaemonRequest = serde_json::from_str(line.trim()).expect("parse handshake");
+            assert!(matches!(hs, DaemonRequest::Handshake { .. }));
+            let hs_resp = serde_json::to_string(&DaemonResponse::HandshakeOk {
+                epoch: 1,
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                binary_path: None,
+                binary_mtime_ms: None,
+                daemon_version: None,
+            })
+            .unwrap()
+                + "\n";
+            write_half
+                .write_all(hs_resp.as_bytes())
+                .await
+                .expect("write handshake ok");
+            write_half.flush().await.unwrap();
+
+            // Loop handling requests
+            line.clear();
+            let legacy_session_for_stream = legacy_session_clone.clone();
+            let mut exit_rx = exit_tx_for_accept.subscribe();
+
+            tokio::spawn(async move {
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let req: DaemonRequest = serde_json::from_str(line.trim()).expect("parse req");
+                    line.clear();
+                    match req {
+                        DaemonRequest::ListSessions => {
+                            let resp = serde_json::to_string(&DaemonResponse::ListSessionsOk {
+                                epoch: 1,
+                                sessions: vec![legacy_session_for_stream.clone()],
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
+                        DaemonRequest::RemoteSessionDetails { session_id: _ } => {
+                            let resp = serde_json::to_string(&DaemonResponse::RemoteSessionDetailsOk {
+                                details: None,
+                                legacy_direct_ssh: false,
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
+                        DaemonRequest::DescribeSession { session_id } => {
+                            let resp = serde_json::to_string(&DaemonResponse::DescribeSessionOk {
+                                session: DaemonSessionDetails {
+                                    session_id,
+                                    workspace_id: Some("mock-handover-ws".into()),
+                                    worktree: None,
+                                    cwd: Some("/mock/handover".into()),
+                                    cols: 80,
+                                    rows: 24,
+                                    running: true,
+                                    start_sequence: Some(1),
+                                    end_sequence: Some(1),
+                                },
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
+                        DaemonRequest::Attach {
+                            session_id: _,
+                            after_sequence: _,
+                        } => {
+                            let resp = serde_json::to_string(&DaemonResponse::AttachOk {
+                                epoch: 1,
+                                session_id: legacy_session_for_stream.clone(),
+                                start_sequence: Some(1),
+                                end_sequence: Some(1),
+                                gap: None,
+                                history: b"legacy handover snapshot\n".to_vec(),
+                                pty_cols: Some(80),
+                                pty_rows: Some(24),
+                                history_segments: Vec::new(),
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+
+                            // Send an output stream message
+                            let out = serde_json::to_string(&DaemonStreamMessage::Output {
+                                session_id: std::borrow::Cow::Borrowed(&legacy_session_for_stream),
+                                sequence: 2,
+                                data: std::borrow::Cow::Borrowed(b"legacy handover live chunk\n"),
+                                metrics_read_unix_micros: None,
+                            })
+                            .unwrap()
+                                + "\n";
+                            write_half.write_all(out.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+
+                            // Wait for test completion
+                            let _ = exit_rx.recv().await;
+                            break;
+                        }
+                        DaemonRequest::Resize { .. } => {
+                            let resp =
+                                serde_json::to_string(&DaemonResponse::ResizeOk).unwrap() + "\n";
+                            write_half.write_all(resp.as_bytes()).await.unwrap();
+                            write_half.flush().await.unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+    });
+
+    // Fresh terminal service in new process (has NO sessions)
+    let terminal_service = Arc::new(TerminalService::default());
+    assert!(terminal_service.list_sessions().is_empty());
+
+    // SessionRouter owns the predecessor's live session via LegacyPeer
+    let session_router = Arc::new(SessionRouter::new(terminal_service));
+    let legacy_peer = Arc::new(LegacyPeer::new(
+        socket_path,
+        vec![legacy_session_id.clone()],
+    ));
+    session_router.add_legacy_peer(legacy_peer);
+
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        session_router,
+        crate::worktree::WorkspaceRegistry::new(),
+    ));
+
+    // Configure and start remote server
+    *state.config.write() = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::Tailscale,
+        port: 0,
+        allow_control: true,
+        relay_url: None,
+    };
+    let pairing_code = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pairing_code, "HandoverTestDevice")
+        .expect("pair device");
+
+    let (server_handle, addr) = start_remote_server(Arc::clone(&state))
+        .await
+        .expect("start remote server");
+
+    // CRITICAL: Ensure NO desktop selection is active (headless handover state)
+    assert!(state.active_selection.read().is_none());
+
+    // Query workspace state via GET /api/v1/workspace/state
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/api/v1/workspace/state"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("GET /api/v1/workspace/state");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.text().await.expect("read workspace state body");
+    let ws_state: RemoteWorkspaceState =
+        serde_json::from_str(&body).expect("parse workspace state json");
+
+    // 1. Verify active_context selected the live legacy session rather than spawning a replacement
+    assert_eq!(
+        ws_state.active_context.session_id.as_deref(),
+        Some(legacy_session_id.as_str()),
+        "active_context must select the live legacy session from session_backend"
+    );
+    assert_eq!(
+        ws_state.active_workspace_id, "mock-handover-ws",
+        "active_workspace_id must align with the legacy session's workspace"
+    );
+    assert_eq!(
+        ws_state.active_context.workspace_id.as_deref(),
+        Some("mock-handover-ws"),
+        "active_context workspace_id must align with the legacy session's workspace"
+    );
+    assert_eq!(ws_state.active_context.terminal_tabs.len(), 1);
+    assert_eq!(ws_state.active_context.terminal_tabs[0].id, legacy_session_id);
+
+    // 2. Verify sessions list contains only the legacy session, with running=true
+    assert_eq!(
+        ws_state.sessions.len(),
+        1,
+        "sessions must contain only the live session, not an extra auto-spawned shell"
+    );
+    assert_eq!(ws_state.sessions[0].session_id, legacy_session_id);
+    assert!(ws_state.sessions[0].running);
+
+    // 3. Verify terminal_service in the new process was NOT used to spawn a replacement shell
+    assert!(
+        state.terminal_service.list_sessions().is_empty(),
+        "local terminal_service must remain empty; no replacement shell was auto-spawned"
+    );
+
+    // 4. Verify WebSocket reconnect to legacy session succeeds without desktop selection
+    let mut ws = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        open_ws_stream(
+            addr,
+            &format!("/api/v1/terminal/{legacy_session_id}"),
+            Some(&token),
+        ),
+    )
+    .await
+    .expect("connect legacy terminal ws without desktop selection");
+
+    // Read initial snapshot frame
+    let snapshot_frame = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        read_server_ws_frame(&mut ws),
+    )
+    .await
+    .expect("read initial snapshot");
+    let ServerWebSocketFrame::Binary(snapshot_bytes) = snapshot_frame else {
+        panic!("expected binary snapshot frame");
+    };
+    assert!(
+        String::from_utf8_lossy(&snapshot_bytes).contains("legacy handover snapshot"),
+        "snapshot must contain legacy history"
     );
 
     server_handle.stop();

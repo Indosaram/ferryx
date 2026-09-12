@@ -430,6 +430,20 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
     rmSync(tempDir, { recursive: true, force: true });
   }
 
+  // On macOS, verify Gatekeeper spctl assessment on published DMG
+  if (process.platform === "darwin") {
+    const dmgFile = join(publishDir, "Ferryx_universal.dmg");
+    if (existsSync(dmgFile)) {
+      const spctlRes = spawnSync("spctl", ["-a", "-vvv", "-t", "install", dmgFile], { encoding: "utf8" });
+      const spctlCombined = `${spctlRes.stdout || ""}\n${spctlRes.stderr || ""}`;
+      if (spctlRes.status !== 0 || !spctlCombined.includes("Notarized Developer ID")) {
+        throw new Error(
+          `Gatekeeper spctl verification failed for published DMG: ${spctlCombined.trim()}`,
+        );
+      }
+    }
+  }
+
   return { ok: true, plan, files: Array.from(sumsMap.keys()) };
 }
 

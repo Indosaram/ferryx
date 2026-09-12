@@ -1380,7 +1380,7 @@ impl DaemonClient {
     pub async fn remote_create_pairing_code_detailed(
         &self,
         permission: Option<DevicePermission>,
-    ) -> Result<(String, Option<String>, Option<String>), IpcError> {
+    ) -> Result<(String, Option<String>, Option<String>, Option<String>), IpcError> {
         let resp = self
             .send_request(DaemonRequest::RemoteCreatePairingCode { permission })
             .await?;
@@ -1389,7 +1389,8 @@ impl DaemonClient {
                 code,
                 pairing_token,
                 machine_id,
-            } => Ok((code, pairing_token, machine_id)),
+                relay_url,
+            } => Ok((code, pairing_token, machine_id, relay_url)),
             DaemonResponse::Error { message } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }

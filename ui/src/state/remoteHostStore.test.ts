@@ -24,6 +24,9 @@ describe("remoteHostStore", () => {
   let store: RemoteHostStore;
 
   beforeEach(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.clear();
+    }
     store = createRemoteHostStore();
   });
 

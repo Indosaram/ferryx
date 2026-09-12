@@ -1,15 +1,14 @@
 use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
-#[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
-#[cfg(feature = "native-terminal")]
 use crate::remote::protocol::RemoteGridFrame;
 use crate::remote::protocol::{
     ClientControlMessage, RemoteActiveDesktopSelection, RemoteCreateWorktreeRequest,
     RemoteDeleteWorktreeRequest, RemoteEventMessage, RemoteProjectInfo,
     RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
-    RemoteWorkspaceState, RemoteWorktreeInfo,
+    RemoteTerminalTabInfo, RemoteWorkspaceState, RemoteWorktreeInfo,
 };
+pub use crate::remote::protocol::RemoteTerminalTabInfo as RemoteTerminalTab;
 use crate::remote::push::{global_push_store, PushSubscriptionInfo};
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
@@ -31,10 +30,8 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(feature = "native-terminal")]
 use std::time::Duration;
 use tokio::sync::broadcast;
-#[cfg(feature = "native-terminal")]
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -663,6 +660,7 @@ pub(crate) async fn get_active_running_sessions(
 ) -> Vec<RemoteTerminalSession> {
     let active = state.active_selection.read().clone();
     let mut sessions = Vec::new();
+
     for session_id in state.session_backend.list_sessions().await {
         let Ok(details) = state.session_backend.describe_session(&session_id).await else {
             continue;
@@ -696,7 +694,8 @@ pub(crate) async fn get_active_running_sessions(
             cache.derive_session_metadata(details.worktree_path.as_deref());
         let workspace_id = derived_ws
             .or(details.workspace_id)
-            .or_else(|| selected.and_then(|selection| selection.workspace_id.clone()));
+            .or_else(|| selected.and_then(|selection| selection.workspace_id.clone()))
+            .or_else(|| if active.is_none() { Some("default".to_string()) } else { None });
         // Sessions are listed for authenticated remote callers regardless of
         // desktop active selection; `active_selection` only supplies extra
         // label metadata when it matches this session, it never filters.
@@ -707,15 +706,63 @@ pub(crate) async fn get_active_running_sessions(
                     .clone()
                     .or_else(|| selection.worktree_label.clone())
             })
-        });
+        }).or_else(|| if active.is_none() { Some("default".to_string()) } else { None });
         sessions.push(RemoteTerminalSession {
             session_id: details.session_id,
-            title: None,
+            title: if active.is_none() { Some("Terminal".to_string()) } else { None },
             workspace_id,
             worktree_label,
             running: true,
         });
     }
+
+    if active.is_none() {
+        for session_id in state.terminal_service.list_sessions() {
+            if sessions.iter().any(|s| s.session_id == session_id) {
+                continue;
+            }
+            let is_running_or_starting = if let Some(session) = state.terminal_service.get_session(&session_id) {
+                matches!(
+                    session.state(),
+                    crate::terminal::PtySessionState::Running | crate::terminal::PtySessionState::Starting
+                )
+            } else if let Some(details) = state.terminal_service.remote().details(&session_id) {
+                matches!(
+                    details.state,
+                    crate::terminal::remote::RemoteConnectionState::Connected
+                )
+            } else {
+                false
+            };
+
+            if !is_running_or_starting {
+                continue;
+            }
+
+            let worktree_path = state
+                .terminal_service
+                .get_session(&session_id)
+                .and_then(|s| s.worktree_path())
+                .or_else(|| {
+                    state
+                        .terminal_service
+                        .remote()
+                        .details(&session_id)
+                        .map(|d| PathBuf::from(d.descriptor.config.project_path))
+                });
+            let (derived_ws, derived_label) =
+                cache.derive_session_metadata(worktree_path.as_deref());
+
+            sessions.push(RemoteTerminalSession {
+                session_id,
+                title: Some("Terminal".to_string()),
+                workspace_id: derived_ws.or_else(|| Some("default".to_string())),
+                worktree_label: derived_label.or_else(|| Some("default".to_string())),
+                running: true,
+            });
+        }
+    }
+
     sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     sessions
 }
@@ -785,13 +832,13 @@ async fn get_workspace_state(
             attention: None,
         }],
     }));
-    let active_ws = active_selection
+    let mut active_ws = active_selection
         .as_ref()
         .and_then(|sel| sel.workspace_id.clone())
         .filter(|id| !id.is_empty())
         .or_else(|| projects.first().map(|p| p.workspace_id.clone()))
         .unwrap_or_else(|| "default".into());
-    let active_context = active_selection
+    let mut active_context = active_selection
         .clone()
         .unwrap_or(RemoteActiveDesktopSelection {
             workspace_id: Some(active_ws.clone()),
@@ -802,8 +849,95 @@ async fn get_workspace_state(
             tab_id: None,
             terminal_tabs: Vec::new(),
         });
+
+    if state.active_selection.read().is_none() {
+        let backend_sessions = state.session_backend.list_sessions().await;
+        let mut live_session_id = None;
+        for sid in &backend_sessions {
+            if let Ok(details) = state.session_backend.describe_session(sid).await {
+                if details.running {
+                    live_session_id = Some(sid.clone());
+                    break;
+                }
+            }
+        }
+        if live_session_id.is_none() {
+            for sid in state.terminal_service.list_sessions() {
+                if let Some(session) = state.terminal_service.get_session(&sid) {
+                    if matches!(
+                        session.state(),
+                        crate::terminal::PtySessionState::Running
+                            | crate::terminal::PtySessionState::Starting
+                    ) {
+                        live_session_id = Some(sid);
+                        break;
+                    }
+                }
+            }
+        }
+        if live_session_id.is_none() && !backend_sessions.is_empty() {
+            live_session_id = backend_sessions.first().cloned();
+        }
+        if live_session_id.is_none() {
+            if let Some(sid) = state.terminal_service.list_sessions().first() {
+                live_session_id = Some(sid.clone());
+            }
+        }
+
+        if let Some(session_id) = live_session_id {
+            if active_context.session_id.is_none() {
+                active_context.session_id = Some(session_id.clone());
+                active_context.terminal_tabs = vec![RemoteTerminalTabInfo {
+                    id: session_id.clone(),
+                    label: "Terminal".to_string(),
+                    session_id: Some(session_id),
+                    ..Default::default()
+                }];
+            }
+        } else if backend_sessions.is_empty() && state.terminal_service.list_sessions().is_empty() {
+            if let Ok((session_id, _)) = state.terminal_service.spawn_shell(80, 24) {
+                tracing::info!("Auto-spawned default shell session {session_id} for headless remote gateway");
+                active_context.session_id = Some(session_id.clone());
+                active_context.terminal_tabs = vec![RemoteTerminalTabInfo {
+                    id: session_id,
+                    label: "Terminal".to_string(),
+                    session_id: active_context.session_id.clone(),
+                    ..Default::default()
+                }];
+            }
+        }
+    }
+
     let worktrees = cache.worktrees_for(&active_ws, active_selection.as_ref());
-    let sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
+    let mut sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
+
+    if let Some(ref session_id) = active_context.session_id {
+        if let Some(s) = sessions.iter_mut().find(|s| &s.session_id == session_id) {
+            if s.title.is_none() {
+                s.title = Some("Terminal".to_string());
+            }
+            if s.workspace_id.is_none() || s.workspace_id.as_deref() == Some("default") {
+                s.workspace_id = Some(active_ws.clone());
+            } else if active_selection.is_none() && active_ws == "default" {
+                if let Some(ref ws) = s.workspace_id {
+                    active_ws = ws.clone();
+                    active_context.workspace_id = Some(ws.clone());
+                }
+            }
+            if s.worktree_label.is_none() {
+                s.worktree_label = Some("default".to_string());
+            }
+        } else {
+            sessions.push(RemoteTerminalSession {
+                session_id: session_id.clone(),
+                title: Some("Terminal".to_string()),
+                workspace_id: Some(active_ws.clone()),
+                worktree_label: Some("default".to_string()),
+                running: true,
+            });
+            sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        }
+    }
 
     Ok(Json(RemoteWorkspaceState {
         projects,
@@ -1157,16 +1291,49 @@ async fn ws_terminal_handler(
         .then(|| requested_grid_geometry(&query))
         .flatten();
 
-    let is_declared_active = {
-        let active = state.active_selection.read();
-        active
-            .as_ref()
-            .and_then(|a| a.session_id.as_deref())
-            .map(|id| id == session_id.as_str())
-            .unwrap_or(false)
+    let is_session_valid = match state.session_backend.describe_session(&session_id).await {
+        Ok(details) if details.running => true,
+        _ => {
+            if let Some(session) = state.terminal_service.get_session(&session_id) {
+                matches!(
+                    session.state(),
+                    crate::terminal::PtySessionState::Running
+                        | crate::terminal::PtySessionState::Starting
+                )
+            } else if let Some(details) = state.terminal_service.remote().details(&session_id) {
+                matches!(
+                    details.state,
+                    crate::terminal::remote::RemoteConnectionState::Connected
+                )
+            } else {
+                state.terminal_service.list_sessions().contains(&session_id)
+                    || state.session_backend.list_sessions().await.contains(&session_id)
+            }
+        }
     };
 
-    if !is_declared_active {
+    let active_selection = state.active_selection.read().clone();
+    if let Some(ref active) = active_selection {
+        let is_declared_active = active
+            .session_id
+            .as_deref()
+            .map(|id| id == session_id.as_str())
+            .unwrap_or(false);
+        if !is_declared_active && !is_session_valid {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Forbidden: session is not the active desktop session".into(),
+            ));
+        }
+        if let Some(declared_active_id) = active.session_id.as_deref() {
+            if declared_active_id != session_id.as_str() {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Forbidden: session is not the active desktop session".into(),
+                ));
+            }
+        }
+    } else if !is_session_valid {
         return Err((
             StatusCode::FORBIDDEN,
             "Forbidden: session is not the active desktop session".into(),
@@ -1226,25 +1393,17 @@ async fn handle_terminal_socket(
         }
     }
     if render_grid {
-        #[cfg(feature = "native-terminal")]
-        {
-            handle_terminal_grid_socket(
-                socket,
-                session_id,
-                attachment,
-                device,
-                state,
-                recovery,
-                recovery_state,
-            )
-            .await;
-            return;
-        }
-        #[cfg(not(feature = "native-terminal"))]
-        {
-            let _ = (socket, session_id, attachment, device, state);
-            return;
-        }
+        handle_terminal_grid_socket(
+            socket,
+            session_id,
+            attachment,
+            device,
+            state,
+            recovery,
+            recovery_state,
+        )
+        .await;
+        return;
     }
 
     let (mut sender, mut receiver) = socket.split();
@@ -1375,9 +1534,14 @@ async fn handle_terminal_socket(
         }
     });
 
+    let has_active_selection = state.active_selection.read().is_some();
     let mut active_session_rx = state.active_session_watch_rx();
     let target_session_id = session_id.clone();
     let mut focus_watcher = std::pin::pin!(async move {
+        if !has_active_selection {
+            std::future::pending::<()>().await;
+            return;
+        }
         if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
             return;
         }
@@ -1451,19 +1615,17 @@ async fn ssh_control(
     }
 }
 
-#[cfg(feature = "native-terminal")]
 fn grid_text_message(frame: RemoteGridFrame) -> Message {
     let text = serde_json::to_string(&frame).expect("remote grid frame serializes");
     Message::Text(text.into())
 }
 
-#[cfg(feature = "native-terminal")]
-fn enqueue_grid_operation(
+fn enqueue_grid_operation<E>(
     mirror: &Arc<parking_lot::Mutex<RemoteTerminalMirror>>,
     outbound_tx: &mpsc::UnboundedSender<Message>,
     operation: impl FnOnce(
         &mut RemoteTerminalMirror,
-    ) -> Result<RemoteGridFrame, crate::native_terminal::NativeTerminalError>,
+    ) -> Result<RemoteGridFrame, E>,
 ) -> bool {
     let mut mirror = mirror.lock();
     let frame = match operation(&mut mirror) {
@@ -1473,7 +1635,6 @@ fn enqueue_grid_operation(
     outbound_tx.send(grid_text_message(frame)).is_ok()
 }
 
-#[cfg(feature = "native-terminal")]
 async fn handle_terminal_grid_socket(
     socket: WebSocket,
     session_id: String,
@@ -1764,9 +1925,14 @@ async fn handle_terminal_grid_socket(
         }
     });
 
+    let has_active_selection = state.active_selection.read().is_some();
     let mut active_session_rx = state.active_session_watch_rx();
     let target_session_id = session_id.clone();
     let mut focus_watcher = std::pin::pin!(async move {
+        if !has_active_selection {
+            std::future::pending::<()>().await;
+            return;
+        }
         if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
             return;
         }
@@ -2496,5 +2662,66 @@ mod tests {
                 .all(|sub| sub.endpoint != "https://push.example.com/sub/unauth"),
             "unauthenticated request must not have registered a subscription"
         );
+    }
+
+    #[tokio::test]
+    async fn test_headless_auto_spawns_default_shell() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+
+        let code = state
+            .auth_manager
+            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&code, "HeadlessClient")
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+
+        assert!(state.active_selection.read().is_none());
+        assert!(state.terminal_service.list_sessions().is_empty());
+
+        let res = get_workspace_state(State(Arc::clone(&state)), headers.clone())
+            .await
+            .expect("get_workspace_state succeeds");
+        let ws_state = res.0;
+
+        let session_id = ws_state.active_context.session_id.expect("session_id populated");
+        assert_eq!(ws_state.active_context.terminal_tabs.len(), 1);
+        assert_eq!(ws_state.active_context.terminal_tabs[0].id, session_id);
+        assert_eq!(ws_state.active_context.terminal_tabs[0].label, "Terminal");
+
+        assert_eq!(ws_state.sessions.len(), 1);
+        let s = &ws_state.sessions[0];
+        assert_eq!(s.session_id, session_id);
+        assert_eq!(s.title.as_deref(), Some("Terminal"));
+        assert_eq!(s.worktree_label.as_deref(), Some("default"));
+        assert!(s.running);
+
+        let _ = terminal_service.close_session(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_spawn_shell_method() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = TerminalService::new(pty, hub);
+
+        let (session_id, _rx) = terminal_service
+            .spawn_shell(80, 24)
+            .expect("spawn_shell succeeds");
+        assert!(terminal_service.list_sessions().contains(&session_id));
+        let _ = terminal_service.close_session(&session_id).await;
     }
 }

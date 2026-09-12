@@ -77,6 +77,15 @@ impl TerminalService {
         &self.output_hub
     }
 
+    pub fn spawn_shell(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
+        let (session_id, pty_rx) = self.pty_manager.spawn_shell(cols, rows)?;
+        Ok(self.register_output(session_id, pty_rx, cols, rows))
+    }
+
     pub fn spawn_in_worktree(
         &self,
         cmd: CommandBuilder,

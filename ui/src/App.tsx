@@ -1,5 +1,5 @@
 import { PanelLeft } from "lucide-react";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
@@ -11,6 +11,8 @@ import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./comp
 import { Sidebar } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
+import { RemoteHostConnection } from "./remote/RemoteApp";
+import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
@@ -283,7 +285,26 @@ export function App() {
           const storedBootstrap = loadProjectBootstrap();
           const savedSession = await loadSession().catch(() => null);
           const recovered = recoverProjectBootstrap(savedSession);
-          const prepared = mergeRecoveredProjectBootstrap(storedBootstrap, recovered, DEFAULT_PROJECT);
+          // In native runtime, if there are no real stored or recovered projects,
+          // do NOT resurrect an unregistrable phantom "default" workspace that causes
+          // WORKSPACE_NOT_FOUND on spawn; show the genuine empty state instead.
+          const realProjects = storedBootstrap.projects.filter(
+            (p) => p.workspaceId !== DEFAULT_WORKSPACE_ID && p.repoRoot !== ".",
+          );
+          const recoveredProjects = recovered?.projects.filter(
+            (p) => p.workspaceId !== DEFAULT_WORKSPACE_ID && p.repoRoot !== ".",
+          ) ?? [];
+          const initialProject = realProjects[0] ?? recoveredProjects[0];
+          const prepared: ProjectBootstrap = initialProject
+            ? canonicalizeProjectBootstrap(
+                mergeRecoveredProjectBootstrap(
+                  { projects: realProjects, activeProjectId: storedBootstrap.activeProjectId },
+                  recovered,
+                  initialProject,
+                ),
+                initialProject,
+              )
+            : { projects: [], activeProjectId: "" };
           await preloadWorkspaceSnapshots(
             prepared.projects.map((project) => project.workspaceId),
             async () => savedSession,
@@ -473,6 +494,12 @@ function WorkspaceApp({
   initialProjects: RegisteredProject[];
   initialActiveProjectId: string;
 }) {
+  const activeRemoteHost = useSyncExternalStore(
+    remoteHostStore.subscribe,
+    () => selectActiveHost(remoteHostStore.getState()),
+  );
+  const activeRemoteHostRef = useRef(activeRemoteHost);
+  activeRemoteHostRef.current = activeRemoteHost;
   const [projects, setProjects] = useState<RegisteredProject[]>(initialProjects);
   const [activeProjectId, setActiveProjectId] = useState(initialActiveProjectId);
 
@@ -675,6 +702,7 @@ function WorkspaceApp({
   ]);
   const plainRootWorktree = useMemo(
     () => {
+      if (projects.length === 0) return null;
       const target = activeProject.target;
       if (activeProject.gitRoot === null || target?.kind === "ssh") {
         const hostLabel = target?.kind === "ssh"
@@ -1285,9 +1313,9 @@ function WorkspaceApp({
     persistProjects(next);
     setProjects(next);
     if (target.workspaceId === activeProjectId) {
-      const nextActive = next[0] ?? DEFAULT_PROJECT;
-      setActiveProjectId(nextActive.workspaceId);
-      persistActiveProjectId(nextActive.workspaceId);
+      const nextActiveId = next[0]?.workspaceId ?? "";
+      setActiveProjectId(nextActiveId);
+      persistActiveProjectId(nextActiveId);
       setWorktreeStatuses({});
     }
     clearWorkspaceSnapshot(target.workspaceId);
@@ -1302,6 +1330,8 @@ function WorkspaceApp({
 
   const handleSelectWorktree = useCallback(
     (worktree: Worktree) => {
+      if (activeRemoteHostRef.current) return;
+      if (projectsRef.current.length === 0) return;
       const ownerId = resolveWorktreeOwnerId(worktree, projectsRef.current);
       const owner = ownerId
         ? projectsRef.current.find((project) => project.workspaceId === ownerId)
@@ -1330,6 +1360,7 @@ function WorkspaceApp({
 
   useEffect(() => {
     if (!pendingWorktreePath) return;
+    if (activeRemoteHostRef.current) return;
     if (activeProject.target?.kind === "ssh" && (registeredProjectId !== activeProject.workspaceId ||
       workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading")) return;
     const target = state.worktrees.find((worktree) => worktree.path === pendingWorktreePath);
@@ -1363,6 +1394,7 @@ function WorkspaceApp({
 
   const handleSelectTerminalTab = useCallback(
     (tabId: string) => {
+      if (activeRemoteHostRef.current) return;
       const currentState = stateRef.current;
       const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
@@ -1560,6 +1592,7 @@ function WorkspaceApp({
   );
 
   const handleAddTerminalTab = useCallback((shell?: string) => {
+    if (activeRemoteHostRef.current) return;
     if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
     const activeWt = activeWorktreeRef.current;
     if (!activeWt) return;
@@ -1568,6 +1601,7 @@ function WorkspaceApp({
 
   const handleLaunchAgent = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
+      if (activeRemoteHostRef.current) return;
       if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
       try {
         const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
@@ -1594,7 +1628,10 @@ function WorkspaceApp({
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
-    void onNewTerminalTabMenu(handleAddTerminalTab).then((dispose) => {
+    void onNewTerminalTabMenu(() => {
+      if (activeRemoteHostRef.current) return;
+      handleAddTerminalTab();
+    }).then((dispose) => {
       if (cancelled) dispose();
       else unlisten = dispose;
     });
@@ -1606,6 +1643,7 @@ function WorkspaceApp({
 
   const handleCloseTab = useCallback(
     (tabId: string) => {
+      if (activeRemoteHostRef.current) return;
       const tab = stateRef.current.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab || tab.pinned) return;
       if (generalSettings.confirmCloseTab) {
@@ -1618,6 +1656,7 @@ function WorkspaceApp({
   );
 
   const handleCloseActiveSurface = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
     const currentState = stateRef.current;
     const activeTabId = currentState.layout.activeTabId;
     if (!activeTabId) return;
@@ -1644,6 +1683,7 @@ function WorkspaceApp({
 
   const handleCloseOtherTabs = useCallback(
     (tabId: string) => {
+      if (activeRemoteHostRef.current) return;
       void closeOtherTabs(tabId).catch(reportRuntimeError);
     },
     [closeOtherTabs, reportRuntimeError],
@@ -1651,6 +1691,7 @@ function WorkspaceApp({
 
   const handleCloseTabsToRight = useCallback(
     (tabId: string) => {
+      if (activeRemoteHostRef.current) return;
       void closeTabsToRight(tabId).catch(reportRuntimeError);
     },
     [closeTabsToRight, reportRuntimeError],
@@ -1658,6 +1699,7 @@ function WorkspaceApp({
 
   const handleCloseTabsToLeft = useCallback(
     (tabId: string) => {
+      if (activeRemoteHostRef.current) return;
       void closeTabsToLeft(tabId).catch(reportRuntimeError);
     },
     [closeTabsToLeft, reportRuntimeError],
@@ -1665,6 +1707,7 @@ function WorkspaceApp({
 
   const handleCycleTab = useCallback(
     (offset: number) => {
+      if (activeRemoteHostRef.current) return;
       const currentState = stateRef.current;
       const focusedGroup = currentState.layout.focusedGroupId
         ? currentState.layout.tabGroups?.[currentState.layout.focusedGroupId]
@@ -1683,6 +1726,7 @@ function WorkspaceApp({
 
   const handleSplitActive = useCallback(
     (direction: PaneDirection) => {
+      if (activeRemoteHostRef.current) return;
       const currentState = stateRef.current;
       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
       if (!activeTab || activeTab.kind === "browser") return;
@@ -1694,6 +1738,7 @@ function WorkspaceApp({
   );
 
   const handleUnsplitActive = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
     const currentState = stateRef.current;
     const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
     if (!activeTab || activeTab.kind === "browser") return;
@@ -1705,6 +1750,7 @@ function WorkspaceApp({
 
   const handleCyclePaneFocus = useCallback(
     (offset: number) => {
+      if (activeRemoteHostRef.current) return;
       const currentState = stateRef.current;
       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
       if (!activeTab || activeTab.kind === "browser") return;
@@ -1721,6 +1767,7 @@ function WorkspaceApp({
   );
 
   const handleOpenTerminalSearch = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
     const currentState = stateRef.current;
     const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
     if (!activeTab || activeTab.kind === "browser") return;
@@ -1731,6 +1778,7 @@ function WorkspaceApp({
 
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
+      if (activeRemoteHostRef.current) return;
       const visible = listVisibleWorktrees(
         projectsRef.current,
         stateRef.current.worktrees,
@@ -1754,21 +1802,25 @@ function WorkspaceApp({
   terminalSettingsRef.current = terminalSettings;
 
   const handleZoomIn = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
     const nextSize = Math.min(36, terminalSettingsRef.current.fontSize + 1);
     updateTerminalSettings({ fontSize: nextSize });
   }, [updateTerminalSettings]);
 
   const handleZoomOut = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
     const nextSize = Math.max(10, terminalSettingsRef.current.fontSize - 1);
     updateTerminalSettings({ fontSize: nextSize });
   }, [updateTerminalSettings]);
 
   const handleZoomReset = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
     updateTerminalSettings({ fontSize: null });
   }, [updateTerminalSettings]);
 
   const handleSelectTerminalTabByIndex = useCallback(
     (index: number) => {
+      if (activeRemoteHostRef.current) return;
       const currentState = stateRef.current;
       const focusedGroup = currentState.layout.focusedGroupId
         ? currentState.layout.tabGroups?.[currentState.layout.focusedGroupId]
@@ -1780,10 +1832,12 @@ function WorkspaceApp({
   );
 
   const handleOpenAddProject = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
     setAddProjectHostId(undefined);
     setIsAddProjectOpen(true);
   }, []);
   const handleOpenSshProject = useCallback((hostId: string) => {
+    if (activeRemoteHostRef.current) return;
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
     setAddProjectHostId(hostId);
@@ -1791,6 +1845,7 @@ function WorkspaceApp({
   }, []);
   const handleCloseAddProject = useCallback(() => setIsAddProjectOpen(false), []);
   const handleOpenCreateWorktree = useCallback((project?: RegisteredProject) => {
+    if (activeRemoteHostRef.current) return;
     const target = project ?? activeProjectRef.current;
     setCreateTargetProject(target);
     setIsCreateOpen(true);
@@ -1799,8 +1854,17 @@ function WorkspaceApp({
     setIsCreateOpen(false);
     setCreateTargetProject(null);
   }, []);
-  const handleOpenCommandPalette = useCallback(() => setIsCommandPaletteOpen(true), []);
+  const handleOpenCommandPalette = useCallback(() => {
+    if (activeRemoteHostRef.current) return;
+    setIsCommandPaletteOpen(true);
+  }, []);
   const handleCloseCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
+
+  useEffect(() => {
+    if (activeRemoteHost) {
+      setIsCommandPaletteOpen(false);
+    }
+  }, [activeRemoteHost]);
   const handleOpenSettings = useCallback((section?: SectionId) => {
     preloadSettingsDialog();
     const validSection =
@@ -1902,6 +1966,7 @@ function WorkspaceApp({
 
   const handleSplitPane = useCallback(
     (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second" }) => {
+      if (activeRemoteHostRef.current) return;
       if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
       void splitPane(tabId, leafId, direction, options).catch(reportRuntimeError);
     },
@@ -1910,6 +1975,7 @@ function WorkspaceApp({
 
   const handleClosePane = useCallback(
     (tabId: string, leafId: string) => {
+      if (activeRemoteHostRef.current) return;
       void closePane(tabId, leafId).catch(reportRuntimeError);
     },
     [closePane, reportRuntimeError],
@@ -1919,6 +1985,7 @@ function WorkspaceApp({
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     void onCloseTabMenu(() => {
+      if (activeRemoteHostRef.current) return;
       handleCloseActiveSurface();
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -1934,6 +2001,7 @@ function WorkspaceApp({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onBrowserOpenRequested((payload) => {
+      if (activeRemoteHostRef.current) return;
       void createBrowserTab(payload.targetUrl, undefined, {
         profileId: payload.profileId,
         worktreePath: payload.worktreePath ?? undefined,
@@ -1953,6 +2021,7 @@ function WorkspaceApp({
   // falls back to the system browser.
   useEffect(() => {
     return registerBuiltInBrowserLinkOpener((url) => {
+      if (activeRemoteHostRef.current) return;
       void createBrowserTab(url).catch(reportRuntimeError);
     });
   }, [createBrowserTab, reportRuntimeError]);
@@ -1963,6 +2032,7 @@ function WorkspaceApp({
     // Cmd+1..9 never reaches the webview because the macOS Window menu claims it,
     // so the native key monitor forwards the digit as an event instead.
     void onSelectWorktreeMenu((digit) => {
+      if (activeRemoteHostRef.current) return;
       handleSelectWorktreeByIndex(digit - 1);
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -1986,6 +2056,7 @@ function WorkspaceApp({
     let cancelled = false;
 
     void onSelectTabMenu((digit) => {
+      if (activeRemoteHostRef.current) return;
       handleSelectTerminalTabByIndex(digit - 1);
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -1993,6 +2064,7 @@ function WorkspaceApp({
     });
 
     void onNextTabMenu(() => {
+      if (activeRemoteHostRef.current) return;
       handleCycleTab(1);
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -2000,6 +2072,7 @@ function WorkspaceApp({
     });
 
     void onPrevTabMenu(() => {
+      if (activeRemoteHostRef.current) return;
       handleCycleTab(-1);
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -2007,6 +2080,7 @@ function WorkspaceApp({
     });
 
     void onSplitRightMenu(() => {
+      if (activeRemoteHostRef.current) return;
       handleSplitActive("horizontal");
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -2014,6 +2088,7 @@ function WorkspaceApp({
     });
 
     void onSplitDownMenu(() => {
+      if (activeRemoteHostRef.current) return;
       handleSplitActive("vertical");
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -2021,6 +2096,7 @@ function WorkspaceApp({
     });
 
     void onCommandPaletteMenu(() => {
+      if (activeRemoteHostRef.current) return;
       setIsCommandPaletteOpen(true);
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -2077,6 +2153,7 @@ function WorkspaceApp({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onBrowserShortcutRequested((payload) => {
+      if (activeRemoteHostRef.current) return;
       const action = payload.action;
       if (action === "tab-next") {
         handleCycleTab(1);
@@ -2144,49 +2221,58 @@ function WorkspaceApp({
   ]);
 
   const shortcutHandlers = useMemo(
-    () => ({
-      "tab.newTerminal": handleAddTerminalTab,
-      "tab.newBrowser": () => void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError),
-      "tab.close": handleCloseActiveSurface,
-      "browser.focusAddress": browserShortcutsActive ? () => dispatchBrowserShortcut("focus-address") : undefined,
-      "browser.reload": browserShortcutsActive ? () => dispatchBrowserShortcut("reload") : undefined,
-      "browser.back": browserShortcutsActive ? () => dispatchBrowserShortcut("back") : undefined,
-      "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
-      "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
-      "tab.next": () => handleCycleTab(1),
-      "tab.previous": () => handleCycleTab(-1),
-      "tab.select1": () => handleSelectTerminalTabByIndex(0),
-      "tab.select2": () => handleSelectTerminalTabByIndex(1),
-      "tab.select3": () => handleSelectTerminalTabByIndex(2),
-      "tab.select4": () => handleSelectTerminalTabByIndex(3),
-      "tab.select5": () => handleSelectTerminalTabByIndex(4),
-      "tab.select6": () => handleSelectTerminalTabByIndex(5),
-      "tab.select7": () => handleSelectTerminalTabByIndex(6),
-      "tab.select8": () => handleSelectTerminalTabByIndex(7),
-      "tab.select9": () => handleSelectTerminalTabByIndex(8),
-      "workspace.select1": () => handleSelectWorktreeByIndex(0),
-      "workspace.select2": () => handleSelectWorktreeByIndex(1),
-      "workspace.select3": () => handleSelectWorktreeByIndex(2),
-      "workspace.select4": () => handleSelectWorktreeByIndex(3),
-      "workspace.select5": () => handleSelectWorktreeByIndex(4),
-      "workspace.select6": () => handleSelectWorktreeByIndex(5),
-      "workspace.select7": () => handleSelectWorktreeByIndex(6),
-      "workspace.select8": () => handleSelectWorktreeByIndex(7),
-      "workspace.select9": () => handleSelectWorktreeByIndex(8),
-      "terminal.splitRight": () => handleSplitActive("horizontal"),
-      "terminal.splitDown": () => handleSplitActive("vertical"),
-      "terminal.unsplit": handleUnsplitActive,
-      "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
-      "terminal.focusPrevious": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(-1),
-      "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
-      "sidebar.left.toggle": toggleSidebar,
-      "commandPalette.open": handleOpenCommandPalette,
-      "settings.toggle": handleToggleSettings,
-      "zoom.in": browserShortcutsActive ? undefined : handleZoomIn,
-      "zoom.out": browserShortcutsActive ? undefined : handleZoomOut,
-      "zoom.reset": browserShortcutsActive ? undefined : handleZoomReset,
-    }),
+    () => {
+      if (activeRemoteHost) {
+        return {
+          "sidebar.left.toggle": toggleSidebar,
+          "settings.toggle": handleToggleSettings,
+        };
+      }
+      return {
+        "tab.newTerminal": handleAddTerminalTab,
+        "tab.newBrowser": () => void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError),
+        "tab.close": handleCloseActiveSurface,
+        "browser.focusAddress": browserShortcutsActive ? () => dispatchBrowserShortcut("focus-address") : undefined,
+        "browser.reload": browserShortcutsActive ? () => dispatchBrowserShortcut("reload") : undefined,
+        "browser.back": browserShortcutsActive ? () => dispatchBrowserShortcut("back") : undefined,
+        "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
+        "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
+        "tab.next": () => handleCycleTab(1),
+        "tab.previous": () => handleCycleTab(-1),
+        "tab.select1": () => handleSelectTerminalTabByIndex(0),
+        "tab.select2": () => handleSelectTerminalTabByIndex(1),
+        "tab.select3": () => handleSelectTerminalTabByIndex(2),
+        "tab.select4": () => handleSelectTerminalTabByIndex(3),
+        "tab.select5": () => handleSelectTerminalTabByIndex(4),
+        "tab.select6": () => handleSelectTerminalTabByIndex(5),
+        "tab.select7": () => handleSelectTerminalTabByIndex(6),
+        "tab.select8": () => handleSelectTerminalTabByIndex(7),
+        "tab.select9": () => handleSelectTerminalTabByIndex(8),
+        "workspace.select1": () => handleSelectWorktreeByIndex(0),
+        "workspace.select2": () => handleSelectWorktreeByIndex(1),
+        "workspace.select3": () => handleSelectWorktreeByIndex(2),
+        "workspace.select4": () => handleSelectWorktreeByIndex(3),
+        "workspace.select5": () => handleSelectWorktreeByIndex(4),
+        "workspace.select6": () => handleSelectWorktreeByIndex(5),
+        "workspace.select7": () => handleSelectWorktreeByIndex(6),
+        "workspace.select8": () => handleSelectWorktreeByIndex(7),
+        "workspace.select9": () => handleSelectWorktreeByIndex(8),
+        "terminal.splitRight": () => handleSplitActive("horizontal"),
+        "terminal.splitDown": () => handleSplitActive("vertical"),
+        "terminal.unsplit": handleUnsplitActive,
+        "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
+        "terminal.focusPrevious": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(-1),
+        "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
+        "sidebar.left.toggle": toggleSidebar,
+        "commandPalette.open": handleOpenCommandPalette,
+        "settings.toggle": handleToggleSettings,
+        "zoom.in": browserShortcutsActive ? undefined : handleZoomIn,
+        "zoom.out": browserShortcutsActive ? undefined : handleZoomOut,
+        "zoom.reset": browserShortcutsActive ? undefined : handleZoomReset,
+      };
+    },
     [
+      activeRemoteHost,
       createBrowserTab,
       handleAddTerminalTab,
       handleCloseActiveSurface,
@@ -2279,7 +2365,16 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
-        {projects.length === 0 ? (
+        {activeRemoteHost ? (
+          <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
+            <RemoteHostConnection
+              key={activeRemoteHost.hostId}
+              hostId={activeRemoteHost.hostId}
+              relayUrl={activeRemoteHost.relayOrigin || activeRemoteHost.address}
+              readUrlHints={false}
+            />
+          </div>
+        ) : projects.length === 0 ? (
           <div
             data-testid="no-projects-view"
             className="flex h-full flex-1 flex-col items-center justify-center gap-4 bg-background"
@@ -2382,7 +2477,7 @@ function WorkspaceApp({
         )}
       </main>
 
-      {isCommandPaletteOpen ? (
+      {isCommandPaletteOpen && !activeRemoteHost ? (
         <CommandPalette
           open={true}
           worktrees={state.worktrees}
@@ -2424,6 +2519,7 @@ function WorkspaceApp({
           project={createTargetProject ?? activeProject}
           onClose={handleCloseCreateWorktree}
           onCreated={async (worktree) => {
+            if (activeRemoteHostRef.current) return;
             const owner = createTargetProject ?? activeProject;
             if (owner.workspaceId !== activeProject.workspaceId) {
               handleSelectProject(owner);

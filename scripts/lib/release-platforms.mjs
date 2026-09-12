@@ -604,10 +604,17 @@ bun install --cwd "$source_dir/ui" --frozen-lockfile
 mkdir "$out_dir"
 export CARGO_TARGET_DIR="$workspace/cargo-target"
 export SOURCE_DATE_EPOCH=${quoteSh(String(plan.sourceDateEpoch))}
+export NO_STRIP=true
 cd "$source_dir"
 bun tauri build --bundles appimage,deb
-mapfile -t appimages < <(find "$CARGO_TARGET_DIR/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage')
-mapfile -t debs < <(find "$CARGO_TARGET_DIR/release/bundle/deb" -maxdepth 1 -type f -name '*.deb')
+appimages=()
+while IFS= read -r f; do
+  [ -n "$f" ] && appimages+=("$f")
+done < <(find "$CARGO_TARGET_DIR/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage')
+debs=()
+while IFS= read -r f; do
+  [ -n "$f" ] && debs+=("$f")
+done < <(find "$CARGO_TARGET_DIR/release/bundle/deb" -maxdepth 1 -type f -name '*.deb')
 test "${"${#appimages[@]}"}" -eq 1 && test "${"${#debs[@]}"}" -eq 1
 test -s "${"${appimages[0]}"}" && test -s "${"${debs[0]}"}"
 cp "${"${appimages[0]}"}" "$out_dir/Ferryx_amd64.AppImage"
@@ -860,9 +867,38 @@ export async function buildHost({
         delete buildEnv.APPLE_PASSWORD;
       }
 
+      // Build Darwin universal binaries first (skip bundle)
+      const cargoTargetDir = join(workspaceDir, "cargo-target");
+      const aarch64Rel = join(cargoTargetDir, "aarch64-apple-darwin", "release");
+      const x86Rel = join(cargoTargetDir, "x86_64-apple-darwin", "release");
+      const universalRel = join(cargoTargetDir, "universal-apple-darwin", "release");
+
       execFileSync(
         "bun",
-        ["tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app,dmg"],
+        ["tauri", "build", "--target", "universal-apple-darwin", "--no-bundle"],
+        {
+          cwd: isolatedSource,
+          env: buildEnv,
+          stdio: "pipe",
+          timeout: timeoutMs,
+        },
+      );
+
+      // Ensure all workspace binaries (e.g. ferryx-cli, ferryx-relay) are universal lipo'd
+      mkdirSync(universalRel, { recursive: true });
+      for (const binName of ["ferryx-cli", "ferryx-relay"]) {
+        const aarch64Bin = join(aarch64Rel, binName);
+        const x86Bin = join(x86Rel, binName);
+        const universalBin = join(universalRel, binName);
+        if (existsSync(aarch64Bin) && existsSync(x86Bin)) {
+          execFileSync("lipo", ["-create", aarch64Bin, x86Bin, "-output", universalBin], { stdio: "pipe" });
+        }
+      }
+
+      // Run Tauri bundling now that all universal binaries exist
+      execFileSync(
+        "bun",
+        ["tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app,dmg", "-c", '{"build":{"beforeBuildCommand":""}}'],
         {
           cwd: isolatedSource,
           env: buildEnv,
@@ -908,7 +944,24 @@ export async function buildHost({
         throw new Error(`Info.plist version does not match plan version '${plan.appVersion}'`);
       }
 
-      // 3. Verify codesign
+      // 3. Verify and re-sign codesign (ensuring all subcomponents in Contents/MacOS have hardened runtime)
+      if (hostConfig.signingIdentity) {
+        const macosBinDir = join(appPath, "Contents", "MacOS");
+        if (existsSync(macosBinDir)) {
+          for (const item of readdirSync(macosBinDir)) {
+            const itemPath = join(macosBinDir, item);
+            if (statSync(itemPath).isFile()) {
+              execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, itemPath], {
+                stdio: "pipe",
+              });
+            }
+          }
+        }
+        execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, appPath], {
+          stdio: "pipe",
+        });
+      }
+
       execFileSync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath], {
         stdio: "pipe",
       });
@@ -937,11 +990,17 @@ export async function buildHost({
       }
 
       if (approveNotarization && hostConfig.notaryProfile) {
+        const appZipPath = join(workspaceDir, "Ferryx-notary.zip");
+        rmSync(appZipPath, { force: true });
+        execFileSync("ditto", ["-c", "-k", "--keepParent", appPath, appZipPath], { stdio: "pipe" });
+
         execFileSync(
           "xcrun",
-          ["notarytool", "submit", appPath, "--keychain-profile", hostConfig.notaryProfile, "--wait"],
+          ["notarytool", "submit", appZipPath, "--keychain-profile", hostConfig.notaryProfile, "--wait"],
           { stdio: "pipe" },
         );
+        rmSync(appZipPath, { force: true });
+
         execFileSync("xcrun", ["stapler", "staple", appPath], { stdio: "pipe" });
         execFileSync("xcrun", ["stapler", "validate", appPath], { stdio: "pipe" });
 
@@ -954,13 +1013,28 @@ export async function buildHost({
           execFileSync("xcrun", ["stapler", "staple", dmgPath], { stdio: "pipe" });
           execFileSync("xcrun", ["stapler", "validate", dmgPath], { stdio: "pipe" });
         }
+
+        // Validate Gatekeeper assessment with spctl
+        const spctlApp = spawnSync("spctl", ["-a", "-vvv", "-t", "install", appPath], { encoding: "utf8" });
+        const spctlAppOut = `${spctlApp.stdout || ""}\n${spctlApp.stderr || ""}`;
+        if (spctlApp.status !== 0 || !spctlAppOut.includes("Notarized Developer ID")) {
+          throw new Error(`Gatekeeper spctl validation failed for ${appPath}: ${spctlAppOut.trim()}`);
+        }
+
+        if (dmgPath && existsSync(dmgPath)) {
+          const spctlDmg = spawnSync("spctl", ["-a", "-vvv", "-t", "install", dmgPath], { encoding: "utf8" });
+          const spctlDmgOut = `${spctlDmg.stdout || ""}\n${spctlDmg.stderr || ""}`;
+          if (spctlDmg.status !== 0 || !spctlDmgOut.includes("Notarized Developer ID")) {
+            throw new Error(`Gatekeeper spctl validation failed for ${dmgPath}: ${spctlDmgOut.trim()}`);
+          }
+        }
       }
 
       // 5. Create updater tar from verified (and stapled) .app, excluding AppleDouble
       const updaterTarPath = join(artifactsOutDir, "Ferryx.app.tar.gz");
       execFileSync(
         "tar",
-        ["-czf", updaterTarPath, "-C", macosDir, "Ferryx.app"],
+        ["--no-xattrs", "-czf", updaterTarPath, "-C", macosDir, "Ferryx.app"],
         {
           env: { ...process.env, COPYFILE_DISABLE: "1" },
           stdio: "pipe",
