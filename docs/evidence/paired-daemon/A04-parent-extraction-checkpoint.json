@@ -1,0 +1,72 @@
+{
+  "status": "A04-incomplete-parent-extraction-checkpoint",
+  "sourceSha256": {
+    "src-tauri/src/daemon/server.rs": "5789ef53877df3b97107e1dd0293342de1e595ab7dfacf42095312d9c9b27c91",
+    "src-tauri/src/daemon/mod.rs": "f62cac476e47a45f3a6dce95311d194820fd59f15411fe8a18ce54df5328812b",
+    "src-tauri/src/daemon/workspace_service.rs": "714a8e4dbceec57aba00aad01bcdc5a23bcaf41284f0b88c75cfa60797930af6",
+    "src-tauri/src/daemon/session_service.rs": "1bbd593f77fc575c5b2a717913a30d4db3631df02956ce1e2eb89980c024ac7c",
+    "src-tauri/src/daemon/a04_shared_services_tests.rs": "57ed927b9c2fafa157e5f3123fa886b3758b98dc9794be8d37a4b880c67031ba",
+    "src-tauri/src/remote/state.rs": "15f3fffbc551b035beb522c7d3db314406cefb9a1f3bbdcb0fd714b4f9aa7af4",
+    "src-tauri/src/remote/backend.rs": "9e4c9049421a7cfdcaf0d539c42af5857abc8dd8a768e21fbec3526c34fcd71c"
+  },
+  "parentCorrections": [
+    "Restore unconditional crate-visible normalize_process_cwd compatibility export for ipc/agents.rs",
+    "Remove now-unused DaemonSessionDetails server import"
+  ],
+  "focused": {
+    "exitCode": 0,
+    "tests": 4,
+    "log": "A04-extracted-focused-green.log",
+    "serverHashAtRun": "c35dcaaefa147415733fdeb9e7196fc27e31fc3b4ac0472392edf317b83941b5",
+    "note": "Before unused import removal; actual same runtime behavior, final source session regression pending",
+    "ownerPid": 14409,
+    "ptyPid": 14482,
+    "cwd": "/private/tmp/a04-gskjP3/project",
+    "session": "7a6bc87c-ada3-4715-adec-29d0ee9399c3",
+    "httpStatus": 200,
+    "ownedPids": [
+      14408,
+      14425,
+      14426,
+      14478,
+      14409,
+      14482,
+      14483,
+      14522,
+      14523,
+      14548,
+      14581,
+      14582,
+      14615
+    ],
+    "privateRoots": [
+      "/private/tmp/a04-wpscMU",
+      "/private/tmp/a04-gskjP3",
+      "/private/tmp/a04-NKpAU8",
+      "/private/tmp/a04-78prHq",
+      "/private/tmp/a04-uDRtcR",
+      "/private/tmp/a04-ezTHJ1",
+      "/private/tmp/a04-JRDoWs"
+    ],
+    "allPidsAndRootsAbsent": true
+  },
+  "remote": {
+    "exitCode": 0,
+    "tests": 212,
+    "log": "A04-extracted-remote-green.log",
+    "serverHashAtRun": "c35dcaaefa147415733fdeb9e7196fc27e31fc3b4ac0472392edf317b83941b5"
+  },
+  "headlessBins": {
+    "exitCode": 0,
+    "log": "A04-extracted-bins-check.log",
+    "command": "env -u A04_PRIVATE_ROOT -u A04_SPLIT_AUTHORITY -u A04_INJECTION CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri/target cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay"
+  },
+  "pending": [
+    "Local session regression monitor bash_235",
+    "Isolated SSH helper build monitor bash_236 followed by SSH runtime regression",
+    "SSH survival and legacy handover scoped checks",
+    "Final current-source independent approval",
+    "A04 commit"
+  ],
+  "warnings": "New unused server import removed; unrelated pre-existing compiler warnings remain unsuppressed"
+}

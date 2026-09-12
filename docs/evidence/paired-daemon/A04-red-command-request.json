@@ -1,0 +1,24 @@
+{
+  "status": "test-only-source-awaiting-monitored-execution",
+  "cwd": "/Users/indo/code/project/orca-lite-wt/herdr-wave1",
+  "command": "CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri/target A04_SPLIT_AUTHORITY=1 cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::server::a04_shared_services_tests::a04_shared_authority_runtime -- --exact --nocapture",
+  "log": "docs/evidence/paired-daemon/A04-red-shared-authority.log",
+  "expected": "Compilation succeeds; real IPC creates a PTY; real authenticated HTTP on the deliberately detached authority omits it; assertion HTTP cannot see original IPC session and workspace fails after cleanup receipts. A compiler error or earlier fixture failure is NOT behavioral RED.",
+  "mutation": "A04_SPLIT_AUTHORITY affects only the test gateway selection. Baseline production already shares its router and registry.",
+  "productionEdited": false,
+  "sourceSha256": {
+    "src-tauri/src/daemon/a04_shared_services_tests.rs": "2b87c0765970140a90a08e31af182008ba9f351de2d979b1ae8a4c22522970b4",
+    "src-tauri/src/daemon/server.rs": "668e1710b738c5de019ec447c36bbcf075852f6256c0946d3a47f6838a190345"
+  },
+  "executionReason": "Parent offers monitored execution. Child bash works; child has no tool.monitor. No Cargo process has been launched by child; avoid concurrent duplicate execution.",
+  "cleanupContract": {
+    "isolation": "Dedicated child test process, tempfile root under /tmp, HOME/FERRYX_DATA_DIR/FERRYX_RUNTIME_DIR private to child, private Unix socket, TCP port 0, no desktop or canonical daemon discovery.",
+    "normalAndScenarioAssertionFailure": "Close every owned PTY and assert is_reaped; signal and join IPC/HTTP tasks with ten-second bounds; remove socket; propagate scenario result only afterward; outer process reaps child and removes private root even for child test failure.",
+    "outerDeadline": "Sixty-second child completion deadline; on timeout kill and reap the exact child then remove root. No test sleeps or polling delays.",
+    "requiredReceipts": ["PTY reaped=true for each created session", "listeners_joined=true socket_removed=true", "child_pid reaped=true", "private_root_removed=true"],
+    "limitations": "Not runtime verified. Outer timeout currently kills only the owned child, not an owned process group; orphan PTY cleanup on timeout is therefore not established. A setup or teardown error can bypass later inner cleanup, though outer runtime/process teardown still occurs. Parent must not accept full cleanup until these failure paths are hardened and verified."
+  },
+  "capabilityGating": "Unchanged: absent machine APIs remain 503 stubs and machine capabilities remain empty. A04 fixture exercises existing authenticated session listing, not A09 machine creation.",
+  "verification": "git diff --check passed; test-file LSP reported no errors before bounded outer wait edit. Cargo has not been invoked by this child.",
+  "remaining": "Behavioral RED, guard mutation evidence, service extraction, focused GREEN, remote suite, binary check, final source hashes, hardened failure cleanup and complete runtime cleanup evidence, and A04-implementation.md. This is not acceptance."
+}

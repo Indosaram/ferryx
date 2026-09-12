@@ -1,0 +1,57 @@
+{
+  "status": "guard-red-restoration-green-confirmed-not-A04-acceptance",
+  "worktree": "/Users/indo/code/project/orca-lite-wt/herdr-wave1",
+  "command": "env -u A04_PRIVATE_ROOT -u A04_SPLIT_AUTHORITY -u A04_INJECTION CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::server::a04_shared_services_tests::a04_shared_authority_runtime -- --exact --nocapture",
+  "fixtureSha256": "24d8e8f0e61043ec1fe2e8d3984bd26f37c17aa2881717bf959e71436906115d",
+  "originalAndRestoredServerSha256": "668e1710b738c5de019ec447c36bbcf075852f6256c0946d3a47f6838a190345",
+  "mutations": [
+    {
+      "id": "unregistered-admission",
+      "sha256": "5b9f9f83bca75f3d31dc14e80043685ccacf9987885bc143390a3dce3cbd96aa",
+      "exitCode": 101,
+      "failure": "unregistered spawn admitted",
+      "log": "A04-red-unregistered-g2.log",
+      "pids": [
+        96723,
+        96743
+      ],
+      "root": "/private/tmp/a04-h5R6Or",
+      "restored": true
+    },
+    {
+      "id": "cwd-admission",
+      "sha256": "fe7e9d69b5c43555372b5d0e00b9c6e33b13e5f8e44e97047114aa4fbdef8f3a",
+      "exitCode": 101,
+      "failure": "cwd escape admitted",
+      "log": "A04-red-cwd-g2.log",
+      "pids": [
+        97839,
+        97881
+      ],
+      "root": "/private/tmp/a04-PXlSfO",
+      "restored": true
+    }
+  ],
+  "green": {
+    "exitCode": 0,
+    "log": "A04-guards-restored-green.log",
+    "ownerPid": 638,
+    "ptyPid": 683,
+    "root": "/private/tmp/a04-OXW5Lc",
+    "session": "d08882f2-007f-4c7f-a68b-864cf7e9c82e",
+    "httpStatus": 200,
+    "sharedSessionAndWorkspace": true,
+    "ipcAndOsCwd": "/private/tmp/a04-OXW5Lc/project"
+  },
+  "cleanup": {
+    "allReportedPidsAbsent": true,
+    "allRootsAbsent": true,
+    "allMutationsRemoved": true
+  },
+  "remaining": [
+    "Actual shared service extraction",
+    "Service-less constructor and ownership verification",
+    "Final remote regression and CLI/relay check",
+    "Independent current candidate approval"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "status": "INCOMPLETE A04 - test cleanup implementation ready for parent execution",
+  "cwd": "/Users/indo/code/project/orca-lite-wt/herdr-wave1",
+  "productionEdited": false,
+  "sourceSha256": {
+    "src-tauri/src/daemon/a04_shared_services_tests.rs": "e358d6d5635ba587c5468bad9c3fe283e7f0b1fb115c7c008ee0c9a7fff799b2",
+    "src-tauri/src/daemon/server.rs": "668e1710b738c5de019ec447c36bbcf075852f6256c0946d3a47f6838a190345"
+  },
+  "execution": "Parent monitor only; execute serially with no concurrent Cargo. No split-authority RED repeat. Capture stdout/stderr and exit status verbatim in named logs; verify hashes before and after.",
+  "commands": [
+    {
+      "command": "env -u A04_PRIVATE_ROOT -u A04_SPLIT_AUTHORITY -u A04_INJECTION CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::server::a04_shared_services_tests::a04_cleanup_failure_paths -- --exact --nocapture",
+      "log": "docs/evidence/paired-daemon/A04-cleanup-injected-g3.log",
+      "expectedExit": 0,
+      "expected": "Six sequential private child fixtures: IpcSetup closes IPC; HttpSetup closes both listeners; Scenario closes one PTY; Cleanup injects first close error then actually closes both PTYs; Cancel and Deadline trigger at the original PTY oneshot barrier and each reap one PTY. Every child is waited, every private root is removed. Only Cleanup may report one expected cleanup error. No bearer/PIN logging."
+    },
+    {
+      "command": "env -u A04_PRIVATE_ROOT -u A04_SPLIT_AUTHORITY -u A04_INJECTION CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::server::a04_shared_services_tests::a04_shared_authority_runtime -- --exact --nocapture",
+      "log": "docs/evidence/paired-daemon/A04-cleanup-normal-g3.log",
+      "expectedExit": 0,
+      "expected": "Baseline shared authority remains: unregistered/escaping cwd requests error; original IPC PTY PID and process cwd agree with metadata; HTTP200 lists that exact session/workspace; listener joins, PTY reap, child wait, private-root removal receipts. This is baseline cleanup verification, NOT completed A04 extraction GREEN."
+    }
+  ],
+  "resultFile": "docs/evidence/paired-daemon/A04-parent-cleanup-result-g3.json",
+  "requiredObservations": [
+    "Exact commands, exit codes, pre/post hashes and unmodified production seam hash.",
+    "Record every A04 OWNED and CLEANUP PID, verify each PID absent after wait, and every reported private root absent. Preserve unexpected errors rather than treating an injection label as sufficient proof.",
+    "Only after these pass, run the two guard mutations requested in A04-guard-red-command-request-g2.json against these updated test hashes; restore server.rs after each. Do not repeat accepted split-authority RED."
+  ],
+  "limitations": [
+    "No Cargo command or live fixture executed by this generation: child has no monitor. Initial LSP returned no diagnostics; final refresh timed out after 3000ms. Neither is compilation verification. Final rustfmt --check, git diff --check and JSON parsing exited 0.",
+    "Normal scenario has an inner 30-second deadline retaining server ownership. Injected deadline is reset to now only after an exact real-PTY barrier; no 60-second timeout simulation.",
+    "Outer wrapper now waits for owner cleanup rather than killing it at 60 seconds. This deliberately cannot certify cleanup after an external SIGKILL, runtime deadlock, or OS failure. Parent must not kill just the wrapper and call that a cleanup receipt.",
+    "Production close has existing bounded TERM/KILL/reader phases. Emergency original-handle kill/wait_and_reap runs off-thread, but its OS wait is not independently bounded. A kernel-level stuck child is not covered by injected scenarios.",
+    "IPC clients drain before PTY enumeration, bounded by listener join deadline; task abort on a genuinely stuck IPC handler cannot certify cancellation of already-started blocking work. Current deterministic cancellation is after acknowledged spawn, not during blocking spawn.",
+    "Test registration remains Unix-only as in the accepted RED fixture; no Windows runtime assertion is claimed.",
+    "A04 production service extraction, independent guard RED, remote suite, CLI/relay checks, final implementation evidence and acceptance remain outstanding. A01-A24 remains open."
+  ]
+}

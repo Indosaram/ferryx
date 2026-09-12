@@ -278,6 +278,8 @@ pub struct RemoteGatewayState {
     #[cfg(test)]
     pub(crate) identity_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
+    /// Absent for legacy/test constructors. Presence enables no future API.
+    pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
@@ -316,6 +318,18 @@ pub struct RemoteGatewayState {
 }
 
 impl RemoteGatewayState {
+    /// Derive both gateway handles from the authority before publication.
+    pub(crate) fn with_machine_services(
+        mut self,
+        sessions: Arc<crate::daemon::session_service::DaemonSessionService>,
+    ) -> Self {
+        let workspaces = Arc::clone(&sessions.workspace_service);
+        self.workspace_registry = workspaces.registry.clone();
+        self.session_backend = sessions.clone();
+        self.machine_services = Some(Arc::new(crate::daemon::MachineServices { sessions, workspaces }));
+        self
+    }
+
     pub fn new(
         terminal_service: Arc<TerminalService>,
         workspace_registry: WorkspaceRegistry,
@@ -405,6 +419,7 @@ impl RemoteGatewayState {
             daemon_epoch: AtomicU64::new(0),
             session_backend,
             workspace_registry,
+            machine_services: None,
             active_selection: RwLock::new(None),
             ssh_store_path: RwLock::new(None),
             active_session_tx,

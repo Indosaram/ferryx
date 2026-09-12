@@ -1,8 +1,8 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 use crate::daemon::protocol::{
-    AgentProviderSessionKey, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus,
-    DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire,
+    AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus,
+    DaemonRequest, DaemonResponse, DaemonStreamMessage, HistorySegmentWire,
     TerminalStartup, DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
@@ -11,8 +11,11 @@ use crate::remote::state::{
     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, REMOTE_GATEWAY_PORT,
 };
 use crate::session::{clear_session_from_path, load_session_from_path, save_session_to_path};
-use crate::terminal::{PtyManager, PtySessionState, TerminalOutputHub, TerminalService};
-use crate::worktree::{WorkspaceRegistry, WorktreeIdentity, WorktreeManager};
+use crate::terminal::{PtyManager, TerminalOutputHub, TerminalService};
+use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
+use super::session_service::*;
+#[cfg(test)]
+use crate::daemon::protocol::AgentProviderSessionKey;
 use parking_lot::{Mutex, RwLock};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -22,7 +25,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 #[cfg(not(unix))]
 use tokio::net::TcpListener;
@@ -730,103 +733,6 @@ fn remove_stale_socket_after_lock(path: &Path) -> Result<(), String> {
     }
 }
 
-const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
-
-#[derive(Clone)]
-struct SpawnCacheEntry {
-    session_id: String,
-    created_at: Instant,
-    fingerprint: SpawnRequestFingerprint,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct StoredSessionMeta {
-    client_request_id: String,
-    workspace_id: String,
-    worktree: Option<WorktreeIdentity>,
-    cwd: PathBuf,
-    provider_claim: Option<ProviderSessionClaimKey>,
-    spawn_fingerprint: SpawnRequestFingerprint,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct SpawnRequestFingerprint {
-    workspace_id: String,
-    worktree: Option<WorktreeIdentity>,
-    cwd: Option<String>,
-    cols: u16,
-    rows: u16,
-    shell: Option<String>,
-    provider_claim: Option<ProviderSessionClaimKey>,
-    startup: Option<TerminalStartup>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-struct ProviderSessionClaimKey {
-    agent_type: String,
-    provider_key: AgentProviderSessionKey,
-    provider_id: String,
-    transcript_path: Option<String>,
-}
-
-impl ProviderSessionClaimKey {
-    fn from_startup(startup: Option<&TerminalStartup>) -> Option<Self> {
-        let TerminalStartup::AgentResume {
-            agent_type,
-            provider_session,
-        } = startup?
-        else {
-            return None;
-        };
-        let agent_type = agent_type.trim().to_ascii_lowercase();
-        let transcript_path = if matches!(agent_type.as_str(), "pi" | "prime-agent") {
-            provider_session
-                .transcript_path
-                .as_deref()
-                .map(str::trim)
-                .map(str::to_string)
-        } else {
-            None
-        };
-        Some(Self {
-            agent_type,
-            provider_key: provider_session.key,
-            provider_id: provider_session.id.trim().to_string(),
-            transcript_path,
-        })
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum SpawnError {
-    #[error(
-        "AgentSessionConflict: {agent_type} {provider_key:?} '{provider_id}' is already owned by session '{existing_session_id}'"
-    )]
-    AgentSessionConflict {
-        agent_type: String,
-        provider_key: AgentProviderSessionKey,
-        provider_id: String,
-        existing_session_id: String,
-    },
-    #[error("{0}")]
-    InvalidAgentResume(String),
-    #[error("{0}")]
-    Other(String),
-}
-
-impl SpawnError {
-    #[cfg(test)]
-    fn contains(&self, needle: &str) -> bool {
-        self.to_string().contains(needle)
-    }
-}
-
-impl From<String> for SpawnError {
-    fn from(value: String) -> Self {
-        Self::Other(value)
-    }
-}
-
 pub fn get_agent_state_socket_path() -> PathBuf {
     get_runtime_dir().join("agent-state.sock")
 }
@@ -835,28 +741,7 @@ pub fn agent_state_socket_path() -> String {
     get_agent_state_socket_path().to_string_lossy().into_owned()
 }
 
-pub(crate) fn normalize_process_cwd(path: &Path) -> PathBuf {
-    let Some(path_str) = path.to_str() else {
-        return path.to_path_buf();
-    };
-
-    if let Some(rest) = path_str.strip_prefix(r"\\?\") {
-        if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(r"UNC\") {
-            return PathBuf::from(format!(r"\\{}", &rest[4..]));
-        }
-
-        let bytes = rest.as_bytes();
-        if bytes.len() >= 2
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/')
-        {
-            return PathBuf::from(rest);
-        }
-    }
-
-    path.to_path_buf()
-}
+pub(crate) use super::session_service::normalize_process_cwd;
 
 fn daemon_ssh_store_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR") {
@@ -872,12 +757,6 @@ fn daemon_ssh_store_path() -> PathBuf {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct DurableRemoteSession {
-    descriptor: crate::terminal::remote::RemoteSessionDescriptor,
-    metadata: Option<StoredSessionMeta>,
-}
-
 pub struct DaemonServer {
     pub session_router: Arc<crate::daemon::proxy::SessionRouter>,
     pub handover_manager: Arc<crate::daemon::handover::HandoverManager>,
@@ -888,22 +767,24 @@ pub struct DaemonServer {
     epoch: u64,
     binary_path: Option<String>,
     binary_mtime_ms: Option<u64>,
-    spawn_idempotency_cache: Arc<Mutex<HashMap<String, SpawnCacheEntry>>>,
-    spawn_lock: tokio::sync::Mutex<()>,
-    remote_persistence_lock: Arc<tokio::sync::Mutex<()>>,
-    remote_sessions_path: PathBuf,
-    ssh_store_path: PathBuf,
+    pub(crate) session_service: Arc<DaemonSessionService>,
     #[cfg(test)]
     helper_home: Option<String>,
-    session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
-    provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
-    agent_states: Arc<AgentStateHub>,
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
 }
 
 #[cfg(all(test, unix))]
 #[path = "a03_owner_cli_fixture.rs"]
 mod a03_owner_cli_fixture;
+
+#[cfg(all(test, unix))]
+#[path = "a04_shared_services_tests.rs"]
+mod a04_shared_services_tests;
+
+impl std::ops::Deref for DaemonServer {
+    type Target = DaemonSessionService;
+    fn deref(&self) -> &Self::Target { &self.session_service }
+}
 
 impl Default for DaemonServer {
     fn default() -> Self {
@@ -931,6 +812,30 @@ impl DaemonServer {
             &terminal_service,
         )));
         let workspace_registry = WorkspaceRegistry::new();
+        let handover_manager = Arc::new(crate::daemon::handover::HandoverManager::new(get_socket_path()));
+        let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
+        let workspace_service = Arc::new(super::workspace_service::DaemonWorkspaceService::new(workspace_registry.clone()));
+        let session_service = Arc::new(DaemonSessionService {
+            workspace_service,
+            terminal_service: Arc::clone(&terminal_service),
+            session_router: Arc::clone(&session_router),
+            handover_manager: Arc::downgrade(&handover_manager),
+            remote_event_tx: remote_event_tx.clone(),
+            agent_states: Arc::new(AgentStateHub::default()),
+            spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
+            spawn_lock: Arc::new(tokio::sync::Mutex::new(())),
+            remote_persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
+            remote_sessions_path: isolated_dir
+                .clone()
+                .or_else(session_dir_override)
+                .unwrap_or_else(get_runtime_dir)
+                .join("remote_sessions.json"),
+            ssh_store_path: isolated_dir.clone()
+                .map(|p| p.join("ssh_hosts.json"))
+                .unwrap_or_else(daemon_ssh_store_path),
+            session_metadata: Arc::new(RwLock::new(HashMap::new())),
+            provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
+        });
         #[cfg(test)]
         let remote_state = Arc::new(RemoteGatewayState::new_with_paths_backend(
             Arc::clone(&session_router) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -955,6 +860,10 @@ impl DaemonServer {
             ))
         };
 
+        let remote_state = Arc::new(Arc::try_unwrap(remote_state)
+            .unwrap_or_else(|_| unreachable!("gateway not published yet"))
+            .with_machine_services(Arc::clone(&session_service)));
+
         let epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -966,7 +875,6 @@ impl DaemonServer {
         // The gateway runs inside this process, so desktop-directed events must
         // be relayed to the GUI over the socket; without this sink they are
         // dropped and remote-issued selections never reach the desktop.
-        let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
         let sink_tx = remote_event_tx.clone();
         remote_state.set_desktop_event_sink(Arc::new(move |event, payload| {
             let _ = sink_tx.send(DaemonRemoteEvent {
@@ -974,10 +882,6 @@ impl DaemonServer {
                 payload,
             });
         }));
-
-        let handover_manager = Arc::new(crate::daemon::handover::HandoverManager::new(
-            get_socket_path(),
-        ));
 
         let remote_handle_for_handover: Arc<
             Mutex<Option<crate::remote::server::RemoteServerHandle>>,
@@ -1005,300 +909,31 @@ impl DaemonServer {
             remote_state,
             remote_event_tx,
             remote_server_handle: remote_handle_for_handover,
-            agent_states: Arc::new(AgentStateHub::default()),
             epoch,
             binary_path,
             binary_mtime_ms,
-            spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
-            spawn_lock: tokio::sync::Mutex::new(()),
-            remote_persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
-            remote_sessions_path: isolated_dir
-                .clone()
-                .or_else(session_dir_override)
-                .unwrap_or_else(get_runtime_dir)
-                .join("remote_sessions.json"),
+            session_service,
             #[cfg(test)]
             helper_home: isolated_dir
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
-            ssh_store_path: isolated_dir
-                .map(|p| p.join("ssh_hosts.json"))
-                .unwrap_or_else(daemon_ssh_store_path),
-            session_metadata: Arc::new(RwLock::new(HashMap::new())),
-            provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
+
         }
     }
 
-    async fn write_session_input(&self, id: &str, data: Vec<u8>) -> Result<(), String> {
-        self.validate_session_ssh_target(id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let generation = self
-            .terminal_service
-            .remote()
-            .details(id)
-            .map(|d| d.generation)
-            .unwrap_or(0);
-        self.terminal_service
-            .write_input_operation(id, generation, data)
-            .map_err(|e| e.to_string())?
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn resize_session(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
-        self.validate_session_ssh_target(id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let generation = self
-            .terminal_service
-            .remote()
-            .details(id)
-            .map(|d| d.generation)
-            .unwrap_or(0);
-        self.terminal_service
-            .resize_operation(id, generation, cols, rows)
-            .map_err(|e| e.to_string())?
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn persist_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
-        let _guard = self.remote_persistence_lock.lock().await;
-        let records: Vec<_> = self
-            .terminal_service
-            .remote()
-            .list()
-            .iter()
-            .filter_map(|id| {
-                self.terminal_service
-                    .remote()
-                    .details(id)
-                    .map(|d| DurableRemoteSession {
-                        descriptor: d.descriptor,
-                        metadata: self.session_metadata.read().get(id).cloned(),
-                    })
-            })
-            .collect();
-        crate::ipc::run_blocking(move || {
-            let mut session = crate::session::PersistedWorkspaceSession::default();
-            session.version = 3;
-            session.extra.insert(
-                "remoteSessions".into(),
-                serde_json::to_value(records)
-                    .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?,
-            );
-            save_session_to_path(&path, &session)
-        })
-        .await
-        .map_err(|e| e.to_string())
-    }
-
-    async fn restore_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
-        let records: Vec<DurableRemoteSession> = crate::ipc::run_blocking(move || {
-            let value = load_session_from_path(&path)?
-                .and_then(|mut s| s.extra.remove("remoteSessions"))
-                .unwrap_or_else(|| serde_json::json!([]));
-            serde_json::from_value(value).map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        for mut record in records {
-            // A new daemon has no hub backlog. Replay retained remote output from zero;
-            // Attach emits a reset boundary instead of treating old local sequences as cursors.
-            record.descriptor.remote_cursor = crate::ssh::bridge::RemoteCursor(0);
-            let id = record.descriptor.backend_session_id.clone();
-            if self
-                .session_router
-                .find_legacy_peer_for_session(&id)
-                .is_some()
-            {
-                continue;
-            }
-            self.session_router.register_workspace(
-                &id,
-                &record.descriptor.config.project_id,
-                Some(self.ssh_store_path.clone()),
-            );
-            if let Some(meta) = record.metadata {
-                self.session_metadata.write().insert(id.clone(), meta);
-            }
-            self.terminal_service
-                .remote()
-                .restore(record.descriptor)
-                .map_err(|e| e.to_string())?;
-            self.watch_remote_session(&id)?;
-        }
-        Ok(())
-    }
-
-    fn watch_remote_session(&self, id: &str) -> Result<(), String> {
-        let mut rx = self
-            .terminal_service
-            .remote()
-            .subscribe(id)
-            .map_err(|e| e.to_string())?;
-        let tx = self.remote_event_tx.clone();
-        let runtime = Arc::downgrade(self.terminal_service.remote());
-        let metadata = self.session_metadata.clone();
-        let path = self.remote_sessions_path.clone();
-        let lock = self.remote_persistence_lock.clone();
-        tokio::spawn(async move {
-            loop {
-                let details = rx.borrow_and_update().clone();
-                {
-                    let _guard = lock.lock().await;
-                    let Some(runtime) = runtime.upgrade() else {
-                        break;
-                    };
-                    let records: Vec<_> = runtime
-                        .list()
-                        .iter()
-                        .filter_map(|id| {
-                            runtime.details(id).map(|d| DurableRemoteSession {
-                                descriptor: d.descriptor,
-                                metadata: metadata.read().get(id).cloned(),
-                            })
-                        })
-                        .collect();
-                    drop(runtime);
-                    let path = path.clone();
-                    if let Err(error) = crate::ipc::run_blocking(move || {
-                        let mut session = crate::session::PersistedWorkspaceSession::default();
-                        session.version = 3;
-                        session.extra.insert(
-                            "remoteSessions".into(),
-                            serde_json::to_value(records)
-                                .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?,
-                        );
-                        save_session_to_path(&path, &session)
-                    })
-                    .await
-                    {
-                        tracing::error!(%error, "Remote session checkpoint persistence failed");
-                    }
-                }
-                let _ = tx.send(DaemonRemoteEvent { event: "terminal_remote_status".into(), payload: serde_json::json!({"sessionId":details.descriptor.backend_session_id,"state":details.state,"generation":details.generation,"failure":details.failure,"replayGap":details.replay_gap}) });
-                if rx.changed().await.is_err() {
-                    break;
-                }
-            }
-        });
-        Ok(())
-    }
-
-    async fn spawn_remote(
+    async fn handle_spawn(
         &self,
-        project: crate::ssh::projects::RemoteProject,
-        host: crate::ssh::SshHost,
-        request: &str,
+        client_request_id: &str,
+        workspace_id: &str,
         worktree: Option<WorktreeIdentity>,
         cwd: Option<String>,
         cols: u16,
         rows: u16,
-        fingerprint: SpawnRequestFingerprint,
+        shell: Option<String>,
+        startup: Option<TerminalStartup>,
     ) -> Result<String, SpawnError> {
-        let environment = crate::ssh::runtime::detect(&host)
-            .await
-            .map_err(|e| e.to_string())?;
-        if project
-            .platform
-            .unwrap_or(crate::ssh::runtime::RemotePlatform::Posix)
-            != environment.platform
-        {
-            return Err(SpawnError::Other(
-                "Remote platform changed; register the project again".into(),
-            ));
-        }
-        let root = crate::ssh::worktree::resolve_remote_spawn_root(
-            environment.platform,
-            &project.repo_root,
-            worktree.as_ref(),
-            cwd.as_deref(),
-        )
-        .map_err(|e| e.to_string())?;
-        #[cfg(test)]
-        let environment = {
-            let mut environment = environment;
-            if let Some(home) = &self.helper_home {
-                environment.home = home.clone();
-            }
-            environment
-        };
-        let helper = crate::ssh::helper_setup::default_location(&host, &environment)
-            .map_err(|e| e.to_string())?;
-        let relative = root
-            .strip_prefix(&project.repo_root)
-            .unwrap_or("")
-            .trim_start_matches(&['/', '\\'][..])
-            .replace('\\', "/");
-        let config = crate::terminal::remote::RemoteSessionConfig {
-            host,
-            environment,
-            helper,
-            project_id: project.workspace_id.clone(),
-            project_path: project.repo_root,
-            worktree: if relative.is_empty() {
-                None
-            } else {
-                Some(relative)
-            },
-            agent_identity: None,
-        };
-        // Persist the immutable request before any potentially ambiguous remote spawn.
-        use sha2::{Digest, Sha256};
-        let request_key = format!("{:x}", Sha256::digest(request.as_bytes()));
-        let request_path = self
-            .remote_sessions_path
-            .with_file_name(format!("remote-request-{request_key}.json"));
-        let request_value = serde_json::json!({"clientRequestId":request,"config":config,"fingerprint":fingerprint});
-        crate::ipc::run_blocking(move || {
-            if let Some(previous) = load_session_from_path(&request_path)? {
-                if previous.extra.get("request") != Some(&request_value) {
-                    return Err(crate::ipc::IpcError::internal("clientRequestId was reused with a different remote spawn request"));
-                }
-                // Uncertain requests require recovery of their original target, not a new shell.
-                return Err(crate::ipc::IpcError::internal("Remote spawn request is pending recovery; refusing to create a replacement target"));
-            }
-            let mut session = crate::session::PersistedWorkspaceSession::default(); session.version = 3;
-            session.extra.insert("request".into(), request_value);
-            save_session_to_path(&request_path, &session)
-        }).await.map_err(|e| e.to_string())?;
-        let descriptor = self
-            .terminal_service
-            .remote()
-            .create(
-                config,
-                crate::ssh::bridge::SpawnParams {
-                    cols: Some(cols),
-                    rows: Some(rows),
-                    ..Default::default()
-                },
-                request.into(),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        let id = descriptor.backend_session_id.clone();
-        self.session_metadata.write().insert(
-            id.clone(),
-            StoredSessionMeta {
-                client_request_id: request.into(),
-                workspace_id: project.workspace_id.clone(),
-                worktree,
-                cwd: PathBuf::from(root),
-                provider_claim: None,
-                spawn_fingerprint: fingerprint,
-            },
-        );
-        self.session_router.register_workspace(
-            &id,
-            &project.workspace_id,
-            Some(self.ssh_store_path.clone()),
-        );
-        self.persist_remote_sessions_at(self.remote_sessions_path.clone())
-            .await?;
-        self.watch_remote_session(&id)?;
-        Ok(id)
+        self.session_service.handle_spawn(client_request_id, workspace_id, worktree, cwd,
+            cols, rows, shell, startup, #[cfg(test)] self.helper_home.clone()).await
     }
 
     pub fn epoch(&self) -> u64 {
@@ -1605,9 +1240,13 @@ impl DaemonServer {
                 Ok(DaemonRequest::RegisterWorkspace {
                     workspace_id,
                     repo_root,
-                }) => match self.handle_register_workspace(&workspace_id, &repo_root) {
+                }) => match {
+                    let service = Arc::clone(&self.session_service.workspace_service);
+                    crate::ipc::run_blocking(move || service.register(&workspace_id, &repo_root)
+                        .map_err(crate::ipc::IpcError::internal)).await
+                } {
                     Ok(()) => DaemonResponse::RegisterWorkspaceOk,
-                    Err(e) => DaemonResponse::Error { message: e },
+                    Err(e) => DaemonResponse::Error { message: e.to_string() },
                 },
                 Ok(DaemonRequest::UnregisterWorkspace { workspace_id }) => {
                     match self.handle_unregister_workspace(&workspace_id).await {
@@ -2271,67 +1910,8 @@ impl DaemonServer {
         DaemonResponse::UpgradeUnsupported
     }
 
-    pub fn handle_register_workspace(
-        &self,
-        workspace_id: &str,
-        repo_root: &str,
-    ) -> Result<(), String> {
-        WorkspaceRegistry::validate_workspace_id(workspace_id).map_err(|e| e.to_string())?;
-        let path = PathBuf::from(repo_root);
-        if !path.is_absolute() {
-            return Err("repo_root must be an absolute path".into());
-        }
-        let canonical = fs::canonicalize(&path)
-            .map_err(|e| format!("Invalid repo_root path '{}': {e}", path.display()))?;
-        if !canonical.is_dir() || canonical.parent().is_none() {
-            return Err(format!(
-                "Repo root '{}' is not a valid project directory",
-                canonical.display()
-            ));
-        }
-        let manager = WorktreeManager::try_new(&canonical).map_err(|e| e.to_string())?;
-        if manager.repo_root() != canonical {
-            return Err(format!(
-                "repo_root '{}' must be the canonical repository root '{}'",
-                path.display(),
-                manager.repo_root().display()
-            ));
-        }
-        self.workspace_registry
-            .register(workspace_id, &canonical)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Revokes a workspace binding and terminates every live session the
-    /// daemon owns for it, so remote clients cannot keep using already-spawned
-    /// PTYs of a workspace the user removed. Idempotent: unregistering an
-    /// unknown workspace (e.g. after a daemon restart) succeeds as a no-op.
-    pub async fn handle_unregister_workspace(&self, workspace_id: &str) -> Result<(), String> {
-        self.workspace_registry.unregister(workspace_id);
-
-        let owned_sessions: Vec<String> = self
-            .session_metadata
-            .read()
-            .iter()
-            .filter(|(_, meta)| meta.workspace_id == workspace_id)
-            .map(|(session_id, _)| session_id.clone())
-            .collect();
-        for session_id in owned_sessions {
-            if self.session_router.is_local_session(&session_id) {
-                self.handle_close(&session_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            } else if let Some(peer) = self
-                .session_router
-                .find_legacy_peer_for_session(&session_id)
-            {
-                peer.close(&session_id).await.map_err(|message| {
-                    format!("failed to close peer session '{session_id}': {message}")
-                })?;
-            }
-            self.release_session_ownership(&session_id);
-        }
-        Ok(())
+    pub fn handle_register_workspace(&self, workspace_id: &str, repo_root: &str) -> Result<(), String> {
+        self.session_service.workspace_service.register(workspace_id, repo_root)
     }
 
     pub async fn handle_remote_configure(
@@ -2382,483 +1962,6 @@ impl DaemonServer {
                 let _ = self.remote_state.persist_config();
                 Err(err)
             }
-        }
-    }
-
-    async fn handle_spawn(
-        &self,
-        client_request_id: &str,
-        workspace_id: &str,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
-        shell: Option<String>,
-        startup: Option<TerminalStartup>,
-    ) -> Result<String, SpawnError> {
-        if self.handover_manager.is_draining() {
-            return Err(SpawnError::Other(
-                "Daemon is in draining mode and does not accept new sessions".into(),
-            ));
-        }
-
-        if client_request_id.trim().is_empty() {
-            return Err(SpawnError::Other("clientRequestId cannot be empty".into()));
-        }
-
-        let remote = match (
-            crate::ssh::projects::is_remote(workspace_id),
-            startup.as_ref(),
-        ) {
-            (true, Some(TerminalStartup::RemoteSsh { host_store_path })) => {
-                if shell.is_some() {
-                    return Err(SpawnError::Other(
-                        "Local shell overrides are unsupported for SSH sessions".into(),
-                    ));
-                }
-                if host_store_path != &self.ssh_store_path {
-                    return Err(SpawnError::Other(
-                        "SSH inventory path is not daemon-configured".into(),
-                    ));
-                }
-                let path = self.ssh_store_path.clone();
-                let id = workspace_id.to_string();
-                Some(
-                    crate::ipc::run_blocking(move || crate::ssh::projects::resolve(&path, &id))
-                        .await
-                        .map_err(|e| SpawnError::Other(e.to_string()))?,
-                )
-            }
-            (true, _) | (false, Some(TerminalStartup::RemoteSsh { .. })) => {
-                return Err(SpawnError::Other(
-                    "SSH workspace requires stored SSH routing; local fallback is forbidden".into(),
-                ));
-            }
-            (false, _) => None,
-        };
-        let _spawn_guard = self.spawn_lock.lock().await;
-
-        let now = Instant::now();
-        let provider_claim = ProviderSessionClaimKey::from_startup(startup.as_ref());
-        let spawn_fingerprint = SpawnRequestFingerprint {
-            workspace_id: workspace_id.to_string(),
-            worktree: worktree.clone(),
-            cwd: cwd.clone(),
-            cols,
-            rows,
-            shell: shell.clone(),
-            provider_claim: provider_claim.clone(),
-            startup: startup.clone(),
-        };
-        self.prune_dead_spawn_ownership(now);
-        {
-            let mut cache = self.spawn_idempotency_cache.lock();
-            if let Some(entry) = cache.get_mut(client_request_id) {
-                if entry.fingerprint != spawn_fingerprint {
-                    return Err(SpawnError::Other(format!(
-                        "clientRequestId '{client_request_id}' was reused with a different spawn request"
-                    )));
-                }
-                entry.created_at = now;
-                return Ok(entry.session_id.clone());
-            }
-        }
-
-        let existing_request = self
-            .session_metadata
-            .read()
-            .iter()
-            .find(|(session_id, meta)| {
-                meta.client_request_id == client_request_id && self.session_is_live(session_id)
-            })
-            .map(|(session_id, meta)| (session_id.clone(), meta.spawn_fingerprint.clone()));
-        if let Some((live_session_id, existing_fingerprint)) = existing_request {
-            if existing_fingerprint != spawn_fingerprint {
-                return Err(SpawnError::Other(format!(
-                    "clientRequestId '{client_request_id}' was reused with a different spawn request"
-                )));
-            }
-            self.spawn_idempotency_cache.lock().insert(
-                client_request_id.to_string(),
-                SpawnCacheEntry {
-                    session_id: live_session_id.clone(),
-                    created_at: now,
-                    fingerprint: spawn_fingerprint.clone(),
-                },
-            );
-            return Ok(live_session_id);
-        }
-
-        if let Some((project, host)) = remote {
-            return self
-                .spawn_remote(
-                    project,
-                    host,
-                    client_request_id,
-                    worktree,
-                    cwd,
-                    cols,
-                    rows,
-                    spawn_fingerprint,
-                )
-                .await;
-        }
-        let (session_id, mut lifecycle_rx, resolved_cwd) = {
-            // Resolve manager from workspace registry; workspace MUST be registered.
-            let (mgr, default_cwd) = self
-                .workspace_registry
-                .resolve_terminal_target(workspace_id, worktree.as_ref())
-                .map_err(|e| SpawnError::Other(e.to_string()))?;
-
-            let resume_startup = startup.clone();
-            let resume_cwd = crate::ipc::run_blocking(move || {
-                crate::terminal::resume_cwd::resolve_agent_resume_cwd(resume_startup.as_ref())
-                    .map_err(|error| {
-                        crate::ipc::IpcError::new(
-                            crate::ipc::IpcErrorCode::AgentResumeInvalid,
-                            error.to_string(),
-                        )
-                    })
-            })
-            .await
-            .map_err(|error| SpawnError::InvalidAgentResume(error.to_string()))?;
-            let cwd = resume_cwd
-                .map(|path| path.to_string_lossy().into_owned())
-                .or(cwd);
-            let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {
-                let custom_path = PathBuf::from(custom_cwd_str);
-                if !custom_path.exists() {
-                    return Err(SpawnError::Other(format!(
-                        "CWD does not exist: {custom_cwd_str}"
-                    )));
-                }
-                if !custom_path.is_dir() {
-                    return Err(SpawnError::Other(format!(
-                        "CWD is not a directory: {custom_cwd_str}"
-                    )));
-                }
-                let canonical = fs::canonicalize(&custom_path).map_err(|e| {
-                    SpawnError::Other(format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))
-                })?;
-                let allowed = mgr.canonical_allowed_path(&canonical).map_err(|e| {
-                    SpawnError::Other(format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))
-                })?;
-                if allowed != default_cwd && !allowed.starts_with(&default_cwd) {
-                    return Err(SpawnError::Other(format!(
-                    "CWD '{custom_cwd_str}' is outside the resolved workspace/worktree root '{}'",
-                    default_cwd.display()
-                )));
-                }
-                allowed
-            } else {
-                default_cwd
-            };
-
-            let mut cmd = match crate::terminal::shell::resolve_startup_command(
-                shell.as_deref(),
-                startup.as_ref(),
-            ) {
-                Ok(cmd) => cmd,
-                Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
-            };
-            if let Some(claim) = provider_claim.as_ref() {
-                if let Some(existing_session_id) = self.provider_session_claims.lock().get(claim) {
-                    return Err(SpawnError::AgentSessionConflict {
-                        agent_type: claim.agent_type.clone(),
-                        provider_key: claim.provider_key,
-                        provider_id: claim.provider_id.clone(),
-                        existing_session_id: existing_session_id.clone(),
-                    });
-                }
-            }
-            cmd.env("PROMPT_EOL_MARK", "");
-            cmd.cwd(normalize_process_cwd(&resolved_cwd));
-
-            let (session_id, lifecycle_rx) = self
-                .terminal_service
-                .spawn_in_worktree(cmd, cols, rows, &mgr, &resolved_cwd)
-                .map_err(|e| SpawnError::Other(e.to_string()))?;
-            (session_id, lifecycle_rx, resolved_cwd)
-        };
-
-        // Store idempotency entry and session metadata before releasing the request lock.
-        let ssh_store = match startup.as_ref() {
-            Some(TerminalStartup::RemoteSsh { host_store_path }) => Some(host_store_path.clone()),
-            _ => None,
-        };
-        self.session_router
-            .register_workspace(&session_id, workspace_id, ssh_store);
-        self.spawn_idempotency_cache.lock().insert(
-            client_request_id.to_string(),
-            SpawnCacheEntry {
-                session_id: session_id.clone(),
-                created_at: now,
-                fingerprint: spawn_fingerprint.clone(),
-            },
-        );
-        self.session_metadata.write().insert(
-            session_id.clone(),
-            StoredSessionMeta {
-                client_request_id: client_request_id.to_string(),
-                workspace_id: workspace_id.to_string(),
-                worktree,
-                cwd: resolved_cwd,
-                provider_claim: provider_claim.clone(),
-                spawn_fingerprint,
-            },
-        );
-        if let Some(claim) = provider_claim {
-            self.provider_session_claims
-                .lock()
-                .insert(claim, session_id.clone());
-        }
-
-        let cleanup_session_id = session_id.clone();
-        let cleanup_router = Arc::clone(&self.session_router);
-        let cleanup_cache = Arc::clone(&self.spawn_idempotency_cache);
-        let cleanup_metadata = Arc::clone(&self.session_metadata);
-        let cleanup_claims = Arc::clone(&self.provider_session_claims);
-        let cleanup_agent_states = Arc::clone(&self.agent_states);
-        let handover_manager = Arc::clone(&self.handover_manager);
-        let terminal_service = Arc::clone(&self.terminal_service);
-        tokio::spawn(async move {
-            loop {
-                match lifecycle_rx.recv().await {
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            cleanup_router.remove_workspace(&cleanup_session_id);
-            cleanup_agent_states.remove(&cleanup_session_id);
-            cleanup_cache
-                .lock()
-                .retain(|_, entry| entry.session_id != cleanup_session_id);
-            if let Some(meta) = cleanup_metadata.write().remove(&cleanup_session_id) {
-                if let Some(claim) = meta.provider_claim {
-                    cleanup_claims
-                        .lock()
-                        .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
-                }
-            }
-            handover_manager.check_retirement_if_empty(&terminal_service);
-        });
-
-        Ok(session_id)
-    }
-
-    async fn validate_session_ssh_target(
-        &self,
-        session_id: &str,
-    ) -> Result<(), crate::ipc::IpcError> {
-        let meta = self.session_metadata.read().get(session_id).cloned();
-        if let Some(meta) = meta {
-            if crate::ssh::projects::is_remote(&meta.workspace_id) {
-                let path = self.ssh_store_path.clone();
-                crate::ipc::run_blocking(move || {
-                    crate::ssh::projects::resolve(&path, &meta.workspace_id)
-                })
-                .await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_close(&self, session_id: &str) -> Result<(), crate::terminal::PtyError> {
-        let remote = self.terminal_service.remote().contains(session_id);
-        self.terminal_service.close_session(session_id).await?;
-        self.release_session_ownership(session_id);
-        self.agent_states.remove(session_id);
-        if remote {
-            self.persist_remote_sessions_at(self.remote_sessions_path.clone())
-                .await
-                .map_err(crate::terminal::PtyError::Other)?;
-        }
-        Ok(())
-    }
-
-    fn session_is_live(&self, session_id: &str) -> bool {
-        if self.terminal_service.remote().contains(session_id) {
-            return true;
-        }
-        self.terminal_service
-            .get_session(session_id)
-            .is_some_and(|session| {
-                matches!(
-                    session.state(),
-                    PtySessionState::Starting | PtySessionState::Running
-                )
-            })
-    }
-
-    fn release_session_ownership(&self, session_id: &str) {
-        self.session_router.remove_workspace(session_id);
-        self.spawn_idempotency_cache
-            .lock()
-            .retain(|_, entry| entry.session_id != session_id);
-        if let Some(meta) = self.session_metadata.write().remove(session_id) {
-            if let Some(claim) = meta.provider_claim {
-                self.provider_session_claims
-                    .lock()
-                    .retain(|key, owner| key != &claim || owner != session_id);
-            }
-        }
-    }
-
-    fn prune_dead_spawn_ownership(&self, now: Instant) {
-        let dead_sessions: Vec<String> = self
-            .session_metadata
-            .read()
-            .keys()
-            .filter(|session_id| !self.session_is_live(session_id))
-            .cloned()
-            .collect();
-        for session_id in dead_sessions {
-            self.release_session_ownership(&session_id);
-        }
-        self.spawn_idempotency_cache.lock().retain(|_, entry| {
-            now.duration_since(entry.created_at) <= SPAWN_REQUEST_TTL
-                && self.session_is_live(&entry.session_id)
-        });
-        self.provider_session_claims
-            .lock()
-            .retain(|_, session_id| self.session_is_live(session_id));
-    }
-
-    #[cfg(test)]
-    fn expire_spawn_request_for_test(&self, client_request_id: &str) {
-        if let Some(entry) = self
-            .spawn_idempotency_cache
-            .lock()
-            .get_mut(client_request_id)
-        {
-            entry.created_at = Instant::now() - SPAWN_REQUEST_TTL - Duration::from_secs(1);
-        }
-    }
-
-    #[cfg(test)]
-    fn spawn_cache_len_for_test(&self) -> usize {
-        self.spawn_idempotency_cache.lock().len()
-    }
-
-    #[cfg(test)]
-    fn provider_claim_len_for_test(&self) -> usize {
-        self.provider_session_claims.lock().len()
-    }
-
-    #[cfg(test)]
-    fn reserve_provider_claim_for_test(
-        &self,
-        client_request_id: &str,
-        session_id: &str,
-        startup: &TerminalStartup,
-    ) -> Result<String, SpawnError> {
-        let claim = ProviderSessionClaimKey::from_startup(Some(startup))
-            .expect("agent resume startup has a provider claim");
-        let mut claims = self.provider_session_claims.lock();
-        if let Some(existing_session_id) = claims.get(&claim) {
-            return Err(SpawnError::AgentSessionConflict {
-                agent_type: claim.agent_type,
-                provider_key: claim.provider_key,
-                provider_id: claim.provider_id,
-                existing_session_id: existing_session_id.clone(),
-            });
-        }
-        claims.insert(claim.clone(), session_id.to_string());
-        self.session_metadata.write().insert(
-            session_id.to_string(),
-            StoredSessionMeta {
-                client_request_id: client_request_id.to_string(),
-                workspace_id: "test".to_string(),
-                worktree: None,
-                cwd: PathBuf::from("/test"),
-                provider_claim: Some(claim),
-                spawn_fingerprint: SpawnRequestFingerprint {
-                    workspace_id: "test".to_string(),
-                    worktree: None,
-                    cwd: None,
-                    cols: 80,
-                    rows: 24,
-                    shell: None,
-                    provider_claim: ProviderSessionClaimKey::from_startup(Some(startup)),
-                    startup: Some(startup.clone()),
-                },
-            },
-        );
-        Ok(session_id.to_string())
-    }
-
-    fn handle_describe_session(&self, session_id: &str) -> DaemonResponse {
-        if let Some(details) = self.terminal_service.remote().details(session_id) {
-            let d = details.descriptor;
-            let meta = self.session_metadata.read().get(session_id).cloned();
-            let (start_sequence, end_sequence) = self
-                .terminal_service
-                .output_hub()
-                .session_sequence_range(session_id)
-                .unwrap_or((None, None));
-            return DaemonResponse::DescribeSessionOk {
-                session: DaemonSessionDetails {
-                    session_id: session_id.into(),
-                    workspace_id: Some(d.config.project_id),
-                    worktree: meta.as_ref().and_then(|m| m.worktree.clone()),
-                    cwd: Some(
-                        meta.map(|m| m.cwd.to_string_lossy().into_owned())
-                            .unwrap_or(d.config.project_path),
-                    ),
-                    cols: d.cols,
-                    rows: d.rows,
-                    running: details.state
-                        == crate::terminal::remote::RemoteConnectionState::Connected,
-                    start_sequence,
-                    end_sequence,
-                },
-            };
-        }
-        let Some(pty_session) = self.terminal_service.get_session(session_id) else {
-            return DaemonResponse::Error {
-                message: format!("Session '{session_id}' not found"),
-            };
-        };
-
-        let (cols, rows) = pty_session.get_size();
-        let running = matches!(
-            pty_session.state(),
-            PtySessionState::Starting | PtySessionState::Running
-        );
-        let (start_sequence, end_sequence) = self
-            .terminal_service
-            .output_hub()
-            .session_sequence_range(session_id)
-            .unwrap_or((None, None));
-
-        let meta = self.session_metadata.read().get(session_id).cloned();
-        let (workspace_id, worktree, cwd) = match meta {
-            Some(m) => (
-                Some(m.workspace_id),
-                m.worktree,
-                Some(m.cwd.to_string_lossy().to_string()),
-            ),
-            None => (
-                None,
-                None,
-                pty_session
-                    .worktree_path()
-                    .map(|p| p.to_string_lossy().to_string()),
-            ),
-        };
-
-        DaemonResponse::DescribeSessionOk {
-            session: DaemonSessionDetails {
-                session_id: session_id.to_string(),
-                workspace_id,
-                worktree,
-                cwd,
-                cols,
-                rows,
-                running,
-                start_sequence,
-                end_sequence,
-            },
         }
     }
 
