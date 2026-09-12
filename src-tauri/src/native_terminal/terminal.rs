@@ -149,6 +149,25 @@ impl NativeTerminal {
         })
     }
 
+    pub fn set_pty_write_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+        let mut guard = self.context.pty_write_tx.lock();
+        let mut buffer = self.context.write_pty_buffer.lock();
+        if !buffer.is_empty() {
+            let drained = std::mem::take(&mut *buffer);
+            let _ = tx.send(drained);
+        }
+        *guard = Some(tx);
+    }
+
+    /// Drains and discards buffered PTY writes without delivering them.
+    ///
+    /// Used when re-attaching an existing session: the buffer then holds stale VT
+    /// responses produced by re-emulating scrollback, which must not be echoed
+    /// into the live process.
+    pub fn discard_buffered_pty_writes(&self) {
+        self.context.write_pty_buffer.lock().clear();
+    }
+
     pub(crate) fn synchronized_output_enabled(&self) -> Result<bool, NativeTerminalError> {
         let mut config = GhosttyTerminalModeConfig {
             mode: GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,

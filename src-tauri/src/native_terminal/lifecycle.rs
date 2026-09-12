@@ -4,13 +4,17 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-use super::bell::{terminal_bell_callback, terminal_title_changed_callback, TerminalContext};
+use super::bell::{
+    terminal_bell_callback, terminal_title_changed_callback, terminal_write_pty_callback,
+    TerminalContext,
+};
 use super::error::NativeTerminalError;
 use super::sys::ffi::{ghostty_terminal_free, ghostty_terminal_new, ghostty_terminal_set};
 use super::sys::types::{
     GhosttyTerminal, GhosttyTerminalImpl, GHOSTTY_TERMINAL_OPT_BELL,
     GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
     GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, GHOSTTY_TERMINAL_OPT_USERDATA,
+    GHOSTTY_TERMINAL_OPT_WRITE_PTY,
 };
 
 /// Allocates a new native terminal and registers callbacks transactionally.
@@ -38,6 +42,8 @@ pub fn create_native_terminal(
     let context = Box::new(TerminalContext {
         bell_counter: AtomicU64::new(0),
         title_updated: AtomicBool::new(false),
+        write_pty_buffer: parking_lot::Mutex::new(Vec::new()),
+        pty_write_tx: parking_lot::Mutex::new(None),
     });
     let userdata_ptr = (&*context) as *const TerminalContext as *const c_void;
 
@@ -76,6 +82,18 @@ pub fn create_native_terminal(
         )
     };
     if let Err(e) = NativeTerminalError::from_c_result(reg_title, "set(OPT_TITLE_CHANGED)") {
+        unsafe { ghostty_terminal_free(non_null.as_ptr()) };
+        return Err(e);
+    }
+
+    let reg_write_pty = unsafe {
+        ghostty_terminal_set(
+            non_null.as_ptr(),
+            GHOSTTY_TERMINAL_OPT_WRITE_PTY,
+            terminal_write_pty_callback as *const c_void,
+        )
+    };
+    if let Err(e) = NativeTerminalError::from_c_result(reg_write_pty, "set(OPT_WRITE_PTY)") {
         unsafe { ghostty_terminal_free(non_null.as_ptr()) };
         return Err(e);
     }
@@ -121,6 +139,11 @@ pub fn teardown_native_terminal(handle: NonNull<GhosttyTerminalImpl>) {
         let _ = ghostty_terminal_set(
             handle.as_ptr(),
             GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
+            null_ptr,
+        );
+        let _ = ghostty_terminal_set(
+            handle.as_ptr(),
+            GHOSTTY_TERMINAL_OPT_WRITE_PTY,
             null_ptr,
         );
         let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_USERDATA, null_ptr);

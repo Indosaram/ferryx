@@ -11,6 +11,15 @@ pub struct GhosttyTerminalImpl {
 }
 pub type GhosttyTerminal = *mut GhosttyTerminalImpl;
 
+/// C callback for writing terminal VT reports (CPR, DA, etc.) back to PTY.
+#[allow(dead_code)]
+pub type GhosttyTerminalWritePtyFn = unsafe extern "C" fn(
+    terminal: GhosttyTerminal,
+    userdata: *mut std::ffi::c_void,
+    data: *const u8,
+    len: usize,
+);
+
 /// Opaque foreign render state handle.
 #[repr(C)]
 pub struct GhosttyRenderStateImpl {

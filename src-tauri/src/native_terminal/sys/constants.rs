@@ -34,6 +34,7 @@ pub const GHOSTTY_TERMINAL_DATA_MODE: c_int = 37;
 
 // GhosttyTerminalOption C integer constants matching `ghostty/vt/terminal.h`.
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: c_int = 0;
+pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: c_int = 1;
 pub const GHOSTTY_TERMINAL_OPT_BELL: c_int = 2;
 pub const GHOSTTY_TERMINAL_OPT_TITLE_CHANGED: c_int = 5;
 pub const GHOSTTY_TERMINAL_OPT_TITLE: c_int = 9;
@@ -53,6 +54,7 @@ pub const GHOSTTY_SCROLL_VIEWPORT_DELTA: c_int = 2;
 pub const GHOSTTY_SCROLL_VIEWPORT_ROW: c_int = 3;
 
 // GhosttyTerminalScreen matching `ghostty/vt/terminal.h`.
+#[allow(dead_code)]
 pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
 pub const GHOSTTY_TERMINAL_SCREEN_ALTERNATE: c_int = 1;
 

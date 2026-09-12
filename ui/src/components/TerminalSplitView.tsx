@@ -33,6 +33,7 @@ import type {
   WorkspaceTab,
 } from "../lib/types";
 import { defaultContentForTab, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
+import { isRemoteWorkspaceId } from "../lib/remoteProject";
 import {
   isRedundantSplit as isRedundantPaneSplit,
   resolveSeam,
@@ -207,6 +208,7 @@ type TerminalSplitViewProps = {
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -259,6 +261,7 @@ export function TerminalSplitView({
   searchLeafId,
   onCloseSearch,
   onReconnectAgentSession,
+  onReconnectSshSession,
   onOpenNewShell,
   onBackendSessionUnavailable,
 }: TerminalSplitViewProps) {
@@ -489,6 +492,7 @@ export function TerminalSplitView({
     searchLeafId,
     onCloseSearch,
     onReconnectAgentSession,
+    onReconnectSshSession,
     onOpenNewShell,
     onBackendSessionUnavailable,
     splitTerminalTab,
@@ -669,6 +673,7 @@ type TabGroupViewProps = {
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -717,6 +722,7 @@ function TabGroupView({
   searchLeafId,
   onCloseSearch,
   onReconnectAgentSession,
+  onReconnectSshSession,
   onOpenNewShell,
   onBackendSessionUnavailable,
   splitTerminalTab,
@@ -820,6 +826,7 @@ function TabGroupView({
             searchLeafId={searchLeafId}
             onCloseSearch={onCloseSearch}
             onReconnectAgentSession={onReconnectAgentSession}
+            onReconnectSshSession={onReconnectSshSession}
             onOpenNewShell={onOpenNewShell}
             onBackendSessionUnavailable={onBackendSessionUnavailable}
             onSplitPane={onSplitPane}
@@ -860,6 +867,7 @@ type PaneRendererProps = {
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -901,6 +909,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         searchOpen={props.searchLeafId === node.leafId}
         onCloseSearch={props.onCloseSearch}
         onReconnectAgentSession={props.onReconnectAgentSession}
+        onReconnectSshSession={props.onReconnectSshSession}
         onOpenNewShell={props.onOpenNewShell}
         onBackendSessionUnavailable={props.onBackendSessionUnavailable}
         onNavigateBrowserTab={onNavigateBrowserTab}
@@ -953,6 +962,7 @@ type PaneLeafViewProps = {
   searchOpen?: boolean;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -981,6 +991,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   searchOpen,
   onCloseSearch,
   onReconnectAgentSession,
+  onReconnectSshSession,
   onOpenNewShell,
   onBackendSessionUnavailable,
   onNavigateBrowserTab,
@@ -1198,7 +1209,11 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   needsAttention={needsAttention}
                   searchOpen={searchOpen}
                   onCloseSearch={onCloseSearch}
-                  onReconnect={onReconnectAgentSession}
+                  onReconnect={
+                    session && isRemoteWorkspaceId(session.workspaceId)
+                      ? (onReconnectSshSession ?? onReconnectAgentSession)
+                      : onReconnectAgentSession
+                  }
                   onOpenNewShell={onOpenNewShell}
                   onBackendSessionUnavailable={onBackendSessionUnavailable}
                 />

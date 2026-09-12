@@ -80,6 +80,8 @@ import {
   saveSession,
   setBadgeCount,
   spawnTerminal,
+  spawnTerminalDetailed,
+  retryTerminalRemoteSession,
   toIpcError,
   writeTerminal,
   bootTrace,
@@ -90,6 +92,7 @@ import {
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
+import { safeRandomUUID } from "./lib/uuid";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
@@ -1130,6 +1133,52 @@ function WorkspaceApp({
         }
         throw error;
       });
+    },
+    [activeProject.repoRoot, activeProject.workspaceId, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
+  );
+
+  const handleReconnectSshSession = useCallback(
+    async (sessionId: string) => {
+      const current = stateRef.current.sessions;
+      const session = current[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+      if (!session) return;
+      if (session.backendSessionId) {
+        try {
+          const res = await retryTerminalRemoteSession(session.backendSessionId);
+          if (res.type === "retryRemoteSessionOk") {
+            return;
+          }
+        } catch {
+          // Retry failed or backend session no longer valid on daemon; fall through to respawn
+        }
+      }
+      try {
+        const spawned = await spawnTerminalDetailed({
+          workspaceId: session.workspaceId,
+          worktree: session.worktree,
+          cwd: session.cwd,
+          clientRequestId: `ssh-reconnect-${safeRandomUUID()}`,
+          startup: null,
+        });
+        const nextState = workspaceReducer(stateRef.current, {
+          type: "REBIND_SESSION_BACKEND",
+          sessionId,
+          backendSessionId: spawned.sessionId,
+          cwd: spawned.session.cwd ?? session.cwd,
+          daemonEpoch: spawned.daemonEpoch,
+        });
+        dispatchWorkspaceAction({
+          type: "REBIND_SESSION_BACKEND",
+          sessionId,
+          backendSessionId: spawned.sessionId,
+          cwd: spawned.session.cwd ?? session.cwd,
+          daemonEpoch: spawned.daemonEpoch,
+        });
+        await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+      } catch (error) {
+        reportRuntimeError(error);
+        throw error;
+      }
     },
     [activeProject.repoRoot, activeProject.workspaceId, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
   );
@@ -2490,6 +2539,9 @@ function WorkspaceApp({
             onCloseSearch={handleCloseSearch}
             onReconnectAgentSession={(sessionId) => {
               void handleReconnectAgentSession(sessionId);
+            }}
+            onReconnectSshSession={(sessionId) => {
+              void handleReconnectSshSession(sessionId);
             }}
             onOpenNewShell={(sessionId) => replaceExitedShellSession(sessionId, {
               getSessions: () => stateRef.current.sessions,

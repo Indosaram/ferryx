@@ -289,6 +289,8 @@ pub struct NativeTerminalSession {
     pub cell_metrics: Option<CellMetrics>,
     pub stream_task: Option<tokio::task::JoinHandle<()>>,
     pub pump_task: Option<tokio::task::JoinHandle<()>>,
+    pub pty_write_task: Option<tokio::task::JoinHandle<()>>,
+    pub remote_generation: Option<u64>,
     pub last_sequence: Option<u64>,
     pub update_sender: tokio::sync::watch::Sender<()>,
     detach_sender: tokio::sync::watch::Sender<()>,
@@ -989,6 +991,8 @@ impl NativeTerminalSurfaceHostState {
                         cell_metrics: None,
                         stream_task: None,
                         pump_task: None,
+                        pty_write_task: None,
+                        remote_generation: None,
                         last_sequence: None,
                         update_sender,
                         detach_sender: tokio::sync::watch::channel(()).0,
@@ -1089,6 +1093,17 @@ impl NativeTerminalSurfaceHostState {
         app: Option<tauri::AppHandle<R>>,
         bounds: Option<LogicalBounds>,
     ) -> Result<(), NativeTerminalError> {
+        self.attach_daemon_attachment_with_bounds_and_client(session_id, attachment, app, bounds, None)
+    }
+
+    pub fn attach_daemon_attachment_with_bounds_and_client<R: Runtime>(
+        &self,
+        session_id: &str,
+        attachment: DaemonAttachment,
+        app: Option<tauri::AppHandle<R>>,
+        bounds: Option<LogicalBounds>,
+        daemon_client: Option<Arc<crate::daemon::DaemonClient>>,
+    ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
         if let Some(bounds) = bounds {
             // Re-arm the surface before laying out: an attach following a detach must accept its own
@@ -1117,7 +1132,7 @@ impl NativeTerminalSurfaceHostState {
                 );
             }
         }
-        self.attach_daemon_attachment(session_id, attachment, app)
+        self.attach_daemon_attachment_with_client(session_id, attachment, app, daemon_client)
     }
 
     pub fn reattach_existing_session_with_bounds(
@@ -1239,6 +1254,16 @@ impl NativeTerminalSurfaceHostState {
         attachment: DaemonAttachment,
         app: Option<tauri::AppHandle<R>>,
     ) -> Result<(), NativeTerminalError> {
+        self.attach_daemon_attachment_with_client(session_id, attachment, app, None)
+    }
+
+    pub fn attach_daemon_attachment_with_client<R: Runtime>(
+        &self,
+        session_id: &str,
+        attachment: DaemonAttachment,
+        app: Option<tauri::AppHandle<R>>,
+        daemon_client: Option<Arc<crate::daemon::DaemonClient>>,
+    ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
 
         let initial_dims = (80, 24);
@@ -1255,6 +1280,9 @@ impl NativeTerminalSurfaceHostState {
                     task.abort();
                 }
                 if let Some(task) = session.pump_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = session.pty_write_task.take() {
                     task.abort();
                 }
                 if attachment.history_segments.is_empty() {
@@ -1339,6 +1367,8 @@ impl NativeTerminalSurfaceHostState {
                         cell_metrics: None,
                         stream_task: None,
                         pump_task: None,
+                        pty_write_task: None,
+                        remote_generation: None,
                         last_sequence: attachment.end_sequence,
                         update_sender: update_sender.clone(),
                         detach_sender: tokio::sync::watch::channel(()).0,
@@ -1657,6 +1687,12 @@ impl NativeTerminalSurfaceHostState {
                     DaemonStreamMessage::RemoteStatus {
                         state, generation, failure, replay_gap, ..
                     } => {
+                        {
+                            let mut sessions_guard = sessions.lock();
+                            if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                                sess.remote_generation = Some(generation);
+                            }
+                        }
                         if let Some(app) = app_handle.as_ref() {
                             if let Err(error) = app.emit("terminal_remote_status", serde_json::json!({
                                 "sessionId": session_id_owned,
@@ -1677,11 +1713,80 @@ impl NativeTerminalSurfaceHostState {
             }
         });
 
+        let pty_write_task = if let Some(daemon_client) = daemon_client {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            {
+                let sessions_guard = self.sessions.lock();
+                if let Some(session) = sessions_guard.get(session_id) {
+                    // A re-attach of an existing session (gap recovery) replays
+                    // scrollback through the emulator, which answers stale VT
+                    // queries into the buffer; those responses must not be echoed
+                    // into the live process. Only fresh initial startups flush.
+                    let lagged_recovery =
+                        attachment.gap.is_some() || attachment.start_sequence.unwrap_or(0) > 1;
+                    if lagged_recovery {
+                        session.terminal.discard_buffered_pty_writes();
+                    }
+                    session.terminal.set_pty_write_sender(tx);
+                }
+            }
+            let client = daemon_client.clone();
+            let sessions = Arc::clone(&self.sessions);
+            let id = session_id.to_string();
+            Some(tokio::spawn(async move {
+                while let Some(bytes) = rx.recv().await {
+                    let generation = sessions.lock().get(&id).and_then(|s| s.remote_generation);
+                    let Some(generation) = generation else {
+                        // Local session (or remote generation not yet observed):
+                        // the daemon fails generation-less writes closed for
+                        // remote sessions, so this only delivers locally.
+                        let _ = client.write_terminal_at_generation(&id, None, bytes).await;
+                        continue;
+                    };
+                    let mut retries = 0u32;
+                    loop {
+                        match client
+                            .write_terminal_at_generation(&id, Some(generation), bytes.clone())
+                            .await
+                        {
+                            Ok(()) => break,
+                            Err(err)
+                                if is_busy_error(&err) && retries < 2 =>
+                            {
+                                retries += 1;
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                                let current =
+                                    sessions.lock().get(&id).and_then(|s| s.remote_generation);
+                                if current != Some(generation) {
+                                    tracing::warn!(
+                                        session_id = %id,
+                                        "Discarding terminal pty write after remote generation changed"
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    session_id = %id,
+                                    %err,
+                                    "Failed to deliver terminal pty write to remote session"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         {
             let mut sessions = self.sessions.lock();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.stream_task = Some(stream_task);
                 session.pump_task = Some(pump_task);
+                session.pty_write_task = pty_write_task;
             }
         }
 
@@ -1722,6 +1827,9 @@ impl NativeTerminalSurfaceHostState {
             if let Some(task) = session.pump_task.take() {
                 task.abort();
             }
+            if let Some(task) = session.pty_write_task.take() {
+                task.abort();
+            }
         }
         drop(sessions);
 
@@ -1736,6 +1844,9 @@ impl NativeTerminalSurfaceHostState {
                 task.abort();
             }
             if let Some(task) = session.pump_task {
+                task.abort();
+            }
+            if let Some(task) = session.pty_write_task {
                 task.abort();
             }
         }
@@ -1859,6 +1970,8 @@ impl NativeTerminalSurfaceHostState {
                         cell_metrics: None,
                         stream_task: None,
                         pump_task: None,
+                        pty_write_task: None,
+                        remote_generation: None,
                         last_sequence: None,
                         update_sender,
                         detach_sender: tokio::sync::watch::channel(()).0,
@@ -2108,6 +2221,17 @@ impl NativeTerminalSurfaceHostState {
 
         self.get_receipt(window, session_id)
     }
+}
+
+/// True when a write failure came from the interactive connection being busy
+/// (see `DaemonClient::send_interactive_request`), which is worth a bounded retry.
+fn is_busy_error(error: &crate::ipc::IpcError) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("kind"))
+        .and_then(|kind| kind.as_str())
+        == Some("busy")
 }
 
 struct NativeTerminalSurfaceHost {

@@ -566,6 +566,12 @@ export function useWorkspaceStore({
         worktree: worktreeIdentity(worktree),
         backendSessionId,
         lifecycle: "working",
+        ...(isRemoteWorkspaceId(workspaceId)
+          ? {
+              remoteConnectionState: "connected",
+              remoteGeneration: 1,
+            }
+          : {}),
       };
       const tab: TerminalTab = {
         id: tabId,
@@ -848,6 +854,7 @@ export function useWorkspaceStore({
 
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
+      const isRemote = isRemoteWorkspaceId(sourceSession.workspaceId || workspaceId);
       const session: TerminalSession = {
         id: localSessionId,
         cwd: sourceSession.cwd,
@@ -856,6 +863,12 @@ export function useWorkspaceStore({
         worktree: sourceSession.worktree,
         backendSessionId: null,
         lifecycle: "working",
+        ...(isRemote
+          ? {
+              remoteConnectionState: "connected",
+              remoteGeneration: 1,
+            }
+          : {}),
       };
 
       dispatch({
@@ -881,7 +894,7 @@ export function useWorkspaceStore({
           // CWD inheritance (M9): one IPC round trip — the daemon resolves the source
           // pane's live working directory server-side and returns it in the response.
           const result = await spawnDetailedForLogicalAction(services, {
-            workspaceId,
+            workspaceId: sourceSession.workspaceId || workspaceId,
             worktree: sourceSession.worktree,
             cwd: null,
             inheritFromSessionId: sourceSession.backendSessionId,
@@ -900,7 +913,7 @@ export function useWorkspaceStore({
           }
           inheritedCwd = liveCwd;
           backendSessionId = await spawnTerminalForLogicalAction(services, {
-            workspaceId,
+            workspaceId: sourceSession.workspaceId || workspaceId,
             worktree: sourceSession.worktree,
             cwd: liveCwd,
           });
@@ -2241,7 +2254,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "REBIND_SESSION_BACKEND": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
-      const isSshSession = isRemoteWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
+      const isSshSession = isRemoteWorkspaceId(session.workspaceId);
       const activityBySessionId = { ...state.activityBySessionId };
       if (isSshSession) delete activityBySessionId[action.sessionId];
       return {
@@ -2259,7 +2272,17 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             reconnectLifecycle: "idle",
             reconnectError: null,
             reconnectRequestId: null,
-            ...(isSshSession ? { agentType: null, agentSessionId: null, providerSession: null } : {}),
+            ...(isSshSession
+              ? {
+                  agentType: null,
+                  agentSessionId: null,
+                  providerSession: null,
+                  remoteConnectionState: "connected",
+                  remoteGeneration: 1,
+                  remoteFailure: null,
+                  remoteReplayGap: null,
+                }
+              : {}),
           },
         },
       };

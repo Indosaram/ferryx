@@ -512,11 +512,12 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
         Ok(attachment) => attachment,
         Err(err) => return Err(err),
     };
-    if let Err(err) = state.attach_daemon_attachment_with_bounds(
+    if let Err(err) = state.attach_daemon_attachment_with_bounds_and_client(
         &session_id,
         attachment,
         Some(app),
         logical_bounds,
+        Some(daemon_client.inner().clone()),
     ) {
         return Err(IpcError::internal(err.to_string()));
     }

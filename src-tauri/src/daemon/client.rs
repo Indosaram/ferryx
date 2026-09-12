@@ -672,15 +672,22 @@ impl DaemonClient {
                 IpcError::internal("Remote control is busy; input was not queued")
                     .with_details(serde_json::json!({"kind":"busy", "inputWritten":false}))
             })?;
-            if slot.is_none() {
-                *slot = Some(self.connect_and_handshake().await?);
+            // Take the connection out of the pool while awaiting the reply: if this
+            // future is cancelled mid-request, `active` is dropped, cleanly closing
+            // the socket instead of leaving a half-written request pooled with its
+            // unread response to corrupt the next request's framing.
+            let mut conn = slot.take();
+            if conn.is_none() {
+                conn = Some(self.connect_and_handshake().await?);
             }
-            return match slot.as_mut().expect("connected").request(&req).await {
-                Ok(reply) => Ok(reply),
-                Err(error) => {
-                    *slot = None;
-                    Err(error.into_ipc_error(&req, true))
+            let mut active = conn.expect("connected");
+            let res = active.request(&req).await;
+            return match res {
+                Ok(reply) => {
+                    *slot = Some(active);
+                    Ok(reply)
                 }
+                Err(error) => Err(error.into_ipc_error(&req, true)),
             };
         }
         self.send_on_connection(&self.interactive_connection, req)
