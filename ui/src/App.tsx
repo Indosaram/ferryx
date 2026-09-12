@@ -121,7 +121,7 @@ import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspa
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { hasNavigableSession, selectGlobalUnreadBadgeCount, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
@@ -650,11 +650,13 @@ function WorkspaceApp({
     const target = eventTarget ?? targets.find(
       (candidate) => candidate.sessionId === sessionId,
     );
+    let workspaceLabel = target?.workspaceLabel;
     let worktreePath = target?.worktreePath;
     let worktreeLabel = target?.worktreeLabel;
     let terminalTitle = target?.terminalTitle;
 
     if (!target) {
+      workspaceLabel = selectNotificationWorkspaceLabel(stateRef.current);
       const session = stateRef.current.sessions[sessionId];
       const fallbackWorktreePath = session?.worktreePath ?? session?.cwd ?? "";
       const worktree = stateRef.current.worktrees.find(
@@ -667,6 +669,7 @@ function WorkspaceApp({
 
     coordinatorRef.current?.handleTerminalBell({
       workspaceId: target?.workspaceId,
+      workspaceLabel,
       sessionId,
       tabId,
       worktreePath,
@@ -2676,6 +2679,7 @@ function loadProjects(): RegisteredProject[] {
         workspaceId: project.workspaceId,
         repoRoot: project.repoRoot,
         target: project.target,
+        hostLabel: typeof project.hostLabel === "string" ? project.hostLabel : undefined,
         gitCommonDir: typeof project.gitCommonDir === "string" ? project.gitCommonDir : undefined,
         gitRemote:
           typeof project.gitRemote === "string"

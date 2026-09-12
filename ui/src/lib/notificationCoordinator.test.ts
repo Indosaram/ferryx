@@ -73,6 +73,7 @@ describe("terminal bell", () => {
       tabId: "t1",
       worktreePath: "/repo/wt-a",
       worktreeLabel: "wt-a",
+      workspaceLabel: "Orca (Build machine)",
       terminalTitle: "vim",
     });
 
@@ -82,6 +83,7 @@ describe("terminal bell", () => {
       source: "terminal-bell",
       sound: "system",
       worktreeLabel: "wt-a",
+      workspaceLabel: "Orca (Build machine)",
       terminalTitle: "vim",
     });
   });
@@ -253,6 +255,7 @@ describe("agent state change", () => {
       tabId: "t1",
       worktreePath: "/repo/wt-a",
       worktreeLabel: "wt-a",
+      workspaceLabel: "local-project",
       agentLabel: "codex",
       terminalTitle: "codex run",
       previousState: "running",
@@ -265,6 +268,7 @@ describe("agent state change", () => {
       attentionReason: "waiting",
       sound: "system",
       worktreeLabel: "wt-a",
+      workspaceLabel: "local-project",
       terminalTitle: "codex run",
       agentLabel: "codex",
     });

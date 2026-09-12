@@ -185,9 +185,9 @@ const restoreWorkspace = vi.fn();
  * The bell reaches App through the store's global native subscription, so the test fires it the
  * same way the store does rather than through a pane prop that only the foreground tab would have.
  */
-const bellListeners = new Set<(sessionId: string, tabId: string) => void>();
-function emitTerminalBell(sessionId = "sess-1", tabId = "tab-1"): void {
-  for (const listener of bellListeners) listener(sessionId, tabId);
+const bellListeners = new Set<(sessionId: string, tabId: string, target?: ActivityNotificationTarget) => void>();
+function emitTerminalBell(sessionId = "sess-1", tabId = "tab-1", target?: ActivityNotificationTarget): void {
+  for (const listener of bellListeners) listener(sessionId, tabId, target);
 }
 
 const storeState = {
@@ -416,7 +416,7 @@ describe("App notification coordinator wiring", () => {
       syncWorktrees: vi.fn(),
       restoreWorkspace,
       updateSessionTitleActivity: vi.fn(),
-      subscribeTerminalBell: (listener: (sessionId: string, tabId: string) => void) => {
+      subscribeTerminalBell: (listener: (sessionId: string, tabId: string, target?: ActivityNotificationTarget) => void) => {
         bellListeners.add(listener);
         return () => {
           bellListeners.delete(listener);
@@ -443,11 +443,61 @@ describe("App notification coordinator wiring", () => {
     expect(native.dispatchNotification).toHaveBeenCalledWith(
       expect.objectContaining({
         source: "terminal-bell",
+        workspaceLabel: "default",
       }),
     );
     expect(native.playNotificationSound).toHaveBeenCalledTimes(1);
     expect(markTabUnread).toHaveBeenCalledWith("tab-1", undefined);
     expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main", undefined);
+  });
+
+  it.each([
+    { repoRoot: "/srv/Orca/", hostLabel: "Build machine", grouped: false, expected: "Orca (Build machine)" },
+    { repoRoot: "C:\\work\\Orca\\", hostLabel: "Build machine", grouped: false, expected: "Orca (Build machine)" },
+    { repoRoot: "/", hostLabel: undefined, grouped: false, expected: "/ (build)" },
+    { repoRoot: "/srv/Orca", hostLabel: "Build machine", grouped: true, expected: "Orca" },
+  ])("forwards SSH labels for agent completion and both bell paths: $expected at $repoRoot", async ({ repoRoot, hostLabel, grouped, expected }) => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const workspaceId = "ssh:build:orca";
+    const gitRemote = "git@github.com:example/orca.git";
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+      { workspaceId: "default", repoRoot: ".", gitRoot: null },
+      { workspaceId, repoRoot, hostLabel, target: { kind: "ssh", hostId: "build" }, gitRemote },
+      ...(grouped ? [{ workspaceId: "local-orca", repoRoot: "/local/orca", gitRemote }] : []),
+    ]));
+    const snapshot = parkedProjectSnapshot("sess-remote");
+    snapshot.workspaceId = workspaceId;
+    snapshot.activityBySessionId = {
+      "sess-remote": { state: "done", title: "codex run", isAgent: true, agentType: "codex" },
+    };
+    const [target] = workspaceStoreModule.selectActivityNotificationTargets(snapshot);
+    expect(target).toMatchObject({ workspaceId, workspaceLabel: expected });
+    currentActivityTargets = [target];
+
+    render(<App />);
+    await nativeFocusTrackingReady;
+    nativeFocusChanged?.({ payload: false });
+    emitActivityTargets();
+    expect(native.dispatchNotification).toHaveBeenLastCalledWith(expect.objectContaining({
+      source: "agent-task-complete", workspaceLabel: expected,
+      target: { workspaceId, sessionId: "sess-remote" },
+    }));
+
+    // Explicit event targets belong to the emitting workspace, not the mounted project.
+    emitTerminalBell("bell-remote", "tab-r", { ...target, sessionId: "bell-remote" });
+    expect(native.dispatchNotification).toHaveBeenLastCalledWith(expect.objectContaining({
+      source: "terminal-bell", workspaceLabel: expected,
+      target: { workspaceId, sessionId: "bell-remote" },
+    }));
+
+    cleanup();
+    currentActivityTargets = [];
+    setWorkspaceSnapshot("default", snapshot);
+    render(<App />);
+    emitTerminalBell("sess-remote", "tab-r");
+    expect(native.dispatchNotification).toHaveBeenLastCalledWith(expect.objectContaining({
+      source: "terminal-bell", workspaceLabel: expected,
+    }));
   });
 
   it("CRITERION 2b: clicking the bell button while the window is FOCUSED calls dispatchNotification ZERO times", async () => {

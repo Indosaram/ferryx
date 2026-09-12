@@ -21,6 +21,7 @@ export interface NotificationCoordinatorOptions {
 
 export interface TerminalBellEventParams {
   workspaceId?: string;
+  workspaceLabel?: string;
   sessionId?: string;
   tabId?: string;
   worktreeId?: string;
@@ -32,6 +33,7 @@ export interface TerminalBellEventParams {
 
 export interface AgentStateChangeEventParams {
   workspaceId?: string;
+  workspaceLabel?: string;
   notificationSuppressed?: boolean;
   sessionId?: string;
   tabId?: string;
@@ -129,6 +131,7 @@ export class NotificationCoordinator {
 
         const dispatchArgs: DispatchNotificationArgs = {
           source: 'terminal-bell',
+          workspaceLabel: params.workspaceLabel,
           sound: settings.customSoundId === 'system' ? 'system' : 'silent',
           worktreeLabel: params.worktreeLabel || params.worktreeId,
           terminalTitle: params.terminalTitle,
@@ -213,6 +216,7 @@ export class NotificationCoordinator {
 
         const dispatchArgs: DispatchNotificationArgs = {
           source: 'agent-task-complete',
+          workspaceLabel: params.workspaceLabel,
           attentionReason: next === 'waiting' ? 'waiting' : 'done',
           sound: settings.customSoundId === 'system' ? 'system' : 'silent',
           worktreeLabel: params.worktreeLabel || params.worktreeId,

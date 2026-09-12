@@ -16,6 +16,10 @@ import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import { isRemoteWorkspaceId } from "../lib/remoteProject";
+import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
+import { hasValidProjectTarget } from "../lib/projectIdentity";
+import { getCachedSshHosts } from "../lib/sshHosts";
+import { getMigratedItem, PROJECTS_STORAGE_KEY } from "../lib/storageKeys";
 import { startSshRecovery } from "../lib/sshRecovery";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
@@ -27,6 +31,7 @@ import type {
   LayoutState,
   PaneContent,
   ReconnectLifecycle,
+  RegisteredProject,
   StructuredIpcError,
   TerminalLifecycle,
   TerminalLifecyclePayload,
@@ -1513,6 +1518,7 @@ export function selectGlobalUnreadBadgeCount(
 
 export type ActivityNotificationTarget = {
   workspaceId?: string;
+  workspaceLabel?: string;
   notificationSuppressed?: boolean;
   sessionId: string;
   tabId: string;
@@ -1525,6 +1531,31 @@ export type ActivityNotificationTarget = {
 
 export type ActivityNotificationEvent = ActivityNotificationTarget & { previousState?: TerminalActivityState };
 
+/** Match ProjectHeader labels without tying parked-workspace events to the active project. */
+export function selectNotificationWorkspaceLabel(state: WorkspaceState): string | undefined {
+  const workspaceId = state.workspaceId;
+  if (!workspaceId) return undefined;
+  let projects: RegisteredProject[];
+  try {
+    const stored: unknown = JSON.parse(getMigratedItem(PROJECTS_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(stored)) return workspaceId;
+    projects = stored.filter((project): project is RegisteredProject =>
+      project && typeof project.workspaceId === "string" && typeof project.repoRoot === "string" &&
+      hasValidProjectTarget(project),
+    );
+  } catch (error) {
+    console.error("Failed to resolve notification workspace label", error);
+    return workspaceId;
+  }
+  const project = projects.find((candidate) => candidate.workspaceId === workspaceId);
+  const remote = project?.target?.kind === "ssh" ? project.target : null;
+  if (!project || !remote) return workspaceId;
+  const folderName = project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/";
+  const hostLabel = getCachedSshHosts()?.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId;
+  const standalone = findGroupForWorkspace(groupProjects(projects), workspaceId)?.memberProjects.length === 1;
+  return standalone && hostLabel ? `${folderName} (${hostLabel})` : folderName;
+}
+
 function notificationTarget(state: WorkspaceState, sessionId: string, tabId: string): ActivityNotificationTarget {
   const activity = state.activityBySessionId?.[sessionId];
   const worktreePath = sessionWorktreePath(state.sessions[sessionId]);
@@ -1532,6 +1563,7 @@ function notificationTarget(state: WorkspaceState, sessionId: string, tabId: str
   const parsed = parseAgentTitle(activity?.title ?? "");
   return {
     workspaceId: state.workspaceId, sessionId, tabId, worktreePath,
+    workspaceLabel: selectNotificationWorkspaceLabel(state),
     worktreeLabel: worktree ? workspaceName(worktree) : "",
     agentLabel: parsed?.isAgent ? parsed.name : agentDisplayNameForType(activity?.isAgent ? activity.agentType : undefined),
     terminalTitle: activity?.title ?? "", state: activity?.state ?? "done",
@@ -1541,6 +1573,7 @@ function notificationTarget(state: WorkspaceState, sessionId: string, tabId: str
 
 export function selectActivityNotificationTargets(state: WorkspaceState): ActivityNotificationTarget[] {
   const targets: ActivityNotificationTarget[] = [];
+  const workspaceLabel = selectNotificationWorkspaceLabel(state);
   const activityBySessionId = state.activityBySessionId ?? {};
 
   for (const [sessionId, activity] of Object.entries(activityBySessionId)) {
@@ -1559,6 +1592,7 @@ export function selectActivityNotificationTargets(state: WorkspaceState): Activi
 
     targets.push({
       workspaceId: state.workspaceId,
+      workspaceLabel,
       notificationSuppressed: activity.notificationSuppressed,
       sessionId,
       tabId,
