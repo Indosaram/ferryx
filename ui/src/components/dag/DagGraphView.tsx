@@ -98,6 +98,13 @@ export function DagGraphView({
   } | null>(null);
   const hasDraggedRef = useRef<boolean>(false);
 
+  const setViewportRef = useCallback((node: HTMLDivElement | null) => {
+    viewportRef.current = node;
+    if (node) {
+      lastViewportElementRef.current = node;
+    }
+  }, []);
+
   const cancelGesture = useCallback(() => {
     const viewport = viewportRef.current ?? lastViewportElementRef.current;
     if (viewport && primaryPointerIdRef.current !== null) {
@@ -120,6 +127,9 @@ export function DagGraphView({
     primaryPointerIdRef.current = null;
     pinchBaselineRef.current = null;
     hasDraggedRef.current = false;
+    if (!viewportRef.current) {
+      lastViewportElementRef.current = null;
+    }
   }, []);
 
   // Compute graph geometry
@@ -682,18 +692,19 @@ export function DagGraphView({
       data-run-id={activeRun.runId}
     >
       <div
-        className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/40 bg-card/60 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm"
+        className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/40 bg-card/60 px-2 sm:px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm"
         data-testid="dag-header"
       >
-        <div className="flex min-w-0 items-center gap-2 font-medium">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-medium">
           {showRunName && (
-            <>
+            <span className="flex min-w-0 items-center gap-1.5">
               <span className="truncate text-foreground">{activeRun.name}</span>
               <span className="text-muted-foreground/60">&mdash;</span>
-            </>
+            </span>
           )}
-          <span className="shrink-0 font-mono text-muted-foreground">
-            {counts.completed}/{counts.total} done, {counts.running} running
+          <span className="inline-flex flex-wrap items-center gap-x-1 font-mono text-muted-foreground">
+            <span>{counts.completed}/{counts.total} done, </span>
+            <span>{counts.running} running</span>
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -749,7 +760,7 @@ export function DagGraphView({
       </div>
 
       <div
-        ref={viewportRef}
+        ref={setViewportRef}
         className="relative flex-1 min-h-0 min-w-0 overflow-hidden select-none"
         style={{ touchAction: "none", overscrollBehavior: "none" }}
         data-testid="dag-viewport"

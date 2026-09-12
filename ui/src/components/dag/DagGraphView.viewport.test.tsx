@@ -27,21 +27,24 @@ class CustomPointerEvent extends MouseEvent {
 }
 
 type ResizeCallback = (entries: ResizeObserverEntry[], observer: ResizeObserver) => void;
-let activeResizeCallbacks: ResizeCallback[] = [];
+let activeResizeObservers: ControlledResizeObserver[] = [];
 
 class ControlledResizeObserver implements ResizeObserver {
-  private cb: ResizeCallback;
+  readonly targets = new Set<Element>();
+  readonly cb: ResizeCallback;
   constructor(cb: ResizeCallback) {
     this.cb = cb;
-    activeResizeCallbacks.push(cb);
+    activeResizeObservers.push(this);
   }
-  observe(_target: Element) {
+  observe(target: Element) {
+    this.targets.add(target);
     // In real browsers, ResizeObserver delivery is asynchronous; tests drive sizing
     // via triggerResize / mockViewportDimensions.
   }
-  unobserve() {}
+  unobserve(target: Element) { this.targets.delete(target); }
   disconnect() {
-    activeResizeCallbacks = activeResizeCallbacks.filter((c) => c !== this.cb);
+    this.targets.clear();
+    activeResizeObservers = activeResizeObservers.filter((observer) => observer !== this);
   }
 }
 
@@ -61,8 +64,9 @@ function triggerResize(target: Element, width: number, height: number) {
   Object.defineProperty(target, "clientHeight", { configurable: true, value: height });
 
   act(() => {
-    for (const cb of activeResizeCallbacks) {
-      cb(
+    for (const observer of activeResizeObservers) {
+      if (!observer.targets.has(target)) continue;
+      observer.cb(
         [
           {
             target,
@@ -72,7 +76,7 @@ function triggerResize(target: Element, width: number, height: number) {
             devicePixelContentBoxSize: [],
           } as unknown as ResizeObserverEntry,
         ],
-        {} as ResizeObserver,
+        observer,
       );
     }
   });
@@ -115,7 +119,7 @@ describe("DagGraphView Camera and Viewport Interaction", () => {
 
   beforeEach(() => {
     dagStore.reset();
-    activeResizeCallbacks = [];
+    activeResizeObservers = [];
     Object.defineProperty(globalThis, "ResizeObserver", {
       configurable: true,
       writable: true,
@@ -622,7 +626,7 @@ describe("DagGraphView Camera and Viewport Interaction", () => {
       fireEvent.pointerMove(viewport, { pointerId: 10, pointerType: "touch", clientX: 150, clientY: 200 });
       fireEvent.pointerMove(viewport, { pointerId: 11, pointerType: "touch", clientX: 350, clientY: 200 });
       const tAfter = parseTransform(world.style.transform);
-      expect(tAfter.scale).toBeCloseTo(tBlur.scale, 4);
+      expect(tAfter).toEqual(tBlur);
     });
 
     it("releases pointer capture on unmount without throwing errors", () => {
@@ -737,6 +741,154 @@ describe("DagGraphView Camera and Viewport Interaction", () => {
       expect(tFinal.y).toBeCloseTo(t2End.y + 10, 1);
 
       fireEvent.pointerUp(viewport, { pointerId: 1, pointerType: "touch" });
+    });
+  });
+
+  describe("B5 complete capture and camera regressions", () => {
+    it.each([1, 2])("rebases a real pinch when contact %i survives", (survivor) => {
+      const { container } = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+      const { viewport, world } = getElements(container);
+      mockViewportDimensions(viewport);
+      const initial = parseTransform(world.style.transform);
+      fireEvent.pointerDown(viewport, { pointerId: 1, pointerType: "touch", clientX: 100, clientY: 100 });
+      fireEvent.pointerMove(document.body, { pointerId: 1, pointerType: "touch", clientX: 120, clientY: 110 });
+      const panned = parseTransform(world.style.transform);
+      expect(panned).toEqual({ ...initial, x: initial.x + 20, y: initial.y + 10 });
+      fireEvent.pointerDown(viewport, { pointerId: 2, pointerType: "touch", clientX: 220, clientY: 110 });
+      expect(parseTransform(world.style.transform)).toEqual(panned);
+      fireEvent.pointerMove(document.body, { pointerId: 1, pointerType: "touch", clientX: 100, clientY: 130 });
+      fireEvent.pointerMove(document.body, { pointerId: 2, pointerType: "touch", clientX: 260, clientY: 130 });
+      const pinched = parseTransform(world.style.transform);
+      expect(pinched.scale).toBeCloseTo(panned.scale * 1.6, 8);
+      expect(pinched.x).toBeCloseTo(180 - 1.6 * (170 - panned.x), 8);
+      expect(pinched.y).toBeCloseTo(130 - 1.6 * (110 - panned.y), 8);
+      fireEvent.pointerUp(document.body, { pointerId: 3 - survivor, pointerType: "touch" });
+      expect(viewport.hasPointerCapture(3 - survivor)).toBe(false);
+      expect(viewport.hasPointerCapture(survivor)).toBe(true);
+      expect(parseTransform(world.style.transform)).toEqual(pinched);
+      fireEvent.pointerMove(document.body, { pointerId: survivor, pointerType: "touch", clientX: (survivor === 1 ? 100 : 260) + 20, clientY: 140 });
+      expect(parseTransform(world.style.transform)).toEqual({ ...pinched, x: pinched.x + 20, y: pinched.y + 10 });
+      fireEvent.pointerUp(document.body, { pointerId: survivor, pointerType: "touch" });
+      expect(viewport.hasPointerCapture(survivor)).toBe(false);
+    });
+
+    it("defers a subpixel pinch baseline then anchors the first nondegenerate distance", () => {
+      const { container } = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+      const { viewport, world } = getElements(container);
+      mockViewportDimensions(viewport);
+      const initial = parseTransform(world.style.transform);
+      fireEvent.pointerDown(viewport, { pointerId: 1, pointerType: "touch", clientX: 100, clientY: 100 });
+      fireEvent.pointerDown(viewport, { pointerId: 2, pointerType: "touch", clientX: 100, clientY: 100 });
+      fireEvent.pointerMove(document.body, { pointerId: 2, pointerType: "touch", clientX: 100.5, clientY: 100 });
+      expect(parseTransform(world.style.transform)).toEqual(initial);
+      fireEvent.pointerMove(document.body, { pointerId: 2, pointerType: "touch", clientX: 110, clientY: 100 });
+      expect(parseTransform(world.style.transform)).toEqual(initial);
+      fireEvent.pointerMove(document.body, { pointerId: 2, pointerType: "touch", clientX: 120, clientY: 100 });
+      const actual = parseTransform(world.style.transform);
+      expect(actual.scale).toBeCloseTo(initial.scale * 2, 8);
+      expect(actual.x).toBeCloseTo(110 - 2 * (105 - initial.x), 8);
+      expect(actual.y).toBeCloseTo(100 - 2 * (100 - initial.y), 8);
+    });
+
+    it("ignores extra contact motion and release without replacing the selected pair", () => {
+      const { container } = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+      const { viewport, world } = getElements(container);
+      mockViewportDimensions(viewport);
+      const initial = parseTransform(world.style.transform);
+      fireEvent.pointerDown(viewport, { pointerId: 1, pointerType: "touch", clientX: 100, clientY: 100 });
+      fireEvent.pointerDown(viewport, { pointerId: 2, pointerType: "touch", clientX: 200, clientY: 100 });
+      fireEvent.pointerDown(viewport, { pointerId: 3, pointerType: "touch", clientX: 300, clientY: 300 });
+      expect(viewport.hasPointerCapture(3)).toBe(false);
+      fireEvent.pointerMove(viewport, { pointerId: 3, pointerType: "touch", clientX: 400, clientY: 450 });
+      expect(parseTransform(world.style.transform)).toEqual(initial);
+      fireEvent.pointerUp(viewport, { pointerId: 3, pointerType: "touch" });
+      expect(parseTransform(world.style.transform)).toEqual(initial);
+      fireEvent.pointerMove(document.body, { pointerId: 1, pointerType: "touch", clientX: 80, clientY: 120 });
+      fireEvent.pointerMove(document.body, { pointerId: 2, pointerType: "touch", clientX: 240, clientY: 120 });
+      const actual = parseTransform(world.style.transform);
+      expect(actual.scale).toBeCloseTo(initial.scale * 1.6, 8);
+      expect(actual.x).toBeCloseTo(160 - 1.6 * (150 - initial.x), 8);
+      expect(actual.y).toBeCloseTo(120 - 1.6 * (100 - initial.y), 8);
+    });
+
+    it.each(["cancel", "lost capture", "blur", "hidden", "run switch", "resize", "unmount"] as const)(
+      "releases both touch captures on %s and ignores continuing contacts", (interruption) => {
+        const { container, rerender, unmount } = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+        const { viewport, world } = getElements(container);
+        mockViewportDimensions(viewport);
+        fireEvent.pointerDown(viewport, { pointerId: 10, pointerType: "touch", clientX: 100, clientY: 100 });
+        fireEvent.pointerDown(viewport, { pointerId: 11, pointerType: "touch", clientX: 200, clientY: 100 });
+        fireEvent.pointerMove(document.body, { pointerId: 11, pointerType: "touch", clientX: 240, clientY: 130 });
+        expect(viewport.hasPointerCapture(10)).toBe(true);
+        expect(viewport.hasPointerCapture(11)).toBe(true);
+        act(() => {
+          switch (interruption) {
+            case "cancel":
+              fireEvent.pointerCancel(document.body, { pointerId: 10, pointerType: "touch" });
+              fireEvent.pointerCancel(document.body, { pointerId: 11, pointerType: "touch" });
+              break;
+            case "lost capture": viewport.releasePointerCapture(10); viewport.releasePointerCapture(11); break;
+            case "blur": window.dispatchEvent(new Event("blur")); break;
+            case "hidden":
+              vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+              document.dispatchEvent(new Event("visibilitychange"));
+              break;
+            case "run switch": rerender(<DagGraphView snapshot={buildTallDagRun()} />); break;
+            case "resize": triggerResize(viewport, 800, 600); break;
+            case "unmount": unmount(); break;
+          }
+        });
+        // Soft assertions keep the continuation oracle reachable if release fails.
+        expect.soft(viewport.hasPointerCapture(10)).toBe(false);
+        expect.soft(viewport.hasPointerCapture(11)).toBe(false);
+        const stopped = parseTransform(world.style.transform);
+        for (const target of [document.body, viewport]) {
+          fireEvent.pointerMove(target, { pointerId: 10, pointerType: "touch", buttons: 1, clientX: 50, clientY: 300 });
+          fireEvent.pointerMove(target, { pointerId: 11, pointerType: "touch", buttons: 1, clientX: 450, clientY: 350 });
+          expect(parseTransform(world.style.transform)).toEqual(stopped);
+          fireEvent.pointerMove(target, { pointerId: 10, buttons: 0, clientX: 500, clientY: 500 });
+          expect(parseTransform(world.style.transform)).toEqual(stopped);
+        }
+      },
+    );
+
+    it("delivers lost capture to React and makes pressed mouse continuation inert", () => {
+      const { container } = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+      const { viewport, world } = getElements(container);
+      mockViewportDimensions(viewport);
+      fireEvent.pointerDown(viewport, { pointerId: 1, button: 0, buttons: 1, clientX: 100, clientY: 100 });
+      fireEvent.pointerMove(document.body, { pointerId: 1, buttons: 1, clientX: 150, clientY: 130 });
+      const stopped = parseTransform(world.style.transform);
+      act(() => { viewport.releasePointerCapture(1); });
+      expect(viewport.hasPointerCapture(1)).toBe(false);
+      fireEvent.pointerMove(viewport, { pointerId: 1, buttons: 1, clientX: 500, clientY: 500 });
+      expect(parseTransform(world.style.transform)).toEqual(stopped);
+    });
+
+    it("fits a tiny 20x20 viewport with a five-pixel margin and no minimum clamp jump", () => {
+      const { container } = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+      const { viewport, world } = getElements(container);
+      mockViewportDimensions(viewport, 20, 20);
+      // Fixture A world is 1160 x 214; margin = min(24, 20/4, 20/4).
+      const expectedScale = 10 / 1160;
+      const fitted = parseTransform(world.style.transform);
+      expect(fitted.scale).toBeCloseTo(expectedScale, 10);
+      expect(fitted.x).toBeCloseTo(5, 8);
+      expect(fitted.y).toBeCloseTo((20 - 214 * expectedScale) / 2, 8);
+      fireEvent.wheel(viewport, { clientX: 7, clientY: 13, deltaY: 120 });
+      expect(parseTransform(world.style.transform)).toEqual(fitted);
+    });
+
+    it("delivers resize only to the observed viewport", () => {
+      const first = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+      const second = render(<DagGraphView snapshot={buildQaDagRunA()} />);
+      const a = getElements(first.container);
+      const b = getElements(second.container);
+      mockViewportDimensions(a.viewport);
+      mockViewportDimensions(b.viewport, 600, 400);
+      const before = parseTransform(a.world.style.transform);
+      triggerResize(b.viewport, 800, 500);
+      expect(parseTransform(a.world.style.transform)).toEqual(before);
     });
   });
 

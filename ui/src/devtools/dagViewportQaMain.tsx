@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 
 import "../index.css";
@@ -85,6 +86,25 @@ function DagViewportQaHarness(): JSX.Element {
   const seededRef = useRef(false);
   const [standaloneRunId, setStandaloneRunId] = useState("qa-dag-a");
   const [standaloneRatio, setStandaloneRatio] = useState(0.5);
+  const [receipt, setReceipt] = useState<unknown>(null);
+
+  // QA-only commit barrier. MessageChannel runs after the native dispatch stack,
+  // unlike a capture-listener microtask. The layout effect acknowledges an actual
+  // committed subtree render, including queued camera updates, even for no-ops.
+  useLayoutEffect(() => {
+    if (receipt !== null) window.dispatchEvent(new CustomEvent("qa-render-receipt", { detail: receipt }));
+  }, [receipt]);
+  useEffect(() => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = (event) => flushSync(() => setReceipt(event.data));
+    const request = (event: Event) => channel.port2.postMessage((event as CustomEvent).detail);
+    window.addEventListener("qa-request-receipt", request);
+    return () => {
+      window.removeEventListener("qa-request-receipt", request);
+      channel.port1.close();
+      channel.port2.close();
+    };
+  }, []);
 
   useEffect(() => {
     if (seededRef.current) return;

@@ -20,18 +20,34 @@ if (!globalThis.PointerEvent) {
   }
 }
 
-// Faithful pointer capture stubs for JSDOM
+// Deterministic capture delivery for JSDOM. Synthetic dispatch represents platform
+// pointer input here; capture is applied before DOM propagation. Disconnection
+// deliberately does not erase ownership: tests must observe explicit cleanup.
 if (typeof Element !== "undefined") {
   const pointerCaptures = new Map<number, Element>();
+  const dispatchEvent = EventTarget.prototype.dispatchEvent;
+
+  function emitCaptureLoss(owner: Element, pointerId: number) {
+    // The MouseEvent fallback ignores PointerEventInit.pointerId.
+    const event = new PointerEvent("lostpointercapture", { bubbles: true, pointerId });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    owner.dispatchEvent(event);
+  }
+
+  EventTarget.prototype.dispatchEvent = function (event: Event) {
+    if ((event.type === "pointermove" || event.type === "pointerup" || event.type === "pointercancel") &&
+        "pointerId" in event && typeof event.pointerId === "number") {
+      const owner = pointerCaptures.get(event.pointerId);
+      const result = dispatchEvent.call(owner ?? this, event);
+      if (event.type !== "pointermove") {
+        pointerCaptures.get(event.pointerId)?.releasePointerCapture(event.pointerId);
+      }
+      return result;
+    }
+    return dispatchEvent.call(this, event);
+  };
 
   Element.prototype.hasPointerCapture = function (pointerId: number) {
-    if (!this.isConnected && typeof document !== "undefined" && !document.contains(this)) {
-      if (pointerCaptures.get(pointerId) === this) {
-        pointerCaptures.delete(pointerId);
-        this.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId }));
-      }
-      return false;
-    }
     return pointerCaptures.get(pointerId) === this;
   };
 
@@ -42,7 +58,7 @@ if (typeof Element !== "undefined") {
     const prev = pointerCaptures.get(pointerId);
     if (prev && prev !== this) {
       pointerCaptures.delete(pointerId);
-      prev.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId }));
+      emitCaptureLoss(prev, pointerId);
     }
     pointerCaptures.set(pointerId, this);
   };
@@ -50,7 +66,7 @@ if (typeof Element !== "undefined") {
   Element.prototype.releasePointerCapture = function (pointerId: number) {
     if (pointerCaptures.get(pointerId) === this) {
       pointerCaptures.delete(pointerId);
-      this.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId }));
+      emitCaptureLoss(this, pointerId);
     }
   };
 
