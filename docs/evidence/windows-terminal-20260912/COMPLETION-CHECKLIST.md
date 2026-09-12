@@ -3,18 +3,21 @@
 Status: NOT COMPLETE. Authoritative final audit: `FINAL-AUDIT.md`.
 Shell and retained-frame changes committed as `1313d387` and `40c2ae5c`.
 Final four suites: 62 passed; build exit0. Actual PTY startup/resize/cmd echo
-outputs are saved, but full menu-to-cmd and current unobscured visual proof
-remain incomplete. Original Windows bounds failure was not reproduced.
-QA resources were cleaned; user's installed app and daemon were preserved.
+outputs are saved. Cold-loaded `7f7ecd8e` now proves full menu-to-cmd and
+unobscured startup/resize output. The original installed app's bounds banner
+is positively identified, but its raw cause and same-seam RED/GREEN remain
+unknown. Both QA runs are cleaned with the installed app and daemon preserved.
 
 ## Prompt-to-artifact checklist
 
-- [ ] Windows terminal type selection restored.
+- [x] Windows terminal type selection restored.
   - Diagnosis and historical regression: `shell-diagnosis.md`.
   - [x] Before/after behavior evidence: exact test IDs and RED/GREEN logs in `shell-implementation.md`; lead rerun confirms 23 shell tests pass.
   - Actual menu screenshot and action log: `+` exposes shell choices.
   - Actual Command Prompt execution: `echo FERRYX_WIN_SHELL_OK` output is visible.
   - Exact selected shell reaches spawn; default and non-Windows paths retain behavior.
+  - Fresh evidence: `runtime/FRESH-RUN.md`, `runtime/fresh-visual-review.md`,
+    `runtime/artifacts/fresh-menu-cmd-receipt.json`.
 - [ ] Startup terminal appears instead of native bounds failure.
   - Confirmed call-chain and runtime cause: `bounds-diagnosis.md`.
   - RED before production edit and identical GREEN proof.

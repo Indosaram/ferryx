@@ -1,0 +1,292 @@
+[
+  {
+    "name": "Ferryx",
+    "type": "ControlType.Pane",
+    "rect": [
+      0.0,
+      54.0,
+      3840.0,
+      1486.0
+    ]
+  },
+  {
+    "name": "Ferryx - 웹 콘텐츠",
+    "type": "ControlType.Pane",
+    "rect": [
+      0.0,
+      54.0,
+      3840.0,
+      1487.0
+    ]
+  },
+  {
+    "name": "Ferryx",
+    "type": "ControlType.Document",
+    "rect": [
+      0.0,
+      54.0,
+      3840.0,
+      1487.0
+    ]
+  },
+  {
+    "name": "Hide sidebar",
+    "type": "ControlType.Button",
+    "rect": [
+      10.0,
+      61.0,
+      30.0,
+      31.0
+    ]
+  },
+  {
+    "name": "Add project",
+    "type": "ControlType.Button",
+    "rect": [
+      40.0,
+      61.0,
+      30.0,
+      31.0
+    ]
+  },
+  {
+    "name": "Collapse System32",
+    "type": "ControlType.Button",
+    "rect": [
+      10.0,
+      114.0,
+      25.0,
+      25.0
+    ]
+  },
+  {
+    "name": "System32",
+    "type": "ControlType.Button",
+    "rect": [
+      37.0,
+      110.0,
+      243.0,
+      33.0
+    ]
+  },
+  {
+    "name": "System32 worktrees",
+    "type": "ControlType.List",
+    "rect": [
+      25.0,
+      149.0,
+      258.0,
+      37.0
+    ]
+  },
+  {
+    "name": "\\\\?\\C:\\Windows\\System32primary",
+    "type": "ControlType.ListItem",
+    "rect": [
+      25.0,
+      149.0,
+      258.0,
+      37.0
+    ]
+  },
+  {
+    "name": "\\\\?\\C:\\Windows\\System32 primary",
+    "type": "ControlType.Button",
+    "rect": [
+      26.0,
+      150.0,
+      256.0,
+      35.0
+    ]
+  },
+  {
+    "name": "Delete worktree",
+    "type": "ControlType.Button",
+    "rect": [
+      244.0,
+      152.0,
+      30.0,
+      31.0
+    ]
+  },
+  {
+    "name": "Collapse Strawberry",
+    "type": "ControlType.Button",
+    "rect": [
+      10.0,
+      196.0,
+      25.0,
+      25.0
+    ]
+  },
+  {
+    "name": "Strawberry",
+    "type": "ControlType.Button",
+    "rect": [
+      37.0,
+      192.0,
+      243.0,
+      33.0
+    ]
+  },
+  {
+    "name": "Strawberry worktrees",
+    "type": "ControlType.List",
+    "rect": [
+      25.0,
+      231.0,
+      258.0,
+      37.0
+    ]
+  },
+  {
+    "name": "\\\\?\\C:\\Strawberryprimary",
+    "type": "ControlType.ListItem",
+    "rect": [
+      25.0,
+      231.0,
+      258.0,
+      37.0
+    ]
+  },
+  {
+    "name": "\\\\?\\C:\\Strawberry primary",
+    "type": "ControlType.Button",
+    "rect": [
+      26.0,
+      232.0,
+      256.0,
+      35.0
+    ]
+  },
+  {
+    "name": "Delete worktree",
+    "type": "ControlType.Button",
+    "rect": [
+      244.0,
+      234.0,
+      30.0,
+      31.0
+    ]
+  },
+  {
+    "name": "Settings",
+    "type": "ControlType.Button",
+    "rect": [
+      255.0,
+      1503.0,
+      30.0,
+      31.0
+    ]
+  },
+  {
+    "name": "Resize sidebar",
+    "type": "ControlType.Separator",
+    "rect": [
+      287.0,
+      54.0,
+      8.0,
+      1487.0
+    ]
+  },
+  {
+    "name": "main (3) Close main (3)",
+    "type": "ControlType.TabItem",
+    "rect": [
+      295.0,
+      54.0,
+      160.0,
+      39.0
+    ]
+  },
+  {
+    "name": "Close main (3)",
+    "type": "ControlType.Button",
+    "rect": [
+      424.0,
+      63.0,
+      20.0,
+      21.0
+    ]
+  },
+  {
+    "name": "main (2) Close main (2)",
+    "type": "ControlType.TabItem",
+    "rect": [
+      455.0,
+      54.0,
+      160.0,
+      39.0
+    ]
+  },
+  {
+    "name": "Close main (2)",
+    "type": "ControlType.Button",
+    "rect": [
+      584.0,
+      63.0,
+      20.0,
+      21.0
+    ]
+  },
+  {
+    "name": "New tab",
+    "type": "ControlType.Button",
+    "rect": [
+      620.0,
+      58.0,
+      30.0,
+      31.0
+    ]
+  },
+  {
+    "name": "Split pane right Split pane down",
+    "type": "ControlType.Button",
+    "rect": [
+      295.0,
+      94.0,
+      3545.0,
+      15.0
+    ]
+  },
+  {
+    "name": "Split pane right",
+    "type": "ControlType.Button",
+    "rect": [
+      3777.0,
+      88.0,
+      26.0,
+      26.0
+    ]
+  },
+  {
+    "name": "Split pane down",
+    "type": "ControlType.Button",
+    "rect": [
+      3805.0,
+      88.0,
+      25.0,
+      26.0
+    ]
+  },
+  {
+    "name": "Native terminal input",
+    "type": "ControlType.Edit",
+    "rect": [
+      405.0,
+      253.0,
+      10.0,
+      24.0
+    ]
+  },
+  {
+    "name": "Failed to update native terminal bounds",
+    "type": "ControlType.Text",
+    "rect": [
+      3565.0,
+      1500.0,
+      249.0,
+      19.0
+    ]
+  }
+]

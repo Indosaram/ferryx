@@ -1,0 +1,11 @@
+{
+  "commit": "7f7ecd8e",
+  "path": "actual QA pointer click New tab -> New Terminal Profile -> Command Prompt; then CDP trusted keys",
+  "receipt": {
+    "sessionId": "6a20835f-7276-44a2-9c1c-a6e4c8de0f1b",
+    "daemonEpoch": "1789225753950",
+    "historyStartSequence": "2",
+    "historyEndSequence": "28",
+    "history": "G1s2bhtbPzkwMDFoG1s/MTAwNGgbWz8yNWwbW20bW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1tIG10wO0M6XFdpbmRvd3Ncc3lzdGVtMzJcY21kLmV4ZQcbWz8yNWhNaWNyb3NvZnQgV2luZG93cyBbVmVyc2lvbiAxMC4wLjI2MjAwLjk0NDVdG1s/MjVsDQooYykgTWljcm9zb2Z0IENvcnBvcmF0aW9uLiBBbGwgcmlnaHRzIHJlc2VydmVkLhtbNDsxSEM6XFVzZXJzXHNvb2tcZmVycnl4LXFhLWZyZXNoLTA5MTJcb3JjYS1saXRlPhtbPzI1aGVjaG8gRkVSUllYX1dJTl9TSEVMTF9PSxtbPzI1bA0KRkVSUllYX1dJTl9TSEVMTF9PSxtbNzsxSEM6XFVzZXJzXHNvb2tcZmVycnl4LXFhLWZyZXNoLTA5MTJcb3JjYS1saXRlPhtbPzI1aA=="
+  }
+}
