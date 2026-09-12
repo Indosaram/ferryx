@@ -1,0 +1,12 @@
+bun test v1.4.0 (34cbb9a40)
+
+ui/src/remote/input-latency-soak/soak.test.mjs:
+(pass) remote input latency measurement > uses nearest-rank percentiles without changing the samples [1.30ms]
+(pass) remote input latency measurement > measures every host through real sockets, excluding warmup [9.71ms]
+(pass) remote input latency measurement > rejects invalid run configuration before creating hosts [0.13ms]
+
+ 3 pass
+ 0 fail
+ 18 expect() calls
+Ran 3 tests across 1 file. [24.00ms]
+exit_code=0

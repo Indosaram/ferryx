@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "measurement": "WebSocketTerminalTransport.write-to-application-echo",
+  "topology": "independent loopback Bun echo gateways; no SSH, PTY, Rust gateway or renderer",
+  "loadModel": "closed-loop; one outstanding 64-byte input per host; concurrent hosts",
+  "percentileMethod": "nearest-rank",
+  "startedAt": "2026-09-12T16:04:32.301Z",
+  "requestedDurationMs": 60000,
+  "durationMs": 60000.068208000004,
+  "hostCount": 4,
+  "warmupSamplesPerHost": 100,
+  "livenessTimeoutMs": 5000,
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "release": "25.6.0",
+    "cpu": "Apple M4 Max",
+    "bun": "1.4.0"
+  },
+  "latencyMs": {
+    "sampleCount": 4011582,
+    "min": 0.024292000001878478,
+    "p50": 0.05187500000465661,
+    "p90": 0.062458000000333413,
+    "p95": 0.10329200000342098,
+    "p99": 0.19416700000147102,
+    "max": 60.83462499999996
+  },
+  "hosts": [
+    {
+      "hostId": "host-0",
+      "latencyMs": {
+        "sampleCount": 1002896,
+        "min": 0.024292000001878478,
+        "p50": 0.05170899999939138,
+        "p90": 0.06229199999506818,
+        "p95": 0.10200000000259024,
+        "p99": 0.19050000000061118,
+        "max": 42.319917000000714
+      }
+    },
+    {
+      "hostId": "host-1",
+      "latencyMs": {
+        "sampleCount": 1002896,
+        "min": 0.02524999999877764,
+        "p50": 0.05195799999637529,
+        "p90": 0.06266600000162725,
+        "p95": 0.10379199999806588,
+        "p99": 0.1937499999985448,
+        "max": 60.811041999999816
+      }
+    },
+    {
+      "hostId": "host-2",
+      "latencyMs": {
+        "sampleCount": 1002895,
+        "min": 0.025084000000788365,
+        "p50": 0.05195800000001327,
+        "p90": 0.06258399999933317,
+        "p95": 0.10366599999542814,
+        "p99": 0.19529099999635946,
+        "max": 60.83462499999996
+      }
+    },
+    {
+      "hostId": "host-3",
+      "latencyMs": {
+        "sampleCount": 1002895,
+        "min": 0.025207999999111053,
+        "p50": 0.05195800000365125,
+        "p90": 0.06229200000234414,
+        "p95": 0.10370800000055169,
+        "p99": 0.19708300000093004,
+        "max": 60.82250000000022
+      }
+    }
+  ]
+}

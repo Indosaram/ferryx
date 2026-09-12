@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "measurement": "WebSocketTerminalTransport.write-to-application-echo",
+  "topology": "independent loopback Bun echo gateways; no SSH, PTY, Rust gateway or renderer",
+  "loadModel": "closed-loop; one outstanding 64-byte input per host; concurrent hosts",
+  "percentileMethod": "nearest-rank",
+  "startedAt": "2026-09-12T16:04:32.342Z",
+  "requestedDurationMs": 0,
+  "durationMs": 0.25004200000000054,
+  "hostCount": 2,
+  "warmupSamplesPerHost": 1,
+  "livenessTimeoutMs": 5000,
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "release": "25.6.0",
+    "cpu": "Apple M4 Max",
+    "bun": "1.4.0"
+  },
+  "latencyMs": {
+    "sampleCount": 2,
+    "min": 0.13154099999999858,
+    "p50": 0.13154099999999858,
+    "p90": 0.16166600000000386,
+    "p95": 0.16166600000000386,
+    "p99": 0.16166600000000386,
+    "max": 0.16166600000000386
+  },
+  "hosts": [
+    {
+      "hostId": "host-0",
+      "latencyMs": {
+        "sampleCount": 1,
+        "min": 0.13154099999999858,
+        "p50": 0.13154099999999858,
+        "p90": 0.13154099999999858,
+        "p95": 0.13154099999999858,
+        "p99": 0.13154099999999858,
+        "max": 0.13154099999999858
+      }
+    },
+    {
+      "hostId": "host-1",
+      "latencyMs": {
+        "sampleCount": 1,
+        "min": 0.16166600000000386,
+        "p50": 0.16166600000000386,
+        "p90": 0.16166600000000386,
+        "p95": 0.16166600000000386,
+        "p99": 0.16166600000000386,
+        "max": 0.16166600000000386
+      }
+    }
+  ]
+}
