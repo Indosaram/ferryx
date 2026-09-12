@@ -48,10 +48,18 @@ jobs:
           PUBLIC_ANALYTICS_DOMAIN: ${{ secrets.PUBLIC_ANALYTICS_DOMAIN }}
         run: bun run build
 
-      - name: Deploy to Cloudflare Workers
+      - name: Deploy the site
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: site
           command: deploy -c wrangler.jsonc
+
+      - name: Deploy the www redirect
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: site
+          command: deploy -c wrangler.www.jsonc

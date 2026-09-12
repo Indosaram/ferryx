@@ -55,17 +55,25 @@ Two repository secrets are required for CI:
 
 An OAuth session from `wrangler login` deploys fine from a laptop but cannot be used in CI.
 
-## The www redirect
+## Two Workers, on purpose
 
-`site/worker.js` answers any `www.` hostname with a 301 to the bare domain, preserving the
-path. Two details make this the only workable shape:
+`site/wrangler.jsonc` is the site: static assets and **no Worker script at all**, on
+`ferryx.dev`. `site/wrangler.www.jsonc` is a redirect-only Worker with no assets, on
+`www.ferryx.dev`, whose entire job is the 301 in `site/worker.js`.
 
-- Workers Static Assets rejects absolute URLs in a `_redirects` file, so the Pages-style
-  `https://www.ferryx.dev/* https://ferryx.dev/:splat 301` cannot be used. The redirect has
-  to be code.
-- Static assets are served *before* the Worker script by default, so the redirect would
-  never run. `assets.run_worker_first` is set to `true` so the Worker sees every request
-  and hands non-redirect traffic to `env.ASSETS`.
+Splitting them is a billing and availability decision, not tidiness. Requests served
+straight from static assets are free and unlimited; requests that invoke a Worker script are
+billed. The obvious single-Worker shape needs `assets.run_worker_first` so the redirect can
+run before assets match, and that setting makes **every** request to the site a Worker
+invocation. On the free tier that is worse than a cost: once the request limit is exceeded,
+matching requests return `429 Too Many Requests` instead of falling back to serving the
+asset, so the whole site goes down rather than degrading.
+
+With the split, apex traffic never invokes a Worker, and only `www` does.
+
+Workers Static Assets also rejects absolute URLs in a `_redirects` file, so the Pages-style
+`https://www.ferryx.dev/* https://ferryx.dev/:splat 301` cannot be used. The redirect has to
+be code either way.
 
 ## No duplicate origins
 
