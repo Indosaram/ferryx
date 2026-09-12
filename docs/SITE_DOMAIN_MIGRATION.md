@@ -1,71 +1,81 @@
-# Ferryx site hosting and the ferryx.dev domain
+# Ferryx site hosting on ferryx.dev
 
-The site is published to Cloudflare Pages, project `ferryx`, and served from `ferryx.dev`.
-It previously lived at `https://indosaram.github.io/ferryx/`. That project subpath was the
-single largest cap on organic search traffic, for two reasons no amount of on-page SEO can
-fix:
+The site is served from `https://ferryx.dev` by a Cloudflare Worker with static assets,
+deployed from `site/`. It previously lived at `https://indosaram.github.io/ferryx/`, which
+capped organic search traffic for two reasons no on-page work could fix:
 
 - **`robots.txt` is origin-scoped.** Crawlers read `https://indosaram.github.io/robots.txt`,
-  which belongs to a different repository. The well-formed `robots.txt` generated at
+  which belongs to a different repository. The well-formed file generated at
   `/ferryx/robots.txt` was never consulted.
-- **Domain authority was shared.** Every signal earned on `indosaram.github.io` is pooled
-  across every project hosted there, and none of it accrued to a Ferryx brand domain.
+- **Domain authority was shared.** Every signal earned on `indosaram.github.io` pooled
+  across every project on that host and none of it accrued to a Ferryx brand domain.
+
+## Why a Worker and not Pages
+
+The site is static, so Pages was the obvious first choice and the project was built and
+deployed there. Attaching the custom domain is where it stopped: the Pages API only creates
+the zone's DNS records when the calling credential carries DNS edit permission. A
+`wrangler login` OAuth session does not have it. Its zone permissions are `#zone:read`,
+`#worker:edit` and `#ssl:edit`, with no `#dns_records:edit`, so both domains sat at
+`pending` against an empty zone and nothing resolved.
+
+Workers custom domains provision their DNS server-side under `#worker:edit`, which the same
+session does have. Workers Static Assets serves the identical `dist/` output, so the switch
+cost nothing functionally and removed the permission deadlock. It is also where Cloudflare
+is steering new static projects.
+
+Reverting to Pages is possible at any time, but it needs an API token with Zone, DNS, Edit
+on `ferryx.dev` to create the two records.
 
 ## How the build knows where it lives
 
-`site/astro.config.mjs` reads two environment variables and nothing else decides the URLs:
+`site/astro.config.mjs` reads two environment variables, and nothing else decides the URLs:
 
 - `SITE_URL` is the absolute origin, used for `canonical`, `og:url`, `og:image` and the
-  `Sitemap:` line in `robots.txt`. Cloudflare builds set it to `https://ferryx.dev`.
-- `BASE_URL` is the path prefix. It is **deliberately unset** for Cloudflare, because the
-  site is served from the domain root. Setting it would prefix every generated path and
-  break the whole site.
+  `Sitemap:` line in `robots.txt`. It is `https://ferryx.dev`.
+- `BASE_URL` is the path prefix. It is **deliberately unset**, because the site is served
+  from the domain root. Setting it would prefix every generated path and break the site.
 
-Root-origin output is covered by a regression test. `site/src/seo.test.ts` contains
-`a root-origin build still emits absolute, non-doubled URLs`, which rebuilds the entire site
-with `BASE_URL` unset and `SITE_URL=https://ferryx.dev`, then asserts the canonical,
-`og:url`, `og:image` and `robots.txt` values. A second test walks every built page and fails
-if any internal link is missing the expected base, which is what catches a half-applied
-prefix change.
+Both are covered by regression tests in `site/src/seo.test.ts`: one rebuilds the whole site
+with `BASE_URL` unset and asserts the canonical, `og:url`, `og:image` and `robots.txt`
+values, and another walks every built page and fails if an internal link is missing its
+expected base, which is what catches a half-applied prefix change.
 
 ## Deployment
 
-`.github/workflows/deploy-cloudflare-pages.yml` builds the site and uploads `site/dist` with
-`wrangler pages deploy`. This is Direct Upload, not Cloudflare's Git integration: the build
-runs in GitHub Actions where the rest of the repository's checks already run, and the build
-configuration stays in version control instead of in a dashboard form.
+`site/wrangler.jsonc` declares the Worker, the asset directory and both custom domains, so
+`wrangler deploy` reproduces the whole routing setup rather than depending on dashboard
+state. `.github/workflows/deploy-cloudflare.yml` runs the same build and deploy in CI.
 
-Two repository secrets are required:
+Two repository secrets are required for CI:
 
-- `CLOUDFLARE_API_TOKEN`, a custom token with Account, Cloudflare Pages, Edit.
+- `CLOUDFLARE_API_TOKEN`, a custom token with Account, Workers Scripts, Edit, plus Zone,
+  Workers Routes, Edit on `ferryx.dev`.
 - `CLOUDFLARE_ACCOUNT_ID`.
 
-A `wrangler login` OAuth session is enough to deploy from a laptop but cannot be used in CI,
-and its scopes do not include DNS. Creating or changing DNS records needs a token with
-Zone, DNS, Edit on `ferryx.dev`.
+An OAuth session from `wrangler login` deploys fine from a laptop but cannot be used in CI.
 
-## DNS
+## The www redirect
 
-Both records are proxied `CNAME`s to the Pages project. Cloudflare flattens the apex
-`CNAME` automatically, so no `A` records are needed and no registrar IP list has to be kept
-up to date:
+`site/worker.js` answers any `www.` hostname with a 301 to the bare domain, preserving the
+path. Two details make this the only workable shape:
 
-- `ferryx.dev` CNAME to `ferryx.pages.dev`, proxied.
-- `www.ferryx.dev` CNAME to `ferryx.pages.dev`, proxied.
+- Workers Static Assets rejects absolute URLs in a `_redirects` file, so the Pages-style
+  `https://www.ferryx.dev/* https://ferryx.dev/:splat 301` cannot be used. The redirect has
+  to be code.
+- Static assets are served *before* the Worker script by default, so the redirect would
+  never run. `assets.run_worker_first` is set to `true` so the Worker sees every request
+  and hands non-redirect traffic to `env.ASSETS`.
 
-Attaching a custom domain through the Cloudflare dashboard creates these records for you.
-Attaching it through the API only creates them when the calling token carries DNS edit
-permission; otherwise the domain sits at `pending` with an empty zone and nothing resolves.
+## No duplicate origins
 
-`www` redirects to the apex with a 301 from `site/public/_redirects`. Cloudflare Pages reads
-that file from the deployed output, which is why the redirect lives in the repository rather
-than in a dashboard rule. GitHub Pages had no equivalent, and that gap is why the old host
-could not redirect anything.
+`workers_dev` and `preview_urls` are both `false`. Left enabled, `ferryx-site.<subdomain>.workers.dev`
+would publicly serve the same pages as `ferryx.dev`, splitting ranking signals between two
+origins. The Pages project was deleted for the same reason once the Worker took over.
 
-Note that a `CNAME` file is a GitHub Pages mechanism and has no meaning on Cloudflare. If
-one is ever reintroduced for a GitHub Pages deploy, it has to live at `site/public/CNAME`,
-because this site publishes the `site/dist` artifact and a repository-root `CNAME` is not
-part of it.
+GitHub Pages is disabled. It serves no server-side redirects, so the old `/ferryx/*` URLs
+could never have issued a 301 to the new domain; taking the site down at least stops it
+competing with the new one.
 
 ## Verifying a deploy
 
@@ -73,17 +83,12 @@ part of it.
 curl -sI https://ferryx.dev/ | head -3
 curl -s https://ferryx.dev/robots.txt
 curl -s https://ferryx.dev/sitemap-0.xml | grep -c '<loc>'
-curl -sI https://www.ferryx.dev/ | head -3
+curl -sI https://www.ferryx.dev/compare/warp/ | grep -i 'http/\|location'
 ```
 
 The apex returns 200, `robots.txt` carries an absolute `Sitemap:` line on `ferryx.dev`, the
-sitemap lists 15 URLs with no `/ferryx` segment, and `www` returns 301 to the apex.
-
-## The old GitHub Pages site
-
-It is disabled. Because GitHub Pages serves no server-side redirects, the old `/ferryx/*`
-URLs could never have issued a 301 to the new domain; taking the site down avoids serving
-the same content from two origins, which would have split ranking signals between them.
+sitemap lists 15 URLs with no `/ferryx` segment, and `www` returns 301 to the apex with the
+path preserved.
 
 ## Analytics and Search Console
 
@@ -99,7 +104,7 @@ forks and local builds ship no third-party requests:
   such as Plausible and Umami. Set both or neither.
 
 Both are already passed through in the Build static site step of
-`.github/workflows/deploy-cloudflare-pages.yml`, sourced from repository secrets. Setting
-the secrets is all that is needed to activate them.
+`.github/workflows/deploy-cloudflare.yml`, sourced from repository secrets. Setting the
+secrets is all that is needed to activate them.
 
-Submit `https://ferryx.dev/sitemap-index.xml` in Google Search Console once DNS resolves.
+Submit `https://ferryx.dev/sitemap-index.xml` in Google Search Console.

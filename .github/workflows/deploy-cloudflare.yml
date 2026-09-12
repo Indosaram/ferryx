@@ -1,4 +1,4 @@
-name: Deploy Ferryx Site to Cloudflare Pages
+name: Deploy Ferryx Site to Cloudflare
 
 on:
   push:
@@ -7,14 +7,14 @@ on:
     paths:
       - 'site/**'
       - 'ui/**'
-      - '.github/workflows/deploy-cloudflare-pages.yml'
+      - '.github/workflows/deploy-cloudflare.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: "cloudflare-pages"
+  group: "cloudflare-site"
   cancel-in-progress: false
 
 jobs:
@@ -48,10 +48,10 @@ jobs:
           PUBLIC_ANALYTICS_DOMAIN: ${{ secrets.PUBLIC_ANALYTICS_DOMAIN }}
         run: bun run build
 
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: site
-          command: pages deploy dist --project-name=ferryx --branch=main
+          command: deploy -c wrangler.jsonc
