@@ -6,6 +6,7 @@ export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedP
 export const SIDEBAR_WORKTREE_ORDER_STORAGE_KEY = "ferryx.sidebar.worktreeOrder";
 export const TERMINAL_SETTINGS_STORAGE_KEY = "ferryx.terminal.settings";
 export const NOTIFICATION_SETTINGS_STORAGE_KEY = "ferryx.settings.notifications:v1";
+export const NOTIFICATION_HISTORY_STORAGE_KEY = "ferryx.notifications.history:v1";
 export const APPEARANCE_SETTINGS_STORAGE_KEY = "ferryx.settings.appearance";
 export const BROWSER_SETTINGS_STORAGE_KEY = "ferryx.settings.browser";
 export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
@@ -24,6 +25,7 @@ export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY]: ["rorca.sidebar.collapsedProjects", "orca.sidebar.collapsedProjects"],
   [TERMINAL_SETTINGS_STORAGE_KEY]: ["orca.terminal.settings", "rorca.terminal.settings"],
   [NOTIFICATION_SETTINGS_STORAGE_KEY]: ["rorca:settings:notifications:v1", "orca:settings:notifications:v1"],
+  [NOTIFICATION_HISTORY_STORAGE_KEY]: ["rorca.notifications.history:v1", "orca.notifications.history:v1"],
   [GENERAL_SETTINGS_STORAGE_KEY]: ["rorca.settings.general", "orca.settings.general"],
   [REMOTE_INSTALLATION_ID_STORAGE_KEY]: ["rorca.remote.installation-id", "orca.remote.installation-id"],
 };
