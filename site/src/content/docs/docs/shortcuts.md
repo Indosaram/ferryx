@@ -1,6 +1,6 @@
 ---
 title: Keyboard Shortcuts
-description: Verified keyboard shortcuts for Ferryx.
+description: Every verified Ferryx keyboard shortcut, covering terminal and browser tabs, split panes, workspace switching, terminal search, and the command palette.
 ---
 
 These match the in-app bindings defined in `ui/src/lib/shortcuts.ts`.

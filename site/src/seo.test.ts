@@ -53,14 +53,12 @@ function builtPages(): Record<string, string> {
     }
   };
   walk(DIST);
-  expect(Object.keys(pages).sort()).toEqual([
-    "/404.html",
-    "/docs/architecture/index.html",
-    "/docs/introduction/index.html",
-    "/docs/shortcuts/index.html",
-    "/index.html",
-    "/privacy/index.html",
-  ]);
+  // Containment, not equality: a page vanishing from the build still fails loudly,
+  // while publishing a new one does not require editing this list first.
+  const built = Object.keys(pages);
+  for (const required of REQUIRED_PAGES) {
+    expect(built, `${required} disappeared from the build`).toContain(required);
+  }
   return pages;
 }
 
@@ -69,7 +67,19 @@ const DOC_PAGES = [
   "/docs/shortcuts/index.html",
   "/docs/architecture/index.html",
   "/privacy/index.html",
+  "/compare/index.html",
+  "/compare/warp/index.html",
+  "/compare/wave-terminal/index.html",
+  "/compare/conductor/index.html",
+  "/compare/crystal/index.html",
+  "/compare/tmux-git-worktree/index.html",
+  "/compare/ghostty/index.html",
+  "/use-cases/parallel-ai-agents/index.html",
+  "/use-cases/git-worktree-workflow/index.html",
+  "/use-cases/remote-terminal-access/index.html",
 ];
+
+const REQUIRED_PAGES = ["/index.html", "/404.html", ...DOC_PAGES];
 
 function distFileFor(href: string): string | null {
   let pathname = href;
@@ -246,6 +256,19 @@ describe("SEO — head metadata and icons", () => {
     expect(description.length).toBeLessThanOrEqual(160);
   });
 
+  test("every content page ships a unique SERP-sized description", () => {
+    const pages = builtPages();
+    const seen = new Map<string, string>();
+    for (const route of DOC_PAGES) {
+      const description = metaContent(pages[route]!, { name: "description" }) ?? "";
+      expect(description.length, `${route} description is too short to be useful`).toBeGreaterThan(70);
+      expect(description.length, `${route} description will be truncated in results`).toBeLessThanOrEqual(160);
+      // Duplicate descriptions across pages are a self-inflicted ranking problem.
+      expect(seen.get(description), `${route} reuses the description from ${seen.get(description)}`).toBeUndefined();
+      seen.set(description, route);
+    }
+  });
+
   test("every page links an apple-touch-icon that exists at 180x180", () => {
     for (const [route, html] of Object.entries(builtPages())) {
       const links = linksWithRel(html, "apple-touch-icon");
@@ -374,14 +397,24 @@ describe("SEO — crawlable content and internal linking", () => {
     }
   });
 
-  test("every internal link in the landing page resolves to a built page", () => {
-    const html = readFileSync(path.join(DIST, "index.html"), "utf8");
-    for (const tag of tags(html, "a")) {
-      const href = attr(tag, "href") ?? "";
-      if (!href.startsWith(BASE_PATH)) continue;
-      const [pathname] = href.split("#");
-      expect(distFileFor(pathname!), `landing link ${href} is broken`).not.toBeNull();
+  test("every internal link on every built page resolves to a built page", () => {
+    const pages = builtPages();
+    let checked = 0;
+    for (const [route, html] of Object.entries(pages)) {
+      for (const tag of tags(html, "a")) {
+        const href = attr(tag, "href") ?? "";
+        // A root-relative link that skips the base path 404s on a subpath deployment,
+        // which is exactly how prose written as /compare/warp/ breaks in production.
+        if (href.startsWith("/") && !href.startsWith("//") && !href.startsWith(BASE_PATH)) {
+          throw new Error(`${route} links ${href}, which is missing the ${BASE_PATH} base path`);
+        }
+        if (!href.startsWith(BASE_PATH)) continue;
+        const [pathname] = href.split("#");
+        expect(distFileFor(pathname!), `${route} link ${href} is broken`).not.toBeNull();
+        checked += 1;
+      }
     }
+    expect(checked, "no internal links were checked").toBeGreaterThan(40);
   });
 });
 

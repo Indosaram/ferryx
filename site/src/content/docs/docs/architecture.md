@@ -1,6 +1,6 @@
 ---
 title: Technical Architecture
-description: Why Ferryx uses Tauri v2, WGPU, a Rust PTY daemon, and libghostty.
+description: "How Ferryx is built: Tauri v2 instead of Electron, a pinned libghostty-vt parser, WGPU rendering, and a headless Rust PTY daemon with replay."
 ---
 
 :::note[한국어 요약: Ferryx 아키텍처 요약]

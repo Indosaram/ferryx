@@ -48,6 +48,18 @@ export function Footer({ basePath }: { readonly basePath: string }) {
             Architecture Docs
           </a>
           <a
+            href={`${basePath}use-cases/parallel-ai-agents/`}
+            className="hover:text-ink transition-colors"
+          >
+            Use Cases
+          </a>
+          <a
+            href={`${basePath}compare/`}
+            className="hover:text-ink transition-colors"
+          >
+            Compare
+          </a>
+          <a
             href={`${basePath}privacy/`}
             className="text-ink-soft hover:text-ink transition-colors whitespace-nowrap"
           >
