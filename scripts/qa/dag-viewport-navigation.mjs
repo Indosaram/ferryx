@@ -102,6 +102,10 @@ function movedBy(d, x, y, tol = 1) {
   return Math.abs(d.x - x) <= tol && Math.abs(d.y - y) <= tol;
 }
 
+function isIdentityTransform(t) {
+  return t === "none" || t === "matrix(1, 0, 0, 1, 0, 0)";
+}
+
 async function settle(page) {
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 }
@@ -135,6 +139,7 @@ async function captureGeometry(page, host, cardTestId, edgeTestId) {
       edgeEndpoint: { x: +midScreen.x.toFixed(2), y: +midScreen.y.toFixed(2) },
       ctmScale: +ctm.a.toFixed(6),
       ctmTranslate: { e: +ctm.e.toFixed(3), f: +ctm.f.toFixed(3) },
+      worldTransform: getComputedStyle(world).transform,
       viewport: rect(viewport),
       world: rect(world),
       scroll: { top: viewport.scrollTop, left: viewport.scrollLeft },
@@ -178,6 +183,20 @@ async function openFixture(page, host, fixture) {
 const FIXTURE_A = { runId: "qa-dag-a", card: "dag-node-a", edge: "dag-edge-a-c" };
 const FIXTURE_TALL = { runId: "qa-dag-tall", card: "dag-node-t0", edge: "dag-edge-t0-t1" };
 const FIXTURE_BIG = { runId: "qa-dag-big", card: "dag-node-n0", edge: "dag-edge-n0-n1" };
+
+/**
+ * The QA monitor serves 5193 (per plan), while ui/vite.config.ts pins the HMR
+ * client to ws://127.0.0.1:5173 for the Tauri dev flow. On any other port the
+ * Vite dev client logs a refused HMR websocket and an unhandled error — dev
+ * infrastructure noise, not a defect of the page under test. These entries are
+ * separated into `environmentNoise` (raw text preserved) and excluded from the
+ * page-error verdict. Everything else still fails the run.
+ */
+function isViteHmrClientNoise(message) {
+  return message.includes("ws://127.0.0.1:5173")
+    || message.includes("[vite] failed to connect to websocket")
+    || message.includes("WebSocket closed without opened");
+}
 
 async function runHost(browser, host, evidencePaths) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
@@ -305,8 +324,8 @@ async function runHost(browser, host, evidencePaths) {
     await settle(page);
     const gh1 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     checks.push(check("S2-horizontal-wheel-camera-unchanged", "behavioral", "pass",
-      gh1.ctmScale === gh0.ctmScale && movedBy(delta(gh0.card, gh1.card), 0, 0, 1),
-      { note: "vacuous in baseline (no camera exists); scroll routing is recorded as the next observation", scaleBefore: gh0.ctmScale, scaleAfter: gh1.ctmScale }));
+      gh1.ctmScale === gh0.ctmScale && gh0.worldTransform === gh1.worldTransform && isIdentityTransform(gh0.worldTransform),
+      { note: "camera invariant = scale unchanged and world transform stays identity; scroll routing is recorded separately because incumbent scroll legitimately moves screen rects", scaleBefore: gh0.ctmScale, scaleAfter: gh1.ctmScale, worldTransform: gh1.worldTransform }));
     checks.push(check("observation-horizontal-wheel-scroll-delta", "observation", "pass",
       true, { detail: "recorded incumbent scroll routing for horizontal wheel", scrollDelta: delta({ x: gh0.scroll.left, y: gh0.scroll.top }, { x: gh1.scroll.left, y: gh1.scroll.top }), overflow: gh0.overflow }));
     skipNotes.push("S2 deltaMode 0/1/2 and Ctrl variants and at-limits invariants require the camera implementation; they are unit/component cases for task 2, not baseline browser scenarios.");
@@ -332,6 +351,7 @@ async function runHost(browser, host, evidencePaths) {
       await page.locator(`${SCOPE.standalone} [data-testid="dag-node-n0"]`).waitFor({ state: "visible", timeout: PAGE_TIMEOUT_MS });
       await settle(page);
       const gb0 = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
+      await page.mouse.move(centerX, centerY);
       actions.push({ action: "mouse.wheel", deltaX: 600, deltaY: 0, fixture: "big" });
       await page.mouse.wheel(600, 0);
       await settle(page);
@@ -352,7 +372,13 @@ async function runHost(browser, host, evidencePaths) {
   } finally {
     await context.close();
   }
-  return { checks, actions, consoleErrors, pageErrors, screenshots, skipNotes, scenarioError };
+  const pageErrorNoise = pageErrors.filter((e) => isViteHmrClientNoise(e.message));
+  const pageErrorReal = pageErrors.filter((e) => !isViteHmrClientNoise(e.message));
+  return { checks, actions, consoleErrors, pageErrors: pageErrorReal, environmentNoise: {
+    reason: "ui/vite.config.ts pins hmr clientPort 5173; the QA monitor serves 5193, so the Vite dev client's HMR websocket is refused. Dev-client noise, not page behavior. Raw entries preserved below.",
+    pageErrors: pageErrorNoise,
+    consoleErrors: consoleErrors.filter((e) => isViteHmrClientNoise(e.text)),
+  }, screenshots, skipNotes, scenarioError };
 }
 
 function summarize(results, hosts) {

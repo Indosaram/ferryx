@@ -143,7 +143,7 @@ function DagViewportQaHarness(): JSX.Element {
 
       <section
         data-testid="qa-standalone-host"
-        className="h-[520px] w-[640px] overflow-hidden rounded border border-border"
+        className="flex h-[520px] w-[640px] flex-col overflow-hidden rounded border border-border"
       >
         <TerminalSplitView layout={layout} sessions={{ [qaSession.id]: qaSession }} />
       </section>
