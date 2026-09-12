@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
+import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 import { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, SIDEBAR_WIDTH_STORAGE_KEY, Sidebar } from "./Sidebar";
 
 const nativeMenu = vi.hoisted(() => ({
@@ -63,7 +64,10 @@ function projectToggle(workspaceId: string) {
   return screen.getByRole("button", { name: new RegExp(`^(Expand|Collapse) ${workspaceId}$`) });
 }
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  notificationCenterStore.clearAll();
+});
 afterEach(cleanup);
 
 const projects = [
@@ -777,5 +781,28 @@ describe("Sidebar navigation", () => {
 
     fireEvent.click(trashBtn);
     expect(onRemoveProject).toHaveBeenCalledWith(testProjects[0]);
+  });
+
+  it("renders notification center button in footer with no-drag class and reflects store unread count", async () => {
+    renderSidebar();
+    const bellBtn = screen.getByTestId("notification-center-button");
+    expect(bellBtn).toBeInTheDocument();
+    expect(bellBtn).toHaveClass("no-drag");
+    expect(screen.queryByTestId("notification-center-badge")).toBeNull();
+
+    notificationCenterStore.recordActivity({
+      workspaceId: "default",
+      sessionId: "sess-1",
+      labels: { terminalTitle: "Term" },
+      subject: "terminal",
+      occurredAt: Date.now(),
+      observed: false,
+      previousState: "working",
+      state: "done",
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("notification-center-badge")).toHaveTextContent("1");
+    });
   });
 });

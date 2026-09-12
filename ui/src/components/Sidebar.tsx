@@ -48,6 +48,8 @@ import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import { RemoteHostSwitcher } from "./RemoteHostSwitcher";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
+import { NotificationCenterButton } from "./notification/NotificationCenterButton";
+import type { IsSessionNavigable } from "./notification/NotificationCenterPopover";
 import { fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
 
 export {
@@ -98,6 +100,8 @@ type SidebarProps = {
   onOpenSettings?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
+  onNavigateToSession?: (target: { workspaceId: string; sessionId: string; revision: number }) => void;
+  isSessionNavigable?: IsSessionNavigable;
 };
 
 export function Sidebar({
@@ -123,6 +127,8 @@ export function Sidebar({
   onOpenSettings,
   onToggle,
   onHide,
+  onNavigateToSession,
+  isSessionNavigable,
 }: SidebarProps) {
   const worktreeRegionRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -500,7 +506,11 @@ export function Sidebar({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center justify-end border-t border-worktree-sidebar-border px-2 py-1.5">
+        <div className="flex shrink-0 items-center justify-end gap-1 border-t border-worktree-sidebar-border px-2 py-1.5">
+          <NotificationCenterButton
+            onNavigateToSession={onNavigateToSession}
+            isSessionNavigable={isSessionNavigable}
+          />
           <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={onOpenSettings}>
             <Settings2 className="size-3.5" />
           </IconButton>
