@@ -115,6 +115,49 @@ fn agent_completion_uses_agent_name_and_worktree_label() {
 }
 
 #[test]
+fn agent_completion_composites_workspace_and_worktree_labels() {
+    let content = format_notification(&DispatchNotificationRequest {
+        source: NotificationSource::AgentTaskComplete,
+        agent_label: Some("Claude".into()),
+        workspace_label: Some("orca-lite".into()),
+        worktree_label: Some("feat/login".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(content.title, "Claude finished");
+    assert_eq!(content.body, "orca-lite / feat/login");
+}
+
+#[test]
+fn agent_completion_dedupes_identical_workspace_and_worktree_labels() {
+    let content = format_notification(&DispatchNotificationRequest {
+        source: NotificationSource::AgentTaskComplete,
+        agent_label: Some("Claude".into()),
+        workspace_label: Some("orca-lite".into()),
+        worktree_label: Some("orca-lite".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(content.title, "Claude finished");
+    assert_eq!(content.body, "orca-lite");
+}
+
+#[test]
+fn agent_completion_waiting_composites_workspace_and_worktree_labels() {
+    let content = format_notification(&DispatchNotificationRequest {
+        source: NotificationSource::AgentTaskComplete,
+        attention_reason: NotificationAttentionReason::Waiting,
+        agent_label: Some("Claude".into()),
+        workspace_label: Some("orca-lite".into()),
+        worktree_label: Some("feat/login".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(content.title, "Claude needs input");
+    assert_eq!(content.body, "orca-lite / feat/login");
+}
+
+#[test]
 fn agent_completion_falls_back_when_labels_are_missing() {
     let content = format_notification(&request(NotificationSource::AgentTaskComplete));
 
@@ -145,6 +188,44 @@ fn terminal_bell_joins_location_and_terminal_title() {
 
     assert_eq!(content.title, "Terminal needs attention");
     assert_eq!(content.body, "feat/login \u{b7} npm test");
+}
+
+#[test]
+fn terminal_bell_composites_workspace_and_worktree_labels() {
+    let with_terminal = format_notification(&DispatchNotificationRequest {
+        source: NotificationSource::TerminalBell,
+        workspace_label: Some("orca-lite".into()),
+        worktree_label: Some("feat/login".into()),
+        terminal_title: Some("npm test".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(with_terminal.title, "Terminal needs attention");
+    assert_eq!(with_terminal.body, "orca-lite / feat/login \u{b7} npm test");
+
+    let without_terminal = format_notification(&DispatchNotificationRequest {
+        source: NotificationSource::TerminalBell,
+        workspace_label: Some("orca-lite".into()),
+        worktree_label: Some("feat/login".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(without_terminal.title, "Terminal needs attention");
+    assert_eq!(without_terminal.body, "orca-lite / feat/login");
+}
+
+#[test]
+fn terminal_bell_dedupes_identical_workspace_and_worktree_labels() {
+    let content = format_notification(&DispatchNotificationRequest {
+        source: NotificationSource::TerminalBell,
+        workspace_label: Some("orca-lite".into()),
+        worktree_label: Some("orca-lite".into()),
+        terminal_title: Some("npm test".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(content.title, "Terminal needs attention");
+    assert_eq!(content.body, "orca-lite \u{b7} npm test");
 }
 
 #[test]

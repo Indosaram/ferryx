@@ -402,6 +402,13 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
     let workspace = clean_field(request.workspace_label.as_deref());
     let terminal = clean_field(request.terminal_title.as_deref());
 
+    let location = match (workspace, worktree) {
+        (Some(ws), Some(wt)) if ws != wt => Some(format!("{ws} / {wt}")),
+        (Some(ws), _) => Some(ws),
+        (None, Some(wt)) => Some(wt),
+        (None, None) => None,
+    };
+
     let (title, body) = match request.source {
         NotificationSource::AgentTaskComplete => {
             let (action, fallback) = match request.attention_reason {
@@ -409,14 +416,11 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
                 NotificationAttentionReason::Done => ("finished", "Task complete"),
             };
             let title = format!("{} {action}", agent.as_deref().unwrap_or("Agent"));
-            let body = worktree
-                .or(workspace)
-                .unwrap_or_else(|| fallback.to_string());
+            let body = location.unwrap_or_else(|| fallback.to_string());
             (title, body)
         }
         NotificationSource::TerminalBell => {
             let title = "Terminal needs attention".to_string();
-            let location = worktree.or(workspace);
             let body = match (location, terminal) {
                 (Some(location), Some(terminal)) => format!("{location} \u{b7} {terminal}"),
                 (Some(location), None) => location,
