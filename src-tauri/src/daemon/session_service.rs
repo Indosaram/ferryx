@@ -461,12 +461,15 @@ impl DaemonSessionService {
     /// unknown workspace (e.g. after a daemon restart) succeeds as a no-op.
     pub async fn handle_unregister_workspace(&self, workspace_id: &str) -> Result<(), String> {
         let _spawn_guard = Arc::clone(&self.spawn_lock).lock_owned().await;
-        let workspaces = Arc::clone(&self.workspace_service);
-        let workspace = workspace_id.to_string();
-        crate::ipc::run_blocking(move || {
-            workspaces.unregister(&workspace);
-            Ok(())
-        }).await.map_err(|error| error.to_string())?;
+        // SSH owns a separate inventory, but still needs the session cleanup
+        // below. Never send remote identities through the local catalog gate.
+        if !crate::ssh::projects::is_remote(workspace_id) {
+            let workspaces = Arc::clone(&self.workspace_service);
+            let workspace = workspace_id.to_string();
+            crate::ipc::run_blocking(move || {
+                workspaces.unregister(&workspace).map_err(crate::ipc::IpcError::internal)
+            }).await.map_err(|error| error.to_string())?;
+        }
 
         let owned_sessions: Vec<String> = self
             .session_metadata

@@ -771,6 +771,86 @@ pub struct DaemonServer {
     #[cfg(test)]
     helper_home: Option<String>,
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
+    #[cfg(test)]
+    _catalog_fixture: Option<tempfile::TempDir>,
+}
+
+#[cfg(test)]
+mod a05_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_constructor_child() {
+        let Some(root) = std::env::var_os("A05_CONSTRUCTOR_ROOT") else { return };
+        let root = PathBuf::from(root);
+        let sentinel = root.join("data/remote/machine-workspaces.v1.json");
+        let before = fs::read(&sentinel).unwrap();
+        let first = DaemonServer::new();
+        let second = DaemonServer::new_with_paths(None, None);
+        assert!(first.session_service.workspace_service.catalog().is_ok(), "constructor read canonical sentinel");
+        let first_dir = first.session_service.remote_sessions_path.parent().unwrap().to_owned();
+        let second_dir = second.session_service.remote_sessions_path.parent().unwrap().to_owned();
+        assert_ne!(first_dir, second_dir);
+        for (server, name) in [(&first, "one"), (&second, "two")] {
+            let plain = root.join(name);
+            fs::create_dir(&plain).unwrap();
+            server.handle_register_workspace("same-id", plain.to_str().unwrap()).unwrap();
+            assert_eq!(server.workspace_registry.repo_root("same-id").unwrap(), fs::canonicalize(plain).unwrap());
+        }
+        assert_eq!(fs::read(&sentinel).unwrap(), before);
+        drop(first);
+        drop(second);
+        assert!(!first_dir.exists());
+        assert!(!second_dir.exists());
+        eprintln!("CONSTRUCTOR cleanup first={} second={} absent=true sentinel_unchanged=true", first_dir.display(), second_dir.display());
+    }
+
+    #[tokio::test]
+    async fn catalog_constructor_isolation() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("data/remote")).unwrap();
+        fs::write(root.path().join("data/remote/machine-workspaces.v1.json"), b"private canonical sentinel").unwrap();
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "daemon::server::a05_compatibility_tests::catalog_constructor_child", "--nocapture"])
+            .env("A05_CONSTRUCTOR_ROOT", root.path())
+            .env("FERRYX_DATA_DIR", root.path().join("data"))
+            .env("FERRYX_RUNTIME_DIR", root.path().join("runtime"))
+            .env("HOME", root.path()).env("TMPDIR", root.path())
+            .kill_on_drop(true).spawn().unwrap();
+        let pid = child.id().unwrap();
+        let status = match tokio::time::timeout(Duration::from_secs(20), child.wait()).await {
+            Ok(status) => status.unwrap(),
+            Err(_) => { child.start_kill().unwrap(); child.wait().await.unwrap() }
+        };
+        let receipt = root.path().to_owned();
+        root.close().unwrap();
+        eprintln!("CONSTRUCTOR owner pid={pid} reaped=true root={} absent={}", receipt.display(), !receipt.exists());
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn catalog_ssh_unregister_compatibility() {
+        let root = tempfile::tempdir().unwrap();
+        let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
+        let id = "ssh:isolated-fixture";
+        let metadata = serde_json::from_value(serde_json::json!({
+            "client_request_id": "fixture", "workspace_id": id, "worktree": null,
+            "cwd": root.path(), "provider_claim": null,
+            "spawn_fingerprint": {"workspace_id": id, "worktree": null, "cwd": null,
+                "cols": 80, "rows": 24, "shell": null, "provider_claim": null, "startup": null}
+        })).unwrap();
+        server.session_metadata.write().insert("expired-ssh-session".into(), metadata);
+        let result = server.handle_unregister_workspace(id).await;
+        let cleaned = !server.session_metadata.read().contains_key("expired-ssh-session");
+        assert!(server.handle_unregister_workspace("daemon:desktop").await.is_err());
+        assert!(!root.path().join("data/machine-workspaces.v1.json").exists());
+        drop(server);
+        let receipt = root.path().to_owned();
+        root.close().unwrap();
+        eprintln!("SSH cleanup root={} absent={} no_hosts_contacted=true ownership_released={cleaned}", receipt.display(), !receipt.exists());
+        assert!(result.is_ok(), "SSH unregister rejected: {result:?}");
+        assert!(cleaned);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -794,14 +874,27 @@ impl Default for DaemonServer {
 
 impl DaemonServer {
     pub fn new() -> Self {
+        // Headless CLI constructs synchronously inside its multi-thread runtime.
+        // Yield that executor worker while startup waits for catalog restoration.
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle|
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        {
+            return tokio::task::block_in_place(|| Self::new_with_paths(None, None));
+        }
         Self::new_with_paths(None, None)
     }
 
     pub fn new_with_paths(config_path: Option<PathBuf>, auth_path: Option<PathBuf>) -> Self {
+        // No-path unit constructors must never share or inspect owner state.
+        // Explicit paths keep their persistent restart semantics.
+        #[cfg(test)]
+        let catalog_fixture = config_path.is_none().then(|| tempfile::tempdir().expect("private test catalog"));
         let isolated_dir = config_path
             .as_ref()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf);
+        #[cfg(test)]
+        let isolated_dir = isolated_dir.or_else(|| catalog_fixture.as_ref().map(|dir| dir.path().to_owned()));
         let pty_manager = Arc::new(PtyManager::new());
         let output_hub = Arc::new(TerminalOutputHub::default());
         let terminal_service = Arc::new(TerminalService::new(
@@ -814,7 +907,17 @@ impl DaemonServer {
         let workspace_registry = WorkspaceRegistry::new();
         let handover_manager = Arc::new(crate::daemon::handover::HandoverManager::new(get_socket_path()));
         let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
-        let workspace_service = Arc::new(super::workspace_service::DaemonWorkspaceService::new(workspace_registry.clone()));
+        let catalog_path = isolated_dir.clone()
+            .unwrap_or_else(|| crate::remote::auth::canonical_identity_dir()
+                .expect("daemon requires a private data directory"))
+            .join("machine-workspaces.v1.json");
+        // Keep restore filesystem/Git work off executor threads, and join before
+        // building the gateway or advertising readiness.
+        let workspace_service = std::thread::scope(|scope| {
+            let registry = workspace_registry.clone();
+            scope.spawn(move || Arc::new(super::workspace_service::DaemonWorkspaceService::new(registry, catalog_path)))
+                .join().expect("workspace catalog initialization panicked")
+        });
         let session_service = Arc::new(DaemonSessionService {
             workspace_service,
             terminal_service: Arc::clone(&terminal_service),
@@ -917,7 +1020,8 @@ impl DaemonServer {
             helper_home: isolated_dir
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
-
+            #[cfg(test)]
+            _catalog_fixture: catalog_fixture,
         }
     }
 

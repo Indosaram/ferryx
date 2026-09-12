@@ -17,7 +17,7 @@ impl WorkspaceRegistry {
 
     pub(crate) fn validate_workspace_id(workspace_id: &str) -> Result<&str, WorktreeError> {
         let workspace_id = workspace_id.trim();
-        if crate::ssh::projects::is_remote(workspace_id) {
+        if crate::ssh::projects::is_remote(workspace_id) || workspace_id.starts_with("daemon:") {
             return Err(WorktreeError::RemoteUnsupported);
         }
         if workspace_id.is_empty() {
@@ -114,6 +114,13 @@ impl WorkspaceRegistry {
 
     pub fn contains(&self, workspace_id: &str) -> bool {
         self.workspaces.read().contains_key(workspace_id)
+    }
+
+    /// Publish an already validated, durably committed daemon candidate without
+    /// probing the filesystem again after commit.
+    pub(crate) fn publish(&self, workspace_id: String, manager: WorktreeManager) {
+        self.workspaces.write().insert(workspace_id, manager);
+        self.bump_revision();
     }
 
     pub fn revision(&self) -> u64 {
