@@ -69,7 +69,7 @@ export type ReconnectLifecycle = "idle" | "validating" | "spawning" | "binding" 
 
 export type RemoteConnectionState = "connected" | "reconnecting" | "disconnected" | "expired";
 export type RemoteFailure = {
-  kind: "transport" | "authentication" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
+  kind: "network" | "transport" | "authentication" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
   message: string;
 };
 export type RemoteReplayGap = { requestedAfterCursor: string; availableFromCursor: string };

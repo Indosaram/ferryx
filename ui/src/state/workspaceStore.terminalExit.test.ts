@@ -72,7 +72,7 @@ describe("workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer", (
     expect(next.sessions["term-1"].backendSessionId).toBe("backend-new-2");
   });
 
-  it("preserves remote workspace session without forcing local exited state", () => {
+  it("marks remote workspace session disconnected with a failure", () => {
     const session: TerminalSession = {
       id: "term-remote",
       cwd: "/remote/path",
@@ -90,9 +90,14 @@ describe("workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer", (
       reason: "daemon-attach-not-found",
     });
 
-    expect(next.sessions["term-remote"].lifecycle).toBe("working");
-    expect(next.sessions["term-remote"].remoteConnectionState).toBe("reconnecting");
+    expect(next.sessions["term-remote"].lifecycle).toBe("exited");
+    expect(next.sessions["term-remote"].backendSessionId).toBe("backend-remote-1");
+    expect(next.sessions["term-remote"].remoteConnectionState).toBe("disconnected");
     expect(next.sessions["term-remote"].remoteGeneration).toBeNull();
+    expect(next.sessions["term-remote"].remoteFailure).toEqual({
+      kind: "network",
+      message: "daemon-attach-not-found",
+    });
   });
 
   it("sets active activity to done when local session exits", () => {

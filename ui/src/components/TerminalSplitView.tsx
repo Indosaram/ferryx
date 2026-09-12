@@ -208,7 +208,7 @@ type TerminalSplitViewProps = {
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
-  onReconnectSshSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -673,7 +673,7 @@ type TabGroupViewProps = {
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
-  onReconnectSshSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -867,7 +867,7 @@ type PaneRendererProps = {
   searchLeafId?: string | null;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
-  onReconnectSshSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -962,7 +962,7 @@ type PaneLeafViewProps = {
   searchOpen?: boolean;
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
-  onReconnectSshSession?: (sessionId: string) => void;
+  onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onOpenNewShell?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,

@@ -11,7 +11,7 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
@@ -207,7 +207,7 @@ export type WorkspaceAction =
   | {
       type: "SESSION_BACKEND_UNAVAILABLE";
       sessionId: string;
-      backendSessionId: string;
+      backendSessionId: string | null;
       bindingKey?: string | null;
       reason: string;
     }
@@ -854,7 +854,8 @@ export function useWorkspaceStore({
 
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
-      const isRemote = isRemoteWorkspaceId(sourceSession.workspaceId || workspaceId);
+      // The pane has no backend yet, so it must not claim a live remote connection:
+      // REBIND_SESSION_BACKEND wires remote state once the split's PTY actually exists.
       const session: TerminalSession = {
         id: localSessionId,
         cwd: sourceSession.cwd,
@@ -863,12 +864,6 @@ export function useWorkspaceStore({
         worktree: sourceSession.worktree,
         backendSessionId: null,
         lifecycle: "working",
-        ...(isRemote
-          ? {
-              remoteConnectionState: "connected",
-              remoteGeneration: 1,
-            }
-          : {}),
       };
 
       dispatch({
@@ -935,6 +930,12 @@ export function useWorkspaceStore({
           terminalEventBus.clearSession(backendSessionId);
           await services.closeTerminal(backendSessionId).catch(() => undefined);
         }
+        dispatch({
+          type: "SESSION_BACKEND_UNAVAILABLE",
+          sessionId: localSessionId,
+          backendSessionId: null,
+          reason: toIpcError(error).message,
+        });
         throw error;
       }
     },
@@ -2170,7 +2171,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "SESSION_BACKEND_UNAVAILABLE": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
-      if (session.backendSessionId !== action.backendSessionId) return state;
+      if (action.backendSessionId !== null && session.backendSessionId !== action.backendSessionId) return state;
       if (action.bindingKey && session.backendSessionId) {
         const currentBindingKey = `${session.backendSessionId}:${session.daemonEpoch ?? ""}:${session.remoteGeneration ?? 0}:${session.remoteConnectionState ?? ""}`;
         if (action.bindingKey !== currentBindingKey) return state;
@@ -2182,8 +2183,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...state.sessions,
             [action.sessionId]: {
               ...session,
-              remoteConnectionState: "reconnecting",
+              remoteConnectionState: "disconnected",
               remoteGeneration: null,
+              remoteFailure: {
+                kind: "network",
+                message: action.reason ?? "Failed to spawn terminal",
+              },
+              lifecycle: "exited",
             },
           },
         };
@@ -2254,12 +2260,15 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "REBIND_SESSION_BACKEND": {
       const session = state.sessions[action.sessionId];
       if (!session) return state;
-      const isSshSession = isRemoteWorkspaceId(session.workspaceId);
+      // A changed backend id means the old remote process was replaced: drop agent
+      // identity and activity. An unchanged id is a same-process reattach (the daemon
+      // restarted around the same PTY); the pane keeps its agent and generation.
+      const isSshBackendReplaced = isRemoteWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
       const activityBySessionId = { ...state.activityBySessionId };
-      if (isSshSession) delete activityBySessionId[action.sessionId];
+      if (isSshBackendReplaced) delete activityBySessionId[action.sessionId];
       return {
         ...state,
-        ...(isSshSession ? { activityBySessionId } : {}),
+        ...(isSshBackendReplaced ? { activityBySessionId } : {}),
         sessions: {
           ...state.sessions,
           [action.sessionId]: {
@@ -2272,7 +2281,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             reconnectLifecycle: "idle",
             reconnectError: null,
             reconnectRequestId: null,
-            ...(isSshSession
+            ...(isSshBackendReplaced
               ? {
                   agentType: null,
                   agentSessionId: null,
