@@ -113,6 +113,24 @@ performance benchmark against Electron-based AI IDEs or terminal emulators.
 | Mobile pairing | PIN/QR gateway with a custom DOM terminal grid |
 | Agent supervision | Manifest-driven status detection and notifications |
 
+## Guides and comparisons
+
+Practical walkthroughs:
+
+- [Running coding agents in parallel](https://indosaram.github.io/ferryx/use-cases/parallel-ai-agents/) — why agents collide in a shared working directory, and how a worktree per agent fixes it
+- [Git worktrees in practice](https://indosaram.github.io/ferryx/use-cases/git-worktree-workflow/) — the manual commands, and where the manual flow gets tedious
+- [Remote terminal access](https://indosaram.github.io/ferryx/use-cases/remote-terminal-access/) — checking a long run from your phone
+
+Honest comparisons against the alternatives, on architecture and licensing rather than
+unmeasured performance claims:
+
+- [Ferryx vs Warp](https://indosaram.github.io/ferryx/compare/warp/)
+- [Ferryx vs Wave Terminal](https://indosaram.github.io/ferryx/compare/wave-terminal/)
+- [Ferryx vs Conductor](https://indosaram.github.io/ferryx/compare/conductor/)
+- [Ferryx vs Crystal / Nimbalyst](https://indosaram.github.io/ferryx/compare/crystal/)
+- [Ferryx vs tmux + git worktree](https://indosaram.github.io/ferryx/compare/tmux-git-worktree/)
+- [Ferryx and Ghostty](https://indosaram.github.io/ferryx/compare/ghostty/) — Ferryx embeds libghostty-vt; it is not a Ghostty competitor
+
 ## Build from source
 
 ### Prerequisites
