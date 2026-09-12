@@ -1,0 +1,84 @@
+{
+  "base": "cd16c90e76e2ea1ce56f0213932675b613d0a47b",
+  "worktree": "/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean",
+  "source_files": [
+    {
+      "path": "src-tauri/src/cli.rs",
+      "sha256": "e64d4413869f12fb5c564685e1d77aecfbfb4712b60d05105bc2561156b77531",
+      "ownership": "Explicit machine owner CLI selection and authority display; HEAD three-tuple and URL resolution retained."
+    },
+    {
+      "path": "src-tauri/src/daemon/a03_owner_cli_fixture.rs",
+      "sha256": "4e2239db9711390b7a3d32615d1d249f958e76b524c655ddc41225c583c4e330",
+      "ownership": "Byte-identical A03 isolated real owner CLI/daemon/relay fixture."
+    },
+    {
+      "path": "src-tauri/src/daemon/client.rs",
+      "sha256": "69151358926a13e7be8193367bad0ae19cabf50ab81ec5674a835eafe7f80fd6",
+      "ownership": "Only additive request-name arms."
+    },
+    {
+      "path": "src-tauri/src/daemon/protocol.rs",
+      "sha256": "255834281e33a943baea9c876e575e1cf8bb8962fdc99d94a9e908c80ed03dbd",
+      "ownership": "Only GetCapabilities, RemoteCreateMachinePairingCode and CapabilitiesOk; protocol 3 and three-field pairing response retained."
+    },
+    {
+      "path": "src-tauri/src/daemon/server.rs",
+      "sha256": "fa92980b92102b8799346be88c4ff03affd26a0503f09b6fbd07fccefe32031c",
+      "ownership": "Fixture module, daemon epoch publication, scoped request dispatch and issuers in HEAD flow; constructors and local identity fallback retained."
+    },
+    {
+      "path": "src-tauri/src/remote/auth.rs",
+      "sha256": "8d9468845f28f6113419a9e05867227705f8f786c159fe4ecf057b1748125bf5",
+      "ownership": "Byte-identical A03 persisted scope, validators and issuer/approval/exchange propagation."
+    },
+    {
+      "path": "src-tauri/src/remote/machine_auth_tests.rs",
+      "sha256": "6956043b428f055cbd6fec894d8b3ee786a37c225a5f527a26aba3d272a77767",
+      "ownership": "Byte-identical thirteen A03 authorization/coordinator/router tests."
+    },
+    {
+      "path": "src-tauri/src/remote/relay_client.rs",
+      "sha256": "386abd5a2c71c0889912d6790b74bbf77352e2b75fab7d9bf0ac3f48a8786c0e",
+      "ownership": "Byte-identical A03 scoped coordinator issuance and validation."
+    },
+    {
+      "path": "src-tauri/src/remote/server.rs",
+      "sha256": "0b568a165570701e3d78435209b76a23154ddcf9b2c007910460eb4212f344d1",
+      "ownership": "Authenticated capabilities, pre/post-await auth, offthread identity, no-store responses, typed machine admission errors, four unchanged A03 tests. Native feature guards retained; test-only Duration import added."
+    },
+    {
+      "path": "src-tauri/src/remote/state.rs",
+      "sha256": "a07b344a9443d0d2bbc3375ceec8dcb04ab6cdf3c60661517656878b97327760",
+      "ownership": "Only identity directory/probe and epoch fields initialized in HEAD new_with_paths_backend; AtomicU64 import available in production."
+    },
+    {
+      "path": "src-tauri/src/remote/tests.rs",
+      "sha256": "c80096f03889c567720b45747e6649bd6ad08411aeefaf9a0dc6799bb4528824",
+      "ownership": "Only machine_auth module declaration."
+    }
+  ],
+  "excluded_foreign_features": [
+    "relay_url response field / four-tuple",
+    "terminal service sharing constructors/field",
+    "headless auto-spawn",
+    "mirror/grid/focus changes and foreign tests",
+    "IPC/UI/relay-server/release changes"
+  ],
+  "checks": {
+    "hashes_before_execution": "all 11 match",
+    "hashes_after_execution": "all 11 match",
+    "headless_check": "pass",
+    "fresh_cli_build": "pass",
+    "focused_a03_tests": "18 passed",
+    "remote_regression": "196 passed; 5 pre-existing failures",
+    "baseline_remote_regression": "179 passed; identical 5 failures"
+  },
+  "receipts": [
+    "A03-clean-runtime.log",
+    "A03-clean-baseline-remote.log",
+    "A03-clean-ui-build.log",
+    "A03-clean-parent-gate.md"
+  ],
+  "scope": "A03 only; not full Wave 0 acceptance"
+}

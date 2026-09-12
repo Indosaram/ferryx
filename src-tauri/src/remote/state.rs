@@ -7,9 +7,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -273,6 +271,12 @@ pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 =
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
+    /// Session-owning daemon epoch, supplied by the daemon at construction.
+    pub daemon_epoch: AtomicU64,
+    /// Explicit stores keep identity alongside auth, including private fixtures.
+    pub(crate) identity_dir: Option<PathBuf>,
+    #[cfg(test)]
+    pub(crate) identity_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
@@ -394,7 +398,11 @@ impl RemoteGatewayState {
             .unwrap_or_default();
         Self {
             config: RwLock::new(config),
+            identity_dir: auth_path.as_deref().and_then(|path| path.parent()).map(PathBuf::from),
+            #[cfg(test)]
+            identity_probe: RwLock::new(None),
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
+            daemon_epoch: AtomicU64::new(0),
             session_backend,
             workspace_registry,
             active_selection: RwLock::new(None),

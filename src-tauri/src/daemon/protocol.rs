@@ -200,6 +200,10 @@ pub enum DaemonRequest {
     LoadSession,
     ClearSession,
     RemoteGetStatus,
+    GetCapabilities,
+    /// Separate variant: an old daemon rejects machine issuance instead of
+    /// ignoring an unknown scope field and accidentally issuing a mirror PIN.
+    RemoteCreateMachinePairingCode,
     #[serde(rename_all = "camelCase")]
     RemoteConfigure {
         config: RemoteGatewayConfig,
@@ -328,6 +332,10 @@ pub enum DaemonResponse {
         status: DaemonRemoteStatus,
     },
     RemoteConfigureOk,
+    #[serde(rename_all = "camelCase")]
+    CapabilitiesOk {
+        capabilities: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
     RemotePairingCodeOk {
         code: String,

@@ -1,0 +1,25 @@
+Command: cd '/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean' && export CARGO_TARGET_DIR='/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri/target' CARGO_BUILD_JOBS=4 GIT_PAGER=cat && unset A03_PRIVATE_ROOT A03_CLI_BINARY FERRYX_MACHINE_TOKEN FERRYX_RELAY_URL && cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay && cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli && cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib a03_ -- --nocapture && cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote:: -- --nocapture && git --no-pager diff --check
+Monitor: mon_D0289B6X8VBDM72J
+status: exited_101 exit_code: 101
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri)
+error: failed to run custom build command for `ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri)`
+
+Caused by:
+  process didn't exit successfully: `/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri/target/debug/build/ferryx-d16b3fd262287bc7/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rerun-if-env-changed=TAURI_CONFIG
+  cargo:rustc-check-cfg=cfg(desktop)
+  cargo:rustc-cfg=desktop
+  cargo:rustc-check-cfg=cfg(mobile)
+  cargo:rerun-if-changed=/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri/tauri.conf.json
+  cargo:rerun-if-changed=/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri/tauri.macos.conf.json
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_APP_NAME=app
+  cargo:rustc-env=TAURI_ANDROID_PACKAGE_NAME_PREFIX=com_ferryx
+  cargo:rustc-check-cfg=cfg(dev)
+  cargo:rustc-cfg=dev
+  cargo:PERMISSION_FILES_PATH=/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri/target/debug/build/ferryx-1878452eba9d3cd0/out/app-manifest/__app__-permission-files
+  cargo:rerun-if-changed=capabilities
+  cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+  cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE=aarch64-apple-darwin
+  resource path `../ui/dist` doesn't exist
+This is a missing generated UI resource, not behavioral RED. Parent is building ui/dist from clean candidate source.

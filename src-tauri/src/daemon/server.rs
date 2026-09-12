@@ -901,6 +901,10 @@ pub struct DaemonServer {
     remote_event_tx: broadcast::Sender<DaemonRemoteEvent>,
 }
 
+#[cfg(all(test, unix))]
+#[path = "a03_owner_cli_fixture.rs"]
+mod a03_owner_cli_fixture;
+
 impl Default for DaemonServer {
     fn default() -> Self {
         Self::new()
@@ -957,6 +961,7 @@ impl DaemonServer {
             .unwrap_or(1);
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
+        remote_state.daemon_epoch.store(epoch, std::sync::atomic::Ordering::Release);
 
         // The gateway runs inside this process, so desktop-directed events must
         // be relayed to the GUI over the socket; without this sink they are
@@ -1942,7 +1947,18 @@ impl DaemonServer {
                         Err(e) => DaemonResponse::Error { message: e },
                     }
                 }
-                Ok(DaemonRequest::RemoteCreatePairingCode { permission }) => {
+                Ok(DaemonRequest::GetCapabilities) => DaemonResponse::CapabilitiesOk {
+                    capabilities: vec!["machinePairingV1".into()],
+                },
+                Ok(request @ (DaemonRequest::RemoteCreatePairingCode { .. }
+                    | DaemonRequest::RemoteCreateMachinePairingCode)) => {
+                    let (permission, scope) = match request {
+                        DaemonRequest::RemoteCreatePairingCode { permission } =>
+                            (permission, crate::remote::auth::DeviceAccessScope::Mirror),
+                        DaemonRequest::RemoteCreateMachinePairingCode =>
+                            (Some(DevicePermission::Control), crate::remote::auth::DeviceAccessScope::Machine),
+                        _ => unreachable!("pairing request pattern"),
+                    };
                     let perm = permission.unwrap_or(DevicePermission::Control);
                     if self.remote_state.relay_pairing.read().is_none() {
                         let mode = self.remote_state.config.read().mode;
@@ -1970,9 +1986,10 @@ impl DaemonServer {
                     match coordinator {
                         Some(coordinator) => {
                             match coordinator
-                                .generate_pairing_with_permission(
+                                .generate_scoped_pairing(
                                     std::time::Duration::from_secs(60),
                                     perm,
+                                    scope,
                                 )
                                 .await
                             {
@@ -1985,16 +2002,19 @@ impl DaemonServer {
                             }
                         }
                         None => {
-                            let code =
-                                self.remote_state.auth_manager.create_pairing_code(perm);
-                            let machine_id = crate::remote::auth::canonical_identity_dir()
-                                .ok()
-                                .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
-                                .map(|id| id.machine_id);
-                            DaemonResponse::RemotePairingCodeOk {
-                                code,
-                                pairing_token: None,
-                                machine_id,
+                            match self.remote_state.auth_manager.create_scoped_pairing_code(perm, scope) {
+                                Ok(code) => {
+                                    let machine_id = crate::remote::auth::canonical_identity_dir()
+                                        .ok()
+                                        .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+                                        .map(|id| id.machine_id);
+                                    DaemonResponse::RemotePairingCodeOk {
+                                        code,
+                                        pairing_token: None,
+                                        machine_id,
+                                    }
+                                }
+                                Err(error) => DaemonResponse::Error { message: error.to_string() },
                             }
                         }
                     }

@@ -130,6 +130,18 @@ impl PairingCoordinator {
         timeout: Duration,
         permission: DevicePermission,
     ) -> Result<PairingSessionInfo, String> {
+        self.generate_scoped_pairing(timeout, permission, crate::remote::auth::DeviceAccessScope::Mirror).await
+    }
+
+    pub async fn generate_scoped_pairing(
+        &self,
+        timeout: Duration,
+        permission: DevicePermission,
+        scope: crate::remote::auth::DeviceAccessScope,
+    ) -> Result<PairingSessionInfo, String> {
+        if scope == crate::remote::auth::DeviceAccessScope::Machine && permission != DevicePermission::Control {
+            return Err("Machine access requires Control permission".into());
+        }
         // Gateway pairing credentials have a maximum lifetime of sixty seconds.
         let timeout = timeout.min(Duration::from_secs(60));
         let expires_at = SystemTime::now()
@@ -149,9 +161,11 @@ impl PairingCoordinator {
             *self.active_pin.write() = Some(pin.clone());
             *self.active_token.write() = Some(pairing_token.clone());
             self.auth
-                .register_pairing_capability_with_permission(&pairing_token, permission);
+                .register_scoped_pairing_capability(&pairing_token, permission, scope)
+                .map_err(|error| error.to_string())?;
             self.auth
-                .register_pairing_capability_with_permission(&pin, permission);
+                .register_scoped_pairing_capability(&pin, permission, scope)
+                .map_err(|error| error.to_string())?;
             (*generation, pin, pairing_token)
         };
         let registration = RegisterPairingPin {

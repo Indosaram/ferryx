@@ -137,6 +137,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::LoadSession => "loadSession",
         DaemonRequest::ClearSession => "clearSession",
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
+        DaemonRequest::GetCapabilities => "getCapabilities",
+        DaemonRequest::RemoteCreateMachinePairingCode => "remoteCreateMachinePairingCode",
         DaemonRequest::RemoteConfigure { .. } => "remoteConfigure",
         DaemonRequest::RemoteCreatePairingCode { .. } => "remoteCreatePairingCode",
         DaemonRequest::RemoteListDevices => "remoteListDevices",

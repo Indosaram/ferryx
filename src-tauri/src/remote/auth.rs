@@ -205,12 +205,23 @@ pub enum DevicePermission {
     Control,
 }
 
+/// Owner-issued authority, independent of mirror input permission.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceAccessScope {
+    #[default]
+    Mirror,
+    Machine,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
     pub id: String,
     pub name: String,
     pub permission: DevicePermission,
+    #[serde(default)]
+    pub access_scope: DeviceAccessScope,
     pub created_at: u64,
     pub last_seen_at: u64,
     /// Always `false` for a live device: revoking deletes the device outright.
@@ -228,6 +239,8 @@ struct PairingCode {
     #[serde(with = "persisted_instant")]
     created_at: Instant,
     default_permission: DevicePermission,
+    #[serde(default)]
+    access_scope: DeviceAccessScope,
     #[serde(default)]
     approved_token: Option<String>,
 }
@@ -372,6 +385,19 @@ impl AuthManager {
     }
 
     pub fn create_pairing_code(&self, default_permission: DevicePermission) -> String {
+        self.issue_pairing_code(default_permission, DeviceAccessScope::Mirror)
+    }
+
+    pub(crate) fn create_scoped_pairing_code(
+        &self,
+        default_permission: DevicePermission,
+        access_scope: DeviceAccessScope,
+    ) -> Result<String, MachineGrantError> {
+        validate_machine_grant(default_permission, access_scope)?;
+        Ok(self.issue_pairing_code(default_permission, access_scope))
+    }
+
+    fn issue_pairing_code(&self, default_permission: DevicePermission, access_scope: DeviceAccessScope) -> String {
         let _transaction = self.begin_transaction();
         let pin: u32 = rand::thread_rng().gen_range(100_000..=999_999);
         let code = format!("{pin:06}");
@@ -384,6 +410,7 @@ impl AuthManager {
                 _code: code.clone(),
                 created_at: Instant::now(),
                 default_permission,
+                access_scope,
                 approved_token: None,
             },
         );
@@ -393,6 +420,7 @@ impl AuthManager {
     }
 
     /// Installs the relay capability in the same single-use authority as local PINs.
+    #[cfg(test)]
     pub(crate) fn register_pairing_capability(&self, token: &str) {
         self.register_pairing_capability_with_permission(token, DevicePermission::Control);
     }
@@ -402,11 +430,27 @@ impl AuthManager {
     /// The permission must travel with the capability: `exchange_pairing_code` copies
     /// it onto the issued device, so defaulting to Control here would silently upgrade
     /// a caller that asked for View.
+    #[cfg(test)]
     pub(crate) fn register_pairing_capability_with_permission(
         &self,
         token: &str,
         permission: DevicePermission,
     ) {
+        self.issue_pairing_capability(token, permission, DeviceAccessScope::Mirror);
+    }
+
+    pub(crate) fn register_scoped_pairing_capability(
+        &self,
+        token: &str,
+        permission: DevicePermission,
+        access_scope: DeviceAccessScope,
+    ) -> Result<(), MachineGrantError> {
+        validate_machine_grant(permission, access_scope)?;
+        self.issue_pairing_capability(token, permission, access_scope);
+        Ok(())
+    }
+
+    fn issue_pairing_capability(&self, token: &str, permission: DevicePermission, access_scope: DeviceAccessScope) {
         let _transaction = self.begin_transaction();
         let mut window = self.pairing_window.write();
         window.refresh(Instant::now());
@@ -416,6 +460,7 @@ impl AuthManager {
                 _code: token.to_owned(),
                 created_at: Instant::now(),
                 default_permission: permission,
+                access_scope,
                 approved_token: None,
             },
         );
@@ -500,6 +545,7 @@ impl AuthManager {
                     name: effective_name,
                     permission: pairing.default_permission,
                     created_at: existing.created_at,
+                    access_scope: pairing.access_scope,
                     last_seen_at: now,
                     revoked: false,
                     installation_id: effective_installation_id,
@@ -556,6 +602,7 @@ impl AuthManager {
             name: effective_name,
             permission: pairing.default_permission,
             created_at,
+            access_scope: pairing.access_scope,
             last_seen_at: now,
             revoked: false,
             installation_id: effective_installation_id,
@@ -616,6 +663,7 @@ impl AuthManager {
             name: "cli-paired-device".to_string(),
             permission: pairing.default_permission,
             created_at: now,
+            access_scope: pairing.access_scope,
             last_seen_at: now,
             revoked: false,
             installation_id: None,
@@ -913,6 +961,17 @@ pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::i
         if let Ok(dir) = std::fs::File::open(parent) {
             let _ = dir.sync_all();
         }
+    }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Machine access requires Control permission")]
+pub struct MachineGrantError;
+
+fn validate_machine_grant(permission: DevicePermission, scope: DeviceAccessScope) -> Result<(), MachineGrantError> {
+    if scope == DeviceAccessScope::Machine && permission != DevicePermission::Control {
+        return Err(MachineGrantError);
     }
     Ok(())
 }

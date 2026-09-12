@@ -12,6 +12,9 @@ mod security;
 #[path = "ssh_tests.rs"]
 mod ssh;
 
+#[path = "machine_auth_tests.rs"]
+mod machine_auth;
+
 #[test]
 fn test_auth_manager_pairing_and_revocation() {
     let auth = AuthManager::new();

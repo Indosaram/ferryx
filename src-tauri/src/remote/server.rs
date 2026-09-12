@@ -1,4 +1,4 @@
-use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
+use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
 #[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
@@ -337,17 +337,8 @@ async fn health_check() -> Json<HealthResponse> {
 async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
     Json(payload): Json<PairExchangeRequest>,
-) -> Result<Json<PairExchangeResponse>, Response> {
-    let identity = crate::remote::auth::canonical_identity_dir()
-        .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir))
-        .map_err(|error| {
-            tracing::error!(%error, "Unable to load pairing machine identity");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Machine identity unavailable",
-            )
-                .into_response()
-        })?;
+) -> Result<Response, Response> {
+    let identity = load_gateway_identity(Arc::clone(&state)).await?;
     let (token, device) = state
         .auth_manager
         .exchange_pairing_code_with_installation(
@@ -370,12 +361,12 @@ async fn pair_exchange(
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
         })?;
 
-    Ok(Json(PairExchangeResponse {
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(PairExchangeResponse {
         token,
         device,
         machine_id: identity.machine_id,
         display_name: identity.display_name,
-    }))
+    })).into_response())
 }
 
 /// Canonicalize a filesystem path for comparison purposes. When the path itself
@@ -1963,6 +1954,72 @@ async fn push_unsubscribe(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn machine_error(status: StatusCode, code: &str) -> Response {
+    use crate::remote::machine_protocol::{ErrorEnvelope, MachineError};
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(ErrorEnvelope {
+        error: MachineError {
+            code: code.into(), message: code.into(), retryable: false,
+            request_id: uuid::Uuid::new_v4().to_string(), details: serde_json::Map::new(),
+        },
+    })).into_response()
+}
+
+fn authenticate_machine_request(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+) -> Result<DeviceInfo, Response> {
+    let token = extract_token(headers).ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    state.auth_manager.validate_token(&token)
+        .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))
+}
+
+async fn get_capabilities(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    // Authentication precedes even the identity-file lookup. No workspace or
+    // session service is probed or advertised until its implementation ships.
+    authenticate_machine_request(&state, &headers)?;
+    let identity = load_gateway_identity(Arc::clone(&state)).await?;
+    let device = authenticate_machine_request(&state, &headers)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
+        "apiVersion": 1,
+        "machineId": identity.machine_id,
+        "daemonEpoch": state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
+        "platform": std::env::consts::OS,
+        "accessScope": device.access_scope,
+        "permission": device.permission,
+        "capabilities": [],
+        "limits": { "directoryEntries": 1000, "terminalSessions": 64 }
+    }))).into_response())
+}
+
+async fn load_gateway_identity(state: Arc<RemoteGatewayState>) -> Result<crate::remote::auth::MachineIdentity, Response> {
+    crate::ipc::run_blocking(move || {
+        #[cfg(test)]
+        if let Some(probe) = state.identity_probe.read().clone() { probe(); }
+        let dir = match &state.identity_dir {
+            Some(dir) => dir.clone(),
+            None => crate::remote::auth::canonical_identity_dir().map_err(crate::ipc::IpcError::internal)?,
+        };
+        crate::remote::auth::load_or_generate_machine_identity(&dir).map_err(crate::ipc::IpcError::internal)
+    }).await.map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))
+}
+
+async fn machine_service_unavailable(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let device = authenticate_machine_request(&state, &headers)?;
+    let (status, code) = if device.access_scope == DeviceAccessScope::Machine
+        && device.permission == DevicePermission::Control {
+        (StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE")
+    } else {
+        (StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED")
+    };
+    Ok(machine_error(status, code))
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -1971,8 +2028,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
 
     Router::new()
         .route("/api/v1/health", get(health_check))
+        .route("/api/v1/capabilities", get(get_capabilities))
+        .route("/api/v1/fs/directories", get(machine_service_unavailable))
         .route("/api/v1/pair/exchange", post(pair_exchange))
-        .route("/api/v1/sessions", get(list_sessions))
+        .route("/api/v1/sessions", get(list_sessions).post(machine_service_unavailable))
         .route("/api/v1/workspace/state", get(get_workspace_state))
         .route("/api/v1/workspace/select", post(select_workspace))
         .route("/api/v1/workspace/selection", post(select_workspace))
@@ -2119,9 +2178,8 @@ pub async fn start_remote_server_with_resolver(
         .ok()
         .filter(|token| !token.trim().is_empty());
     let relay_identity = if config.mode == RemoteNetworkMode::Relay && relay_token.is_none() {
-        Some(crate::remote::auth::load_or_generate_machine_identity(
-            &crate::remote::auth::canonical_identity_dir()?,
-        )?)
+        Some(load_gateway_identity(Arc::clone(&state)).await
+            .map_err(|_| "Machine identity unavailable".to_string())?)
     } else {
         None
     };
@@ -2221,6 +2279,98 @@ mod tests {
     use crate::terminal::TerminalOutputHub;
     use crate::terminal::TerminalService;
     use crate::worktree::WorkspaceRegistry;
+    #[cfg(not(feature = "native-terminal"))]
+    use std::time::Duration;
+
+    #[test]
+    fn a03_forged_exchange_fields_cannot_upgrade_mirror_authority() {
+        let auth = crate::remote::auth::AuthManager::new();
+        let code = auth.create_pairing_code(DevicePermission::Control);
+        // The actual request decoder discards client authority claims. Only the
+        // persisted owner-issued record supplies the exchange grant.
+        let request: PairExchangeRequest = serde_json::from_value(serde_json::json!({
+            "code": code, "deviceName": "forged desktop", "installationId": "attacker",
+            "accessScope": "machine", "permission": "control", "clientType": "desktop"
+        })).unwrap();
+        let (_, device) = auth.exchange_pairing_code_with_installation(
+            &request.code, &request.device_name, request.installation_id.as_deref(),
+        ).unwrap();
+        assert_eq!(device.access_scope, DeviceAccessScope::Mirror);
+    }
+
+    #[tokio::test]
+    async fn a03_machine_auth_errors_are_private_json() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+        ));
+        let response = get_capabilities(State(state), HeaderMap::new()).await.unwrap_err();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers().get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+        let typed = crate::remote::machine_protocol::decode_json::<crate::remote::machine_protocol::ErrorEnvelope>(&bytes, 4096)
+            .expect("actual authentication response must satisfy A02 error contract");
+        assert_eq!(typed.error.code, "UNAUTHORIZED");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a03_identity_runs_offthread_and_revocation_fences_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+            Some(dir.path().join("config.json")), Some(dir.path().join("auth.json")),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, device) = state.auth_manager.exchange_pairing_code(&pin, "fixture").unwrap();
+        let runtime_thread = std::thread::current().id();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        *state.identity_probe.write() = Some(Arc::new(move || {
+            let offthread = std::thread::current().id() != runtime_thread;
+            if let Some(tx) = entered_tx.lock().unwrap().take() { let _ = tx.send(offthread); }
+            if offthread { release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap(); }
+        }));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let request_state = Arc::clone(&state);
+        let request = tokio::spawn(async move { get_capabilities(State(request_state), headers).await });
+        let entered = tokio::time::timeout(Duration::from_secs(5), entered_rx).await;
+        state.auth_manager.revoke_device(&device.id);
+        let released = release_tx.send(());
+        let response = tokio::time::timeout(Duration::from_secs(5), request).await;
+        assert!(entered.unwrap().unwrap(), "identity work must run off reactor");
+        released.unwrap();
+        let response = response.unwrap().unwrap().unwrap_err();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+        *state.identity_probe.write() = Some(Arc::new(|| panic!("revoked request probed identity")));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        assert_eq!(get_capabilities(State(state), headers).await.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a03_absent_machine_service_is_private_and_unavailable() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
+        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "machine").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let response = machine_service_unavailable(State(state), headers).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "MACHINE_SERVICE_UNAVAILABLE");
+        let typed = crate::remote::machine_protocol::decode_json::<crate::remote::machine_protocol::ErrorEnvelope>(&bytes, 4096)
+            .expect("actual service response must satisfy A02 error contract");
+        assert_eq!(typed.error.code, "MACHINE_SERVICE_UNAVAILABLE");
+    }
 
     #[tokio::test]
     async fn relay_startup_connects_without_machine_token() {
