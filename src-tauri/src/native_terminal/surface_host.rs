@@ -368,10 +368,30 @@ fn dispatch_scheduled_render<R: Runtime>(
             })
         };
         if let Some((layout, logical_bounds, render_input)) = render_state {
-            if let Some(host) = hosts_guard.get_mut(&session_id) {
+            let host = match hosts_guard.entry(session_id.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    match NativeTerminalSurfaceHost::new(&surface_window, logical_bounds.scale_factor) {
+                        Ok(new_host) => Some(entry.insert(new_host)),
+                        Err(err) => {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %err,
+                                "Failed to lazily create native terminal surface host during scheduled render"
+                            );
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some(host) = host {
+                let effective_bounds = host
+                    .active_presentation_geometry()
+                    .resolve(logical_bounds)
+                    .unwrap_or(logical_bounds);
                 host.layout = Some(layout);
-                host.logical_bounds = Some(logical_bounds);
-                host.update_viewport(Some(logical_bounds));
+                host.logical_bounds = Some(effective_bounds);
+                host.update_viewport(Some(effective_bounds));
                 match host.render_snapshot(
                     &surface_window,
                     layout,

@@ -1052,6 +1052,30 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                         Ok(()) => {
                             let _ = child.eval(&eval_bridge_script);
                             let _ = child.set_zoom(zoom_factor);
+                            #[cfg(target_os = "linux")]
+                            let initial_bounds = creation_manager
+                                .get_bounds(&browser_id)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| LogicalRect {
+                                    x: pos.x,
+                                    y: pos.y,
+                                    width: size.width,
+                                    height: size.height,
+                                });
+
+                            #[cfg(target_os = "linux")]
+                            {
+                                if let Err(e) = crate::browser::linux::implementation::attach_child_to_overlay(
+                                    &window_clone,
+                                    &browser_id,
+                                    &child,
+                                    &initial_bounds,
+                                ) {
+                                    tracing::warn!(browser_id = %browser_id, error = %e, "Failed to attach child webview to Linux GTK overlay");
+                                }
+                            }
+
                             if let Ok(Some(current_bounds)) =
                                 creation_manager.get_bounds(&browser_id)
                             {
@@ -1070,8 +1094,22 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
                                 creation_manager.is_visible(&browser_id).unwrap_or(visible);
                             if !is_visible {
                                 let _ = child.hide();
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let _ = crate::browser::linux::implementation::set_child_visible(
+                                        &browser_id,
+                                        false,
+                                    );
+                                }
                             } else {
                                 let _ = child.show();
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let _ = crate::browser::linux::implementation::set_child_visible(
+                                        &browser_id,
+                                        true,
+                                    );
+                                }
                             }
                             Ok(())
                         }
@@ -1340,6 +1378,20 @@ pub async fn cmd_browser_set_bounds<R: tauri::Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    #[cfg(target_os = "linux")]
+    {
+        let browser_id_clone = browser_id.clone();
+        let bounds_clone = bounds.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(e) = crate::browser::linux::implementation::update_child_bounds(
+                &browser_id_clone,
+                &bounds_clone,
+            ) {
+                tracing::warn!(browser_id = %browser_id_clone, error = %e, "Failed to update child webview bounds in Linux GTK overlay");
+            }
+        });
+    }
+
     // The frontend reveals the webview only after this call resolves, so a discarded failure
     // here would show an opaque child at its previous frame over unrelated panes.
     webview
@@ -1372,8 +1424,28 @@ pub async fn cmd_browser_set_visible<R: tauri::Runtime>(
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
     let outcome = if visible {
+        #[cfg(target_os = "linux")]
+        {
+            let browser_id_clone = browser_id.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = crate::browser::linux::implementation::set_child_visible(
+                    &browser_id_clone,
+                    true,
+                );
+            });
+        }
         webview.show()
     } else {
+        #[cfg(target_os = "linux")]
+        {
+            let browser_id_clone = browser_id.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = crate::browser::linux::implementation::set_child_visible(
+                    &browser_id_clone,
+                    false,
+                );
+            });
+        }
         webview.hide()
     };
     // A dropped hide is what strands an opaque child webview over the pane that replaced it.
@@ -1577,6 +1649,13 @@ pub async fn cmd_browser_close<R: tauri::Runtime>(
     browser_id: String,
 ) -> Result<(), IpcError> {
     if let Some(session) = manager.remove_session(&browser_id) {
+        #[cfg(target_os = "linux")]
+        {
+            let browser_id_clone = browser_id.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = crate::browser::linux::implementation::detach_child(&browser_id_clone);
+            });
+        }
         if let Some(webview) = app.get_webview(&session.webview_label) {
             let _ = webview.close();
         }

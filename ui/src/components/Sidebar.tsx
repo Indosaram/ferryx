@@ -357,9 +357,13 @@ export function Sidebar({
         <div
           data-testid="sidebar-drag-region"
           data-tauri-drag-region
-          className="drag-region flex h-titlebar shrink-0 items-center px-2"
+          className="drag-region flex h-titlebar shrink-0 items-center px-2 gap-0.5"
         >
           {isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
+          <RemoteHostSwitcher className="no-drag min-w-0 flex-1" />
+          <IconButton label="Add project" className="no-drag" size="sm" onClick={onAddProject}>
+            <Plus className="size-3.5" />
+          </IconButton>
           <IconButton
             label="Hide sidebar"
             data-shortcut={onToggle || onHide ? "sidebar.left.toggle" : undefined}
@@ -368,10 +372,6 @@ export function Sidebar({
             onClick={onToggle ?? onHide}
           >
             <PanelLeftClose className="size-3.5" />
-          </IconButton>
-          <RemoteHostSwitcher className="no-drag ml-1 min-w-0 flex-1" />
-          <IconButton label="Add project" className="no-drag" size="sm" onClick={onAddProject}>
-            <Plus className="size-3.5" />
           </IconButton>
         </div>
 

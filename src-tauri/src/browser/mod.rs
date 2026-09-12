@@ -2,6 +2,8 @@ pub mod cookies;
 pub mod download;
 pub mod find;
 pub mod guest;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod manager;
 pub mod model;
 pub mod security;

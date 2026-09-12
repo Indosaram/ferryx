@@ -701,11 +701,7 @@ fn require_attached_surface(
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
 ) -> Result<(), NativeTerminalError> {
-    match state.ensure_surface_attached(session_id) {
-        Ok(()) => Ok(()),
-        Err(NativeTerminalError::SessionDetached(_)) => Err(NativeTerminalError::NoValue),
-        Err(err) => Err(err),
-    }
+    state.ensure_surface_attached(session_id)
 }
 
 /// Encode clipboard paste text for a native session only if currently attached.
@@ -1847,6 +1843,7 @@ mod tests {
 
         let error = encode_attached_native_input(&state, "unattached-input", &input)
             .expect_err("an unattached surface cannot accept input");
+        assert_eq!(error.code, crate::ipc::error::IpcErrorCode::SessionNotFound);
         assert_eq!(
             error.details,
             Some(serde_json::json!({ "inputWritten": false }))

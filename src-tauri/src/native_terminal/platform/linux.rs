@@ -60,6 +60,7 @@ unsafe extern "C" {
         height: u32,
     ) -> c_int;
     fn XMapWindow(display: *mut c_void, window: c_ulong) -> c_int;
+    fn XRaiseWindow(display: *mut c_void, window: c_ulong) -> c_int;
     fn XUnmapWindow(display: *mut c_void, window: c_ulong) -> c_int;
     fn XDestroyWindow(display: *mut c_void, window: c_ulong) -> c_int;
     fn XFlush(display: *mut c_void) -> c_int;
@@ -376,6 +377,7 @@ impl LinuxCompositorTarget {
                         geometry.width,
                         geometry.height,
                     );
+                    XRaiseWindow(child.display, child.window);
                     XFlush(child.display);
                 }
             }
@@ -408,6 +410,7 @@ impl LinuxCompositorTarget {
                 // until drop.
                 unsafe {
                     XMapWindow(child.display, child.window);
+                    XRaiseWindow(child.display, child.window);
                     XFlush(child.display);
                 }
             }
