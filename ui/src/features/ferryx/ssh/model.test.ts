@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { resolveRunTarget, validateHost, type HostConfig } from "./model";
 export const host: HostConfig = { id: "qa", name: "QA", hostname: "localhost", user: "indo", port: 22222, identityFile: "/key", proxyJump: "jump@host:2200", knownHostsFile: "/trust" };
 describe("SSH target configuration", () => {
+  it("preserves paired identity independently of the SSH inventory", () => {
+    const target = { kind: "pairedDaemon", hostId: "qa" } as const;
+    expect(resolveRunTarget(target, [])).toEqual(target);
+    expect(resolveRunTarget(target, [host])).toEqual(target);
+  });
   it("rejects invalid ports and option injection", () => {
     expect(validateHost({ ...host, port: 1.5 })).not.toBeNull();
     expect(validateHost({ ...host, hostname: "-oProxyCommand=evil" })).not.toBeNull();

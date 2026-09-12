@@ -58,8 +58,10 @@ export type RegisteredProject = {
   gitBranch?: string | null;
   gitHead?: string | null;
   hostLabel?: string;
-  target?: RunTarget;
-};
+} & (
+  | { target?: Exclude<RunTarget, { kind: "pairedDaemon" }>; remoteWorkspaceId?: never }
+  | { target: Extract<RunTarget, { kind: "pairedDaemon" }>; remoteWorkspaceId: string }
+);
 
 export type LocalBranch = {
   name: string;

@@ -1,0 +1,22 @@
+[
+ {"kind":"worktreeStatus","value":{"workspaceId":"project-a","worktree":{"wsId":"project-a","slug":"feature"},"dirty":{"isDirty":true,"files":[{"statusCode":"M","path":"src/main.rs"}]},"dirtyCount":1,"branchDeletion":{"branch":"feature","head":"abc","upstream":null,"merged":false,"ahead":1,"behind":0},"locked":null,"prunable":null,"liveSessionIds":["pty-1"],"revision":"9007199254740993"}},
+ {"kind":"sessionDetail","value":{"status":"exited","session":{"target":{"machineId":"machine-a","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"workspaceId":"project-a","worktree":null,"cwd":"/home/test/app","cols":120,"rows":36,"running":false,"providerSession":null,"startSequence":"0","endSequence":"12"},"exit":{"code":0,"signal":null}}},
+ {"kind":"sessionDetail","value":{"status":"expired","target":{"machineId":"machine-a","daemonEpoch":"9007199254740993","sessionId":"pty-1"}}},
+ {"kind":"operation","value":{"state":"pending","requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4"}},
+ {"kind":"operation","value":{"state":"outcomeUnknown","requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4"}},
+ {"kind":"operation","value":{"state":"resultExpired","requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4"}},
+ {"kind":"operation","value":{"state":"completed","requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4","outcome":{"kind":"noContent"}}},
+ {"kind":"control","value":{"type":"resize","generation":"9007199254740993","cols":120,"rows":36}},
+ {"kind":"control","value":{"type":"signal","generation":"9","signal":"interrupt"}},
+ {"kind":"control","value":{"type":"ping"}},
+ {"kind":"control","value":{"type":"pong"}},
+ {"kind":"control","value":{"type":"exit","target":{"machineId":"machine-a","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"exit":{"code":0,"signal":null}}},
+ {"kind":"control","value":{"type":"status","target":{"machineId":"machine-a","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"status":"running"}},
+ {"kind":"control","value":{"type":"error","error":{"code":"CONTROL_CONFLICT","message":"Conflict","retryable":false,"requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4","details":{}}}},
+ {"kind":"registerRequest","value":{"requestId":"f017b031-d884-44ae-9b0c-767467032b48","repoPath":"~/app"}},
+ {"kind":"unregisterRequest","value":{"requestId":"f017b031-d884-44ae-9b0c-767467032b48","expectedRevision":"7"}},
+ {"kind":"createWorktreeRequest","value":{"requestId":"f017b031-d884-44ae-9b0c-767467032b48","workspaceId":"project-a","worktree":{"wsId":"project-a","slug":"feature"},"baseRef":"HEAD"}},
+ {"kind":"deleteWorktreeRequest","value":{"requestId":"f017b031-d884-44ae-9b0c-767467032b48","workspaceId":"project-a","worktree":{"wsId":"project-a","slug":"feature"},"deleteBranch":false,"expectedRevision":"7"}},
+ {"kind":"createSessionRequest","value":{"requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4","workspaceId":"project-a","worktree":null,"cols":120,"rows":36,"inheritFromSessionId":null,"cwdRelative":null,"startup":{"kind":"shell"}}},
+ {"kind":"closeSessionRequest","value":{"requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4","daemonEpoch":"9007199254740993"}}
+]

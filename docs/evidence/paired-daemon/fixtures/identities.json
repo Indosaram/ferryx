@@ -1,0 +1,4 @@
+[
+ {"hostId":"relay/machine-a","remoteWorkspaceId":"project-a","target":{"machineId":"machine","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"workspaceId":"daemon:f3fa4269ab5d5b3189945b790e708994534625e0166dc326e02aeca25537ac17","localProxyId":"daemon-session:c92715a3edd4d610415fd36294ee13f4393f93d772921dec49c43e923cdee909"},
+ {"hostId":"relay/machine-b","remoteWorkspaceId":"project-a","target":{"machineId":"machine","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"workspaceId":"daemon:3da1daa5d7b07c906e77669555b57b583886e525765204b92c29397874429e65","localProxyId":"daemon-session:acb96366b8918ccf1d0df94c100256b3674ac914b4fa674bee98ddf783fbaa1e"}
+]

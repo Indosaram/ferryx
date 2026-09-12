@@ -147,19 +147,25 @@ function loadProjectBootstrap(): ProjectBootstrap {
   return { projects: loadProjects(), activeProjectId: loadActiveProjectId() };
 }
 
-function recoverProjectBootstrap(session: PersistedWorkspaceSession | null): ProjectBootstrap | null {
+export function recoverProjectBootstrap(session: PersistedWorkspaceSession | null): ProjectBootstrap | null {
   if (!session) return null;
 
   const projects = Object.values(session.workspaces).reduce<RegisteredProject[]>((recovered, workspace) => {
     if (!workspace.workspaceId || !workspace.repoRoot || !hasValidProjectTarget(workspace)) return recovered;
     if (!recovered.some((project) => project.workspaceId === workspace.workspaceId)) {
-      recovered.push({
+      const metadata = {
         workspaceId: workspace.workspaceId, repoRoot: workspace.repoRoot,
-        target: workspace.target, gitRoot: workspace.gitRoot,
+        gitRoot: workspace.gitRoot,
         gitRemote: workspace.gitRemote, gitCommonDir: workspace.gitCommonDir,
         gitBranch: workspace.gitBranch, gitHead: workspace.gitHead,
         hostLabel: workspace.hostLabel,
-      });
+      };
+      if (workspace.target?.kind === "pairedDaemon") {
+        if (typeof workspace.remoteWorkspaceId !== "string") throw new Error("INVALID_PAIRED_PROJECT_METADATA");
+        recovered.push({ ...metadata, target: workspace.target, remoteWorkspaceId: workspace.remoteWorkspaceId });
+      } else {
+        recovered.push({ ...metadata, target: workspace.target });
+      }
     }
     return recovered;
   }, []);
@@ -2556,7 +2562,7 @@ function loadCollapsedProjectIds(projects: RegisteredProject[], activeProjectId:
   }
 }
 
-function loadProjects(): RegisteredProject[] {
+export function loadProjects(): RegisteredProject[] {
   try {
     const raw = getMigratedItem(PROJECTS_STORAGE_KEY);
     if (!raw) return [DEFAULT_PROJECT];
@@ -2576,10 +2582,10 @@ function loadProjects(): RegisteredProject[] {
           (project.repoRoot !== "/" || project.target?.kind === "ssh") &&
           project.repoRoot !== "\\",
       )
-      .map((project) => ({
+      .map((project): RegisteredProject => {
+        const metadata = {
         workspaceId: project.workspaceId,
         repoRoot: project.repoRoot,
-        target: project.target,
         gitCommonDir: typeof project.gitCommonDir === "string" ? project.gitCommonDir : undefined,
         gitRemote:
           typeof project.gitRemote === "string"
@@ -2596,7 +2602,13 @@ function loadProjects(): RegisteredProject[] {
             : project.gitRoot === null
               ? null
               : project.repoRoot,
-      }));
+        };
+        if (project.target?.kind === "pairedDaemon") {
+          if (typeof project.remoteWorkspaceId !== "string") throw new Error("INVALID_PAIRED_PROJECT_METADATA");
+          return { ...metadata, target: project.target, remoteWorkspaceId: project.remoteWorkspaceId };
+        }
+        return { ...metadata, target: project.target };
+      });
     if (valid.length !== parsed.length) console.error("Ignored invalid stored project records; invalid targets cannot be opened locally.");
     return valid;
   } catch {

@@ -679,6 +679,8 @@ export interface PersistedWorkspace {
   workspaceId: string;
   repoRoot: string;
   target?: import("./scopedContracts").RunTarget;
+  /** Required by the paired decoder; schema migration/writes belong to A17. */
+  remoteWorkspaceId?: string;
   gitRoot?: string | null;
   gitRemote?: string | null;
   gitCommonDir?: string | null;
