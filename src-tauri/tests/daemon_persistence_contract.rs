@@ -6,49 +6,115 @@ use ferryx_lib::daemon::protocol::{
     DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
     DAEMON_PROTOCOL_VERSION,
 };
-use ferryx_lib::daemon::server::{get_lock_path, get_socket_path};
+
 use ferryx_lib::session::{
     clear_session_from_path, load_session_from_path, save_session_to_path, PersistedLayout,
     PersistedTab, PersistedWorkspace, PersistedWorkspaceSession, PersistedWorktree,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::process::Command as TokioCommand;
+
 use tokio::time::timeout;
 
 /// Harness managing the standalone `ferryx --daemon` process lifecycle with deterministic
 /// readiness awaiting, clean shutdown, and safe cleanup of socket/lock artifacts on drop.
 struct DaemonProcessHarness {
-    child: tokio::process::Child,
+    child: Child,
     socket_path: PathBuf,
-    lock_path: PathBuf,
+    // Dropped only after the owned child has been killed and reaped.
+    private_dir: TempDir,
     pub daemon_pid: u32,
+}
+
+fn private_daemon_command(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferryx"));
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", root.join("home"))
+        .env("FERRYX_RUNTIME_DIR", root.join("run"))
+        .env("FERRYX_DATA_DIR", root.join("data"))
+        .env("FERRYX_SESSION_DIR", root.join("sessions"))
+        .env("SHELL", "/bin/sh")
+        .env("PS1", "")
+        .env("PS2", "")
+        .arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    command
+}
+
+fn assert_private_command(command: &Command, root: &Path) {
+    for (key, directory) in [
+        ("HOME", "home"),
+        ("FERRYX_RUNTIME_DIR", "run"),
+        ("FERRYX_DATA_DIR", "data"),
+        ("FERRYX_SESSION_DIR", "sessions"),
+    ] {
+        let value = command.get_envs().find(|(name, _)| *name == key);
+        assert_eq!(
+            value.and_then(|(_, value)| value),
+            Some(root.join(directory).as_os_str()),
+            "private child override required: {key}"
+        );
+    }
+    assert_eq!(command.get_args().collect::<Vec<_>>(), ["--daemon"]);
+}
+
+#[test]
+fn test_private_daemon_command_safety() {
+    // No spawn or connect: mutation RED is safe even on a live-app workstation.
+    let root = tempfile::Builder::new()
+        .prefix("fx-v01-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut command = private_daemon_command(root.path());
+    if std::env::var_os("FERRYX_V01_SAFETY_MUTATION").is_some() {
+        command.env_remove("FERRYX_RUNTIME_DIR");
+    }
+    assert_private_command(&command, root.path());
 }
 
 impl DaemonProcessHarness {
     async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let bin_path = env!("CARGO_BIN_EXE_ferryx");
-        let socket_path = get_socket_path();
-        let lock_path = get_lock_path();
-
-        let mut child = TokioCommand::new(bin_path)
-            .arg("--daemon")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let stdout = child.stdout.take().expect("Daemon stdout must be captured");
-        let mut reader = BufReader::new(stdout).lines();
+        let private_dir = tempfile::Builder::new()
+            .prefix("fx-v01-")
+            .tempdir_in("/tmp")?;
+        for directory in ["home", "run", "data", "sessions"] {
+            std::fs::create_dir(private_dir.path().join(directory))?;
+        }
+        let socket_path = private_dir.path().join("run/daemon.sock");
+        let mut command = private_daemon_command(private_dir.path());
+        assert_private_command(&command, private_dir.path());
+        let child = command.spawn()?;
+        // Install the guard before any fallible readiness or handshake operation.
+        let daemon_pid = child.id();
+        let mut harness = Self {
+            child,
+            socket_path,
+            private_dir,
+            daemon_pid,
+        };
+        let stdout = harness
+            .child
+            .stdout
+            .take()
+            .expect("Daemon stdout must be captured");
+        let readiness = tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            std::io::BufReader::new(stdout).lines().next().transpose()
+        });
 
         // Exact readiness signal: wait for deterministic daemon ready line without polling/sleeps
-        let ready_line = timeout(Duration::from_secs(10), reader.next_line())
+        let ready_line = timeout(Duration::from_secs(10), readiness)
             .await
-            .map_err(|_| "Daemon readiness timed out")??
+            .map_err(|_| "Daemon readiness timed out")???
             .ok_or("Daemon process exited before emitting readiness signal")?;
 
         assert_eq!(
@@ -56,64 +122,80 @@ impl DaemonProcessHarness {
             "Daemon stdout must emit deterministic readiness token"
         );
 
-        // Probe handshake to obtain daemon pid
-        let stream = UnixStream::connect(&socket_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let hs = DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-        };
-        let mut hs_json = serde_json::to_string(&hs)?;
-        hs_json.push('\n');
-        write_half.write_all(hs_json.as_bytes()).await?;
-        write_half.flush().await?;
-
-        let mut line = String::new();
-        let mut hs_reader = BufReader::new(read_half);
-        hs_reader.read_line(&mut line).await?;
-        let resp: DaemonResponse = serde_json::from_str(line.trim())?;
-        let daemon_pid = match resp {
-            DaemonResponse::HandshakeOk { pid, .. } => pid,
-            other => panic!("Expected HandshakeOk, got {other:?}"),
-        };
-
-        Ok(Self {
-            child,
-            socket_path,
-            lock_path,
-            daemon_pid,
-        })
+        harness.connect_client().await?;
+        Ok(harness)
     }
 
     async fn connect_client(
         &self,
     ) -> Result<TestDaemonClient, Box<dyn std::error::Error + Send + Sync>> {
-        TestDaemonClient::connect(&self.socket_path).await
+        timeout(
+            Duration::from_secs(5),
+            TestDaemonClient::connect(&self.socket_path, self.daemon_pid),
+        )
+        .await?
     }
 
-    async fn shutdown(mut self) {
-        if let Ok(mut client) = TestDaemonClient::connect(&self.socket_path).await {
-            let _ = client.send_request(&DaemonRequest::Shutdown).await;
+    async fn shutdown(self) {
+        // Shutdown exits without closing local PTYs gracefully. Close every owned
+        // session first; CloseOk guarantees the daemon has reaped the shell.
+        let mut client = self.connect_client().await.expect("shutdown handshake");
+        for session in client.list_sessions().await.expect("shutdown sessions") {
+            client
+                .close(&session)
+                .await
+                .expect("shutdown close session");
         }
-
-        if timeout(Duration::from_secs(3), self.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = self.child.kill().await;
-            let _ = timeout(Duration::from_secs(3), self.child.wait()).await;
-        }
-
-        let _ = std::fs::remove_file(&self.socket_path);
-        let _ = std::fs::remove_file(&self.lock_path);
+        // No Shutdown request is needed: Drop cancels and reaps our Child.
     }
 }
 
 impl Drop for DaemonProcessHarness {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = std::fs::remove_file(&self.socket_path);
-        let _ = std::fs::remove_file(&self.lock_path);
+        // A separate runtime also works while unwinding a current-thread test.
+        if self.child.try_wait().is_ok_and(|status| status.is_none()) {
+            let cleanup = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+                        runtime.block_on(timeout_cleanup(&self.socket_path, self.daemon_pid))
+                    })
+                    .join()
+            });
+            match cleanup {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("Owned daemon session cleanup: {error}"),
+                Err(_) => eprintln!("Owned daemon session cleanup thread panicked"),
+            }
+        }
+        if let Err(error) = self.child.kill() {
+            eprintln!("Owned daemon kill (possibly already exited): {error}");
+        }
+        if let Err(error) = self.child.wait() {
+            eprintln!("Owned daemon reap failed: {error}");
+        }
+        eprintln!(
+            "V01 reaped owned daemon {}; removing {}",
+            self.daemon_pid,
+            self.private_dir.path().display()
+        );
     }
+}
+
+async fn timeout_cleanup(
+    socket: &Path,
+    pid: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    timeout(Duration::from_secs(10), async {
+        let mut client = TestDaemonClient::connect(socket, pid).await?;
+        for session in client.list_sessions().await? {
+            client.close(&session).await?;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
 }
 
 /// Helper client wrapping a command UDS stream connection to the daemon.
@@ -123,7 +205,10 @@ struct TestDaemonClient {
 }
 
 impl TestDaemonClient {
-    async fn connect(socket_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    async fn connect(
+        socket_path: &Path,
+        expected_pid: u32,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let stream = UnixStream::connect(socket_path).await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -143,7 +228,10 @@ impl TestDaemonClient {
         }
         let resp: DaemonResponse = serde_json::from_str(line.trim())?;
         match resp {
-            DaemonResponse::HandshakeOk { .. } => {}
+            DaemonResponse::HandshakeOk { pid, version, .. } => {
+                assert_eq!(pid, expected_pid, "Handshake must identify our owned child");
+                assert_eq!(version, DAEMON_PROTOCOL_VERSION);
+            }
             other => return Err(format!("Expected HandshakeOk, got {other:?}").into()),
         };
 
@@ -450,81 +538,51 @@ fn extract_pid_and_ppid(output: &str) -> Option<(u32, u32)> {
 
 #[tokio::test]
 async fn test_daemon_cli_selection_headless_readiness_and_cancellation() {
-    let bin_path = env!("CARGO_BIN_EXE_ferryx");
-    let mut child = TokioCommand::new(bin_path)
-        .arg("--daemon")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn ferryx with --daemon");
-
-    let stdout = child.stdout.take().expect("Child stdout must be captured");
-    let mut reader = BufReader::new(stdout).lines();
-
-    // Exact readiness signal: wait for deterministic daemon ready line without polling/sleeps
-    let ready_line = timeout(Duration::from_secs(10), reader.next_line())
+    let mut daemon = DaemonProcessHarness::start()
         .await
-        .expect("Daemon readiness timed out")
-        .expect("Failed to read readiness line from daemon stdout")
-        .expect("Daemon exited before emitting readiness signal");
-
-    assert_eq!(
-        ready_line, "FERRYX_DAEMON_READY",
-        "Daemon stdout must emit deterministic readiness token"
-    );
-
-    let socket_path = get_socket_path();
-    let stream = UnixStream::connect(&socket_path)
+        .expect("start isolated headless daemon");
+    let mut client = daemon
+        .connect_client()
         .await
-        .expect("Failed to connect to daemon UDS socket after readiness signal");
+        .expect("owned daemon handshake");
+    assert!(daemon.daemon_pid > 0);
+    assert!(matches!(
+        client
+            .send_request(&DaemonRequest::Ping)
+            .await
+            .expect("ping"),
+        DaemonResponse::Pong
+    ));
 
-    let (read_half, mut write_half) = stream.into_split();
-    let mut socket_reader = BufReader::new(read_half);
-
-    // 1. Handshake
-    let hs = DaemonRequest::Handshake {
-        version: DAEMON_PROTOCOL_VERSION,
-    };
-    let mut hs_json = serde_json::to_string(&hs).unwrap();
-    hs_json.push('\n');
-    write_half.write_all(hs_json.as_bytes()).await.unwrap();
-
-    let mut line = String::new();
-    socket_reader.read_line(&mut line).await.unwrap();
-    let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
-    match resp {
-        DaemonResponse::HandshakeOk { version, pid, .. } => {
-            assert_eq!(version, DAEMON_PROTOCOL_VERSION);
-            assert!(pid > 0);
-        }
-        other => panic!("Expected HandshakeOk, got {other:?}"),
-    }
-
-    // 2. Ping
-    line.clear();
-    let ping = DaemonRequest::Ping;
-    let mut ping_json = serde_json::to_string(&ping).unwrap();
-    ping_json.push('\n');
-    write_half.write_all(ping_json.as_bytes()).await.unwrap();
-
-    socket_reader.read_line(&mut line).await.unwrap();
-    let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
-    assert!(matches!(resp, DaemonResponse::Pong));
-
-    // Exact cancellation signal: terminate child process and await bounded shutdown
-    child
-        .kill()
-        .await
-        .expect("Failed to send termination signal to daemon process");
-    let exit_status = timeout(Duration::from_secs(5), child.wait())
-        .await
-        .expect("Daemon process failed to exit within timeout after cancellation")
-        .expect("Failed to wait on child process");
-
+    // Kill and reap the exact Child handle, never a discovered/shared PID.
+    daemon.child.kill().expect("cancel owned daemon");
+    let exit_status = daemon.child.wait().expect("reap cancelled daemon");
     assert!(
         !exit_status.success() || exit_status.code().unwrap_or(0) == 0,
         "Child process terminated"
     );
+}
+
+#[tokio::test]
+async fn test_private_daemon_cleanup_on_panic() {
+    let daemon = DaemonProcessHarness::start()
+        .await
+        .expect("isolated daemon");
+    let root = daemon.private_dir.path().to_path_buf();
+    let pid = daemon.daemon_pid;
+    let panic = tokio::spawn(async move {
+        let _owned = daemon;
+        panic!("exercise harness unwind cleanup");
+    })
+    .await
+    .expect_err("task must panic");
+    assert!(panic.is_panic());
+    assert!(!root.exists(), "private artifacts removed after unwind");
+    let status = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .expect("inspect only owned PID");
+    assert!(status.stdout.is_empty(), "owned daemon must be reaped");
 }
 
 #[tokio::test]
@@ -744,18 +802,10 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
         "Stream must deliver Exit message on session close"
     );
 
-    // Verify Shell A process terminates
-    let exit_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let mut shell_a_exited = false;
-    while std::time::Instant::now() < exit_deadline {
-        if unsafe { libc::kill(shell_a_pid as i32, 0) != 0 } {
-            shell_a_exited = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        shell_a_exited,
+    // CloseOk is emitted only after close_session reaps the shell; no PID polling.
+    assert_ne!(
+        unsafe { libc::kill(shell_a_pid as i32, 0) },
+        0,
         "Shell A process group must terminate when session A is closed"
     );
 
@@ -891,14 +941,18 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
     client
         .write_input(
             &session_id,
-            b"for i in 1 2 3 4 5; do echo SEQ_BURST_$i; done\n",
+            b"stty -echo; for i in 1 2 3 4 5; do printf 'SEQ_BURST_%s\\n' \"$i\"; done; printf 'SEQ_%s\\n' DONE; read barrier\n",
         )
         .await
         .expect("write");
 
-    let mut seen_bursts = 0;
-    while seen_bursts < 5 {
-        let msg = attach.next_message().await.expect("next message");
+    let mut output = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !output.contains("SEQ_DONE\r\n") {
+        let msg = tokio::time::timeout_at(deadline, attach.next_message())
+            .await
+            .expect("burst deadline")
+            .expect("next message");
         if let DaemonStreamMessage::Output { sequence, data, .. } = msg {
             assert!(
                 sequence > last_seq,
@@ -910,14 +964,21 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
                 "Output chunk sequence must be strictly contiguous without drops"
             );
             last_seq = sequence;
-            let text = String::from_utf8_lossy(&data);
-            if text.contains("SEQ_BURST_") {
-                seen_bursts += text.matches("SEQ_BURST_").count();
-            }
+            output.push_str(&String::from_utf8_lossy(&data));
         }
     }
+    for index in 1..=5 {
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| *line == format!("SEQ_BURST_{index}"))
+                .count(),
+            1
+        );
+    }
 
-    // Await any trailing prompt chunks and obtain final sequence from DescribeSession
+    // Shell is blocked in read with echo disabled, so no prompt/output can race
+    // DescribeSession -> Attach. The stream sentinel is split-chunk safe.
     let desc = client
         .describe_session(&session_id)
         .await
